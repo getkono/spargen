@@ -26,6 +26,8 @@ time = []
 serde = { workspace = true }
 serde_json = { workspace = true }
 camino = { workspace = true }
+# source
+indexmap = { workspace = true }
 
 [[bin]]
 name = "spargen"
