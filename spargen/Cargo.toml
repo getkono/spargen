@@ -31,6 +31,9 @@ indexmap = { workspace = true }
 # name
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
+# codegen
+syn = { workspace = true }
+prettyplease = { workspace = true }
 
 [[bin]]
 name = "spargen"

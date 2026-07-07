@@ -28,6 +28,8 @@ camino = "1.1"
 indexmap = "2.2"
 proc-macro2 = "1.0"
 quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
+prettyplease = "0.2"
 
 [profile.release]
 strip = true
