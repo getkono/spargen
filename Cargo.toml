@@ -22,6 +22,9 @@ categories = ["development-tools", "api-bindings"]
 # Shared dependency versions. Each subsystem opts in from its own crate manifest; entries are
 # added as the subsystem that first needs them lands (see the per-commit plan).
 [workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+camino = "1.1"
 
 [profile.release]
 strip = true

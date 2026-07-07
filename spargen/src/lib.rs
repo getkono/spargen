@@ -29,8 +29,9 @@
 //! Pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`, with `diag` as the
 //! only vocabulary shared across stages.
 
-// TODO(impl): remove once subsystem bodies are implemented — stub signatures leave params unused.
-#![allow(unused_variables)]
+// TODO(impl): remove these once subsystem bodies are implemented. Stub signatures leave params
+// unused, and stub structs carry private fields that nothing reads yet.
+#![allow(unused_variables, dead_code)]
 
 pub mod diag;
 
