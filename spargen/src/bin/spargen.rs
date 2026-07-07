@@ -1,7 +1,9 @@
-//! The `spargen` binary — gated behind the default-on `cli` feature.
-//!
-//! The command surface is wired to [`spargen::cli`] in the cli subsystem commit.
+//! The `spargen` binary — gated behind the default-on `cli` feature. A thin wrapper that parses
+//! arguments and delegates to [`spargen::cli::run`].
 
-fn main() {
-    // TODO(cli): dispatch to `spargen::cli::run` and return its exit code.
+use clap::Parser;
+use spargen::cli::{run, Cli};
+
+fn main() -> std::process::ExitCode {
+    run(Cli::parse())
 }

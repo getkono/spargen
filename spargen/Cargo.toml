@@ -14,8 +14,9 @@ readme = "../README.md"
 [features]
 default = ["cli", "uuid", "time"]
 # Gates the `spargen` binary and its CLI-only dependencies so `cargo install spargen` works
-# out of the box while library builds stay lean (PRD §2.1). Wired to real deps in the cli commit.
-cli = []
+# out of the box while library builds stay lean (PRD §2.1). The colored-output deps
+# (anstream/anstyle) are added with the diagnostic renderer implementation.
+cli = ["dep:clap"]
 # `format: uuid` / `date-time` / `date` type mappings in generated output (PRD §6.2). Default on;
 # disabling falls back to `String`. The teeth live in the emitted crate's own manifest.
 uuid = []
@@ -34,6 +35,8 @@ quote = { workspace = true }
 # codegen
 syn = { workspace = true }
 prettyplease = { workspace = true }
+# cli (feature-gated)
+clap = { workspace = true, optional = true }
 
 [[bin]]
 name = "spargen"
