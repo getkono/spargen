@@ -1,0 +1,46 @@
+/// hk — git hooks for spargen. Install with `hk install --mise` (or `mise run hooks`).
+///
+/// `pre-commit` auto-fixes formatting/lints on the working tree; `pre-push` is the read-only
+/// gate (format check, clippy-as-error, tests) plus Conventional Commit validation of the
+/// outgoing range. Commit-message validation is also enforced in CI on pull requests.
+amends "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Config.pkl"
+
+hooks {
+  ["pre-commit"] {
+    fix = true
+    stash = "git"
+    steps {
+      // cargo fmt / clippy operate on the whole workspace (no per-file mode); the glob only
+      // decides whether the step runs when Rust files are staged.
+      ["fmt"] {
+        glob = List("*.rs")
+        check = "cargo fmt --all --check"
+        fix = "cargo fmt --all"
+      }
+      ["clippy"] {
+        glob = List("*.rs")
+        exclusive = true
+        check = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+        fix = "cargo clippy --workspace --all-targets --all-features --fix --allow-dirty --allow-staged"
+      }
+    }
+  }
+  ["pre-push"] {
+    steps {
+      ["fmt"] {
+        check = "cargo fmt --all --check"
+      }
+      ["clippy"] {
+        check = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+      }
+      ["test"] {
+        check = "cargo test --workspace"
+      }
+      // Validate the full outgoing commit range against Conventional Commits.
+      // convco skips merge commits by default (do not add --merges).
+      ["convco"] {
+        check = "convco check origin/master..HEAD"
+      }
+    }
+  }
+}

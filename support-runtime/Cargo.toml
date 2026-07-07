@@ -1,0 +1,15 @@
+[package]
+name = "support-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Freestanding runtime embedded into spargen-generated clients. Not published."
+publish = false
+
+# The runtime is embedded verbatim into generated output (PRD §2.1, §2.3 rule 3). Its only
+# dependencies are the ones a consumer's graph already carries — added in the support commit:
+#   reqwest (no default features), serde, serde_json, bytes; feature-gated uuid, time.
+[dependencies]

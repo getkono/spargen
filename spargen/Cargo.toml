@@ -1,0 +1,28 @@
+[package]
+name = "spargen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme = "../README.md"
+
+[features]
+default = ["cli", "uuid", "time"]
+# Gates the `spargen` binary and its CLI-only dependencies so `cargo install spargen` works
+# out of the box while library builds stay lean (PRD §2.1). Wired to real deps in the cli commit.
+cli = []
+# `format: uuid` / `date-time` / `date` type mappings in generated output (PRD §6.2). Default on;
+# disabling falls back to `String`. The teeth live in the emitted crate's own manifest.
+uuid = []
+time = []
+
+[dependencies]
+
+[[bin]]
+name = "spargen"
+required-features = ["cli"]

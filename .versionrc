@@ -1,0 +1,13 @@
+---
+header: |
+  # Changelog
+types:
+  - { type: feat, section: Features }
+  - { type: fix, section: Fixes }
+  - { type: docs, section: Documentation, hidden: true }
+  - { type: refactor, section: Other, hidden: true }
+  - { type: perf, section: Other, hidden: true }
+  - { type: test, section: Other, hidden: true }
+  - { type: build, section: Other, hidden: true }
+  - { type: ci, section: Other, hidden: true }
+  - { type: chore, section: Other, hidden: true }

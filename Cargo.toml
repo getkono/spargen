@@ -1,0 +1,28 @@
+# Spargen — a compile-time-correct Rust client generator for OpenAPI 3.1.x.
+#
+# One published crate (`spargen`), plus a `publish = false` `support-runtime` member that
+# holds the freestanding runtime embedded verbatim into generated output (PRD §2.1, §7.5).
+# The `xtask` member (layer lint, corpus tooling — PRD §2.3/§7.2) is reserved for later.
+[workspace]
+resolver = "2"
+members = ["spargen", "support-runtime"]
+# members = ["spargen", "support-runtime", "xtask"]  # reserved
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+authors = ["Justin Chung"]
+repository = "https://github.com/getkono/spargen"
+description = "A compile-time-correct Rust client generator for OpenAPI 3.1.x."
+keywords = ["openapi", "codegen", "client", "rust", "3.1"]
+categories = ["development-tools", "api-bindings"]
+
+# Shared dependency versions. Each subsystem opts in from its own crate manifest; entries are
+# added as the subsystem that first needs them lands (see the per-commit plan).
+[workspace.dependencies]
+
+[profile.release]
+strip = true
+lto = "thin"

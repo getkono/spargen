@@ -1,0 +1,27 @@
+# mise provisions dev tooling and defines the task runner (replacing just/Makefile).
+# The Rust toolchain itself is pinned by rust-toolchain.toml.
+
+[tools]
+hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
+"cargo:convco" = "0.6.4"                    # Conventional Commit checker
+"aqua:EmbarkStudios/cargo-deny" = "0.19.9"  # supply-chain audit (PRD §7.6)
+
+[tasks.fmt]
+description = "Format the whole workspace"
+run = "cargo fmt --all"
+
+[tasks.lint]
+description = "Clippy across the workspace with warnings denied"
+run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.check]
+description = "Type-check the whole workspace"
+run = "cargo check --workspace --all-features"
+
+[tasks.deny]
+description = "Supply-chain audit (licenses, advisories, bans)"
+run = "cargo deny check"
+
+[tasks.hooks]
+description = "Install git hooks through mise"
+run = "hk install --mise"
