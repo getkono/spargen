@@ -40,32 +40,48 @@ impl ClientCore {
     /// Build a core with a default `reqwest::Client` and the given base URL. Returns a
     /// request-construction error if the base URL is invalid.
     pub fn new(base_url: &str) -> Result<Self, Error<Infallible>> {
-        todo!()
+        Self::with_client(reqwest::Client::new(), base_url)
     }
 
     /// Build a core with a caller-supplied `reqwest::Client` — the injection point for TLS backend,
     /// proxies, middleware, and timeouts (PRD FR3).
     pub fn with_client(client: reqwest::Client, base_url: &str) -> Result<Self, Error<Infallible>> {
-        todo!()
+        let base_url = Url::parse(base_url).map_err(Error::request_construction)?;
+        Ok(Self {
+            http: client,
+            base_url,
+            config: ClientConfig::default(),
+            credentials: HashMap::new(),
+        })
     }
 
     /// The retention/config settings.
     pub fn config(&self) -> &ClientConfig {
-        todo!()
+        &self.config
+    }
+
+    /// Mutably borrow the retention/config settings.
+    pub fn config_mut(&mut self) -> &mut ClientConfig {
+        &mut self.config
     }
 
     /// The base URL.
     pub fn base_url(&self) -> &Url {
-        todo!()
+        &self.base_url
     }
 
     /// The injected HTTP client.
     pub fn http(&self) -> &reqwest::Client {
-        todo!()
+        &self.http
     }
 
     /// Register a credential for a named security scheme (PRD FR4).
     pub fn set_credential(&mut self, scheme: &str, credential: Credential) {
-        todo!()
+        self.credentials.insert(scheme.to_owned(), credential);
+    }
+
+    /// Retrieve a registered credential by scheme name.
+    pub fn credential(&self, scheme: &str) -> Option<&Credential> {
+        self.credentials.get(scheme)
     }
 }

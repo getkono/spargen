@@ -9,12 +9,12 @@ pub struct SecretString(String);
 impl SecretString {
     /// Wrap a secret.
     pub fn new(secret: impl Into<String>) -> Self {
-        todo!()
+        Self(secret.into())
     }
 
     /// Borrow the underlying secret. Use only where the secret must cross the wire.
     pub fn expose(&self) -> &str {
-        todo!()
+        &self.0
     }
 }
 
@@ -28,6 +28,15 @@ impl std::fmt::Debug for SecretString {
 #[derive(Debug)]
 pub struct AuthError {
     message: String,
+}
+
+impl AuthError {
+    /// Build an authentication-provider failure from a displayable message.
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
 }
 
 impl std::fmt::Display for AuthError {
@@ -73,5 +82,17 @@ impl std::fmt::Debug for Credential {
             Credential::Provider(_) => "Provider",
         };
         write!(f, "Credential::{kind}(***)")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SecretString;
+
+    #[test]
+    fn secret_debug_is_redacted() {
+        let secret = SecretString::new("token");
+        assert_eq!(secret.expose(), "token");
+        assert_eq!(format!("{secret:?}"), "SecretString(***)");
     }
 }
