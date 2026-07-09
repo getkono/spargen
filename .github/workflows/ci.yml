@@ -34,6 +34,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace --all-features
+
   check:
     name: Check
     runs-on: ubuntu-latest
@@ -42,6 +55,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
+
+  corpus-smoke:
+    name: Corpus smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json
+      - run: cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json
+      - run: cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
 
   deny:
     name: cargo-deny

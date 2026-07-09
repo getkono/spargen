@@ -57,6 +57,13 @@ Crate shape and usage:
 
 Output is **deterministic**: same `spargen` version + same spec + same config ⇒ byte-identical output, `rustfmt`-clean (via `prettyplease`), and passes `cargo clippy -D warnings`. There is deliberately **no proc-macro mode** (§3.2).
 
+Compatibility omit mode is the one sanctioned preprocessing step: callers may provide an explicit
+`spargen::omit!` profile to remove exact paths, operations, components, or JSON Pointers before
+validation/lowering when a vendored upstream schema contains a currently unsupported segment.
+Omissions are warning-producing, fingerprinted in generated provenance, and never written back to
+the source schema. The public syntax and stale-rule behavior are documented in
+[`docs/compatibility.md`](compatibility.md).
+
 ### 2.3 Internal architecture: subsystems and dependency plan
 
 One published crate does not mean one blob. The crate is internally partitioned into subsystems (top-level modules) with a **declared, machine-enforced dependency DAG** — module privacy alone cannot enforce layering inside a single crate, so an `xtask lint-layers` CI job parses inter-module `use` edges and fails on any edge not in the table below.

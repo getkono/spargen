@@ -9,8 +9,9 @@ construct, its JSON Pointer, and its source location. There is no runtime spec i
 ever. Generated output is *freestanding*: no spargen crate appears in a consumer's runtime
 dependency tree. See [`docs/prd.md`](docs/prd.md) for the full product requirements.
 
-> **Status:** early scaffolding. The public API is being laid down subsystem by subsystem;
-> implementations follow.
+> **Status:** active 3.1 implementation. The core pipeline, diagnostics, compatibility omit
+> overlay, freestanding runtime embedding, and generated-code E2E checks are implemented; full
+> corpus coverage continues to expand against the pinned validation set.
 
 ## OpenAPI Versions Supported
 
@@ -41,6 +42,7 @@ cargo check --workspace --all-features
 | `mise run fmt`   | Format the workspace                           |
 | `mise run lint`  | Clippy with warnings denied                    |
 | `mise run deny`  | Supply-chain audit (licenses, advisories, bans)|
+| `cargo test --workspace --all-features` | Unit, property, runtime, and E2E generated-code tests |
 
 Commit messages must follow [Conventional Commits](https://www.conventionalcommits.org/)
 (`feat:`, `fix:`, `chore:`, …). This is enforced by `convco` on pre-push and in CI on pull

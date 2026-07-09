@@ -22,6 +22,18 @@ run = "cargo check --workspace --all-features"
 description = "Supply-chain audit (licenses, advisories, bans)"
 run = "cargo deny check"
 
+[tasks.test]
+description = "Run the full workspace test suite, including generated-code E2E checks"
+run = "cargo test --workspace --all-features"
+
+[tasks.corpus-smoke]
+description = "Run fast corpus smoke checks"
+run = [
+  "cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json",
+  "cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json",
+  "cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
+]
+
 [tasks.hooks]
 description = "Install git hooks through mise"
 run = "hk install --mise"
