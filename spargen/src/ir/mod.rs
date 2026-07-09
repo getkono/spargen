@@ -26,7 +26,7 @@ pub use media::{
     ErrorShape, HeaderSpec, MediaType, RequestBody, Response, Responses, StatusSpec, SuccessShape,
 };
 pub use operation::{
-    Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathTemplate,
+    Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate,
 };
 pub use types::{
     AdditionalProps, EnumVariant, Field, Prim, PropertyName, ScalarDefault, ScalarEnum, ScalarRepr,

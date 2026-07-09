@@ -14,7 +14,7 @@ pub fn parse_json(
     diags: &mut Diagnostics,
 ) -> Result<SpannedValue, Aborted> {
     match serde_json::from_str::<serde_json::Value>(text) {
-        Ok(value) => Ok(from_json_value(file, root_span(file, text), value)),
+        Ok(value) => Ok(from_json_value(root_span(file, text), value)),
         Err(error) => {
             Diagnostic::error(
                 Code::InvalidInput,
@@ -54,7 +54,7 @@ pub fn parse_yaml(
                 .emit(diags);
                 return Err(Aborted);
             }
-            yaml_to_value(file, root_span(file, text), docs.remove(0), diags)
+            yaml_to_value(root_span(file, text), docs.remove(0), diags)
         }
         Err(error) => {
             Diagnostic::error(
@@ -69,7 +69,7 @@ pub fn parse_yaml(
     }
 }
 
-fn from_json_value(file: FileId, span: Span, value: serde_json::Value) -> SpannedValue {
+fn from_json_value(span: Span, value: serde_json::Value) -> SpannedValue {
     let node = match value {
         serde_json::Value::Null => Node::Null,
         serde_json::Value::Bool(value) => Node::Bool(value),
@@ -87,16 +87,13 @@ fn from_json_value(file: FileId, span: Span, value: serde_json::Value) -> Spanne
         serde_json::Value::Array(values) => Node::Array(
             values
                 .into_iter()
-                .map(|value| from_json_value(file, span, value))
+                .map(|value| from_json_value(span, value))
                 .collect(),
         ),
         serde_json::Value::Object(values) => {
             let mut map = SpannedMap::default();
             for (name, value) in values {
-                map.push(
-                    SpannedKey { name, span },
-                    from_json_value(file, span, value),
-                );
+                map.push(SpannedKey { name, span }, from_json_value(span, value));
             }
             Node::Object(map)
         }
@@ -105,7 +102,6 @@ fn from_json_value(file: FileId, span: Span, value: serde_json::Value) -> Spanne
 }
 
 fn yaml_to_value(
-    file: FileId,
     span: Span,
     value: yaml_rust2::Yaml,
     diags: &mut Diagnostics,
@@ -119,7 +115,7 @@ fn yaml_to_value(
         yaml_rust2::Yaml::Array(values) => {
             let mut out = Vec::with_capacity(values.len());
             for value in values {
-                out.push(yaml_to_value(file, span, value, diags)?);
+                out.push(yaml_to_value(span, value, diags)?);
             }
             Node::Array(out)
         }
@@ -137,7 +133,7 @@ fn yaml_to_value(
                 };
                 map.push(
                     SpannedKey { name, span },
-                    yaml_to_value(file, span, value, diags)?,
+                    yaml_to_value(span, value, diags)?,
                 );
             }
             Node::Object(map)

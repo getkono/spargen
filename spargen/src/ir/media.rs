@@ -72,13 +72,60 @@ impl Responses {
     /// (`2XX`) > `default` (PRD D11). A single success source yields plain `T`; multiple yield a
     /// per-operation success enum.
     pub fn success(&self) -> SuccessShape {
-        todo!()
+        let mut successes = Vec::new();
+        for (status, response) in &self.by_status {
+            if is_success_status(*status) {
+                if let Some(ty) = response.body {
+                    successes.push((*status, ty));
+                }
+            }
+        }
+
+        if successes.is_empty() && self.by_status.is_empty() {
+            if let Some(default) = &self.default {
+                if let Some(body) = default.body {
+                    successes.push((StatusSpec::Range(2), body));
+                }
+            }
+        }
+
+        match successes.as_slice() {
+            [] => SuccessShape::Unit,
+            [(_, ty)] => SuccessShape::Plain(*ty),
+            _ => SuccessShape::Enum(successes),
+        }
     }
 
     /// The error shape of the operation: the typed `E` body, an enum across multiple error
     /// statuses, or none. `default` contributes here unless it is the only success source (D11).
     pub fn error(&self) -> ErrorShape {
-        todo!()
+        let mut errors = Vec::new();
+        for (status, response) in &self.by_status {
+            if !is_success_status(*status) {
+                if let Some(ty) = response.body {
+                    errors.push((*status, ty));
+                }
+            }
+        }
+
+        if let Some(default) = &self.default {
+            if let Some(body) = default.body {
+                errors.push((StatusSpec::Range(0), body));
+            }
+        }
+
+        match errors.as_slice() {
+            [] => ErrorShape::None,
+            [(_, ty)] => ErrorShape::Single(*ty),
+            _ => ErrorShape::Enum(errors),
+        }
+    }
+}
+
+fn is_success_status(status: StatusSpec) -> bool {
+    match status {
+        StatusSpec::Exact(code) => (200..300).contains(&code),
+        StatusSpec::Range(prefix) => prefix == 2,
     }
 }
 

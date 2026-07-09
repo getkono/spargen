@@ -17,9 +17,16 @@ pub struct TypeGraph {
 }
 
 impl TypeGraph {
+    /// Insert a definition and return its stable id.
+    pub fn insert(&mut self, def: TypeDef) -> TypeId {
+        let id = TypeId(self.defs.len() as u32);
+        self.defs.insert(id, def);
+        id
+    }
+
     /// The definition for `id`, if present.
     pub fn get(&self, id: TypeId) -> Option<&TypeDef> {
-        todo!()
+        self.defs.get(&id)
     }
 
     /// Iterate `(id, def)` pairs in insertion order.
