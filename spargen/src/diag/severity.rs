@@ -26,12 +26,20 @@ pub enum Disposition {
 impl Disposition {
     /// The single-letter code used in the published support matrix (`S` / `W` / `R`).
     pub fn letter(self) -> char {
-        todo!()
+        match self {
+            Disposition::Supported => 'S',
+            Disposition::Warned => 'W',
+            Disposition::Rejected => 'R',
+        }
     }
 
     /// The severity a diagnostic for this disposition carries, if any (`Rejected` → error,
     /// `Warned` → warning, `Supported` → none).
     pub fn severity(self) -> Option<Severity> {
-        todo!()
+        match self {
+            Disposition::Supported => None,
+            Disposition::Warned => Some(Severity::Warning),
+            Disposition::Rejected => Some(Severity::Error),
+        }
     }
 }

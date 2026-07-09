@@ -37,6 +37,7 @@
 pub mod diag;
 
 mod codegen;
+mod compat;
 mod emit;
 mod ir;
 mod name;
@@ -49,6 +50,7 @@ pub mod cli;
 
 use camino::Utf8PathBuf;
 
+pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule};
 pub use diag::{Code, Diagnostic, JsonPointer, Severity, Span};
 
 /// Feature toggles for the generated output (both default **on**; PRD §6.2). Disabling one falls
@@ -95,6 +97,8 @@ pub struct Config {
     pub output: OutputTarget,
     /// Generated-output feature toggles.
     pub features: Features,
+    /// Explicit compatibility omissions applied before OpenAPI validation/lowering.
+    pub omit: Omit,
     /// Max bytes of a response body retained on error variants (default 64 KiB; PRD D7).
     pub error_body_cap: usize,
     /// Max diagnostics collected before batching stops (PRD FR6).
@@ -111,6 +115,7 @@ impl Config {
             spec: spec.into(),
             output,
             features: Features::default(),
+            omit: Omit::default(),
             error_body_cap: 64 * 1024,
             batch_cap: 100,
             check_only: false,

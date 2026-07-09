@@ -22,38 +22,54 @@ pub struct Aborted;
 impl Diagnostics {
     /// Create a collector retaining at most `cap` diagnostics (PRD FR6).
     pub fn new(cap: usize) -> Self {
-        todo!()
+        Self {
+            items: Vec::new(),
+            cap,
+            error_count: 0,
+            cap_reached: false,
+        }
     }
 
     /// Record a diagnostic. Ignored once the cap is reached, but sets the cap-reached flag.
     pub fn emit(&mut self, diagnostic: Diagnostic) {
-        todo!()
+        if matches!(diagnostic.severity, super::Severity::Error) {
+            self.error_count += 1;
+        }
+        if self.items.len() < self.cap {
+            self.items.push(diagnostic);
+        } else {
+            self.cap_reached = true;
+        }
     }
 
     /// Whether any error-severity diagnostic has been recorded.
     pub fn has_errors(&self) -> bool {
-        todo!()
+        self.error_count > 0
     }
 
     /// Whether the retention cap has been hit and diagnostics dropped.
     pub fn cap_reached(&self) -> bool {
-        todo!()
+        self.cap_reached
     }
 
     /// The collected diagnostics, in emission order.
     pub fn items(&self) -> &[Diagnostic] {
-        todo!()
+        &self.items
     }
 
     /// Collapse to `Ok(value)` when no errors were recorded, else `Err(`[`Aborted`]`)`.
     pub fn into_result<T>(&self, value: T) -> Result<T, Aborted> {
-        todo!()
+        if self.has_errors() {
+            Err(Aborted)
+        } else {
+            Ok(value)
+        }
     }
 }
 
 impl Default for Diagnostics {
     /// A collector with an unbounded (`usize::MAX`) cap.
     fn default() -> Self {
-        todo!()
+        Self::new(usize::MAX)
     }
 }

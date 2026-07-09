@@ -11,27 +11,52 @@ pub struct JsonPointer(String);
 impl JsonPointer {
     /// The root pointer (`""`), referring to the whole document.
     pub fn root() -> Self {
-        todo!()
+        Self(String::new())
     }
 
     /// Append an object-member reference token, escaping `~` and `/` per RFC 6901.
     pub fn push(&self, token: &str) -> Self {
-        todo!()
+        let escaped = token.replace('~', "~0").replace('/', "~1");
+        if self.0.is_empty() {
+            Self(format!("/{escaped}"))
+        } else {
+            Self(format!("{}/{escaped}", self.0))
+        }
     }
 
     /// Append an array-index reference token.
     pub fn index(&self, index: usize) -> Self {
-        todo!()
+        self.push(&index.to_string())
     }
 
     /// The pointer to the containing construct, or `None` at the root.
     pub fn parent(&self) -> Option<Self> {
-        todo!()
+        if self.0.is_empty() {
+            return None;
+        }
+        let parent = self
+            .0
+            .rsplit_once('/')
+            .map(|(parent, _)| parent)
+            .unwrap_or_default();
+        Some(Self(parent.to_owned()))
     }
 
     /// The pointer as an RFC 6901 string, e.g. `"/components/schemas/Foo"`.
     pub fn as_str(&self) -> &str {
-        todo!()
+        &self.0
+    }
+}
+
+impl From<&str> for JsonPointer {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+impl From<String> for JsonPointer {
+    fn from(value: String) -> Self {
+        Self(value)
     }
 }
 
