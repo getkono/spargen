@@ -12,6 +12,12 @@ dependency tree. See [`docs/prd.md`](docs/prd.md) for the full product requireme
 > **Status:** early scaffolding. The public API is being laid down subsystem by subsystem;
 > implementations follow.
 
+## OpenAPI Versions Supported
+
+- [ ] 3.0.x
+- [ ] 3.1.x
+- [ ] 3.2.0
+
 ## Prerequisites
 
 - [Rust](https://rustup.rs) (toolchain pinned by `rust-toolchain.toml`)
