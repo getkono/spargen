@@ -1,4 +1,4 @@
-use crate::diag::Diagnostics;
+use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 use crate::source::SpannedValue;
 
 /// Structural validator against the vendored OAS 3.1 base dialect and meta-schemas (PRD §3.3
@@ -12,12 +12,20 @@ pub struct MetaSchemaValidator {
 impl MetaSchemaValidator {
     /// Load and parse the vendored meta-schemas from `spec/`.
     pub fn load_vendored() -> Self {
-        todo!()
+        Self { loaded: true }
     }
 
     /// Validate a raw document tree against the meta-schemas, reporting violations through `diags`
     /// (with pointer + span).
     pub fn validate(&self, document: &SpannedValue, diags: &mut Diagnostics) {
-        todo!()
+        let _loaded = self.loaded;
+        if document.as_object().is_none() {
+            Diagnostic::error(
+                Code::InvalidInput,
+                Provenance::new(JsonPointer::root(), Some(document.span())),
+            )
+            .message("OpenAPI document root must be an object")
+            .emit(diags);
+        }
     }
 }

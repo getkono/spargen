@@ -125,10 +125,42 @@ impl From<std::io::Error> for EmitError {
 /// Build the on-disk emission plan from generated code and options: stamp the provenance header,
 /// synthesize `Cargo.toml` for crate layout, and resolve module paths.
 pub fn plan(code: &GeneratedCode, options: &EmitOptions) -> Result<EmitPlan, EmitError> {
-    todo!()
+    let header = provenance_header(&options.spec);
+    let mut files = Vec::new();
+    match &options.layout {
+        OutputLayout::Module { path } => {
+            let Some(file) = code.files.first() else {
+                return Err(EmitError::Layout("codegen produced no files".to_owned()));
+            };
+            files.push(GeneratedFile {
+                path: path.clone(),
+                contents: format!("{header}{}", file.contents),
+            });
+        }
+        OutputLayout::Crate { dir, package } => {
+            files.push(GeneratedFile {
+                path: dir.join("Cargo.toml"),
+                contents: synth_cargo_toml(package, &options.features),
+            });
+            for file in &code.files {
+                files.push(GeneratedFile {
+                    path: dir.join("src").join(&file.path),
+                    contents: format!("{header}{}", file.contents),
+                });
+            }
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(EmitPlan { files })
 }
 
 /// Write a plan to disk.
 pub fn write(plan: &EmitPlan) -> Result<(), EmitError> {
-    todo!()
+    for file in &plan.files {
+        if let Some(parent) = file.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&file.path, &file.contents)?;
+    }
+    Ok(())
 }

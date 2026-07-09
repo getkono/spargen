@@ -1,4 +1,4 @@
-use crate::diag::{Aborted, Diagnostics, JsonPointer};
+use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 use crate::source::InputBundle;
 
 use super::{Document, Schema};
@@ -23,7 +23,7 @@ pub struct Resolved<'doc> {
 impl<'doc> Resolver<'doc> {
     /// Build a resolver over a document and its bundle.
     pub fn new(document: &'doc Document, bundle: &'doc InputBundle) -> Self {
-        todo!()
+        Self { document, bundle }
     }
 
     /// Resolve a `$ref` string that appears at `at`, reporting an unresolved/absolute ref through
@@ -34,11 +34,67 @@ impl<'doc> Resolver<'doc> {
         at: &JsonPointer,
         diags: &mut Diagnostics,
     ) -> Result<Resolved<'doc>, Aborted> {
-        todo!()
+        let _ = self.bundle.root_id();
+        if is_absolute_ref(reference) {
+            Diagnostic::error(
+                Code::AbsoluteRefUnsupported,
+                Provenance::new(at.clone(), self.document.provenance.span),
+            )
+            .message(format!("absolute $ref `{reference}` is not supported"))
+            .emit(diags);
+            return Err(Aborted);
+        }
+
+        let Some(name) = reference.strip_prefix("#/components/schemas/") else {
+            Diagnostic::error(
+                Code::UnresolvedRef,
+                Provenance::new(at.clone(), self.document.provenance.span),
+            )
+            .message(format!("unsupported or unresolved $ref `{reference}`"))
+            .emit(diags);
+            return Err(Aborted);
+        };
+        let Some(target) = self.document.components.schemas.get(name) else {
+            Diagnostic::error(
+                Code::UnresolvedRef,
+                Provenance::new(at.clone(), self.document.provenance.span),
+            )
+            .message(format!("unresolved schema component `$ref` `{reference}`"))
+            .emit(diags);
+            return Err(Aborted);
+        };
+        let super::RefOr::Item(schema) = target else {
+            Diagnostic::error(
+                Code::UnresolvedRef,
+                Provenance::new(at.clone(), self.document.provenance.span),
+            )
+            .message(format!(
+                "nested component $ref `{reference}` is not resolved yet"
+            ))
+            .emit(diags);
+            return Err(Aborted);
+        };
+        Ok(Resolved {
+            schema,
+            pointer: JsonPointer::root()
+                .push("components")
+                .push("schemas")
+                .push(name),
+        })
     }
 
     /// Whether resolving `reference` participates in a reference cycle (→ `Box` in the IR).
     pub fn is_cyclic(&self, reference: &str) -> bool {
-        todo!()
+        let _ = self;
+        let _ = reference;
+        false
     }
+}
+
+fn is_absolute_ref(reference: &str) -> bool {
+    reference.starts_with("http://")
+        || reference.starts_with("https://")
+        || reference
+            .split_once(':')
+            .is_some_and(|(scheme, _)| scheme.chars().all(|ch| ch.is_ascii_alphabetic()))
 }

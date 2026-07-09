@@ -52,7 +52,7 @@ pub async fn send(core: &ClientCore, request: Request) -> Result<Response, Error
 /// Decode a success response body into `T`, wrapping it with status and headers. Monomorphized once
 /// per body type. Decode failures become [`Error::Decode`] with the serde path and a capped body.
 pub async fn decode_success<T>(
-    core: &ClientCore,
+    _core: &ClientCore,
     response: Response,
 ) -> Result<ResponseValue<T>, Error<Infallible>>
 where

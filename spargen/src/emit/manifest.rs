@@ -7,5 +7,33 @@ use super::{FeatureSet, PackageMeta};
 /// ever appears, so the freestanding-output gate holds (PRD §2.1, DoD #7). The eventual
 /// implementation builds this with `toml_edit` for stable formatting.
 pub fn synth_cargo_toml(package: &PackageMeta, features: &FeatureSet) -> String {
-    todo!()
+    let default_features = match (features.uuid, features.time) {
+        (true, true) => r#""uuid", "time""#,
+        (true, false) => r#""uuid""#,
+        (false, true) => r#""time""#,
+        (false, false) => "",
+    };
+    format!(
+        r#"[package]
+name = "{name}"
+version = "{version}"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = [{default_features}]
+uuid = ["dep:uuid"]
+time = ["dep:time"]
+
+[dependencies]
+bytes = "1"
+reqwest = {{ version = "0.12", default-features = false, features = ["json"] }}
+serde = {{ version = "1", features = ["derive"] }}
+serde_json = "1"
+uuid = {{ version = "1", features = ["serde"], optional = true }}
+time = {{ version = "0.3", features = ["serde", "formatting", "parsing"], optional = true }}
+"#,
+        name = package.name,
+        version = package.version,
+    )
 }

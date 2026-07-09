@@ -21,10 +21,6 @@
 // FR5 taxonomy deliberately retains headers/bodies for forensics — so `Error` is intentionally
 // large and is passed by value rather than boxed.
 #![allow(clippy::result_large_err)]
-// TODO(impl): remove once runtime bodies are implemented. Stub signatures leave params unused and
-// stub structs carry private fields nothing reads yet.
-#![allow(unused_variables, dead_code)]
-
 mod auth;
 mod client;
 mod dispatch;

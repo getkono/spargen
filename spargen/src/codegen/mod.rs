@@ -13,6 +13,7 @@ use camino::Utf8PathBuf;
 use crate::diag::Diagnostics;
 use crate::ir::Api;
 use crate::name::Names;
+use quote::quote;
 
 pub use format::format_tokens;
 
@@ -61,5 +62,31 @@ pub fn generate(
     options: &CodegenOptions,
     diags: &mut Diagnostics,
 ) -> GeneratedCode {
-    todo!()
+    let _ = diags;
+    let support = emit::emit_support();
+    let models = emit::emit_models(api, names, options);
+    let client = emit::emit_client(api, names);
+    let tokens = quote! {
+        #![forbid(unsafe_code)]
+        #![allow(clippy::result_large_err)]
+        #![allow(dead_code, unused_imports, unused_mut, unused_variables)]
+
+        pub use support::{Error, ResponseValue};
+
+        #support
+        #models
+        #client
+    };
+    let contents = format_tokens(tokens).unwrap_or_else(|error| {
+        format!(
+            "compile_error!({:?});\n",
+            format!("spargen internal codegen error: {error}")
+        )
+    });
+    GeneratedCode {
+        files: vec![GeneratedFile {
+            path: Utf8PathBuf::from("lib.rs"),
+            contents,
+        }],
+    }
 }

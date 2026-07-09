@@ -7,7 +7,7 @@ use super::{Docs, MediaType, RequestBody, Responses, SecurityRequirement, Ty};
 pub struct OperationId(pub String);
 
 /// An HTTP method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Method {
     Get,
     Put,

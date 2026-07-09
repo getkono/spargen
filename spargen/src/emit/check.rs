@@ -26,5 +26,32 @@ pub struct FileDiff {
 /// Compare a plan against checked-in output rooted at `existing_root`, reporting drift (PRD §7.5:
 /// clean / drifted / missing). Powers `spargen generate --check`.
 pub fn check_drift(plan: &EmitPlan, existing_root: &Utf8Path) -> Result<DriftReport, EmitError> {
-    todo!()
+    let mut missing = Vec::new();
+    let mut drifted = Vec::new();
+    for file in &plan.files {
+        let path = if file.path.is_absolute() {
+            file.path.clone()
+        } else {
+            existing_root.join(&file.path)
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(existing) if existing == file.contents => {}
+            Ok(existing) => {
+                let diff = similar::TextDiff::from_lines(&existing, &file.contents)
+                    .unified_diff()
+                    .header("checked-in", "generated")
+                    .to_string();
+                drifted.push(FileDiff { path, diff });
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => missing.push(path),
+            Err(error) => return Err(EmitError::Io(error)),
+        }
+    }
+    if !missing.is_empty() {
+        Ok(DriftReport::Missing(missing))
+    } else if !drifted.is_empty() {
+        Ok(DriftReport::Drifted(drifted))
+    } else {
+        Ok(DriftReport::Clean)
+    }
 }

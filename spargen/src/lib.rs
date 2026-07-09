@@ -29,10 +29,9 @@
 //! Pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`, with `diag` as the
 //! only vocabulary shared across stages.
 
-// TODO(impl): remove these once subsystem bodies are implemented and the pipeline is wired.
-// Stub signatures leave params unused; stub structs carry private fields nothing reads yet; and
-// subsystem re-exports have no in-crate consumers until later stages depend on them.
-#![allow(unused_variables, dead_code, unused_imports)]
+// The typed OAS and IR layers intentionally retain spec metadata used by future additive
+// frontends/backends and docs generation. The first backend does not consume every retained field.
+#![allow(dead_code, unused_imports)]
 
 pub mod diag;
 
@@ -47,6 +46,8 @@ mod support;
 
 #[cfg(feature = "cli")]
 pub mod cli;
+
+use std::str::FromStr;
 
 use camino::Utf8PathBuf;
 
@@ -158,17 +159,148 @@ pub struct Report {
 /// println!("cargo:warning=spargen outcome: {:?}", report.outcome);
 /// ```
 pub fn generate(config: &Config) -> Report {
-    todo!()
+    run_pipeline(config, PipelineMode::Generate)
 }
 
 /// Run the support-audit only, without codegen (`spargen check`) — a CI contract gate between spec
 /// producers and client consumers (PRD FR6).
 pub fn check(config: &Config) -> Report {
-    todo!()
+    run_pipeline(config, PipelineMode::Check)
 }
 
 /// Extended documentation for a stable diagnostic code, backing `spargen explain E###` and the
 /// published errors index (PRD FR6).
 pub fn explain(code: &str) -> Option<&'static str> {
-    todo!()
+    Code::from_str(code).ok().map(Code::explain)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PipelineMode {
+    Generate,
+    Check,
+}
+
+fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
+    let mut diags = diag::Diagnostics::new(config.batch_cap);
+
+    let mut bundle = match source::InputBundle::load(&config.spec, &mut diags) {
+        Ok(bundle) => bundle,
+        Err(_) => return report(diags, Outcome::Rejected),
+    };
+
+    if !config.omit.is_empty() && config.omit.apply(&mut bundle, &mut diags).is_err() {
+        return report(diags, Outcome::Rejected);
+    }
+
+    let validator = oas31::MetaSchemaValidator::load_vendored();
+    validator.validate(bundle.root(), &mut diags);
+    if diags.has_errors() {
+        return report(diags, Outcome::Rejected);
+    }
+
+    let document = match oas31::parse_document(&bundle, &mut diags) {
+        Ok(document) => document,
+        Err(_) => return report(diags, Outcome::Rejected),
+    };
+
+    let resolver = oas31::Resolver::new(&document, &bundle);
+    let _audit = oas31::audit(&document, &resolver, &mut diags);
+    if matches!(mode, PipelineMode::Check) {
+        return if diags.has_errors() {
+            report(diags, Outcome::Rejected)
+        } else {
+            report(diags, Outcome::Clean)
+        };
+    }
+
+    let api = match oas31::lower(&document, &resolver, &mut diags) {
+        Ok(api) => api,
+        Err(_) => return report(diags, Outcome::Rejected),
+    };
+    ir::check_invariants(&api, &mut diags);
+    if diags.has_errors() {
+        return report(diags, Outcome::Rejected);
+    }
+
+    let names = name::allocate(&api, &mut diags);
+    if diags.has_errors() {
+        return report(diags, Outcome::Rejected);
+    }
+
+    let code = codegen::generate(
+        &api,
+        &names,
+        &codegen::CodegenOptions {
+            feature_uuid: config.features.uuid,
+            feature_time: config.features.time,
+        },
+        &mut diags,
+    );
+
+    let emit_options = emit::EmitOptions {
+        layout: match &config.output {
+            OutputTarget::Module(path) => emit::OutputLayout::Module { path: path.clone() },
+            OutputTarget::Crate { dir, name } => emit::OutputLayout::Crate {
+                dir: dir.clone(),
+                package: emit::PackageMeta {
+                    name: name.clone(),
+                    version: "0.0.0".to_owned(),
+                },
+            },
+        },
+        features: emit::FeatureSet {
+            uuid: config.features.uuid,
+            time: config.features.time,
+        },
+        spec: emit::SpecMeta {
+            source: if config.omit.is_empty() {
+                config.spec.to_string()
+            } else {
+                format!("{} omit={}", config.spec, config.omit.fingerprint())
+            },
+            spargen_version: env!("CARGO_PKG_VERSION").to_owned(),
+        },
+    };
+    let plan = match emit::plan(&code, &emit_options) {
+        Ok(plan) => plan,
+        Err(error) => {
+            emit_pipeline_error(&mut diags, error.to_string());
+            return report(diags, Outcome::Rejected);
+        }
+    };
+
+    if config.check_only {
+        match emit::check_drift(&plan, camino::Utf8Path::new("")) {
+            Ok(emit::DriftReport::Clean) => report(diags, Outcome::Clean),
+            Ok(_) => report(diags, Outcome::Drifted),
+            Err(error) => {
+                emit_pipeline_error(&mut diags, error.to_string());
+                report(diags, Outcome::Rejected)
+            }
+        }
+    } else {
+        match emit::write(&plan) {
+            Ok(()) => report(diags, Outcome::Generated),
+            Err(error) => {
+                emit_pipeline_error(&mut diags, error.to_string());
+                report(diags, Outcome::Rejected)
+            }
+        }
+    }
+}
+
+fn emit_pipeline_error(diags: &mut diag::Diagnostics, message: String) {
+    diag::Diagnostic::error(
+        Code::InvalidInput,
+        diag::Provenance::new(JsonPointer::root(), None),
+    )
+    .message(message)
+    .emit(diags);
+}
+
+fn report(diags: diag::Diagnostics, outcome: Outcome) -> Report {
+    Report {
+        diagnostics: diags.items().to_vec(),
+        outcome,
+    }
 }
