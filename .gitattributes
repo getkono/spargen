@@ -1,0 +1,2 @@
+corpus/**/*.json filter=lfs diff=lfs merge=lfs -text
+corpus/**/*.yaml filter=lfs diff=lfs merge=lfs -text
