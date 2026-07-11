@@ -64,4 +64,16 @@ mod tests {
         assert_eq!(mapped.status(), StatusCode::CREATED);
         assert_eq!(*mapped.inner(), 42);
     }
+
+    #[test]
+    fn accessors_expose_status_headers_and_inner() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-trace", "abc".parse().unwrap());
+        let value = ResponseValue::new(StatusCode::OK, headers, "body".to_owned());
+
+        assert_eq!(value.status(), StatusCode::OK);
+        assert_eq!(value.headers()["x-trace"], "abc");
+        assert_eq!(value.inner(), "body");
+        assert_eq!(value.into_inner(), "body");
+    }
 }

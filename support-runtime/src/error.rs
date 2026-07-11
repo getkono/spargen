@@ -283,4 +283,19 @@ mod tests {
         ));
         assert!(!api.is_transient());
     }
+
+    #[test]
+    fn widen_preserves_the_variant() {
+        let narrow = Error::<std::convert::Infallible>::Timeout(TimeoutKind::Total);
+        let widened: Error<String> = narrow.widen();
+        assert!(matches!(widened, Error::Timeout(TimeoutKind::Total)));
+    }
+
+    #[test]
+    fn request_message_source_displays_the_message() {
+        let error = Error::<std::convert::Infallible>::request_message("no credential for `token`");
+        assert!(matches!(error, Error::RequestConstruction(_)));
+        let source = std::error::Error::source(&error).expect("request errors carry a source");
+        assert_eq!(source.to_string(), "no credential for `token`");
+    }
 }

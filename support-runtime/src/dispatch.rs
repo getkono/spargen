@@ -397,4 +397,65 @@ mod tests {
         assert_eq!(value, "k3y");
         assert!(value.is_sensitive());
     }
+
+    use super::{build_url, StatusSpec};
+
+    fn core_at(base: &str) -> ClientCore {
+        ClientCore::new(base).unwrap()
+    }
+
+    #[test]
+    fn build_url_collapses_double_slash_at_join() {
+        let core = core_at("https://example.com/");
+        let url = build_url(&core, "/foo", &[]).unwrap();
+        // Trailing base slash + leading path slash collapse to a single separator.
+        assert_eq!(url.path(), "/foo");
+        // BUG: build_url always enters `query_pairs_mut()`, so an empty query still stamps a
+        // trailing `?` onto the serialized URL (harmless, but not byte-clean). Documenting current
+        // behavior. See dispatch.rs `build_url`.
+        assert_eq!(url.as_str(), "https://example.com/foo?");
+    }
+
+    #[test]
+    fn build_url_preserves_base_path_prefix() {
+        let core = core_at("https://example.com/api");
+        let url = build_url(&core, "foo", &[]).unwrap();
+        assert_eq!(url.path(), "/api/foo");
+    }
+
+    #[test]
+    fn build_url_empty_path_keeps_base_path() {
+        let prefixed = core_at("https://example.com/api");
+        assert_eq!(build_url(&prefixed, "", &[]).unwrap().path(), "/api");
+
+        let root = core_at("https://example.com");
+        assert_eq!(build_url(&root, "", &[]).unwrap().path(), "/");
+    }
+
+    #[test]
+    fn build_url_appends_and_percent_encodes_query_pairs() {
+        let core = core_at("https://example.com");
+        let url = build_url(&core, "/search", &[("q", "a b&c".to_owned())]).unwrap();
+        // The space and ampersand are form-encoded, so the pair round-trips unambiguously.
+        assert_eq!(url.query(), Some("q=a+b%26c"));
+        let pairs: Vec<(String, String)> = url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(pairs, vec![("q".to_owned(), "a b&c".to_owned())]);
+    }
+
+    #[test]
+    fn status_spec_matches_exact_range_and_any() {
+        use reqwest::StatusCode;
+
+        assert!(StatusSpec::Exact(404).matches(StatusCode::NOT_FOUND));
+        assert!(!StatusSpec::Exact(404).matches(StatusCode::INTERNAL_SERVER_ERROR));
+
+        assert!(StatusSpec::Range(5).matches(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!StatusSpec::Range(5).matches(StatusCode::NOT_FOUND));
+
+        assert!(StatusSpec::Any.matches(StatusCode::OK));
+        assert!(StatusSpec::Any.matches(StatusCode::IM_A_TEAPOT));
+    }
 }
