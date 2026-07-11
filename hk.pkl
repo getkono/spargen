@@ -2,7 +2,8 @@
 ///
 /// `pre-commit` auto-fixes formatting/lints on the working tree; `pre-push` is the read-only
 /// gate (format check, clippy-as-error, tests) plus Conventional Commit validation of the
-/// outgoing range. Commit-message validation is also enforced in CI on pull requests.
+/// outgoing range. `commit-msg` validates each new commit immediately. Commit-message
+/// validation is also enforced in CI on pull requests.
 amends "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Config.pkl"
 
 hooks {
@@ -25,6 +26,15 @@ hooks {
       }
     }
   }
+  ["commit-msg"] {
+    steps {
+      // Use convco for the actual Conventional Commit policy. During an in-progress merge,
+      // Git exposes MERGE_HEAD; skip that hook invocation so merge commits remain exempt.
+      ["convco"] {
+        check = "sh -c 'if test -f \"$(git rev-parse --git-path MERGE_HEAD)\"; then exit 0; fi; convco check --from-stdin --strip < \"$1\"' sh \"{{ commit_msg_file }}\""
+      }
+    }
+  }
   ["pre-push"] {
     steps {
       ["fmt"] {
@@ -37,7 +47,7 @@ hooks {
         check = "cargo test --workspace"
       }
       // Validate the full outgoing commit range against Conventional Commits.
-      // convco skips merge commits by default (do not add --merges).
+      // convco skips merge commits by default for revwalks (do not add --merges).
       ["convco"] {
         check = "convco check origin/master..HEAD"
       }
