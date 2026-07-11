@@ -191,7 +191,7 @@ pub(crate) fn emit_operation(operation: &Operation, names: &Names) -> TokenStrea
         _ => quote! {
             support::decode_success::<#success_ty>(&self.core, response)
                 .await
-                .map_err(|error| error.map_api(|never| match never {}))
+                .map_err(support::Error::widen)
         },
     };
 
@@ -212,13 +212,13 @@ pub(crate) fn emit_operation(operation: &Operation, names: &Names) -> TokenStrea
             #(#required_query)*
             #(#optional_query)*
             let url = support::build_url(&self.core, &path, &query)
-                .map_err(|error| error.map_api(|never| match never {}))?;
+                .map_err(support::Error::widen)?;
             let request = self.core.http().request(#reqwest_method, url);
             #body_send
             let request = request.build().map_err(support::Error::request_construction)?;
             let response = support::send(&self.core, request)
                 .await
-                .map_err(|error| error.map_api(|never| match never {}))?;
+                .map_err(support::Error::widen)?;
             if response.status().is_success() {
                 #success_decode
             } else {

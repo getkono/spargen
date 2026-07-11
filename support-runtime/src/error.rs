@@ -64,37 +64,6 @@ impl<E> Error<E> {
         })
     }
 
-    /// Map only the typed API error body while preserving every transport/runtime failure.
-    pub fn map_api<F>(self, f: impl FnOnce(E) -> F) -> Error<F> {
-        match self {
-            Error::RequestConstruction(e) => Error::RequestConstruction(e),
-            Error::Transport(e) => Error::Transport(e),
-            Error::Timeout(e) => Error::Timeout(e),
-            Error::Protocol(e) => Error::Protocol(e),
-            Error::Redirect(e) => Error::Redirect(e),
-            Error::Api(value) => Error::Api(value.map(f)),
-            Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            } => Error::UnexpectedStatus {
-                status,
-                headers,
-                body,
-            },
-            Error::Decode {
-                path,
-                body,
-                truncated,
-            } => Error::Decode {
-                path,
-                body,
-                truncated,
-            },
-            Error::InterruptedBody(e) => Error::InterruptedBody(e),
-        }
-    }
-
     /// Classify a reqwest error into the closest runtime taxonomy class.
     pub fn from_reqwest(error: reqwest::Error) -> Self {
         if error.is_timeout() {
@@ -128,6 +97,43 @@ impl<E> Error<E> {
             | Error::Protocol(_)
             | Error::Redirect(_)
             | Error::Decode { .. } => false,
+        }
+    }
+}
+
+impl Error<std::convert::Infallible> {
+    /// Widen a never-typed failure into any operation's error type. Dispatch routines that cannot
+    /// produce a typed API error return `Error<Infallible>`; generated shims widen at the call
+    /// site via `.map_err(Error::widen)`.
+    pub fn widen<E>(self) -> Error<E> {
+        match self {
+            Error::RequestConstruction(e) => Error::RequestConstruction(e),
+            Error::Transport(e) => Error::Transport(e),
+            Error::Timeout(e) => Error::Timeout(e),
+            Error::Protocol(e) => Error::Protocol(e),
+            Error::Redirect(e) => Error::Redirect(e),
+            // Statically uninhabited: an `Error<Infallible>` cannot hold an API error body.
+            #[allow(unreachable_code)]
+            Error::Api(value) => match value.into_inner() {},
+            Error::UnexpectedStatus {
+                status,
+                headers,
+                body,
+            } => Error::UnexpectedStatus {
+                status,
+                headers,
+                body,
+            },
+            Error::Decode {
+                path,
+                body,
+                truncated,
+            } => Error::Decode {
+                path,
+                body,
+                truncated,
+            },
+            Error::InterruptedBody(e) => Error::InterruptedBody(e),
         }
     }
 }
