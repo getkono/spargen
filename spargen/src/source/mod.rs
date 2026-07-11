@@ -14,6 +14,6 @@ mod bundle;
 mod parse;
 mod value;
 
-pub use bundle::{InputBundle, SourceFile};
+pub use bundle::InputBundle;
 pub use parse::{parse_json, parse_yaml};
 pub use value::{Node, Number, SpannedKey, SpannedMap, SpannedValue};

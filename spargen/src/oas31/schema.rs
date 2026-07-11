@@ -41,8 +41,6 @@ pub struct Schema {
     pub format: Option<String>,
     /// `contentEncoding` (e.g. `base64` → bytes).
     pub content_encoding: Option<String>,
-    /// `default` (deserialization default; PRD D8).
-    pub default: Option<SpannedValue>,
     /// Retained validation-only keywords (W-class).
     pub validation: ValidationKeywords,
     /// `deprecated`.
@@ -55,8 +53,6 @@ pub struct Schema {
     pub title: Option<String>,
     /// `description` → rustdoc.
     pub description: Option<String>,
-    /// `x-*` extension keywords (W-class).
-    pub extensions: IndexMap<String, SpannedValue>,
     /// Where the schema came from.
     pub provenance: Provenance,
 }
@@ -90,8 +86,10 @@ pub enum JsonType {
     String,
 }
 
-/// An OAS `discriminator` object (matrix: Schema shape → S with `oneOf`).
+/// An OAS `discriminator` object. Lowering currently only tests for its presence; the fields are
+/// retained for the discriminated-union lowering that will consume them.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Discriminator {
     /// `propertyName`.
     pub property_name: String,

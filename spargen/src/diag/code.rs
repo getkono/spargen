@@ -46,6 +46,9 @@ pub enum Code {
     ResponseDegradedToValue,
     /// `allOf` composition is not merged into generated types (matrix: Schema shape).
     AllOfUnsupported,
+    /// `generate --check` found checked-in output that drifted from (or is missing against) the
+    /// spec.
+    OutputDrifted,
     /// A `$ref` cycle was found; recursive types are not generated (matrix: Schema shape).
     RecursiveRefUnsupported,
     /// The input could not be parsed or violates a required structural OpenAPI shape.
@@ -78,6 +81,7 @@ impl Code {
             Code::UnknownSecurityScheme => "E012",
             Code::ResponseDegradedToValue => "W003",
             Code::AllOfUnsupported => "E013",
+            Code::OutputDrifted => "W004",
             Code::RecursiveRefUnsupported => "E014",
             Code::OmittedConstruct => "W009",
             Code::InvalidOmitRule => "E019",
@@ -113,6 +117,7 @@ impl Code {
             Code::UnknownSecurityScheme => "unknown security scheme",
             Code::ResponseDegradedToValue => "response body degrades to serde_json::Value",
             Code::AllOfUnsupported => "allOf composition unsupported",
+            Code::OutputDrifted => "checked-in output drifted",
             Code::RecursiveRefUnsupported => "recursive $ref unsupported",
             Code::InvalidOmitRule => "invalid omit rule",
             Code::OmittedConstruct => "construct omitted",
@@ -171,6 +176,9 @@ impl Code {
             Code::AllOfUnsupported => {
                 "`allOf` object merging is not implemented; generating a type that ignores subschemas would silently drop fields. Flatten the composition in the source schema or omit this API segment."
             }
+            Code::OutputDrifted => {
+                "The checked-in generated code no longer matches what this spec and spargen version produce. Re-run `spargen generate` and commit the result."
+            }
             Code::RecursiveRefUnsupported => {
                 "The schema references itself through `$ref`. Boxed recursive types are not generated yet; break the cycle in the source schema or omit this API segment."
             }
@@ -218,6 +226,7 @@ impl Code {
             Code::ValidationKeywordIgnored,
             Code::ServerInitiatedFlowIgnored,
             Code::ResponseDegradedToValue,
+            Code::OutputDrifted,
             Code::OmittedConstruct,
         ];
         ALL

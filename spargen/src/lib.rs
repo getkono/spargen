@@ -29,10 +29,6 @@
 //! Pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`, with `diag` as the
 //! only vocabulary shared across stages.
 
-// The typed OAS and IR layers intentionally retain spec metadata used by future additive
-// frontends/backends and docs generation. The first backend does not consume every retained field.
-#![allow(dead_code, unused_imports)]
-
 pub mod diag;
 
 mod codegen;
@@ -204,7 +200,7 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
     };
 
     let resolver = oas31::Resolver::new(&document, &bundle);
-    let _audit = oas31::audit(&document, &resolver, &mut diags);
+    oas31::audit(&document, &mut diags);
     if diags.has_errors() {
         return report(diags, Outcome::Rejected);
     }
@@ -235,6 +231,7 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
         &codegen::CodegenOptions {
             feature_uuid: config.features.uuid,
             feature_time: config.features.time,
+            error_body_cap: config.error_body_cap,
         },
         &mut diags,
     );
@@ -274,7 +271,14 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
     if config.check_only {
         match emit::check_drift(&plan, camino::Utf8Path::new("")) {
             Ok(emit::DriftReport::Clean) => report(diags, Outcome::Clean),
-            Ok(_) => report(diags, Outcome::Drifted),
+            Ok(emit::DriftReport::Drifted(paths)) => {
+                emit_drift(&mut diags, &paths, "drifted from the spec");
+                report(diags, Outcome::Drifted)
+            }
+            Ok(emit::DriftReport::Missing(paths)) => {
+                emit_drift(&mut diags, &paths, "missing on disk");
+                report(diags, Outcome::Drifted)
+            }
             Err(error) => {
                 emit_pipeline_error(&mut diags, error.to_string());
                 report(diags, Outcome::Rejected)
@@ -288,6 +292,18 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
                 report(diags, Outcome::Rejected)
             }
         }
+    }
+}
+
+fn emit_drift(diags: &mut diag::Diagnostics, paths: &[camino::Utf8PathBuf], what: &str) {
+    for path in paths {
+        diag::Diagnostic::warning(
+            Code::OutputDrifted,
+            diag::Provenance::new(JsonPointer::root(), None),
+        )
+        .message(format!("checked-in output `{path}` is {what}"))
+        .remedy("re-run spargen generate and commit the result")
+        .emit(diags);
     }
 }
 

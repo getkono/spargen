@@ -1,4 +1,4 @@
-use super::{Docs, Ty};
+use super::Ty;
 
 /// A supported request/response media type (PRD §3.1). Other media types (XML, multipart) are
 /// R-rejected in the frontend.
@@ -21,8 +21,6 @@ pub struct RequestBody {
     pub media: MediaType,
     /// The body's type, or `None` for an untyped/byte body.
     pub ty: Option<Ty>,
-    /// Whether the body is `required`.
-    pub required: bool,
 }
 
 /// A response status selector (matrix: Responses).
@@ -44,28 +42,12 @@ impl StatusSpec {
     }
 }
 
-/// A single response header exposed via `ResponseValue` (matrix: Responses → S).
-#[derive(Debug, Clone)]
-pub struct HeaderSpec {
-    /// The header name.
-    pub name: String,
-    /// The header's type.
-    pub ty: Ty,
-    /// Whether the header is `required`.
-    pub required: bool,
-    /// Header documentation.
-    pub docs: Docs,
-}
-
-/// A typed response for one status selector.
+/// A typed response for one status selector. Response headers stay reachable through
+/// `ResponseValue::headers`; typed header accessors are not generated.
 #[derive(Debug, Clone)]
 pub struct Response {
-    /// The response body media type, if a body is present.
-    pub media: Option<MediaType>,
     /// The response body type, if any.
     pub body: Option<Ty>,
-    /// Documented response headers.
-    pub headers: Vec<HeaderSpec>,
 }
 
 /// The full set of responses for an operation: per-status entries plus an optional `default`.
@@ -102,7 +84,7 @@ impl Responses {
         match successes.as_slice() {
             [] => SuccessShape::Unit,
             [(_, ty)] => SuccessShape::Plain(*ty),
-            _ => SuccessShape::Enum(successes),
+            _ => SuccessShape::Enum,
         }
     }
 
@@ -127,7 +109,7 @@ impl Responses {
         match errors.as_slice() {
             [] => ErrorShape::None,
             [(_, ty)] => ErrorShape::Single(*ty),
-            _ => ErrorShape::Enum(errors),
+            _ => ErrorShape::Enum,
         }
     }
 }
@@ -143,8 +125,8 @@ pub enum SuccessShape {
     Unit,
     /// A single success body type.
     Plain(Ty),
-    /// Multiple success statuses → a per-operation success enum.
-    Enum(Vec<(StatusSpec, Ty)>),
+    /// Multiple success statuses. Generated today as `serde_json::Value` (reported as W003).
+    Enum,
 }
 
 /// The typed error body `E` of an operation (matrix: Responses; PRD FR3, FR5 #6).
@@ -154,6 +136,6 @@ pub enum ErrorShape {
     None,
     /// A single documented error body type.
     Single(Ty),
-    /// Multiple documented error statuses → a per-operation error enum.
-    Enum(Vec<(StatusSpec, Ty)>),
+    /// Multiple documented error statuses. Generated today as `serde_json::Value` (W003).
+    Enum,
 }

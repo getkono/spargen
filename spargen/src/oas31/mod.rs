@@ -17,14 +17,14 @@ mod metaschema;
 mod resolve;
 mod schema;
 
-pub use audit::{audit, DispositionEntry, DispositionReport};
+pub use audit::audit;
 pub use deserialize::parse_document;
 pub use document::{
-    Components, Document, HeaderObject, Info, MediaTypeObject, OperationObject, ParameterObject,
-    PathItem, Paths, RefOr, Reference, RequestBodyObject, ResponseObject, ResponsesObject,
-    SecurityRequirement, SecuritySchemeObject, Server, ServerVariable, Tag, Version,
+    Components, Document, Info, MediaTypeObject, OperationObject, ParameterObject, PathItem, Paths,
+    RefOr, Reference, RequestBodyObject, ResponseObject, ResponsesObject, SecurityRequirement,
+    SecuritySchemeObject, Server,
 };
 pub use lower::lower;
 pub use metaschema::MetaSchemaValidator;
-pub use resolve::{Resolved, Resolver};
+pub use resolve::Resolver;
 pub use schema::{Discriminator, JsonType, Schema, SchemaOr, TypeSet, ValidationKeywords};

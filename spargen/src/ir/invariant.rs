@@ -1,6 +1,6 @@
 use crate::diag::{Code, Diagnostic, Diagnostics};
 
-use super::{AdditionalProps, Api, Ty, TypeKind, Union};
+use super::{AdditionalProps, Api, Ty, TypeKind};
 
 /// Check the IR's well-formedness invariants, reporting any violation through `diags`.
 ///
@@ -70,13 +70,10 @@ pub fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                     );
                 }
             }
-            TypeKind::Map(ty) | TypeKind::Array(ty) => {
+            TypeKind::Array(ty) => {
                 check_ty(api, **ty, diags, &def.name_hint, def.provenance.clone());
             }
-            TypeKind::Tuple(items)
-            | TypeKind::Union(Union {
-                variants: items, ..
-            }) => {
+            TypeKind::Tuple(items) => {
                 for ty in items {
                     check_ty(api, *ty, diags, &def.name_hint, def.provenance.clone());
                 }

@@ -58,14 +58,6 @@ impl SpannedValue {
         }
     }
 
-    /// This value as a mutable object, if it is one.
-    pub(crate) fn as_object_mut(&mut self) -> Option<&mut SpannedMap> {
-        match &mut self.node {
-            Node::Object(object) => Some(object),
-            _ => None,
-        }
-    }
-
     /// This value as an array slice, if it is one.
     pub fn as_array(&self) -> Option<&[SpannedValue]> {
         match &self.node {
@@ -93,23 +85,6 @@ impl SpannedValue {
     /// Object-member lookup by key (first occurrence).
     pub fn get(&self, key: &str) -> Option<&SpannedValue> {
         self.as_object()?.get(key)
-    }
-
-    /// Resolve an RFC 6901 JSON Pointer relative to this value (PRD §3.3 prec 6).
-    pub fn pointer(&self, pointer: &JsonPointer) -> Option<&SpannedValue> {
-        if pointer.as_str().is_empty() {
-            return Some(self);
-        }
-        let mut current = self;
-        for token in pointer.as_str().strip_prefix('/')?.split('/') {
-            let token = unescape_pointer_token(token)?;
-            current = match &current.node {
-                Node::Object(object) => object.get(&token)?,
-                Node::Array(array) => array.get(token.parse::<usize>().ok()?)?,
-                _ => return None,
-            };
-        }
-        Some(current)
     }
 
     /// Remove the value at `pointer`, returning it when it existed.
@@ -197,29 +172,6 @@ impl SpannedMap {
     /// Iterate members in source order.
     pub fn iter(&self) -> impl Iterator<Item = (&SpannedKey, &SpannedValue)> {
         self.entries.iter().map(|(k, v)| (k, v))
-    }
-
-    /// The number of members (counting duplicates).
-    pub fn len(&self) -> usize {
-        self.entries.len()
-    }
-
-    /// Whether the object has no members.
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
-    }
-
-    /// Pairs of duplicate keys as `(first, later)`, for duplicate-key diagnostics.
-    pub fn duplicate_keys(&self) -> Vec<(&SpannedKey, &SpannedKey)> {
-        let mut duplicates = Vec::new();
-        for (index, (first, _)) in self.entries.iter().enumerate() {
-            for (later, _) in self.entries.iter().skip(index + 1) {
-                if first.name == later.name {
-                    duplicates.push((first, later));
-                }
-            }
-        }
-        duplicates
     }
 }
 

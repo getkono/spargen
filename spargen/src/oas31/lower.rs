@@ -4,11 +4,10 @@ use indexmap::IndexMap;
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics};
 use crate::ir::{
-    AdditionalProps, Api, ApiKeyLoc, Docs, EnumVariant, Field, HeaderSpec, HttpScheme, Info,
-    MediaType, OAuthMeta, OidcMeta, Operation, OperationId, ParamLoc, ParamStyle, Parameter,
-    PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response, Responses, ScalarDefault,
-    ScalarEnum, ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, ServerVariable,
-    StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+    AdditionalProps, Api, ApiKeyLoc, Docs, Field, HttpScheme, Info, MediaType, Operation,
+    OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim, PropertyName,
+    RequestBody, Response, Responses, ScalarEnum, ScalarRepr, ScalarValue, SchemeId,
+    SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
 };
 use crate::name::synth_operation_id;
 use crate::source::{Node, Number, SpannedValue};
@@ -133,26 +132,11 @@ pub fn lower(
             .map(|server| Server {
                 url: server.url.clone(),
                 description: server.description.clone(),
-                variables: server
-                    .variables
-                    .iter()
-                    .map(|(name, variable)| {
-                        (
-                            name.clone(),
-                            ServerVariable {
-                                default: variable.default.clone(),
-                                enumeration: variable.enumeration.clone(),
-                                description: variable.description.clone(),
-                            },
-                        )
-                    })
-                    .collect(),
             })
             .collect(),
         operations,
         types: ctx.graph,
         security_schemes,
-        provenance: document.provenance.clone(),
     };
     ctx.diags.into_result(api)
 }
@@ -345,11 +329,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 name: PropertyName { wire: name.clone() },
                 ty,
                 required: required.contains(name),
-                default: schema.default.as_ref().and_then(lower_default),
                 deprecated: schema.deprecated,
                 read_only: schema.read_only,
                 write_only: schema.write_only,
-                docs: Docs::default(),
             });
         }
         let additional = match &schema.additional_properties {
@@ -396,10 +378,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
                 return None;
             }
-            variants.push(EnumVariant {
-                value: scalar,
-                docs: Docs::default(),
-            });
+            variants.push(scalar);
         }
         Some(self.insert_schema_type(
             schema,
@@ -460,7 +439,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ty,
                 required: parameter.required || location == ParamLoc::Path,
                 style: ParamStyle::Content(media),
-                explode: parameter.explode.unwrap_or(false),
                 deprecated: parameter.deprecated,
             });
         } else {
@@ -471,16 +449,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(parameter.provenance.clone()),
             )
         };
-        let explode = parameter
-            .explode
-            .unwrap_or(matches!(style, ParamStyle::Form));
         Some(Parameter {
             name: parameter.name.clone(),
             location,
             ty,
             required: parameter.required || location == ParamLoc::Path,
             style,
-            explode,
             deprecated: parameter.deprecated,
         })
     }
@@ -492,11 +466,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let schema = self.resolve_schema_ref(schema)?;
             self.lower_schema(&schema, "RequestBody")
         });
-        Some(RequestBody {
-            media,
-            ty,
-            required: body.required,
-        })
+        Some(RequestBody { media, ty })
     }
 
     fn lower_responses(&mut self, responses: &super::ResponsesObject) -> Responses {
@@ -531,31 +501,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             },
         );
         Some(Response {
-            media: body.as_ref().map(|(media, _)| *media),
             body: body.and_then(|(_, ty)| ty),
-            headers: response
-                .headers
-                .iter()
-                .filter_map(|(name, header)| {
-                    let header = match header {
-                        RefOr::Item(header) => header,
-                        RefOr::Ref(_) => return None,
-                    };
-                    let schema = header
-                        .schema
-                        .as_ref()
-                        .and_then(|schema| self.resolve_schema_ref(schema))?;
-                    Some(HeaderSpec {
-                        name: name.clone(),
-                        ty: self.lower_schema(&schema, name)?,
-                        required: header.required,
-                        docs: Docs {
-                            description: header.description.clone(),
-                            ..Docs::default()
-                        },
-                    })
-                })
-                .collect(),
         })
     }
 
@@ -684,10 +630,8 @@ fn lower_security_schemes(document: &Document) -> IndexMap<SchemeId, SecuritySch
                     name: scheme.name.clone().unwrap_or_else(|| name.clone()),
                 }
             }
-            "oauth2" => SecurityScheme::OAuth2(OAuthMeta { flows: Vec::new() }),
-            "openIdConnect" => SecurityScheme::OpenIdConnect(OidcMeta {
-                openid_connect_url: scheme.openid_connect_url.clone().unwrap_or_default(),
-            }),
+            "oauth2" => SecurityScheme::OAuth2,
+            "openIdConnect" => SecurityScheme::OpenIdConnect,
             _ => continue,
         };
         schemes.insert(SchemeId(name.clone()), lowered);
@@ -778,17 +722,6 @@ fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {
         Node::Number(Number::Int(value)) => Some(ScalarValue::Int(*value)),
         Node::Number(Number::UInt(value)) => i64::try_from(*value).ok().map(ScalarValue::Int),
         Node::String(value) => Some(ScalarValue::String(value.clone())),
-        _ => None,
-    }
-}
-
-fn lower_default(value: &SpannedValue) -> Option<ScalarDefault> {
-    match &value.node {
-        Node::Bool(value) => Some(ScalarDefault::Bool(*value)),
-        Node::Number(Number::Int(value)) => Some(ScalarDefault::Int(*value)),
-        Node::Number(Number::UInt(value)) => i64::try_from(*value).ok().map(ScalarDefault::Int),
-        Node::Number(Number::Float(value)) => Some(ScalarDefault::Float(*value)),
-        Node::String(value) => Some(ScalarDefault::String(value.clone())),
         _ => None,
     }
 }

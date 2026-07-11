@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use crate::diag::Diagnostics;
 use crate::ir::{Api, OperationId, ScalarValue, TypeId, TypeKind};
 
-pub use casing::{to_pascal_case, to_shouty_snake_case, to_snake_case};
+pub use casing::{to_pascal_case, to_snake_case};
 pub use ident::Ident;
 pub use keyword::{escape, IdentRole};
 pub use scope::Scope;
@@ -89,7 +89,7 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             TypeKind::Enum(enumeration) => {
                 let mut scope = Scope::default();
                 for variant in &enumeration.variants {
-                    let value = match &variant.value {
+                    let value = match variant {
                         ScalarValue::Bool(value) => value.to_string(),
                         ScalarValue::Int(value) => value.to_string(),
                         ScalarValue::String(value) => value.clone(),

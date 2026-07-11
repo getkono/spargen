@@ -19,6 +19,22 @@ pub enum Method {
     Trace,
 }
 
+impl Method {
+    /// The lowercase OAS path-item key.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "get",
+            Method::Put => "put",
+            Method::Post => "post",
+            Method::Delete => "delete",
+            Method::Options => "options",
+            Method::Head => "head",
+            Method::Patch => "patch",
+            Method::Trace => "trace",
+        }
+    }
+}
+
 /// A parsed path template, split into literal and parameter segments so URL construction is
 /// static segment concatenation with no runtime regex (PRD NFR1).
 #[derive(Debug, Clone)]
@@ -78,8 +94,6 @@ pub struct Parameter {
     pub required: bool,
     /// The serialization style.
     pub style: ParamStyle,
-    /// The `explode` flag (with the standard style default already applied).
-    pub explode: bool,
     /// `deprecated` → `#[deprecated]`.
     pub deprecated: bool,
 }

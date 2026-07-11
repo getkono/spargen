@@ -19,10 +19,6 @@ pub struct Omit {
 
 impl Omit {
     /// Construct a profile from exact rules.
-    pub fn from_rules(rules: Vec<OmitRule>) -> Self {
-        Self { rules }
-    }
-
     /// Whether the profile contains no rules.
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()

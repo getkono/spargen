@@ -5,10 +5,10 @@ use crate::ir::Method;
 use crate::source::{InputBundle, Node, Number, SpannedMap, SpannedValue};
 
 use super::{
-    Components, Discriminator, Document, HeaderObject, Info, JsonType, MediaTypeObject,
-    OperationObject, ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject,
-    ResponseObject, ResponsesObject, Schema, SchemaOr, SecurityRequirement, SecuritySchemeObject,
-    Server, ServerVariable, Tag, TypeSet, ValidationKeywords, Version,
+    Components, Discriminator, Document, Info, JsonType, MediaTypeObject, OperationObject,
+    ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject, ResponseObject,
+    ResponsesObject, Schema, SchemaOr, SecurityRequirement, SecuritySchemeObject, Server, TypeSet,
+    ValidationKeywords,
 };
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
@@ -22,7 +22,7 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
         return Err(Aborted);
     };
     let openapi_text = string(openapi_value).unwrap_or_default();
-    let Some(openapi) = parse_version(openapi_text) else {
+    if !version_supported(openapi_text) {
         Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance(&root_pointer, openapi_value))
             .message(format!(
                 "unsupported OpenAPI version `{openapi_text}`; spargen currently implements 3.1.x"
@@ -30,7 +30,7 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
             .remedy("use an OpenAPI 3.1.x document; 3.0.x is rejected because it uses different schema semantics")
             .emit(diags);
         return Err(Aborted);
-    };
+    }
 
     if let Some(dialect) = root.get("jsonSchemaDialect") {
         if string(dialect) != Some(OAS31_DIALECT) {
@@ -76,11 +76,6 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
         .map(|value| parse_security(value, &root_pointer.push("security")))
         .unwrap_or_default();
 
-    let tags = root
-        .get("tags")
-        .map(|value| parse_tags(value, &root_pointer.push("tags")))
-        .unwrap_or_default();
-
     if let Some(webhooks) = root.get("webhooks") {
         Diagnostic::warning(
             Code::ServerInitiatedFlowIgnored,
@@ -91,31 +86,22 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
     }
 
     let document = Document {
-        openapi,
         info,
         servers,
         paths,
         components,
         security,
-        tags,
         provenance: provenance(&root_pointer, root),
     };
     diags.into_result(document)
 }
 
-fn parse_version(value: &str) -> Option<Version> {
+fn version_supported(value: &str) -> bool {
     let mut parts = value.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    if parts.next().is_some() || major != 3 || minor != 1 {
-        return None;
-    }
-    Some(Version {
-        major,
-        minor,
-        patch,
-    })
+    let (Some(major), Some(minor), Some(patch)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    parts.next().is_none() && major == "3" && minor == "1" && patch.parse::<u16>().is_ok()
 }
 
 fn parse_info(
@@ -159,39 +145,9 @@ fn parse_server(
     diags: &mut Diagnostics,
 ) -> Option<Server> {
     let _ = object(value, pointer, diags)?;
-    let variables = value
-        .get("variables")
-        .and_then(SpannedValue::as_object)
-        .map(|map| {
-            map.iter()
-                .filter_map(|(key, value)| {
-                    let default = value.get("default").and_then(string)?.to_owned();
-                    Some((
-                        key.name.clone(),
-                        ServerVariable {
-                            default,
-                            enumeration: value
-                                .get("enum")
-                                .and_then(array)
-                                .unwrap_or_default()
-                                .iter()
-                                .filter_map(string)
-                                .map(str::to_owned)
-                                .collect(),
-                            description: value
-                                .get("description")
-                                .and_then(string)
-                                .map(str::to_owned),
-                        },
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     Some(Server {
         url: value.get("url").and_then(string).unwrap_or("/").to_owned(),
         description: value.get("description").and_then(string).map(str::to_owned),
-        variables,
     })
 }
 
@@ -271,14 +227,6 @@ fn parse_operation(
         security: value
             .get("security")
             .map(|value| parse_security(value, &pointer.push("security"))),
-        tags: value
-            .get("tags")
-            .and_then(array)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(string)
-            .map(str::to_owned)
-            .collect(),
         deprecated: value
             .get("deprecated")
             .and_then(SpannedValue::as_bool)
@@ -313,7 +261,6 @@ fn parse_parameter(
             .and_then(SpannedValue::as_bool)
             .unwrap_or(false),
         style: value.get("style").and_then(string).map(str::to_owned),
-        explode: value.get("explode").and_then(SpannedValue::as_bool),
         schema: value
             .get("schema")
             .and_then(|value| parse_ref_or(value, &pointer.push("schema"), diags, parse_schema)),
@@ -332,11 +279,6 @@ fn parse_request_body(
 ) -> Option<RequestBodyObject> {
     let _ = object(value, pointer, diags)?;
     Some(RequestBodyObject {
-        description: value.get("description").and_then(string).map(str::to_owned),
-        required: value
-            .get("required")
-            .and_then(SpannedValue::as_bool)
-            .unwrap_or(false),
         content: value
             .get("content")
             .map(|value| parse_media_map(value, &pointer.push("content"), diags))
@@ -379,51 +321,10 @@ fn parse_response(
         .emit(diags);
     }
     Some(ResponseObject {
-        description: value
-            .get("description")
-            .and_then(string)
-            .unwrap_or_default()
-            .to_owned(),
-        headers: value
-            .get("headers")
-            .and_then(SpannedValue::as_object)
-            .map(|map| {
-                map.iter()
-                    .filter_map(|(key, value)| {
-                        parse_ref_or(
-                            value,
-                            &pointer.push("headers").push(&key.name),
-                            diags,
-                            parse_header,
-                        )
-                        .map(|header| (key.name.clone(), header))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
         content: value
             .get("content")
             .map(|value| parse_media_map(value, &pointer.push("content"), diags))
             .unwrap_or_default(),
-        provenance: provenance(pointer, value),
-    })
-}
-
-fn parse_header(
-    value: &SpannedValue,
-    pointer: &JsonPointer,
-    diags: &mut Diagnostics,
-) -> Option<HeaderObject> {
-    let _ = object(value, pointer, diags)?;
-    Some(HeaderObject {
-        description: value.get("description").and_then(string).map(str::to_owned),
-        required: value
-            .get("required")
-            .and_then(SpannedValue::as_bool)
-            .unwrap_or(false),
-        schema: value
-            .get("schema")
-            .and_then(|value| parse_ref_or(value, &pointer.push("schema"), diags, parse_schema)),
         provenance: provenance(pointer, value),
     })
 }
@@ -489,12 +390,6 @@ fn parse_components(
         diags,
         parse_request_body,
     );
-    components.headers = parse_component_map(
-        map.get("headers"),
-        &pointer.push("headers"),
-        diags,
-        parse_header,
-    );
     components.security_schemes = parse_component_map(
         map.get("securitySchemes"),
         &pointer.push("securitySchemes"),
@@ -538,11 +433,6 @@ fn parse_security_scheme(
         scheme: value.get("scheme").and_then(string).map(str::to_owned),
         location: value.get("in").and_then(string).map(str::to_owned),
         name: value.get("name").and_then(string).map(str::to_owned),
-        openid_connect_url: value
-            .get("openIdConnectUrl")
-            .and_then(string)
-            .map(str::to_owned),
-        provenance: provenance(pointer, value),
     })
 }
 
@@ -650,7 +540,6 @@ fn parse_schema_or(
             .get("contentEncoding")
             .and_then(string)
             .map(str::to_owned),
-        default: map.get("default").cloned(),
         validation: parse_validation(map),
         deprecated: map
             .get("deprecated")
@@ -666,11 +555,6 @@ fn parse_schema_or(
             .unwrap_or(false),
         title: map.get("title").and_then(string).map(str::to_owned),
         description: map.get("description").and_then(string).map(str::to_owned),
-        extensions: map
-            .iter()
-            .filter(|(key, _)| key.name.starts_with("x-"))
-            .map(|(key, value)| (key.name.clone(), value.clone()))
-            .collect(),
         provenance: provenance(pointer, value),
     };
     Some(SchemaOr::Schema(Box::new(schema)))
@@ -793,7 +677,6 @@ fn parse_ref_or<T>(
     if let Some(reference) = value.get("$ref").and_then(string) {
         Some(RefOr::Ref(Reference {
             reference: reference.to_owned(),
-            provenance: provenance(pointer, value),
         }))
     } else {
         parse(value, pointer, diags).map(RefOr::Item)
@@ -821,23 +704,6 @@ fn parse_security(value: &SpannedValue, _pointer: &JsonPointer) -> Vec<SecurityR
                         })
                         .collect(),
                 )
-            })
-        })
-        .collect()
-}
-
-fn parse_tags(value: &SpannedValue, _pointer: &JsonPointer) -> Vec<Tag> {
-    array(value)
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|value| {
-            value.as_object().map(|_| Tag {
-                name: value
-                    .get("name")
-                    .and_then(string)
-                    .unwrap_or_default()
-                    .to_owned(),
-                description: value.get("description").and_then(string).map(str::to_owned),
             })
         })
         .collect()

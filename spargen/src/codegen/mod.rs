@@ -25,6 +25,9 @@ pub struct CodegenOptions {
     pub feature_uuid: bool,
     /// Map `format: date-time`/`date` to the `time` crate (else `String`).
     pub feature_time: bool,
+    /// Max bytes of a response body retained on error variants (PRD D7); stamped into the
+    /// generated client's default configuration.
+    pub error_body_cap: usize,
 }
 
 impl Default for CodegenOptions {
@@ -32,6 +35,7 @@ impl Default for CodegenOptions {
         Self {
             feature_uuid: true,
             feature_time: true,
+            error_body_cap: 64 * 1024,
         }
     }
 }
@@ -64,9 +68,9 @@ pub fn generate(
 ) -> GeneratedCode {
     for operation in &api.operations {
         let degraded = match operation.responses.success() {
-            SuccessShape::Enum(_) => Some("success"),
+            SuccessShape::Enum => Some("success"),
             _ => match operation.responses.error() {
-                ErrorShape::Enum(_) => Some("error"),
+                ErrorShape::Enum => Some("error"),
                 _ => None,
             },
         };
@@ -83,8 +87,14 @@ pub fn generate(
     }
     let support = emit::emit_support();
     let models = emit::emit_models(api, names, options);
-    let client = emit::emit_client(api, names);
+    let client = emit::emit_client(api, names, options);
+    let mut crate_doc = format!("{} v{}.", api.info.title, api.info.version);
+    if let Some(description) = &api.info.description {
+        crate_doc.push_str("\n\n");
+        crate_doc.push_str(description);
+    }
     let tokens = quote! {
+        #![doc = #crate_doc]
         #![forbid(unsafe_code)]
         #![allow(clippy::result_large_err)]
         #![allow(dead_code, unused_imports, unused_mut, unused_variables)]

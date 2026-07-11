@@ -13,7 +13,7 @@ use camino::Utf8PathBuf;
 
 use crate::codegen::{GeneratedCode, GeneratedFile};
 
-pub use check::{check_drift, DriftReport, FileDiff};
+pub use check::{check_drift, DriftReport};
 pub use header::provenance_header;
 pub use manifest::synth_cargo_toml;
 

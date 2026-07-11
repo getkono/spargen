@@ -13,7 +13,6 @@ pub enum IdentRole {
     /// A method name (`snake_case`).
     Method,
     /// A module name (`snake_case`).
-    Module,
     /// A function parameter (`snake_case`).
     Param,
 }
@@ -24,9 +23,7 @@ pub enum IdentRole {
 pub fn escape(raw: &str, role: IdentRole) -> Ident {
     let mut ident = match role {
         IdentRole::Type | IdentRole::Variant => to_pascal_case(raw),
-        IdentRole::Field | IdentRole::Method | IdentRole::Module | IdentRole::Param => {
-            to_snake_case(raw)
-        }
+        IdentRole::Field | IdentRole::Method | IdentRole::Param => to_snake_case(raw),
     };
 
     ident.retain(|ch| ch == '_' || ch.is_ascii_alphanumeric());

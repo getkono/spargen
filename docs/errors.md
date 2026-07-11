@@ -17,9 +17,12 @@ the library API.
 | `E010` | Error | unsupported parameter style |
 | `E011` | Error | invalid input document |
 | `E012` | Error | unknown security scheme |
+| `E013` | Error | `allOf` composition unsupported |
+| `E014` | Error | recursive `$ref` unsupported |
 | `E019` | Error | invalid omit rule |
 | `E020` | Error | omit profile created an invalid document |
 | `W001` | Warning | validation-only keyword ignored |
 | `W002` | Warning | server-initiated flow ignored |
 | `W003` | Warning | response body degrades to `serde_json::Value` |
+| `W004` | Warning | checked-in output drifted |
 | `W009` | Warning | construct omitted |

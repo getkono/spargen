@@ -30,8 +30,6 @@ camino = { workspace = true }
 # source
 indexmap = { workspace = true }
 yaml-rust2 = { workspace = true }
-# emit
-similar = { workspace = true }
 # name
 proc-macro2 = { workspace = true }
 quote = { workspace = true }

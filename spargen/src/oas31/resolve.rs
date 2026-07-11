@@ -3,21 +3,18 @@ use crate::source::InputBundle;
 
 use super::{Document, Schema};
 
-/// Resolves `$ref`s within a [`Document`] and its input bundle (PRD §3.3 prec 6/7). Detects cycles
-/// so the frontend can break them with `Box` in the IR (matrix: Schema shape → `$ref` cycles).
+/// Resolves `$ref`s within a [`Document`] and its input bundle (PRD §3.3 prec 6/7).
 #[derive(Debug)]
 pub struct Resolver<'doc> {
     document: &'doc Document,
     bundle: &'doc InputBundle,
 }
 
-/// A resolved reference target: the schema it points at and the pointer that addresses it.
+/// A resolved reference target.
 #[derive(Debug)]
 pub struct Resolved<'doc> {
     /// The target schema.
     pub schema: &'doc Schema,
-    /// The pointer to the target within its file.
-    pub pointer: JsonPointer,
 }
 
 impl<'doc> Resolver<'doc> {
@@ -74,20 +71,7 @@ impl<'doc> Resolver<'doc> {
             .emit(diags);
             return Err(Aborted);
         };
-        Ok(Resolved {
-            schema,
-            pointer: JsonPointer::root()
-                .push("components")
-                .push("schemas")
-                .push(name),
-        })
-    }
-
-    /// Whether resolving `reference` participates in a reference cycle (→ `Box` in the IR).
-    pub fn is_cyclic(&self, reference: &str) -> bool {
-        let _ = self;
-        let _ = reference;
-        false
+        Ok(Resolved { schema })
     }
 }
 

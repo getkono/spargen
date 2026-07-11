@@ -33,16 +33,6 @@ impl TypeGraph {
     pub fn iter(&self) -> impl Iterator<Item = (TypeId, &TypeDef)> {
         self.defs.iter().map(|(id, def)| (*id, def))
     }
-
-    /// The number of type definitions.
-    pub fn len(&self) -> usize {
-        self.defs.len()
-    }
-
-    /// Whether the graph is empty.
-    pub fn is_empty(&self) -> bool {
-        self.defs.is_empty()
-    }
 }
 
 /// A named or structurally-derived type definition.
@@ -85,10 +75,6 @@ pub enum TypeKind {
     Struct(Struct),
     /// A homogeneous scalar `enum`/`const` set (PRD D6).
     Enum(ScalarEnum),
-    /// A `oneOf`/`anyOf`, either discriminated or statically provably disjoint (PRD D1).
-    Union(Union),
-    /// A free-form map (`additionalProperties: <schema>`).
-    Map(Box<Ty>),
     /// A homogeneous array (`items`).
     Array(Box<Ty>),
     /// A fixed-length heterogeneous tuple (`prefixItems`).
@@ -138,16 +124,12 @@ pub struct Field {
     pub ty: Ty,
     /// Whether the property is `required`.
     pub required: bool,
-    /// A scalar deserialization default (`default`), applied on missing input only (PRD D8).
-    pub default: Option<ScalarDefault>,
     /// `deprecated` → `#[deprecated]`.
     pub deprecated: bool,
     /// `readOnly` annotation (W-class, surfaced in rustdoc; PRD D2).
     pub read_only: bool,
     /// `writeOnly` annotation (W-class, surfaced in rustdoc; PRD D2).
     pub write_only: bool,
-    /// Field documentation.
-    pub docs: Docs,
 }
 
 /// The `additionalProperties` policy of a [`Struct`] (matrix: Schema shape).
@@ -169,27 +151,14 @@ pub struct PropertyName {
     pub wire: String,
 }
 
-/// A scalar value usable as a deserialization `default` (PRD D8). Non-scalar defaults are W-class.
-#[derive(Debug, Clone, PartialEq)]
-pub enum ScalarDefault {
-    /// A boolean default.
-    Bool(bool),
-    /// An integer default.
-    Int(i64),
-    /// A floating-point default.
-    Float(f64),
-    /// A string default.
-    String(String),
-}
-
 /// A homogeneous scalar enumeration generated from `enum`/`const` over a single scalar kind
 /// (PRD D6). Heterogeneous or structured value sets are R-rejected.
 #[derive(Debug, Clone)]
 pub struct ScalarEnum {
     /// The shared scalar kind of every variant.
     pub repr: ScalarRepr,
-    /// The variants, in declared order.
-    pub variants: Vec<EnumVariant>,
+    /// The variant wire values, in declared order.
+    pub variants: Vec<ScalarValue>,
 }
 
 /// The scalar kind backing a [`ScalarEnum`].
@@ -203,15 +172,6 @@ pub enum ScalarRepr {
     Bool,
 }
 
-/// A single [`ScalarEnum`] variant.
-#[derive(Debug, Clone)]
-pub struct EnumVariant {
-    /// The variant's wire value.
-    pub value: ScalarValue,
-    /// Variant documentation.
-    pub docs: Docs,
-}
-
 /// A concrete scalar value (an `enum` member or `const`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarValue {
@@ -221,29 +181,4 @@ pub enum ScalarValue {
     Int(i64),
     /// A string value.
     String(String),
-}
-
-/// A discriminated or provably-disjoint union lowered from `oneOf`/`anyOf` (PRD D1). serde
-/// `untagged` is never emitted — first-match-wins can silently misparse.
-#[derive(Debug, Clone)]
-pub struct Union {
-    /// How variants are distinguished at deserialization time.
-    pub tag: UnionTag,
-    /// The variant types.
-    pub variants: Vec<Ty>,
-}
-
-/// How a [`Union`]'s variants are told apart.
-#[derive(Debug, Clone)]
-pub enum UnionTag {
-    /// An explicit `discriminator`: the tag property and its value→variant mapping.
-    Discriminator {
-        /// The discriminator property name.
-        property: String,
-        /// Mapping from discriminator value to variant type.
-        mapping: IndexMap<String, TypeId>,
-    },
-    /// No discriminator, but the variant sets are statically provably disjoint, so an
-    /// order-independent deserializer can be generated (PRD D1).
-    Disjoint,
 }

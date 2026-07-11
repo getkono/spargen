@@ -10,12 +10,10 @@ use crate::diag::{
 
 use super::{parse_json, parse_yaml, Node, SpannedValue};
 
-/// A single loaded source file: its id, path, and full text. The text is shared (`Arc<str>`) so
+/// A single loaded source file: its path and full text. The text is shared (`Arc<str>`) so
 /// rustc-style snippet rendering can borrow lines cheaply.
 #[derive(Debug, Clone)]
 pub struct SourceFile {
-    /// Bundle-unique file id.
-    pub id: FileId,
     /// Path as loaded (relative to the bundle root).
     pub path: Utf8PathBuf,
     /// Full file contents.
@@ -119,52 +117,6 @@ impl InputBundle {
                     .find_map(|(id, file)| file.path.as_str().ends_with(path).then_some(*id))
             })
     }
-
-    /// Resolve a `$ref` originating in `base`, loading the target file if it is not yet in the
-    /// bundle. Absolute-URL refs are rejected with a diagnostic (PRD §3.2.10). On success returns
-    /// the target file id and the JSON Pointer within it.
-    pub fn resolve_ref(
-        &mut self,
-        base: FileId,
-        reference: &str,
-        diags: &mut Diagnostics,
-    ) -> Result<(FileId, JsonPointer), Aborted> {
-        if is_absolute_ref(reference) {
-            Diagnostic::error(
-                Code::AbsoluteRefUnsupported,
-                Provenance::new(JsonPointer::root(), Some(self.value_at(base).span())),
-            )
-            .message(format!("absolute $ref `{reference}` is not supported"))
-            .emit(diags);
-            return Err(Aborted);
-        }
-
-        let (path, fragment) = split_ref(reference).unwrap_or(("", ""));
-        let file = if path.is_empty() {
-            base
-        } else {
-            let resolved = self.resolve_path(base, path);
-            match self.file_id_by_path(&resolved) {
-                Some(id) => id,
-                None => self.load_file(resolved, diags)?,
-            }
-        };
-        let pointer = if fragment.is_empty() {
-            JsonPointer::root()
-        } else {
-            JsonPointer::from(fragment.to_owned())
-        };
-        if self.value_at(file).pointer(&pointer).is_none() {
-            Diagnostic::error(
-                Code::UnresolvedRef,
-                Provenance::new(pointer.clone(), Some(self.value_at(file).span())),
-            )
-            .message(format!("unresolved $ref `{reference}`"))
-            .emit(diags);
-            return Err(Aborted);
-        }
-        Ok((file, pointer))
-    }
 }
 
 impl SourceSnippets for InputBundle {
@@ -200,7 +152,6 @@ impl InputBundle {
         self.files.insert(
             id,
             SourceFile {
-                id,
                 path,
                 text: Arc::<str>::from(text),
             },

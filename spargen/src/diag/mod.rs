@@ -22,11 +22,11 @@ mod span;
 
 pub use code::Code;
 pub use collect::{Aborted, Diagnostics};
-pub use interp::{all_interpretations, interpretation, InterpId, Interpretation};
+pub use interp::InterpId;
 pub use pointer::JsonPointer;
 pub use provenance::Provenance;
 pub use render::{render_human, render_json, SourceSnippets};
-pub use severity::{Disposition, Severity};
+pub use severity::Severity;
 pub use span::{FileId, Loc, Span};
 
 /// A single diagnostic emitted during parsing, validation, or codegen (PRD FR6).

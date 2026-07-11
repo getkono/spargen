@@ -29,11 +29,6 @@ pub fn to_snake_case(raw: &str) -> String {
     }
 }
 
-/// Convert `raw` to `SHOUTY_SNAKE_CASE` (for constants).
-pub fn to_shouty_snake_case(raw: &str) -> String {
-    to_snake_case(raw).to_ascii_uppercase()
-}
-
 fn words(raw: &str) -> Vec<String> {
     let mut words = Vec::new();
     let mut current = String::new();
