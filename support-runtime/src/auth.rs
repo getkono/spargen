@@ -2,27 +2,10 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-/// A secret credential value. `Debug` is redacted so secrets never leak through logs (PRD FR4).
-#[derive(Clone)]
-pub struct SecretString(String);
-
-impl SecretString {
-    /// Wrap a secret.
-    pub fn new(secret: impl Into<String>) -> Self {
-        Self(secret.into())
-    }
-
-    /// Borrow the underlying secret. Use only where the secret must cross the wire.
-    pub fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for SecretString {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("SecretString(***)")
-    }
-}
+// Secret handling is delegated to `secrecy` rather than hand-rolled: it zeroizes on drop and
+// redacts `Debug`, and it is already a near-universal transitive dependency of rustls-based
+// stacks. Re-exported so generated code and consumers use one vocabulary.
+pub use secrecy::{ExposeSecret, SecretString};
 
 /// A failure from an async token provider (PRD FR4).
 #[derive(Debug)]
@@ -87,12 +70,14 @@ impl std::fmt::Debug for Credential {
 
 #[cfg(test)]
 mod tests {
-    use super::SecretString;
+    use super::{Credential, ExposeSecret, SecretString};
 
     #[test]
-    fn secret_debug_is_redacted() {
-        let secret = SecretString::new("token");
-        assert_eq!(secret.expose(), "token");
-        assert_eq!(format!("{secret:?}"), "SecretString(***)");
+    fn credential_debug_is_redacted() {
+        let secret = SecretString::from("s3cr3t");
+        assert_eq!(secret.expose_secret(), "s3cr3t");
+        let credential = Credential::Bearer(secret);
+        let rendered = format!("{credential:?}");
+        assert!(!rendered.contains("s3cr3t"), "{rendered}");
     }
 }

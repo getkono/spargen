@@ -28,6 +28,7 @@ time = ["dep:time"]
 [dependencies]
 bytes = "1"
 reqwest = {{ version = "0.12", default-features = false, features = ["json"] }}
+secrecy = "0.10"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"
 uuid = {{ version = "1", features = ["serde"], optional = true }}

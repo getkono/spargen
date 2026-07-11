@@ -296,7 +296,7 @@ pub(crate) fn emit_support() -> TokenStream {
         mod support {
             #(#modules)*
 
-            pub use auth::{AuthError, Credential, SecretString, TokenFuture, TokenProvider};
+            pub use auth::{AuthError, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
             pub use dispatch::{build_url, classify_error, decode_success, send};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
