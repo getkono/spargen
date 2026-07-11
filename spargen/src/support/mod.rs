@@ -18,27 +18,32 @@ pub struct SupportFile {
 
 /// The runtime source files, embedded from the `support-runtime` crate via `include_str!`. Emitted
 /// as a private `support` module carrying `#![forbid(unsafe_code)]`.
+///
+/// The `include_str!` paths resolve through `src/support/runtime/`, whose entries are symlinks to
+/// the canonical `support-runtime/src/*.rs` sources. That indirection keeps a single source of
+/// truth while ensuring `cargo publish` follows the links and ships the bytes *inside* the
+/// `spargen` crate — so the published crate is self-contained.
 pub fn runtime_files() -> &'static [SupportFile] {
     const FILES: &[SupportFile] = &[
         SupportFile {
             name: "auth.rs",
-            contents: include_str!("../../../support-runtime/src/auth.rs"),
+            contents: include_str!("runtime/auth.rs"),
         },
         SupportFile {
             name: "client.rs",
-            contents: include_str!("../../../support-runtime/src/client.rs"),
+            contents: include_str!("runtime/client.rs"),
         },
         SupportFile {
             name: "dispatch.rs",
-            contents: include_str!("../../../support-runtime/src/dispatch.rs"),
+            contents: include_str!("runtime/dispatch.rs"),
         },
         SupportFile {
             name: "error.rs",
-            contents: include_str!("../../../support-runtime/src/error.rs"),
+            contents: include_str!("runtime/error.rs"),
         },
         SupportFile {
             name: "response.rs",
-            contents: include_str!("../../../support-runtime/src/response.rs"),
+            contents: include_str!("runtime/response.rs"),
         },
     ];
     FILES
