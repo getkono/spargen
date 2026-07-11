@@ -7,7 +7,7 @@
 //!
 //! No spargen crate ever appears in a consumer's runtime graph: this crate is `publish = false`
 //! and its only dependencies are the near-universal `reqwest` / `serde` / `serde_json` / `bytes`
-//! set.
+//! / `secrecy` set.
 //!
 //! ## Fault-tolerance guarantees
 //!
