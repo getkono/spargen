@@ -32,6 +32,8 @@ pub use auth::{
     TokenProvider,
 };
 pub use client::{ClientConfig, ClientCore};
-pub use dispatch::{attach_auth, build_url, classify_error, decode_success, send};
+pub use dispatch::{
+    attach_auth, build_url, classify_error, decode_success, send, unexpected_status, StatusSpec,
+};
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
 pub use response::ResponseValue;

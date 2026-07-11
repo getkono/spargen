@@ -10,8 +10,8 @@ mod format;
 
 use camino::Utf8PathBuf;
 
-use crate::diag::Diagnostics;
-use crate::ir::Api;
+use crate::diag::{Code, Diagnostic, Diagnostics};
+use crate::ir::{Api, ErrorShape, SuccessShape};
 use crate::name::Names;
 use quote::quote;
 
@@ -62,7 +62,25 @@ pub fn generate(
     options: &CodegenOptions,
     diags: &mut Diagnostics,
 ) -> GeneratedCode {
-    let _ = diags;
+    for operation in &api.operations {
+        let degraded = match operation.responses.success() {
+            SuccessShape::Enum(_) => Some("success"),
+            _ => match operation.responses.error() {
+                ErrorShape::Enum(_) => Some("error"),
+                _ => None,
+            },
+        };
+        if let Some(kind) = degraded {
+            Diagnostic::warning(Code::ResponseDegradedToValue, operation.provenance.clone())
+                .message(format!(
+                    "operation `{}` documents multiple {kind} bodies; the {kind} type is \
+                     generated as serde_json::Value",
+                    operation.id.0
+                ))
+                .remedy("restructure the responses, or omit the operation with spargen::omit!")
+                .emit(diags);
+        }
+    }
     let support = emit::emit_support();
     let models = emit::emit_models(api, names, options);
     let client = emit::emit_client(api, names);

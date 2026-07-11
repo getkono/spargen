@@ -41,6 +41,9 @@ pub enum Code {
     /// A `security` requirement references a scheme that is not declared under
     /// `components.securitySchemes` (or is of an unsupported type) (matrix: Security).
     UnknownSecurityScheme,
+    /// An operation documents multiple success or error bodies; the combined body is generated as
+    /// `serde_json::Value` because per-status enums are not yet emitted (matrix: Responses).
+    ResponseDegradedToValue,
     /// The input could not be parsed or violates a required structural OpenAPI shape.
     InvalidInput,
     /// A compatibility omit rule did not match a source construct or attempted an invalid removal.
@@ -69,6 +72,7 @@ impl Code {
             Code::ServerInitiatedFlowIgnored => "W002",
             Code::InvalidInput => "E011",
             Code::UnknownSecurityScheme => "E012",
+            Code::ResponseDegradedToValue => "W003",
             Code::OmittedConstruct => "W009",
             Code::InvalidOmitRule => "E019",
             Code::OmitCreatedInvalidDocument => "E020",
@@ -101,6 +105,7 @@ impl Code {
             Code::ServerInitiatedFlowIgnored => "server-initiated flow ignored",
             Code::InvalidInput => "invalid input document",
             Code::UnknownSecurityScheme => "unknown security scheme",
+            Code::ResponseDegradedToValue => "response body degrades to serde_json::Value",
             Code::InvalidOmitRule => "invalid omit rule",
             Code::OmittedConstruct => "construct omitted",
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
@@ -152,6 +157,9 @@ impl Code {
             Code::UnknownSecurityScheme => {
                 "Every scheme named in a `security` requirement must be declared under `components.securitySchemes` as `http` bearer/basic, `apiKey`, `oauth2`, or `openIdConnect` so credentials can be attached at the right location."
             }
+            Code::ResponseDegradedToValue => {
+                "The operation documents multiple success or multiple error bodies. Spargen does not yet generate per-status response enums, so the body type is `serde_json::Value` — typed, but weaker than the spec. Restructure the responses or omit the operation if this is unacceptable."
+            }
             Code::InvalidOmitRule => {
                 "A compatibility omit rule must match at least one exact path, operation, component, pointer, or file-local pointer and cannot omit the document root."
             }
@@ -193,6 +201,7 @@ impl Code {
             Code::OmitCreatedInvalidDocument,
             Code::ValidationKeywordIgnored,
             Code::ServerInitiatedFlowIgnored,
+            Code::ResponseDegradedToValue,
             Code::OmittedConstruct,
         ];
         ALL

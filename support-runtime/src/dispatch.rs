@@ -166,22 +166,76 @@ where
     Ok(ResponseValue::new(status, headers, value))
 }
 
-/// Classify a non-success response into either the operation's typed error body ([`Error::Api`],
-/// #6) or an [`Error::UnexpectedStatus`] (#7), retaining at most `max_error_body` bytes (PRD D7).
-pub async fn classify_error<E>(core: &ClientCore, response: Response) -> Error<E>
+/// A status selector an operation documents as an error response. Generated code passes these as
+/// static tables so classification distinguishes documented from undocumented statuses.
+#[derive(Debug, Clone, Copy)]
+pub enum StatusSpec {
+    /// An exact status code, e.g. `404`.
+    Exact(u16),
+    /// A status range by leading digit, e.g. `Range(5)` for `5XX`.
+    Range(u8),
+    /// The `default` response — matches any status.
+    Any,
+}
+
+impl StatusSpec {
+    /// Whether the selector covers the given status.
+    pub fn matches(self, status: reqwest::StatusCode) -> bool {
+        match self {
+            StatusSpec::Exact(code) => status.as_u16() == code,
+            StatusSpec::Range(prefix) => status.as_u16() / 100 == u16::from(prefix),
+            StatusSpec::Any => true,
+        }
+    }
+}
+
+/// Classify a non-success response: a documented status parses into the operation's typed error
+/// body ([`Error::Api`], #6, falling back to [`Error::Decode`] on parse failure); an undocumented
+/// status becomes [`Error::UnexpectedStatus`] (#7) with the raw body preserved. Retains at most
+/// `max_error_body` bytes either way (PRD D7).
+pub async fn classify_error<E>(
+    core: &ClientCore,
+    response: Response,
+    documented: &[StatusSpec],
+) -> Error<E>
 where
     E: DeserializeOwned,
 {
     let status = response.status();
     let headers = response.headers().clone();
     match read_capped(core, response).await {
-        Ok((body, truncated)) => match serde_json::from_slice::<E>(&body) {
-            Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
-            Err(error) => Error::Decode {
-                path: error.to_string(),
-                body,
-                truncated,
-            },
+        Ok((body, truncated)) => {
+            if documented.iter().any(|spec| spec.matches(status)) {
+                match serde_json::from_slice::<E>(&body) {
+                    Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
+                    Err(error) => Error::Decode {
+                        path: error.to_string(),
+                        body,
+                        truncated,
+                    },
+                }
+            } else {
+                Error::UnexpectedStatus {
+                    status,
+                    headers,
+                    body,
+                }
+            }
+        }
+        Err(error) => error,
+    }
+}
+
+/// Wrap a non-success response as [`Error::UnexpectedStatus`] (#7) for operations that document no
+/// error body at all, retaining at most `max_error_body` bytes.
+pub async fn unexpected_status<E>(core: &ClientCore, response: Response) -> Error<E> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    match read_capped(core, response).await {
+        Ok((body, _truncated)) => Error::UnexpectedStatus {
+            status,
+            headers,
+            body,
         },
         Err(error) => error,
     }

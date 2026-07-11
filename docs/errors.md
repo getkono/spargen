@@ -21,4 +21,5 @@ the library API.
 | `E020` | Error | omit profile created an invalid document |
 | `W001` | Warning | validation-only keyword ignored |
 | `W002` | Warning | server-initiated flow ignored |
+| `W003` | Warning | response body degrades to `serde_json::Value` |
 | `W009` | Warning | construct omitted |

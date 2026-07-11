@@ -34,6 +34,16 @@ pub enum StatusSpec {
     Range(u8),
 }
 
+impl StatusSpec {
+    /// Whether the selector covers only success (2xx) statuses.
+    pub fn is_success(self) -> bool {
+        match self {
+            StatusSpec::Exact(code) => (200..300).contains(&code),
+            StatusSpec::Range(prefix) => prefix == 2,
+        }
+    }
+}
+
 /// A single response header exposed via `ResponseValue` (matrix: Responses → S).
 #[derive(Debug, Clone)]
 pub struct HeaderSpec {
@@ -123,10 +133,7 @@ impl Responses {
 }
 
 fn is_success_status(status: StatusSpec) -> bool {
-    match status {
-        StatusSpec::Exact(code) => (200..300).contains(&code),
-        StatusSpec::Range(prefix) => prefix == 2,
-    }
+    status.is_success()
 }
 
 /// The success return type of an operation (before wrapping in `ResponseValue<T>`).

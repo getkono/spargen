@@ -105,12 +105,7 @@ pub(crate) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
         .iter()
         .filter(|param| param.required)
         .map(|param| {
-            let ident = format_ident!(
-                "{}",
-                crate::name::escape(&param.name, crate::name::IdentRole::Param)
-                    .as_str()
-                    .trim_start_matches("r#")
-            );
+            let ident = param_ident(param, crate::name::IdentRole::Param);
             let ty = ty_tokens(param.ty, names, &CodegenOptions::default(), true);
             quote! { #ident: #ty }
         })
@@ -131,12 +126,7 @@ pub(crate) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
         .filter(|param| param.location == ParamLoc::Path)
         .map(|param| {
             let placeholder = format!("{{{}}}", param.name);
-            let ident = format_ident!(
-                "{}",
-                crate::name::escape(&param.name, crate::name::IdentRole::Param)
-                    .as_str()
-                    .trim_start_matches("r#")
-            );
+            let ident = param_ident(param, crate::name::IdentRole::Param);
             quote! {
                 path = path.replace(#placeholder, &#ident.to_string());
             }
@@ -147,12 +137,7 @@ pub(crate) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
         .filter(|param| param.required && param.location == ParamLoc::Query)
         .map(|param| {
             let name = param.name.clone();
-            let ident = format_ident!(
-                "{}",
-                crate::name::escape(&param.name, crate::name::IdentRole::Param)
-                    .as_str()
-                    .trim_start_matches("r#")
-            );
+            let ident = param_ident(param, crate::name::IdentRole::Param);
             quote! { query.push((#name, #ident.to_string())); }
         });
     let optional_query = operation
@@ -161,18 +146,69 @@ pub(crate) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
         .filter(|param| !param.required && param.location == ParamLoc::Query)
         .map(|param| {
             let name = param.name.clone();
-            let ident = format_ident!(
-                "{}",
-                crate::name::escape(&param.name, crate::name::IdentRole::Field)
-                    .as_str()
-                    .trim_start_matches("r#")
-            );
+            let ident = param_ident(param, crate::name::IdentRole::Field);
             quote! {
                 if let Some(value) = params.as_ref().and_then(|params| params.#ident.as_ref()) {
                     query.push((#name, value.to_string()));
                 }
             }
         });
+    let required_headers = operation
+        .params
+        .iter()
+        .filter(|param| param.required && param.location == ParamLoc::Header)
+        .map(|param| {
+            let name = param.name.clone();
+            let ident = param_ident(param, crate::name::IdentRole::Param);
+            quote! { request = request.header(#name, #ident.to_string()); }
+        });
+    let optional_headers = operation
+        .params
+        .iter()
+        .filter(|param| !param.required && param.location == ParamLoc::Header)
+        .map(|param| {
+            let name = param.name.clone();
+            let ident = param_ident(param, crate::name::IdentRole::Field);
+            quote! {
+                if let Some(value) = params.as_ref().and_then(|params| params.#ident.as_ref()) {
+                    request = request.header(#name, value.to_string());
+                }
+            }
+        });
+    let has_cookies = operation
+        .params
+        .iter()
+        .any(|param| param.location == ParamLoc::Cookie);
+    let cookie_init = has_cookies.then(|| quote! { let mut cookies: Vec<String> = Vec::new(); });
+    let required_cookies = operation
+        .params
+        .iter()
+        .filter(|param| param.required && param.location == ParamLoc::Cookie)
+        .map(|param| {
+            let name = param.name.clone();
+            let ident = param_ident(param, crate::name::IdentRole::Param);
+            quote! { cookies.push(format!("{}={}", #name, #ident)); }
+        });
+    let optional_cookies = operation
+        .params
+        .iter()
+        .filter(|param| !param.required && param.location == ParamLoc::Cookie)
+        .map(|param| {
+            let name = param.name.clone();
+            let ident = param_ident(param, crate::name::IdentRole::Field);
+            quote! {
+                if let Some(value) = params.as_ref().and_then(|params| params.#ident.as_ref()) {
+                    cookies.push(format!("{}={}", #name, value));
+                }
+            }
+        });
+    let cookie_attach = has_cookies.then(|| {
+        quote! {
+            if !cookies.is_empty() {
+                request = request.header(reqwest::header::COOKIE, cookies.join("; "));
+            }
+        }
+    });
     let body_send = if operation
         .request_body
         .as_ref()
@@ -185,15 +221,13 @@ pub(crate) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
             .map(|body| body.media)
             .unwrap_or(MediaType::Json)
         {
-            MediaType::Json | MediaType::FormUrlEncoded => {
-                quote! { let request = request.json(body); }
-            }
-            MediaType::TextPlain | MediaType::OctetStream => {
-                quote! { let request = request.body(body.to_string()); }
-            }
+            MediaType::Json => quote! { request = request.json(body); },
+            MediaType::FormUrlEncoded => quote! { request = request.form(body); },
+            MediaType::TextPlain => quote! { request = request.body(body.to_string()); },
+            MediaType::OctetStream => quote! { request = request.body(body.clone()); },
         }
     } else {
-        quote! { let request = request; }
+        quote! {}
     };
     let attach_auth = if operation.security.is_empty() {
         quote! {}
@@ -222,9 +256,49 @@ pub(crate) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
             quote! { &[#(#schemes),*][..] }
         });
         quote! {
-            let request = support::attach_auth(&self.core, request, &[#(#alternatives),*])
+            request = support::attach_auth(&self.core, request, &[#(#alternatives),*])
                 .await
                 .map_err(support::Error::widen)?;
+        }
+    };
+    let error_shape = operation.responses.error();
+    let error_branch = match &error_shape {
+        ErrorShape::None => quote! {
+            Err(support::unexpected_status::<#error_ty>(&self.core, response).await)
+        },
+        _ => {
+            let mut documented = operation
+                .responses
+                .by_status
+                .iter()
+                .filter(|(status, response)| !status.is_success() && response.body.is_some())
+                .map(|(status, _)| match status {
+                    crate::ir::StatusSpec::Exact(code) => {
+                        quote! { support::StatusSpec::Exact(#code) }
+                    }
+                    crate::ir::StatusSpec::Range(prefix) => {
+                        quote! { support::StatusSpec::Range(#prefix) }
+                    }
+                })
+                .collect::<Vec<_>>();
+            if operation
+                .responses
+                .default
+                .as_ref()
+                .is_some_and(|default| default.body.is_some())
+            {
+                documented.push(quote! { support::StatusSpec::Any });
+            }
+            quote! {
+                Err(
+                    support::classify_error::<#error_ty>(
+                        &self.core,
+                        response,
+                        &[#(#documented),*],
+                    )
+                    .await,
+                )
+            }
         }
     };
     let success_decode = match operation.responses.success() {
@@ -258,7 +332,13 @@ pub(crate) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
             #(#optional_query)*
             let url = support::build_url(&self.core, &path, &query)
                 .map_err(support::Error::widen)?;
-            let request = self.core.http().request(#reqwest_method, url);
+            let mut request = self.core.http().request(#reqwest_method, url);
+            #(#required_headers)*
+            #(#optional_headers)*
+            #cookie_init
+            #(#required_cookies)*
+            #(#optional_cookies)*
+            #cookie_attach
             #body_send
             #attach_auth
             let request = request.build().map_err(support::Error::request_construction)?;
@@ -268,10 +348,19 @@ pub(crate) fn emit_operation(operation: &Operation, api: &Api, names: &Names) ->
             if response.status().is_success() {
                 #success_decode
             } else {
-                Err(support::classify_error::<#error_ty>(&self.core, response).await)
+                #error_branch
             }
         }
     }
+}
+
+fn param_ident(param: &crate::ir::Parameter, role: crate::name::IdentRole) -> proc_macro2::Ident {
+    format_ident!(
+        "{}",
+        crate::name::escape(&param.name, role)
+            .as_str()
+            .trim_start_matches("r#")
+    )
 }
 
 /// Emit an operation's optional-parameters `…Params` struct, deriving `Default` (PRD D3).
@@ -315,7 +404,11 @@ pub(crate) fn emit_error_enum(operation: &Operation, names: &Names) -> TokenStre
     let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
     let error_ty = match operation.responses.error() {
         ErrorShape::Single(ty) => ty_tokens(ty, names, &CodegenOptions::default(), true),
-        ErrorShape::Enum(_) | ErrorShape::None => quote! { serde_json::Value },
+        // Multiple documented error bodies fall back to Value (reported as W003 by `generate`).
+        ErrorShape::Enum(_) => quote! { serde_json::Value },
+        // No documented error body: every non-success status is Error::UnexpectedStatus, and the
+        // uninhabited alias makes Error::Api impossible to construct.
+        ErrorShape::None => quote! { std::convert::Infallible },
     };
     quote! {
         pub type #error_ident = #error_ty;
@@ -344,7 +437,7 @@ pub(crate) fn emit_support() -> TokenStream {
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
-            pub use dispatch::{attach_auth, build_url, classify_error, decode_success, send};
+            pub use dispatch::{attach_auth, build_url, classify_error, decode_success, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use response::ResponseValue;
         }
