@@ -7,6 +7,8 @@ board, carrying the entire span in flight with nothing propping it up. That is t
 everything structural is decided at generation time; nothing is interpreted at runtime. Spec in,
 spar out.
 
+> Note: We intend to support OpenAPI 3.2+ in the near future as demands is required. We choose to omit 3.0.x and older due to divergence; for Rust, Progenitor's client generator may suffice.
+
 ## Why
 
 Most of the modern Rust server ecosystem emits OpenAPI **3.1** (utoipa, aide, poem-openapi —
