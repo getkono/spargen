@@ -70,7 +70,7 @@ pub struct ExplainArgs {
     pub format: Format,
 }
 
-/// The rendering format for diagnostics and reports (PRD FR6).
+/// The rendering format for diagnostics and reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum Format {
     /// Human-readable, rustc-style.

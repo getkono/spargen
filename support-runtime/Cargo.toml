@@ -9,13 +9,14 @@ repository.workspace = true
 description = "Freestanding runtime embedded into spargen-generated clients. Not published."
 publish = false
 
-# The runtime is embedded verbatim into generated output (PRD §2.1, §2.3 rule 3). Its dependency
-# surface is exactly the near-universal set a consumer's graph already carries (PRD §2.1) — no
+# The runtime is embedded verbatim into generated output. Its dependency
+# surface is exactly the near-universal set a consumer's graph already carries — no
 # spargen crate, and nothing project-specific. The emitted crate additionally carries the
-# feature-gated `uuid`/`time` mappings (§6.2); those live in the synthesized crate manifest (emit),
+# feature-gated `uuid`/`time` mappings; those live in the synthesized crate manifest (emit),
 # not here, since this crate holds only the runtime, not the generated models.
 [dependencies]
 reqwest = { version = "0.12", default-features = false }
 serde = "1.0"
 serde_json = "1.0"
 bytes = "1"
+secrecy = "0.10"

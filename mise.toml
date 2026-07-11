@@ -4,7 +4,7 @@
 [tools]
 hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
 "cargo:convco" = "0.6.4"                    # Conventional Commit checker
-"aqua:EmbarkStudios/cargo-deny" = "0.19.9"  # supply-chain audit (PRD §7.6)
+"aqua:EmbarkStudios/cargo-deny" = "0.19.9"  # supply-chain audit
 
 [tasks.fmt]
 description = "Format the whole workspace"
@@ -21,6 +21,22 @@ run = "cargo check --workspace --all-features"
 [tasks.deny]
 description = "Supply-chain audit (licenses, advisories, bans)"
 run = "cargo deny check"
+
+[tasks.test]
+description = "Run the full workspace test suite, including generated-code E2E checks"
+run = "cargo test --workspace --all-features"
+
+[tasks.corpus-smoke]
+description = "Run fast corpus smoke checks"
+run = [
+  "sh -c 'cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json >/tmp/spargen-github-30.json || test $? -eq 1; grep -q E001 /tmp/spargen-github-30.json'",
+  "sh -c 'cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json >/tmp/spargen-ollama.json || test $? -eq 1; grep -q E007 /tmp/spargen-ollama.json'",
+  "cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
+]
+
+[tasks.example]
+description = "Run the end-to-end petstore example against its local mock server"
+run = "cargo run --manifest-path examples/petstore/Cargo.toml"
 
 [tasks.hooks]
 description = "Install git hooks through mise"

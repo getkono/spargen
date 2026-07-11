@@ -1,0 +1,24 @@
+# End-to-end spargen example: build.rs generates the client from petstore.yaml, and main.rs
+# drives it against a local mock server (no external API, no credentials to leak or spam).
+#
+# Standalone on purpose (the empty [workspace] opts out of the repo workspace): a consumer's
+# crate looks exactly like this — spargen appears only in [build-dependencies], never at runtime.
+[package]
+name = "petstore-example"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[build-dependencies]
+spargen = { path = "../../spargen", default-features = false }
+
+# The runtime dependencies of generated output: the near-universal set, no spargen crate.
+[dependencies]
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

@@ -3,7 +3,7 @@
 //!
 //! The OAS 3.1.1 typed document model, structural/meta-schema validation, `$ref` resolution,
 //! per-keyword disposition audit, and lowering `SpannedValue` → IR. The only subsystem that knows
-//! OpenAPI 3.1 syntax (PRD §2.3 rule 1); a future `oas32` sibling would lower into the same IR and
+//! OpenAPI 3.1 syntax; a future `oas32` sibling would lower into the same IR and
 //! touch nothing downstream.
 //!
 //! Frontend flow: [`parse_document`] → [`MetaSchemaValidator::validate`] + [`audit`] → [`lower`],
@@ -17,14 +17,14 @@ mod metaschema;
 mod resolve;
 mod schema;
 
-pub use audit::{audit, DispositionEntry, DispositionReport};
+pub use audit::audit;
 pub use deserialize::parse_document;
 pub use document::{
-    Components, Document, HeaderObject, Info, MediaTypeObject, OperationObject, ParameterObject,
-    PathItem, Paths, RefOr, Reference, RequestBodyObject, ResponseObject, ResponsesObject,
-    SecurityRequirement, SecuritySchemeObject, Server, ServerVariable, Tag, Version,
+    Components, Document, Info, MediaTypeObject, OperationObject, ParameterObject, PathItem, Paths,
+    RefOr, Reference, RequestBodyObject, ResponseObject, ResponsesObject, SecurityRequirement,
+    SecuritySchemeObject, Server,
 };
 pub use lower::lower;
 pub use metaschema::MetaSchemaValidator;
-pub use resolve::{Resolved, Resolver};
+pub use resolve::Resolver;
 pub use schema::{Discriminator, JsonType, Schema, SchemaOr, TypeSet, ValidationKeywords};

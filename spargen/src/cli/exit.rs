@@ -1,7 +1,7 @@
 use std::process::ExitCode;
 
 /// The stable exit-code contract for the CLI — suitable as a CI gate between spec producers and
-/// consumers (PRD FR6, §7.5). The numeric values are product surface and contract-tested.
+/// consumers. The numeric values are product surface and contract-tested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ExitStatus {

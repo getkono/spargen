@@ -2,7 +2,7 @@
 //! layer-deps: codegen, diag
 //!
 //! Output layout (module vs standalone crate), `Cargo.toml` synthesis, the provenance header, and
-//! `--check` drift diffing (PRD §2.3, §2.1). Emit turns [`GeneratedCode`](crate::codegen::GeneratedCode)
+//! `--check` drift diffing. Emit turns [`GeneratedCode`](crate::codegen::GeneratedCode)
 //! into a concrete on-disk [`EmitPlan`] that can be written or compared against checked-in output.
 
 mod check;
@@ -13,11 +13,11 @@ use camino::Utf8PathBuf;
 
 use crate::codegen::{GeneratedCode, GeneratedFile};
 
-pub use check::{check_drift, DriftReport, FileDiff};
+pub use check::{check_drift, DriftReport};
 pub use header::provenance_header;
 pub use manifest::synth_cargo_toml;
 
-/// Where and how generated code is written (PRD §2.2).
+/// Where and how generated code is written.
 #[derive(Debug, Clone)]
 pub enum OutputLayout {
     /// A module (file or directory) checked into an existing crate.
@@ -43,7 +43,7 @@ pub struct PackageMeta {
     pub version: String,
 }
 
-/// The generated crate's feature set (default `uuid`+`time` on; PRD §6.2).
+/// The generated crate's feature set (default `uuid`+`time` on).
 #[derive(Debug, Clone)]
 pub struct FeatureSet {
     /// Enable the `uuid` mapping feature.
@@ -61,7 +61,7 @@ impl Default for FeatureSet {
     }
 }
 
-/// Identity of the source spec, stamped into the provenance header (PRD §2.1).
+/// Identity of the source spec, stamped into the provenance header.
 #[derive(Debug, Clone)]
 pub struct SpecMeta {
     /// A description of the source spec (path or URL as vendored).
@@ -125,10 +125,42 @@ impl From<std::io::Error> for EmitError {
 /// Build the on-disk emission plan from generated code and options: stamp the provenance header,
 /// synthesize `Cargo.toml` for crate layout, and resolve module paths.
 pub fn plan(code: &GeneratedCode, options: &EmitOptions) -> Result<EmitPlan, EmitError> {
-    todo!()
+    let header = provenance_header(&options.spec);
+    let mut files = Vec::new();
+    match &options.layout {
+        OutputLayout::Module { path } => {
+            let Some(file) = code.files.first() else {
+                return Err(EmitError::Layout("codegen produced no files".to_owned()));
+            };
+            files.push(GeneratedFile {
+                path: path.clone(),
+                contents: format!("{header}{}", file.contents),
+            });
+        }
+        OutputLayout::Crate { dir, package } => {
+            files.push(GeneratedFile {
+                path: dir.join("Cargo.toml"),
+                contents: synth_cargo_toml(package, &options.features),
+            });
+            for file in &code.files {
+                files.push(GeneratedFile {
+                    path: dir.join("src").join(&file.path),
+                    contents: format!("{header}{}", file.contents),
+                });
+            }
+        }
+    }
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(EmitPlan { files })
 }
 
 /// Write a plan to disk.
 pub fn write(plan: &EmitPlan) -> Result<(), EmitError> {
-    todo!()
+    for file in &plan.files {
+        if let Some(parent) = file.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&file.path, &file.contents)?;
+    }
+    Ok(())
 }

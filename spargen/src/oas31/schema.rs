@@ -3,7 +3,7 @@ use indexmap::IndexMap;
 use crate::diag::Provenance;
 use crate::source::SpannedValue;
 
-/// A JSON Schema 2020-12 node under the default OAS 3.1 dialect (PRD §3.3 prec 2–4).
+/// A JSON Schema 2020-12 node under the default OAS 3.1 dialect.
 ///
 /// Validation-only keywords are retained in [`validation`](Schema::validation) so the disposition
 /// [`audit`](super::audit) can W-warn them by pointer; shape keywords drive lowering to the IR.
@@ -33,36 +33,32 @@ pub struct Schema {
     pub discriminator: Option<Discriminator>,
     /// `$defs`.
     pub defs: IndexMap<String, SchemaOr>,
-    /// `enum` values (spanned, so non-scalar members can be diagnosed; PRD D6).
+    /// `enum` values (spanned, so non-scalar members can be diagnosed).
     pub enum_values: Option<Vec<SpannedValue>>,
     /// `const` value.
     pub const_value: Option<SpannedValue>,
-    /// `format` (annotation vocabulary; drives §6.2 type mappings).
+    /// `format` (annotation vocabulary; drives feature-gated type mappings).
     pub format: Option<String>,
     /// `contentEncoding` (e.g. `base64` → bytes).
     pub content_encoding: Option<String>,
-    /// `default` (deserialization default; PRD D8).
-    pub default: Option<SpannedValue>,
     /// Retained validation-only keywords (W-class).
     pub validation: ValidationKeywords,
     /// `deprecated`.
     pub deprecated: bool,
-    /// `readOnly` (W-class annotation; PRD D2).
+    /// `readOnly` (W-class annotation).
     pub read_only: bool,
-    /// `writeOnly` (W-class annotation; PRD D2).
+    /// `writeOnly` (W-class annotation).
     pub write_only: bool,
     /// `title` → rustdoc.
     pub title: Option<String>,
     /// `description` → rustdoc.
     pub description: Option<String>,
-    /// `x-*` extension keywords (W-class).
-    pub extensions: IndexMap<String, SpannedValue>,
     /// Where the schema came from.
     pub provenance: Provenance,
 }
 
 /// A schema position that may be a boolean schema (`true`/`false`) or a full [`Schema`]. `{}` and
-/// `true` are the untyped schemas that faithfully lower to `Any` (PRD FR2).
+/// `true` are the untyped schemas that faithfully lower to `Any`.
 #[derive(Debug, Clone)]
 pub enum SchemaOr {
     /// A boolean schema.
@@ -90,8 +86,10 @@ pub enum JsonType {
     String,
 }
 
-/// An OAS `discriminator` object (matrix: Schema shape → S with `oneOf`).
+/// An OAS `discriminator` object. Lowering currently only tests for its presence; the fields are
+/// retained for the discriminated-union lowering that will consume them.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct Discriminator {
     /// `propertyName`.
     pub property_name: String,
@@ -100,7 +98,7 @@ pub struct Discriminator {
 }
 
 /// The validation-only JSON Schema keywords spargen retains but does not enforce at runtime
-/// (PRD FR2 W-class, §3.2.5). Present so the disposition audit can warn once per site; kept as a
+/// (W-class). Present so the disposition audit can warn once per site; kept as a
 /// representative surface (raw applicator keywords such as `if`/`then`/`else`, `not`,
 /// `unevaluated*`, `propertyNames`, and `dependentSchemas`/`dependentRequired` are retained during
 /// implementation).

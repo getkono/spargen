@@ -1,8 +1,8 @@
 # Spargen — a compile-time-correct Rust client generator for OpenAPI 3.1.x.
 #
 # One published crate (`spargen`), plus a `publish = false` `support-runtime` member that
-# holds the freestanding runtime embedded verbatim into generated output (PRD §2.1, §7.5).
-# The `xtask` member (layer lint, corpus tooling — PRD §2.3/§7.2) is reserved for later.
+# holds the freestanding runtime embedded verbatim into generated output.
+# The `xtask` member (layer lint, corpus tooling) is reserved for later.
 [workspace]
 resolver = "2"
 members = ["spargen", "support-runtime"]
@@ -26,11 +26,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 camino = "1.1"
 indexmap = "2.2"
+yaml-rust2 = "0.11"
 proc-macro2 = "1.0"
 quote = "1.0"
 syn = { version = "2.0", features = ["full"] }
 prettyplease = "0.2"
 clap = { version = "4.5", features = ["derive"] }
+proptest = "1.11"
+tempfile = "3.10"
 
 [profile.release]
 strip = true

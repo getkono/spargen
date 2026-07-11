@@ -1,0 +1,317 @@
+//! Per-diagnostic frontend coverage: one minimal inline spec per rejection/warning code, asserting
+//! the code fires and the pipeline outcome is what the taxonomy promises. Rejections travel through
+//! `generate`; the E013 case also proves `check` runs the same lowering (check/generate parity).
+
+use camino::Utf8PathBuf;
+use spargen::{Code, Config, Outcome, OutputTarget, Report};
+
+/// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
+/// tempdir (and any written output) is discarded once the report — which owns its data — is built.
+fn generate(spec: &str) -> Report {
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(&spec_path, spec).unwrap();
+    let out = temp.path().join("client.rs");
+    spargen::generate(&Config::new(
+        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
+        OutputTarget::Module(Utf8PathBuf::from_path_buf(out).unwrap()),
+    ))
+}
+
+/// As [`generate`], but through the `check` entry point (no codegen/emit).
+fn check(spec: &str) -> Report {
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(&spec_path, spec).unwrap();
+    spargen::check(&Config::new(
+        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
+        OutputTarget::Module(Utf8PathBuf::from("unused.rs")),
+    ))
+}
+
+fn has_code(report: &Report, code: Code) -> bool {
+    report.diagnostics.iter().any(|d| d.code == code)
+}
+
+#[test]
+fn e002_unsupported_dialect() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+jsonSchemaDialect: https://example.com/not-the-base
+paths: {}
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedDialect));
+}
+
+#[test]
+fn e005_pattern_properties_rejected() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Thing:
+      type: object
+      patternProperties:
+        "^x-": { type: string }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::PatternPropertiesRejected));
+}
+
+#[test]
+fn e006_dynamic_ref_rejected() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Thing:
+      $dynamicRef: "#meta"
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::DynamicRefRejected));
+}
+
+#[test]
+fn e007_non_disjoint_union() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    U:
+      oneOf:
+        - type: string
+        - type: integer
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::NonDisjointUnion));
+}
+
+#[test]
+fn e008_non_scalar_enum() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Mixed:
+      enum: ["a", 1]
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::NonScalarEnum));
+}
+
+#[test]
+fn e009_unsupported_media_type() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/xml:
+            schema: { type: object }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType));
+}
+
+#[test]
+fn e010_unsupported_parameter_style() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          style: deepObject
+          schema: { type: object }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+}
+
+#[test]
+fn e012_unknown_security_scheme() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      security:
+        - undeclared: []
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnknownSecurityScheme));
+}
+
+const ALL_OF_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Composed:
+      allOf:
+        - type: object
+          properties:
+            a: { type: string }
+"##;
+
+#[test]
+fn e013_all_of_unsupported() {
+    let report = generate(ALL_OF_SPEC);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfUnsupported));
+}
+
+/// `check` must run the same lowering as `generate`, so an R-class construct rejects identically.
+#[test]
+fn e013_check_generate_parity() {
+    let report = check(ALL_OF_SPEC);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfUnsupported));
+}
+
+/// A property that `$ref`s its own schema previously recursed forever; lowering must now terminate
+/// with a diagnostic instead of hanging.
+#[test]
+fn e014_recursive_ref_terminates() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        next:
+          $ref: "#/components/schemas/Node"
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::RecursiveRefUnsupported));
+}
+
+#[test]
+fn w001_validation_keyword_ignored_still_generates() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /ping:
+    get:
+      responses:
+        "204": { description: No Content }
+components:
+  schemas:
+    Age:
+      type: integer
+      minimum: 0
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(has_code(&report, Code::ValidationKeywordIgnored));
+}
+
+#[test]
+fn w002_server_initiated_flow_ignored_still_generates() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /ping:
+    get:
+      responses:
+        "204": { description: No Content }
+webhooks:
+  newThing:
+    post:
+      responses:
+        "200": { description: OK }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(has_code(&report, Code::ServerInitiatedFlowIgnored));
+}
+
+#[test]
+fn w003_response_degraded_to_value_still_generates() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: string }
+        "400":
+          description: Bad
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrA" }
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrB" }
+components:
+  schemas:
+    ErrA:
+      type: object
+      properties:
+        a: { type: string }
+    ErrB:
+      type: object
+      properties:
+        b: { type: string }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(has_code(&report, Code::ResponseDegradedToValue));
+}

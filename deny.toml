@@ -1,4 +1,4 @@
-# cargo-deny configuration — supply-chain gate run on every PR (PRD §7.6).
+# cargo-deny configuration — supply-chain gate run on every PR.
 # Licenses, security advisories, and duplicate/banned dependencies.
 
 [advisories]
