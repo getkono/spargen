@@ -81,6 +81,15 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
         .map(|value| parse_tags(value, &root_pointer.push("tags")))
         .unwrap_or_default();
 
+    if let Some(webhooks) = root.get("webhooks") {
+        Diagnostic::warning(
+            Code::ServerInitiatedFlowIgnored,
+            provenance(&root_pointer.push("webhooks"), webhooks),
+        )
+        .message("webhooks describe server-initiated calls; no client code is generated for them")
+        .emit(diags);
+    }
+
     let document = Document {
         openapi,
         info,
@@ -228,6 +237,14 @@ fn parse_operation(
     diags: &mut Diagnostics,
 ) -> Option<OperationObject> {
     let _ = object(value, pointer, diags)?;
+    if let Some(callbacks) = value.get("callbacks") {
+        Diagnostic::warning(
+            Code::ServerInitiatedFlowIgnored,
+            provenance(&pointer.push("callbacks"), callbacks),
+        )
+        .message("callbacks describe server-initiated calls; no client code is generated for them")
+        .emit(diags);
+    }
     let parameters = value
         .get("parameters")
         .map(|value| parse_ref_array(value, &pointer.push("parameters"), diags, parse_parameter))
@@ -353,6 +370,14 @@ fn parse_response(
     diags: &mut Diagnostics,
 ) -> Option<ResponseObject> {
     let _ = object(value, pointer, diags)?;
+    if let Some(links) = value.get("links") {
+        Diagnostic::warning(
+            Code::ServerInitiatedFlowIgnored,
+            provenance(&pointer.push("links"), links),
+        )
+        .message("response links describe hypermedia flows; no client code is generated for them")
+        .emit(diags);
+    }
     Some(ResponseObject {
         description: value
             .get("description")

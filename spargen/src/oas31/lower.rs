@@ -31,6 +31,7 @@ pub fn lower(
         diags,
         graph: TypeGraph::default(),
         components: HashMap::new(),
+        in_progress: HashSet::new(),
     };
 
     for (name, schema) in &document.components.schemas {
@@ -162,6 +163,8 @@ struct LowerCtx<'a, 'doc> {
     diags: &'a mut Diagnostics,
     graph: TypeGraph,
     components: HashMap<String, TypeId>,
+    /// Components currently being lowered, for `$ref`-cycle detection.
+    in_progress: HashSet<String>,
 }
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -176,7 +179,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let RefOr::Item(schema) = self.document.components.schemas.get(name)? else {
             return None;
         };
-        let ty = self.lower_schema(schema, name)?;
+        if !self.in_progress.insert(name.to_owned()) {
+            // Re-entered while still lowering this component: a `$ref` cycle. Without this guard
+            // lowering would recurse forever.
+            Diagnostic::error(Code::RecursiveRefUnsupported, schema.provenance.clone())
+                .message(format!(
+                    "schema `{name}` references itself through $ref; recursive types are not \
+                     generated"
+                ))
+                .remedy(
+                    "break the cycle in the source schema or omit this API segment with \
+                         spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        let ty = self.lower_schema(schema, name);
+        self.in_progress.remove(name);
+        let ty = ty?;
         self.components.insert(name.to_owned(), ty.id);
         Some(ty)
     }
@@ -208,6 +228,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .resolve(reference, &schema.provenance.pointer, self.diags)
                 .ok()?;
             return self.lower_schema(resolved.schema, hint);
+        }
+
+        if !schema.all_of.is_empty() {
+            // Generating a type that ignores allOf subschemas would silently drop fields.
+            Diagnostic::error(Code::AllOfUnsupported, schema.provenance.clone())
+                .message("allOf composition is not merged into generated types")
+                .remedy(
+                    "flatten the composition in the source schema or omit this API segment with \
+                     spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
         }
 
         if (!schema.one_of.is_empty() || !schema.any_of.is_empty())

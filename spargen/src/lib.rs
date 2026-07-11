@@ -205,14 +205,12 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
 
     let resolver = oas31::Resolver::new(&document, &bundle);
     let _audit = oas31::audit(&document, &resolver, &mut diags);
-    if matches!(mode, PipelineMode::Check) {
-        return if diags.has_errors() {
-            report(diags, Outcome::Rejected)
-        } else {
-            report(diags, Outcome::Clean)
-        };
+    if diags.has_errors() {
+        return report(diags, Outcome::Rejected);
     }
 
+    // `check` runs the full frontend — lowering, IR invariants, and name allocation — so it fires
+    // exactly the diagnostics `generate` would, just without emitting code.
     let api = match oas31::lower(&document, &resolver, &mut diags) {
         Ok(api) => api,
         Err(_) => return report(diags, Outcome::Rejected),
@@ -225,6 +223,10 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
     let names = name::allocate(&api, &mut diags);
     if diags.has_errors() {
         return report(diags, Outcome::Rejected);
+    }
+
+    if matches!(mode, PipelineMode::Check) {
+        return report(diags, Outcome::Clean);
     }
 
     let code = codegen::generate(

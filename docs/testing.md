@@ -14,7 +14,7 @@ PR-required gates:
 - Compatibility E2E: `spargen::omit!` removes an unsupported operation, emits `W009`, and still
   generates the supported subset.
 - Version gate E2E: OpenAPI 3.0.x rejects with `E001`.
-- Fast corpus smoke: GitHub 3.0 rejection, Ollama check, and boilerplate check.
+- Fast corpus smoke: GitHub 3.0 rejection (E001), Ollama rejection (E007, undiscriminated unions), and boilerplate check.
 
 Release/scheduled gates:
 

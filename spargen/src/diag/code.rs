@@ -44,6 +44,10 @@ pub enum Code {
     /// An operation documents multiple success or error bodies; the combined body is generated as
     /// `serde_json::Value` because per-status enums are not yet emitted (matrix: Responses).
     ResponseDegradedToValue,
+    /// `allOf` composition is not merged into generated types (matrix: Schema shape).
+    AllOfUnsupported,
+    /// A `$ref` cycle was found; recursive types are not generated (matrix: Schema shape).
+    RecursiveRefUnsupported,
     /// The input could not be parsed or violates a required structural OpenAPI shape.
     InvalidInput,
     /// A compatibility omit rule did not match a source construct or attempted an invalid removal.
@@ -73,6 +77,8 @@ impl Code {
             Code::InvalidInput => "E011",
             Code::UnknownSecurityScheme => "E012",
             Code::ResponseDegradedToValue => "W003",
+            Code::AllOfUnsupported => "E013",
+            Code::RecursiveRefUnsupported => "E014",
             Code::OmittedConstruct => "W009",
             Code::InvalidOmitRule => "E019",
             Code::OmitCreatedInvalidDocument => "E020",
@@ -106,6 +112,8 @@ impl Code {
             Code::InvalidInput => "invalid input document",
             Code::UnknownSecurityScheme => "unknown security scheme",
             Code::ResponseDegradedToValue => "response body degrades to serde_json::Value",
+            Code::AllOfUnsupported => "allOf composition unsupported",
+            Code::RecursiveRefUnsupported => "recursive $ref unsupported",
             Code::InvalidOmitRule => "invalid omit rule",
             Code::OmittedConstruct => "construct omitted",
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
@@ -160,6 +168,12 @@ impl Code {
             Code::ResponseDegradedToValue => {
                 "The operation documents multiple success or multiple error bodies. Spargen does not yet generate per-status response enums, so the body type is `serde_json::Value` — typed, but weaker than the spec. Restructure the responses or omit the operation if this is unacceptable."
             }
+            Code::AllOfUnsupported => {
+                "`allOf` object merging is not implemented; generating a type that ignores subschemas would silently drop fields. Flatten the composition in the source schema or omit this API segment."
+            }
+            Code::RecursiveRefUnsupported => {
+                "The schema references itself through `$ref`. Boxed recursive types are not generated yet; break the cycle in the source schema or omit this API segment."
+            }
             Code::InvalidOmitRule => {
                 "A compatibility omit rule must match at least one exact path, operation, component, pointer, or file-local pointer and cannot omit the document root."
             }
@@ -197,6 +211,8 @@ impl Code {
             Code::UnsupportedParameterStyle,
             Code::InvalidInput,
             Code::UnknownSecurityScheme,
+            Code::AllOfUnsupported,
+            Code::RecursiveRefUnsupported,
             Code::InvalidOmitRule,
             Code::OmitCreatedInvalidDocument,
             Code::ValidationKeywordIgnored,

@@ -36,7 +36,9 @@ revision = "d47859ce495496196df211e939702364492a2b7f"
 upstream_path = "docs/openapi.yaml"
 sha256 = "d54e2ef5c24a396662ca7222af31ab3e26a642efbd2bb060d921b9393e9fef87"
 license = "MIT"
-expect = "generate"
+# Rejected today: several oneOf unions (e.g. string | string[]) carry no discriminator and
+# disjoint-union lowering is not implemented, so E007 fires under both check and generate.
+expect = "reject:E007"
 
 [[case]]
 id = "openapi-boilerplate"
