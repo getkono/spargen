@@ -34,6 +34,10 @@ run = [
   "cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
 ]
 
+[tasks.example]
+description = "Run the end-to-end petstore example against its local mock server"
+run = "cargo run --manifest-path examples/petstore/Cargo.toml"
+
 [tasks.hooks]
 description = "Install git hooks through mise"
 run = "hk install --mise"

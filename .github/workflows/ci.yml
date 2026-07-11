@@ -71,6 +71,17 @@ jobs:
       - run: grep -q E007 /tmp/spargen-ollama.json
       - run: cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
 
+  example:
+    name: Petstore example
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: examples/petstore
+      - run: cargo run --manifest-path examples/petstore/Cargo.toml
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
