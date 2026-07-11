@@ -16,7 +16,7 @@ license = "MIT OR Apache-2.0"
 authors = ["Justin Chung"]
 repository = "https://github.com/getkono/spargen"
 description = "A compile-time-correct Rust client generator for OpenAPI 3.1.x."
-keywords = ["openapi", "codegen", "client", "rust", "3.1"]
+keywords = ["openapi", "codegen", "client"]
 categories = ["development-tools", "api-bindings"]
 
 # Shared dependency versions. Each subsystem opts in from its own crate manifest; entries are
