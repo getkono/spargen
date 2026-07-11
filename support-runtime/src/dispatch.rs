@@ -33,7 +33,7 @@ pub fn build_url(
         format!("{base_path}/{request_path}")
     };
     url.set_path(&joined);
-    {
+    if !query.is_empty() {
         let mut pairs = url.query_pairs_mut();
         for (name, value) in query {
             pairs.append_pair(name, value);
@@ -410,10 +410,8 @@ mod tests {
         let url = build_url(&core, "/foo", &[]).unwrap();
         // Trailing base slash + leading path slash collapse to a single separator.
         assert_eq!(url.path(), "/foo");
-        // BUG: build_url always enters `query_pairs_mut()`, so an empty query still stamps a
-        // trailing `?` onto the serialized URL (harmless, but not byte-clean). Documenting current
-        // behavior. See dispatch.rs `build_url`.
-        assert_eq!(url.as_str(), "https://example.com/foo?");
+        // An empty query must not stamp a trailing `?` onto the serialized URL.
+        assert_eq!(url.as_str(), "https://example.com/foo");
     }
 
     #[test]

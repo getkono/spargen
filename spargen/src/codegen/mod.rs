@@ -88,18 +88,14 @@ pub fn generate(
     let support = emit::emit_support();
     let models = emit::emit_models(api, names, options);
     let client = emit::emit_client(api, names, options);
-    let mut crate_doc = format!("{} v{}.", api.info.title, api.info.version);
-    if let Some(description) = &api.info.description {
-        crate_doc.push_str("\n\n");
-        crate_doc.push_str(description);
-    }
+    // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
+    // output unusable via `include!` from OUT_DIR, the build.rs consumption path.
     let tokens = quote! {
-        #![doc = #crate_doc]
-        #![forbid(unsafe_code)]
-        #![allow(clippy::result_large_err)]
-        #![allow(dead_code, unused_imports, unused_mut, unused_variables)]
-
-        pub use support::{Error, ResponseValue};
+        #[allow(unused_imports)]
+        pub use support::{
+            AuthError, Credential, Error, ExposeSecret, ResponseValue, SecretString, TokenFuture,
+            TokenProvider,
+        };
 
         #support
         #models

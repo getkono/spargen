@@ -19,6 +19,8 @@ pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) ->
         .iter()
         .map(|(id, def)| emit_type_def(id, def, api, names, options));
     quote! {
+        #[forbid(unsafe_code)]
+        #[allow(dead_code, unused_imports)]
         pub mod types {
             use serde::{Deserialize, Serialize};
             use std::collections::BTreeMap;
@@ -33,6 +35,7 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
     let params = api
         .operations
         .iter()
+        .filter(|operation| operation.params.iter().any(|param| !param.required))
         .map(|operation| emit_params_struct(operation, names, options));
     let errors = api
         .operations
@@ -49,10 +52,13 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
         #(#errors)*
 
         #client_docs
+        #[allow(dead_code)]
         pub struct Client {
             core: support::ClientCore,
         }
 
+        #[forbid(unsafe_code)]
+        #[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
         impl Client {
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
                 Self::with_client(reqwest::Client::new(), base_url)
@@ -489,6 +495,7 @@ pub(crate) fn emit_params_struct(
             }
         });
     quote! {
+        #[allow(dead_code)]
         #[derive(Debug, Clone, Default, serde::Serialize)]
         pub struct #ident {
             #(#fields)*
@@ -516,6 +523,7 @@ pub(crate) fn emit_error_enum(
         ErrorShape::None => quote! { std::convert::Infallible },
     };
     quote! {
+        #[allow(dead_code)]
         pub type #error_ident = #error_ty;
     }
 }
@@ -545,6 +553,10 @@ pub(crate) fn emit_support() -> TokenStream {
         }
     });
     quote! {
+        /// The freestanding runtime embedded verbatim into this output; no spargen crate exists
+        /// at runtime.
+        #[forbid(unsafe_code)]
+        #[allow(dead_code, unused_imports, clippy::result_large_err)]
         mod support {
             #(#modules)*
 

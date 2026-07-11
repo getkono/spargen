@@ -424,15 +424,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         };
         let ty = if let Some(schema) = &parameter.schema {
-            let schema = self.resolve_schema_ref(schema)?;
-            self.lower_schema(&schema, &parameter.name)?
+            self.lower_schema_ref(schema, &parameter.name)?
         } else if let Some((media, object)) = parameter.content.iter().next() {
             let media = lower_media_type(media, &parameter.provenance, self.diags)?;
-            let schema = object
+            let ty = object
                 .schema
                 .as_ref()
-                .and_then(|schema| self.resolve_schema_ref(schema))?;
-            let ty = self.lower_schema(&schema, &parameter.name)?;
+                .and_then(|schema| self.lower_schema_ref(schema, &parameter.name))?;
             return Some(Parameter {
                 name: parameter.name.clone(),
                 location,
@@ -462,10 +460,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
         let (media_name, object) = choose_media(&body.content, &body.provenance, self.diags)?;
         let media = lower_media_type(media_name, &body.provenance, self.diags)?;
-        let ty = object.schema.as_ref().and_then(|schema| {
-            let schema = self.resolve_schema_ref(schema)?;
-            self.lower_schema(&schema, "RequestBody")
-        });
+        let ty = object
+            .schema
+            .as_ref()
+            .and_then(|schema| self.lower_schema_ref(schema, "RequestBody"));
         Some(RequestBody { media, ty })
     }
 
@@ -493,10 +491,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let body = choose_media(&response.content, &response.provenance, self.diags).and_then(
             |(media_name, object)| {
                 let media = lower_media_type(media_name, &response.provenance, self.diags)?;
-                let ty = object.schema.as_ref().and_then(|schema| {
-                    let schema = self.resolve_schema_ref(schema)?;
-                    self.lower_schema(&schema, "ResponseBody")
-                });
+                let ty = object
+                    .schema
+                    .as_ref()
+                    .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody"));
                 Some((media, ty))
             },
         );
@@ -547,17 +545,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
-    fn resolve_schema_ref(&self, schema: &RefOr<Schema>) -> Option<Schema> {
+    /// Lower a possibly-`$ref` schema. Component refs go through [`Self::ensure_component`] so
+    /// every use site shares one generated type instead of lowering a duplicate.
+    fn lower_schema_ref(&mut self, schema: &RefOr<Schema>, hint: &str) -> Option<Ty> {
         match schema {
-            RefOr::Item(schema) => Some(schema.clone()),
-            RefOr::Ref(reference) => reference
-                .reference
-                .strip_prefix("#/components/schemas/")
-                .and_then(|name| self.document.components.schemas.get(name))
-                .and_then(|schema| match schema {
-                    RefOr::Item(schema) => Some(schema.clone()),
-                    RefOr::Ref(_) => None,
-                }),
+            RefOr::Item(schema) => self.lower_schema(schema, hint),
+            RefOr::Ref(reference) => {
+                if let Some(name) = reference.reference.strip_prefix("#/components/schemas/") {
+                    self.ensure_component(name)
+                } else {
+                    let resolved = self
+                        .resolver
+                        .resolve(
+                            &reference.reference,
+                            &crate::diag::JsonPointer::root(),
+                            self.diags,
+                        )
+                        .ok()?;
+                    self.lower_schema(resolved.schema, hint)
+                }
+            }
         }
     }
 
