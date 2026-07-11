@@ -140,6 +140,11 @@ the version or tag manually. The semver surface is the public API of generated o
 that alter generated signatures, type shapes, or variant sets are major; output changes invisible
 to that API are minor; generator-internal fixes are patch.
 
+Publishing runs strictly in CI via crates.io [Trusted Publishing](https://crates.io/docs/trusted-publishing)
+(OIDC) — no `CARGO_REGISTRY_TOKEN` secret. Bootstrap is one-time: the `0.1.0` release was published
+manually to create the crate, after which a Trusted Publisher (`getkono/spargen`, workflow
+`release-plz.yml`) was configured in the crate settings; every release since is automated.
+
 ## License
 
 Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option.

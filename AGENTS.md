@@ -74,3 +74,11 @@ commits are exempt.
 Releases are driven by release-plz: it maintains a version-bump pull request, and merging that
 PR tags the release and publishes to crates.io. Never bump the version or tag manually. The
 semver surface is the public API of generated output.
+
+Publishing runs strictly in CI via crates.io Trusted Publishing (OIDC) — no
+`CARGO_REGISTRY_TOKEN` secret; `release-plz.yml` mints a short-lived token with
+`rust-lang/crates-io-auth-action`. Bootstrap was one-time: `0.1.0` was published manually to
+create the crate, then a Trusted Publisher (`getkono/spargen`, workflow `release-plz.yml`) was
+configured in the crate settings. The published crate must stay self-contained — the runtime
+sources are reached through `spargen/src/support/runtime/` symlinks so they ship inside the
+`.crate`; the CI `package` job (`cargo publish --dry-run`) enforces this.
