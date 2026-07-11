@@ -1,5 +1,5 @@
 # release-plz drives releases: it maintains a version-bump PR, and merging that PR tags the
-# release and publishes to crates.io. Never bump the version or tag manually (PRD §7.1).
+# release and publishes to crates.io. Never bump the version or tag manually.
 #
 # CHANGELOG.md is written by release-plz's embedded git-cliff from Conventional Commits — do
 # NOT add a separate cliff.toml.

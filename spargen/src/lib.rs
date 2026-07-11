@@ -6,7 +6,7 @@
 //! This crate is the library half of the `spargen` tool. Its public surface is the `build.rs`
 //! API — see the [facade](crate) items ([`Config`], [`generate`], [`check`], [`explain`]).
 //!
-//! ## Subsystem layering (PRD §2.3)
+//! ## Subsystem layering
 //!
 //! The crate is internally partitioned into subsystems with a declared dependency DAG. Each
 //! subsystem module records its allowed dependencies in a machine-readable `//! layer-deps:`
@@ -50,7 +50,7 @@ use camino::Utf8PathBuf;
 pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule};
 pub use diag::{Code, Diagnostic, JsonPointer, Severity, Span};
 
-/// Feature toggles for the generated output (both default **on**; PRD §6.2). Disabling one falls
+/// Feature toggles for the generated output (both default **on**). Disabling one falls
 /// back to `String` for the corresponding `format` mappings — a deliberate, documented loss of
 /// typing for size-critical builds.
 #[derive(Debug, Clone)]
@@ -84,7 +84,7 @@ pub enum OutputTarget {
     },
 }
 
-/// Configuration for one generation run — the primary `build.rs` input (PRD §2.1). Construct with
+/// Configuration for one generation run — the primary `build.rs` input. Construct with
 /// [`Config::new`] and adjust fields as needed.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -96,9 +96,9 @@ pub struct Config {
     pub features: Features,
     /// Explicit compatibility omissions applied before OpenAPI validation/lowering.
     pub omit: Omit,
-    /// Max bytes of a response body retained on error variants (default 64 KiB; PRD D7).
+    /// Max bytes of a response body retained on error variants (default 64 KiB).
     pub error_body_cap: usize,
-    /// Max diagnostics collected before batching stops (PRD FR6).
+    /// Max diagnostics collected before batching stops.
     pub batch_cap: usize,
     /// Audit and check drift only; do not write output (`--check`).
     pub check_only: bool,
@@ -129,24 +129,24 @@ pub enum Outcome {
     Clean,
     /// `--check`: checked-in output drifted from the spec.
     Drifted,
-    /// The spec used an R-class construct; generation failed loudly (PRD FR2).
+    /// The spec used an R-class construct; generation failed loudly.
     Rejected,
 }
 
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
 #[derive(Debug, Clone)]
 pub struct Report {
-    /// Every diagnostic emitted during the run (PRD FR6 batch reporting).
+    /// Every diagnostic emitted during the run (batch reporting).
     pub diagnostics: Vec<Diagnostic>,
     /// What happened.
     pub outcome: Outcome,
 }
 
-/// Run the full pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit` (PRD §2.3). The
+/// Run the full pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`. The
 /// primary `build.rs` entry point.
 ///
 /// ```no_run
-/// // build.rs — spec to first typed API call in well under ten lines (PRD DoD #6).
+/// // build.rs — spec to first typed API call in well under ten lines.
 /// let config = spargen::Config::new(
 ///     "api/openapi.yaml",
 ///     spargen::OutputTarget::Module("src/api.rs".into()),
@@ -159,13 +159,13 @@ pub fn generate(config: &Config) -> Report {
 }
 
 /// Run the support-audit only, without codegen (`spargen check`) — a CI contract gate between spec
-/// producers and client consumers (PRD FR6).
+/// producers and client consumers.
 pub fn check(config: &Config) -> Report {
     run_pipeline(config, PipelineMode::Check)
 }
 
 /// Extended documentation for a stable diagnostic code, backing `spargen explain E###` and the
-/// published errors index (PRD FR6).
+/// published errors index.
 pub fn explain(code: &str) -> Option<&'static str> {
     Code::from_str(code).ok().map(Code::explain)
 }

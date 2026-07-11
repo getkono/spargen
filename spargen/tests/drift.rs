@@ -1,5 +1,5 @@
 //! `generate --check` is a CI contract gate: it re-plans output and compares it against what is
-//! checked in, reporting clean / drifted / missing without writing (PRD FR6). These tests drive the
+//! checked in, reporting clean / drifted / missing without writing. These tests drive the
 //! `check_only` config path against a real on-disk module.
 
 use camino::Utf8PathBuf;

@@ -4,7 +4,7 @@
 //! The version-agnostic API model: operation set, type graph, auth requirements, media map;
 //! provenance (pointer + span) on every node; well-formedness invariants. The IR is the coupling
 //! firewall and primary extension seam — it never sees a spec document or Rust tokens, so a new
-//! spec-version frontend (`oas32`) lowers into it and touches nothing downstream (PRD §2.3 rule 1).
+//! spec-version frontend (`oas32`) lowers into it and touches nothing downstream.
 
 mod auth;
 mod invariant;
@@ -27,7 +27,7 @@ pub use types::{
     TypeDef, TypeGraph, TypeId, TypeKind,
 };
 
-/// The whole lowered API: the single artifact frontends produce and backends consume (PRD §2.3).
+/// The whole lowered API: the single artifact frontends produce and backends consume.
 #[derive(Debug, Clone)]
 pub struct Api {
     /// API identity (`info`).
@@ -63,7 +63,7 @@ pub struct Server {
 }
 
 /// Documentation carried from a construct's `title`/`summary`/`description`/`deprecated`, lowered
-/// to rustdoc so IDE hover shows API docs (PRD FR3).
+/// to rustdoc so IDE hover shows API docs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Docs {
     /// `title`.

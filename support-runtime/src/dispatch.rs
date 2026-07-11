@@ -1,4 +1,4 @@
-//! The small set of dispatch routines shared within a generated client (PRD NFR2): build URL →
+//! The small set of dispatch routines shared within a generated client: build URL →
 //! attach auth → send → classify status → decode. Sharing happens *within* a generated client
 //! (not via a shared crate), so per-operation functions stay thin `#[inline]` shims.
 //!
@@ -16,7 +16,7 @@ use serde::de::DeserializeOwned;
 use crate::{AuthKind, AuthScheme, ClientCore, Credential, Error, ResponseValue};
 
 /// Build a request URL from the base URL and pre-rendered path plus query pairs. Paths compile to
-/// static segment concatenation — no runtime regex (PRD NFR1). Non-generic.
+/// static segment concatenation — no runtime regex. Non-generic.
 pub fn build_url(
     core: &ClientCore,
     path: &str,
@@ -42,7 +42,7 @@ pub fn build_url(
     Ok(url)
 }
 
-/// Attach credentials for an operation's security requirement (PRD FR4). `requirements` is an OR
+/// Attach credentials for an operation's security requirement. `requirements` is an OR
 /// of alternatives, each an AND of schemes; the first alternative whose schemes all have a
 /// registered credential wins, deterministically. An empty alternative (`{}` in the spec) marks
 /// security optional and always satisfies. If no alternative is satisfiable the request fails
@@ -137,8 +137,8 @@ fn credential_mismatch(scheme: &str, kind: &str) -> Error<Infallible> {
     ))
 }
 
-/// Send a prepared request, mapping transport/timeout/protocol/redirect failures into the taxonomy
-/// (PRD FR5 #2–#5). Non-generic.
+/// Send a prepared request, mapping transport/timeout/protocol/redirect failures into the taxonomy.
+/// Non-generic.
 pub async fn send(core: &ClientCore, request: Request) -> Result<Response, Error<Infallible>> {
     core.http()
         .execute(request)
@@ -192,7 +192,7 @@ impl StatusSpec {
 /// Classify a non-success response: a documented status parses into the operation's typed error
 /// body ([`Error::Api`], #6, falling back to [`Error::Decode`] on parse failure); an undocumented
 /// status becomes [`Error::UnexpectedStatus`] (#7) with the raw body preserved. Retains at most
-/// `max_error_body` bytes either way (PRD D7).
+/// `max_error_body` bytes either way.
 pub async fn classify_error<E>(
     core: &ClientCore,
     response: Response,

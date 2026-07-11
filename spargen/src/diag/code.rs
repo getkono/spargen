@@ -2,10 +2,10 @@ use serde::Serialize;
 
 use super::{InterpId, Severity};
 
-/// A stable diagnostic code — `E###` for errors, `W###` for warnings (PRD FR6).
+/// A stable diagnostic code — `E###` for errors, `W###` for warnings.
 ///
 /// Codes are product surface: each has [`explain`](Code::explain) text, a docs entry, and at
-/// least one fixture that triggers it (PRD §7.5). The set is closed and exhaustively
+/// least one fixture that triggers it. The set is closed and exhaustively
 /// enumerable via [`all`](Code::all) so the docs/behavior exhaustiveness test can iterate it and
 /// fail the build if code and docs diverge. `#[non_exhaustive]` keeps adding a code a non-breaking
 /// change for external matchers.
@@ -13,26 +13,26 @@ use super::{InterpId, Severity};
 #[non_exhaustive]
 pub enum Code {
     /// The `openapi` field declares an unsupported version (e.g. 3.0.x); no conversion is
-    /// offered (PRD FR1, §3.2.1).
+    /// offered.
     UnsupportedOpenApiVersion,
-    /// `jsonSchemaDialect` is not the default OAS 3.1 dialect (PRD FR1, §3.3).
+    /// `jsonSchemaDialect` is not the default OAS 3.1 dialect.
     UnsupportedDialect,
-    /// A `$ref` targets an absolute URL; only local relative-file refs are supported (§3.2.10).
+    /// A `$ref` targets an absolute URL; only local relative-file refs are supported.
     AbsoluteRefUnsupported,
-    /// A `$ref` could not be resolved within the input bundle (PRD §3.3 prec 6).
+    /// A `$ref` could not be resolved within the input bundle.
     UnresolvedRef,
-    /// A validation-only keyword (`pattern`, `minimum`, …) was ignored (PRD FR2, W-class).
+    /// A validation-only keyword (`pattern`, `minimum`, …) was ignored (W-class).
     ValidationKeywordIgnored,
     /// `patternProperties` is not represented in generated types (matrix: Schema shape → R).
     PatternPropertiesRejected,
     /// `$dynamicRef`/`$dynamicAnchor` are rejected (matrix: Schema shape → R).
     DynamicRefRejected,
     /// A `oneOf`/`anyOf` with non-disjoint variant sets cannot be deserialized unambiguously;
-    /// names the overlapping variants and suggests a `discriminator` (PRD D1).
+    /// names the overlapping variants and suggests a `discriminator`.
     NonDisjointUnion,
-    /// A heterogeneous or structured `enum`/`const` value set is rejected (PRD D6).
+    /// A heterogeneous or structured `enum`/`const` value set is rejected.
     NonScalarEnum,
-    /// A request body media type spargen does not support (XML, multipart, …) (§3.1, §3.2.8).
+    /// A request body media type spargen does not support (XML, multipart, …).
     UnsupportedMediaType,
     /// An unsupported parameter style (`deepObject`, `spaceDelimited`, …) (matrix: Parameters → R).
     UnsupportedParameterStyle,
@@ -194,7 +194,7 @@ impl Code {
         }
     }
 
-    /// The interpretation this code's behavior depends on, if any (PRD §3.3).
+    /// The interpretation this code's behavior depends on, if any.
     pub fn interpretation(self) -> Option<InterpId> {
         match self {
             Code::UnsupportedOpenApiVersion => Some(InterpId(1)),

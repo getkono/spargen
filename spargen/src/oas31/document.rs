@@ -5,7 +5,7 @@ use crate::ir::Method;
 
 use super::Schema;
 
-/// The typed OAS 3.1.1 document model (PRD §2.3, §3.3 prec 1). Built by
+/// The typed OAS 3.1.1 document model. Built by
 /// [`parse_document`](super::parse_document) from the span-preserving source tree; every node
 /// retains provenance for diagnostics.
 #[derive(Debug, Clone)]

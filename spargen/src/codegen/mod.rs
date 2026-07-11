@@ -2,7 +2,7 @@
 //! layer-deps: ir, name, support, diag
 //!
 //! IR + allocated names → Rust tokens: models, client, and the embedded `support` module, with
-//! deterministic item ordering and `prettyplease` formatting (PRD §2.3, FR3, NFR2). Codegen never
+//! deterministic item ordering and `prettyplease` formatting. Codegen never
 //! sees a spec document — it consumes only the IR and the [`Names`](crate::name::Names) table.
 
 mod emit;
@@ -18,14 +18,14 @@ use quote::quote;
 pub use format::format_tokens;
 
 /// Options controlling code generation. The `uuid`/`time` flags mirror the emitted crate's
-/// features (PRD §6.2): when off, the corresponding `format` mappings fall back to `String`.
+/// features: when off, the corresponding `format` mappings fall back to `String`.
 #[derive(Debug, Clone)]
 pub struct CodegenOptions {
     /// Map `format: uuid` to `uuid::Uuid` (else `String`).
     pub feature_uuid: bool,
     /// Map `format: date-time`/`date` to the `time` crate (else `String`).
     pub feature_time: bool,
-    /// Max bytes of a response body retained on error variants (PRD D7); stamped into the
+    /// Max bytes of a response body retained on error variants; stamped into the
     /// generated client's default configuration.
     pub error_body_cap: usize,
 }
@@ -59,7 +59,7 @@ pub struct GeneratedCode {
 /// Generate the Rust source for a client from the IR and allocated names.
 ///
 /// Output is deterministic: item ordering does not depend on input map ordering, so checked-in code
-/// produces stable diffs (PRD FR3). Any codegen-time diagnostic flows through `diags`.
+/// produces stable diffs. Any codegen-time diagnostic flows through `diags`.
 pub fn generate(
     api: &Api,
     names: &Names,

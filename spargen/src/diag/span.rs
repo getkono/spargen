@@ -5,7 +5,7 @@ use serde::Serialize;
 pub struct FileId(pub u32);
 
 /// A position within a source file: 1-based `line` and `col`, plus the 0-based byte `offset`
-/// (PRD FR1 span-preserving parse).
+/// (span-preserving parse).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Loc {
     /// 1-based line number.
@@ -17,7 +17,7 @@ pub struct Loc {
 }
 
 /// A half-open source span `[start, end)` within a single file, powering `file:line:column`
-/// diagnostics (PRD FR6).
+/// diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Span {
     /// The file this span lies in.

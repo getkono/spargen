@@ -1,6 +1,6 @@
 use super::Ty;
 
-/// A supported request/response media type (PRD §3.1). Other media types (XML, multipart) are
+/// A supported request/response media type. Other media types (XML, multipart) are
 /// R-rejected in the frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaType {
@@ -61,7 +61,7 @@ pub struct Responses {
 
 impl Responses {
     /// The success shape of the operation, applying per-status precedence: exact code > range
-    /// (`2XX`) > `default` (PRD D11). A single success source yields plain `T`; multiple yield a
+    /// (`2XX`) > `default`. A single success source yields plain `T`; multiple yield a
     /// per-operation success enum.
     pub fn success(&self) -> SuccessShape {
         let mut successes = Vec::new();
@@ -89,7 +89,7 @@ impl Responses {
     }
 
     /// The error shape of the operation: the typed `E` body, an enum across multiple error
-    /// statuses, or none. `default` contributes here unless it is the only success source (D11).
+    /// statuses, or none. `default` contributes here unless it is the only success source.
     pub fn error(&self) -> ErrorShape {
         let mut errors = Vec::new();
         for (status, response) in &self.by_status {
@@ -129,7 +129,7 @@ pub enum SuccessShape {
     Enum,
 }
 
-/// The typed error body `E` of an operation (matrix: Responses; PRD FR3, FR5 #6).
+/// The typed error body `E` of an operation (matrix: Responses).
 #[derive(Debug, Clone)]
 pub enum ErrorShape {
     /// No documented error body.

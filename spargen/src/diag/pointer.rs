@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-/// An RFC 6901 JSON Pointer addressing a construct in the input document (PRD FR6, §3.3 prec 6).
+/// An RFC 6901 JSON Pointer addressing a construct in the input document.
 ///
 /// Used both for diagnostic addressing and for `$ref` fragment resolution. Reference tokens are
 /// escaped (`~0` for `~`, `~1` for `/`) on construction, so the stored string is always a valid

@@ -1,7 +1,7 @@
 use crate::diag::{JsonPointer, Span};
 
 /// A JSON/YAML number. Preserved as one of three concrete kinds; arbitrary precision is not
-/// supported (PRD D5). Out-of-range wire values surface later as Decode errors, never silent wraps.
+/// supported. Out-of-range wire values surface later as Decode errors, never silent wraps.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Number {
     /// A signed integer that fits `i64`.
@@ -30,7 +30,7 @@ pub enum Node {
 }
 
 /// A value node paired with the source [`Span`] it was parsed from — the unit of the
-/// span-preserving document tree (PRD FR1, D4).
+/// span-preserving document tree.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SpannedValue {
     /// The value.

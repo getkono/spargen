@@ -2,7 +2,7 @@
 //! layer-deps: codegen, diag
 //!
 //! Output layout (module vs standalone crate), `Cargo.toml` synthesis, the provenance header, and
-//! `--check` drift diffing (PRD §2.3, §2.1). Emit turns [`GeneratedCode`](crate::codegen::GeneratedCode)
+//! `--check` drift diffing. Emit turns [`GeneratedCode`](crate::codegen::GeneratedCode)
 //! into a concrete on-disk [`EmitPlan`] that can be written or compared against checked-in output.
 
 mod check;
@@ -17,7 +17,7 @@ pub use check::{check_drift, DriftReport};
 pub use header::provenance_header;
 pub use manifest::synth_cargo_toml;
 
-/// Where and how generated code is written (PRD §2.2).
+/// Where and how generated code is written.
 #[derive(Debug, Clone)]
 pub enum OutputLayout {
     /// A module (file or directory) checked into an existing crate.
@@ -43,7 +43,7 @@ pub struct PackageMeta {
     pub version: String,
 }
 
-/// The generated crate's feature set (default `uuid`+`time` on; PRD §6.2).
+/// The generated crate's feature set (default `uuid`+`time` on).
 #[derive(Debug, Clone)]
 pub struct FeatureSet {
     /// Enable the `uuid` mapping feature.
@@ -61,7 +61,7 @@ impl Default for FeatureSet {
     }
 }
 
-/// Identity of the source spec, stamped into the provenance header (PRD §2.1).
+/// Identity of the source spec, stamped into the provenance header.
 #[derive(Debug, Clone)]
 pub struct SpecMeta {
     /// A description of the source spec (path or URL as vendored).

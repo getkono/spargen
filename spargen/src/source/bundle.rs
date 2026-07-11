@@ -28,8 +28,8 @@ impl SourceFile {
 }
 
 /// An input bundle: the root document plus every local file reachable through relative-file
-/// `$ref`s (PRD FR1). Absolute-URL `$ref`s are rejected (§3.2.10); network fetches never happen —
-/// builds are hermetic (§3.2.10).
+/// `$ref`s. Absolute-URL `$ref`s are rejected; network fetches never happen —
+/// builds are hermetic.
 #[derive(Debug, Default)]
 pub struct InputBundle {
     root: Option<FileId>,

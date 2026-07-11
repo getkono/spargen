@@ -4,7 +4,7 @@ use crate::{check, explain, generate, Config, Outcome, OutputTarget};
 
 use super::{Cli, Command, ExitStatus, Format};
 
-/// Execute a parsed CLI invocation and return the process exit code (PRD FR6, §7.5).
+/// Execute a parsed CLI invocation and return the process exit code.
 ///
 /// Delegates to the crate facade — [`generate`](crate::generate), [`check`](crate::check),
 /// [`explain`](crate::explain) — renders diagnostics in the requested [`Format`](super::Format),

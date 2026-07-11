@@ -2,7 +2,7 @@ use crate::diag::Provenance;
 
 use super::{Docs, MediaType, RequestBody, Responses, SecurityRequirement, Ty};
 
-/// The `operationId` (or synthesized name — PRD D9); the Rust method name is allocated by `name`.
+/// The `operationId` (or synthesized name); the Rust method name is allocated by `name`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OperationId(pub String);
 
@@ -36,7 +36,7 @@ impl Method {
 }
 
 /// A parsed path template, split into literal and parameter segments so URL construction is
-/// static segment concatenation with no runtime regex (PRD NFR1).
+/// static segment concatenation with no runtime regex.
 #[derive(Debug, Clone)]
 pub struct PathTemplate {
     /// The raw template, e.g. `/users/{id}/posts`.
@@ -55,7 +55,7 @@ pub enum PathSegment {
 }
 
 /// One API operation. Required parameters become positional method arguments; optional ones
-/// travel in a per-operation `…Params` struct deriving `Default` (PRD FR3, D3).
+/// travel in a per-operation `…Params` struct deriving `Default`.
 #[derive(Debug, Clone)]
 pub struct Operation {
     /// The operation identifier.
@@ -70,7 +70,7 @@ pub struct Operation {
     pub request_body: Option<RequestBody>,
     /// The typed responses (success and error).
     pub responses: Responses,
-    /// Operation-level security requirements (which credentials attach where; PRD FR4).
+    /// Operation-level security requirements (which credentials attach where).
     pub security: Vec<SecurityRequirement>,
     /// `deprecated` → `#[deprecated]` on the method.
     pub deprecated: bool,

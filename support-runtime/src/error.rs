@@ -4,7 +4,7 @@ use reqwest::StatusCode;
 
 use crate::ResponseValue;
 
-/// The closed error taxonomy shared by every spargen-generated client (PRD FR5). `E` is the
+/// The closed error taxonomy shared by every spargen-generated client. `E` is the
 /// operation's typed error body (an enum when several error statuses are documented).
 ///
 /// Nine variants are constructed; taxonomy class #10 (cancellation) is a documented drop-safety
@@ -36,7 +36,7 @@ pub enum Error<E> {
         body: Bytes,
     },
     /// #8 — the response body failed to deserialize; retains the serde error path and (capped) raw
-    /// body (PRD D7).
+    /// body.
     Decode {
         /// The serde deserialization error path.
         path: String,
@@ -82,7 +82,7 @@ impl<E> Error<E> {
     }
 
     /// Whether the failure is worth retrying: transport failures, timeouts, `429`, and `5xx`
-    /// (PRD FR5, §3.2.6). Lets callers wrap any retry policy around the client without spargen
+    /// Lets callers wrap any retry policy around the client without spargen
     /// shipping one.
     pub fn is_transient(&self) -> bool {
         match self {

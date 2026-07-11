@@ -5,7 +5,7 @@ use crate::diag::Provenance;
 use super::Docs;
 
 /// A stable, dense identifier for a type in the [`TypeGraph`]. Ordered so codegen can emit items
-/// deterministically regardless of input map ordering (PRD FR3).
+/// deterministically regardless of input map ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct TypeId(pub u32);
 
@@ -63,7 +63,7 @@ pub struct Ty {
 
 /// The structure of a [`TypeDef`].
 ///
-/// Invariant (PRD FR2): a typed schema is never silently degraded to `serde_json::Value`. [`Any`]
+/// Invariant: a typed schema is never silently degraded to `serde_json::Value`. [`Any`]
 /// appears only where the spec itself is untyped (`{}` / `true` schemas) — faithful, not lossy.
 ///
 /// [`Any`]: TypeKind::Any
@@ -73,7 +73,7 @@ pub enum TypeKind {
     Primitive(Prim),
     /// An object with named fields.
     Struct(Struct),
-    /// A homogeneous scalar `enum`/`const` set (PRD D6).
+    /// A homogeneous scalar `enum`/`const` set.
     Enum(ScalarEnum),
     /// A homogeneous array (`items`).
     Array(Box<Ty>),
@@ -85,7 +85,8 @@ pub enum TypeKind {
     Any,
 }
 
-/// A scalar primitive. Numeric mappings per PRD D5; `format` type mappings per §6.2 (feature-gated).
+/// A scalar primitive. Numeric wire types map to fixed Rust scalars; `format`-based type mappings
+/// are feature-gated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Prim {
     /// `boolean`.
@@ -126,9 +127,9 @@ pub struct Field {
     pub required: bool,
     /// `deprecated` → `#[deprecated]`.
     pub deprecated: bool,
-    /// `readOnly` annotation (W-class, surfaced in rustdoc; PRD D2).
+    /// `readOnly` annotation (W-class, surfaced in rustdoc).
     pub read_only: bool,
-    /// `writeOnly` annotation (W-class, surfaced in rustdoc; PRD D2).
+    /// `writeOnly` annotation (W-class, surfaced in rustdoc).
     pub write_only: bool,
 }
 
@@ -143,7 +144,7 @@ pub enum AdditionalProps {
     Typed(Box<Ty>),
 }
 
-/// A wire property name. The Rust identifier is allocated separately by `name` (PRD D9); keeping
+/// A wire property name. The Rust identifier is allocated separately by `name`; keeping
 /// the wire name here means the IR stays language-agnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PropertyName {
@@ -151,8 +152,8 @@ pub struct PropertyName {
     pub wire: String,
 }
 
-/// A homogeneous scalar enumeration generated from `enum`/`const` over a single scalar kind
-/// (PRD D6). Heterogeneous or structured value sets are R-rejected.
+/// A homogeneous scalar enumeration generated from `enum`/`const` over a single scalar kind.
+/// Heterogeneous or structured value sets are R-rejected.
 #[derive(Debug, Clone)]
 pub struct ScalarEnum {
     /// The shared scalar kind of every variant.

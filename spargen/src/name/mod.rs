@@ -2,9 +2,9 @@
 //! layer-deps: ir, diag
 //!
 //! Deterministic identifier allocation: Rust-conventional casing via Unicode-XID-aware
-//! segmentation, keyword escaping, in-scope collision resolution, and `operationId` synthesis
-//! (PRD D9). Every allocation is deterministic and injective within its scope, and always yields a
-//! valid Rust identifier — property-tested (§7.5).
+//! segmentation, keyword escaping, in-scope collision resolution, and `operationId` synthesis.
+//! Every allocation is deterministic and injective within its scope, and always yields a
+//! valid Rust identifier — property-tested.
 
 mod casing;
 mod ident;
@@ -25,7 +25,7 @@ pub use synth::synth_operation_id;
 
 /// The identifiers allocated for a whole [`Api`]: one per operation, params struct, type, field,
 /// and variant. Codegen looks names up here rather than deriving them, so naming stays in one
-/// place and stays deterministic (PRD FR3, D9).
+/// place and stays deterministic.
 #[derive(Debug, Default)]
 pub struct Names {
     /// Method name per operation.
@@ -40,7 +40,7 @@ pub struct Names {
     pub variants: HashMap<(TypeId, String), Ident>,
 }
 
-/// Allocate every identifier the API needs, in one deterministic pass (PRD D9). Naming conflicts
+/// Allocate every identifier the API needs, in one deterministic pass. Naming conflicts
 /// that cannot be resolved are reported through `diags`.
 pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     let _ = diags;

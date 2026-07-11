@@ -1,7 +1,7 @@
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 
-/// A successful response body paired with its status and headers (PRD FR3). Returned inside
+/// A successful response body paired with its status and headers. Returned inside
 /// `Result<ResponseValue<T>, Error<E>>` from every generated operation method.
 #[derive(Debug, Clone)]
 pub struct ResponseValue<T> {

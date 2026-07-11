@@ -7,7 +7,7 @@ use std::sync::Arc;
 // stacks. Re-exported so generated code and consumers use one vocabulary.
 pub use secrecy::{ExposeSecret, SecretString};
 
-/// A failure from an async token provider (PRD FR4).
+/// A failure from an async token provider.
 #[derive(Debug)]
 pub struct AuthError {
     message: String,
@@ -33,11 +33,11 @@ impl std::error::Error for AuthError {}
 /// The future returned by a [`TokenProvider`].
 pub type TokenFuture = Pin<Box<dyn Future<Output = Result<SecretString, AuthError>> + Send>>;
 
-/// An async callback that yields a fresh credential, for rotating tokens (PRD FR4).
+/// An async callback that yields a fresh credential, for rotating tokens.
 pub type TokenProvider = Arc<dyn Fn() -> TokenFuture + Send + Sync>;
 
 /// A per-scheme credential supplied at client construction: a static secret or a token provider
-/// for rotation (PRD FR4). Missing required credentials are a construction-time error, not a 401.
+/// for rotation. Missing required credentials are a construction-time error, not a 401.
 #[derive(Clone)]
 pub enum Credential {
     /// `Authorization: Bearer <token>`.
@@ -84,7 +84,7 @@ pub struct AuthScheme {
 
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Secrets are redacted throughout (PRD FR4).
+        // Secrets are redacted throughout.
         let kind = match self {
             Credential::Bearer(_) => "Bearer",
             Credential::Basic { .. } => "Basic",

@@ -3,7 +3,7 @@ use crate::source::InputBundle;
 
 use super::{Document, Schema};
 
-/// Resolves `$ref`s within a [`Document`] and its input bundle (PRD §3.3 prec 6/7).
+/// Resolves `$ref`s within a [`Document`] and its input bundle.
 #[derive(Debug)]
 pub struct Resolver<'doc> {
     document: &'doc Document,
@@ -24,7 +24,7 @@ impl<'doc> Resolver<'doc> {
     }
 
     /// Resolve a `$ref` string that appears at `at`, reporting an unresolved/absolute ref through
-    /// `diags` (PRD §3.2.10).
+    /// `diags`.
     pub fn resolve(
         &self,
         reference: &str,

@@ -1,7 +1,7 @@
 use super::{to_pascal_case, to_snake_case, Ident};
 
 /// The syntactic role an identifier plays, which governs both its casing and how keywords are
-/// escaped (PRD D9).
+/// escaped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentRole {
     /// A type name (`PascalCase`).
@@ -19,7 +19,7 @@ pub enum IdentRole {
 
 /// Produce a legal Rust [`Ident`] for `raw` in the given `role`: cased per the role, with Rust
 /// keywords escaped as raw identifiers (`r#type`) where legal and via a trailing underscore
-/// otherwise, and leading digits / invalid starts repaired (PRD D9).
+/// otherwise, and leading digits / invalid starts repaired.
 pub fn escape(raw: &str, role: IdentRole) -> Ident {
     let mut ident = match role {
         IdentRole::Type | IdentRole::Variant => to_pascal_case(raw),

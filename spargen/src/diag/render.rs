@@ -16,7 +16,7 @@ pub trait SourceSnippets {
 }
 
 /// Render one diagnostic rustc-style (code, message, location, source snippet with caret, and
-/// remedy) into `out` (PRD FR6).
+/// remedy) into `out`.
 pub fn render_human(
     diagnostic: &Diagnostic,
     source: &dyn SourceSnippets,
@@ -58,7 +58,7 @@ pub fn render_human(
     Ok(())
 }
 
-/// Render a batch as a stable JSON structure for CI consumption (`--format json`, PRD FR6). The
+/// Render a batch as a stable JSON structure for CI consumption (`--format json`). The
 /// shape is product surface and schema-tested.
 pub fn render_json(diagnostics: &Diagnostics) -> serde_json::Value {
     let items = diagnostics

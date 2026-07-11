@@ -1,5 +1,5 @@
-//! Casing conversions using Unicode-XID-aware segmentation (PRD D9). `heck` is deliberately not
-//! used — it is not Unicode-XID-correct, which D9 requires.
+//! Casing conversions using Unicode-XID-aware segmentation. `heck` is deliberately not
+//! used — it is not Unicode-XID-correct, which correct identifier allocation requires.
 
 /// Convert `raw` to `PascalCase` (for types and variants).
 pub fn to_pascal_case(raw: &str) -> String {

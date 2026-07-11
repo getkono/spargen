@@ -1,4 +1,4 @@
-//! The headline invariant (PRD FR3, CLAUDE.md): same spargen version + spec + config produces
+//! The headline invariant (CLAUDE.md): same spargen version + spec + config produces
 //! byte-identical output. Generating the same spec into two independent crate directories must
 //! yield identical `Cargo.toml` and `src/lib.rs`.
 

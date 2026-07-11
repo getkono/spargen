@@ -12,7 +12,7 @@ use crate::name::Names;
 
 use super::CodegenOptions;
 
-/// Emit the `types` (models) module for every type in the graph, in deterministic order (PRD FR3).
+/// Emit the `types` (models) module for every type in the graph, in deterministic order.
 pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStream {
     let items = api
         .types
@@ -30,7 +30,7 @@ pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) ->
     }
 }
 
-/// Emit the `Client` struct and its `new` / `with_client` constructors (PRD FR3).
+/// Emit the `Client` struct and its `new` / `with_client` constructors.
 pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStream {
     let params = api
         .operations
@@ -96,7 +96,7 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
 }
 
 /// Emit one operation method — a thin `#[inline]` shim over the non-generic `support` dispatch
-/// routines, so per-operation code stays tiny (PRD NFR2).
+/// routines, so per-operation code stays tiny.
 pub(crate) fn emit_operation(
     operation: &Operation,
     api: &Api,
@@ -416,8 +416,7 @@ fn param_value_tokens(
     }
 }
 
-/// Turn lowered documentation into `#[doc = …]` attributes so IDE hover shows the API docs
-/// (PRD FR3).
+/// Turn lowered documentation into `#[doc = …]` attributes so IDE hover shows the API docs.
 fn doc_tokens(docs: &crate::ir::Docs) -> TokenStream {
     let mut paragraphs: Vec<&str> = Vec::new();
     if let Some(summary) = &docs.summary {
@@ -462,7 +461,7 @@ fn client_doc_tokens(api: &Api) -> TokenStream {
     quote! { #[doc = #text] }
 }
 
-/// Emit an operation's optional-parameters `…Params` struct, deriving `Default` (PRD D3).
+/// Emit an operation's optional-parameters `…Params` struct, deriving `Default`.
 pub(crate) fn emit_params_struct(
     operation: &Operation,
     names: &Names,
@@ -503,7 +502,7 @@ pub(crate) fn emit_params_struct(
     }
 }
 
-/// Emit an operation's typed error enum (or type alias for a single error body) (PRD FR3, FR5 #6).
+/// Emit an operation's typed error enum (or type alias for a single error body).
 pub(crate) fn emit_error_enum(
     operation: &Operation,
     names: &Names,
@@ -529,7 +528,7 @@ pub(crate) fn emit_error_enum(
 }
 
 /// Emit the private `support` module by embedding the freestanding runtime source verbatim, under
-/// `#![forbid(unsafe_code)]` (PRD §2.3 rule 3).
+/// `#![forbid(unsafe_code)]`.
 pub(crate) fn emit_support() -> TokenStream {
     let modules = crate::support::runtime_files().iter().map(|file| {
         let stem = file.name.trim_end_matches(".rs");

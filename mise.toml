@@ -4,7 +4,7 @@
 [tools]
 hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
 "cargo:convco" = "0.6.4"                    # Conventional Commit checker
-"aqua:EmbarkStudios/cargo-deny" = "0.19.9"  # supply-chain audit (PRD §7.6)
+"aqua:EmbarkStudios/cargo-deny" = "0.19.9"  # supply-chain audit
 
 [tasks.fmt]
 description = "Format the whole workspace"

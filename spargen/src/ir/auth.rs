@@ -3,7 +3,7 @@
 pub struct SchemeId(pub String);
 
 /// A security scheme (matrix: Security). `http`/`apiKey` are fully plumbed; `oauth2`/`oidc` are
-/// W-class — the scheme metadata is retained but tokens are supplied by the caller (PRD FR4, §5.5).
+/// W-class — the scheme metadata is retained but tokens are supplied by the caller.
 #[derive(Debug, Clone)]
 pub enum SecurityScheme {
     /// `http` scheme (`bearer` or `basic`).

@@ -2,7 +2,7 @@ use super::Diagnostic;
 
 /// A capped batch of diagnostics collected during one pipeline run.
 ///
-/// Generation collects all diagnostics rather than stopping at the first error (PRD FR6 batch
+/// Generation collects all diagnostics rather than stopping at the first error (batch
 /// reporting); the cap bounds memory under pathological inputs. Once the cap is reached, further
 /// diagnostics are dropped but [`cap_reached`](Diagnostics::cap_reached) is set so the renderer
 /// can note the truncation.
@@ -20,7 +20,7 @@ pub struct Diagnostics {
 pub struct Aborted;
 
 impl Diagnostics {
-    /// Create a collector retaining at most `cap` diagnostics (PRD FR6).
+    /// Create a collector retaining at most `cap` diagnostics.
     pub fn new(cap: usize) -> Self {
         Self {
             items: Vec::new(),

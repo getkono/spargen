@@ -9,7 +9,7 @@ use crate::{Credential, Error};
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
     /// Maximum bytes of a response body retained on error variants; the rest is dropped and the
-    /// error flags truncation (default 64 KiB; PRD D7).
+    /// error flags truncation (default 64 KiB).
     pub max_error_body: usize,
 }
 
@@ -22,12 +22,12 @@ impl Default for ClientConfig {
 }
 
 /// The shared core every generated `Client` wraps: the injected `reqwest::Client` (the BYO-client
-/// injection point for TLS choice, proxies, middleware, timeouts — PRD FR3), the base URL,
+/// injection point for TLS choice, proxies, middleware, timeouts), the base URL,
 /// configuration, and per-scheme credentials.
 ///
 /// The generated `Client` exposes `Client::new(base_url)` and
 /// `Client::with_client(reqwest::Client, base_url)`, and one `#[inline]` method per operation that
-/// delegates to the non-generic dispatch routines (PRD FR3, NFR2).
+/// delegates to the non-generic dispatch routines.
 #[derive(Debug, Clone)]
 pub struct ClientCore {
     http: reqwest::Client,
@@ -44,7 +44,7 @@ impl ClientCore {
     }
 
     /// Build a core with a caller-supplied `reqwest::Client` — the injection point for TLS backend,
-    /// proxies, middleware, and timeouts (PRD FR3).
+    /// proxies, middleware, and timeouts.
     pub fn with_client(client: reqwest::Client, base_url: &str) -> Result<Self, Error<Infallible>> {
         let base_url = Url::parse(base_url).map_err(Error::request_construction)?;
         Ok(Self {
@@ -75,7 +75,7 @@ impl ClientCore {
         &self.http
     }
 
-    /// Register a credential for a named security scheme (PRD FR4).
+    /// Register a credential for a named security scheme.
     pub fn set_credential(&mut self, scheme: &str, credential: Credential) {
         self.credentials.insert(scheme.to_owned(), credential);
     }

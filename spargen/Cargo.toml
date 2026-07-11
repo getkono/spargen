@@ -14,10 +14,10 @@ readme = "../README.md"
 [features]
 default = ["cli", "uuid", "time"]
 # Gates the `spargen` binary and its CLI-only dependencies so `cargo install spargen` works
-# out of the box while library builds stay lean (PRD §2.1). The colored-output deps
+# out of the box while library builds stay lean. The colored-output deps
 # (anstream/anstyle) are added with the diagnostic renderer implementation.
 cli = ["dep:clap"]
-# `format: uuid` / `date-time` / `date` type mappings in generated output (PRD §6.2). Default on;
+# `format: uuid` / `date-time` / `date` type mappings in generated output. Default on;
 # disabling falls back to `String`. The teeth live in the emitted crate's own manifest.
 uuid = []
 time = []

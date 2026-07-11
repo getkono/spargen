@@ -2,7 +2,7 @@
 //! layer-deps:
 //!
 //! Diagnostic codes/severities, the JSON Pointer + span model, the `INT-###` interpretation
-//! registry, human/JSON renderers, and the S/W/R disposition table as data (PRD §2.3, FR6).
+//! registry, human/JSON renderers, and the S/W/R disposition table as data.
 //! `diag` is the only vocabulary shared across pipeline stages, so it depends on nothing.
 //!
 //! Every diagnostic carries a severity, a stable [`Code`], the [`JsonPointer`] to the offending
@@ -29,7 +29,7 @@ pub use render::{render_human, render_json, SourceSnippets};
 pub use severity::Severity;
 pub use span::{FileId, Loc, Span};
 
-/// A single diagnostic emitted during parsing, validation, or codegen (PRD FR6).
+/// A single diagnostic emitted during parsing, validation, or codegen.
 #[derive(Debug, Clone)]
 pub struct Diagnostic {
     /// The stable, documented code (`E###`/`W###`).
@@ -44,7 +44,7 @@ pub struct Diagnostic {
     pub message: String,
     /// An optional suggested fix.
     pub remedy: Option<String>,
-    /// The governing interpretation, when this diagnostic's behavior depends on one (PRD §3.3).
+    /// The governing interpretation, when this diagnostic's behavior depends on one.
     pub interpretation: Option<InterpId>,
 }
 
@@ -99,7 +99,7 @@ impl DiagnosticBuilder {
         self
     }
 
-    /// Link the governing interpretation (PRD §3.3).
+    /// Link the governing interpretation.
     pub fn interpretation(mut self, id: InterpId) -> Self {
         self.interpretation = Some(id);
         self

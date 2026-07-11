@@ -1,8 +1,8 @@
 use crate::diag::{Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 use crate::source::SpannedValue;
 
-/// Structural validator against the vendored OAS 3.1 base dialect and meta-schemas (PRD §3.3
-/// prec 2, §7.5). Targets a fixed, checksummed in-repo artifact under `spec/`, never a live URL.
+/// Structural validator against the vendored OAS 3.1 base dialect and meta-schemas.
+/// Targets a fixed, checksummed in-repo artifact under `spec/`, never a live URL.
 #[derive(Debug, Default)]
 pub struct MetaSchemaValidator {
     // Parsed vendored meta-schemas, populated by `load_vendored`.
