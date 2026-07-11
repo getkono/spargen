@@ -97,6 +97,9 @@ paths:
   /users/{id}:
     get:
       operationId: getUser
+      security:
+        - bearer: []
+        - apiKey: []
       parameters:
         - name: id
           in: path
@@ -111,6 +114,14 @@ paths:
               schema:
                 $ref: "#/components/schemas/User"
 components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
   schemas:
     User:
       type: object

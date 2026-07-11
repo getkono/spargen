@@ -27,8 +27,11 @@ mod dispatch;
 mod error;
 mod response;
 
-pub use auth::{AuthError, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
+pub use auth::{
+    AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture,
+    TokenProvider,
+};
 pub use client::{ClientConfig, ClientCore};
-pub use dispatch::{build_url, classify_error, decode_success, send};
+pub use dispatch::{attach_auth, build_url, classify_error, decode_success, send};
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
 pub use response::ResponseValue;

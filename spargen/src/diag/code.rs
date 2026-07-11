@@ -38,6 +38,9 @@ pub enum Code {
     UnsupportedParameterStyle,
     /// `webhooks`/`callbacks`/`links` acknowledged; no code emitted (matrix: Document → W).
     ServerInitiatedFlowIgnored,
+    /// A `security` requirement references a scheme that is not declared under
+    /// `components.securitySchemes` (or is of an unsupported type) (matrix: Security).
+    UnknownSecurityScheme,
     /// The input could not be parsed or violates a required structural OpenAPI shape.
     InvalidInput,
     /// A compatibility omit rule did not match a source construct or attempted an invalid removal.
@@ -65,6 +68,7 @@ impl Code {
             Code::UnsupportedParameterStyle => "E010",
             Code::ServerInitiatedFlowIgnored => "W002",
             Code::InvalidInput => "E011",
+            Code::UnknownSecurityScheme => "E012",
             Code::OmittedConstruct => "W009",
             Code::InvalidOmitRule => "E019",
             Code::OmitCreatedInvalidDocument => "E020",
@@ -96,6 +100,7 @@ impl Code {
             Code::UnsupportedParameterStyle => "unsupported parameter style",
             Code::ServerInitiatedFlowIgnored => "server-initiated flow ignored",
             Code::InvalidInput => "invalid input document",
+            Code::UnknownSecurityScheme => "unknown security scheme",
             Code::InvalidOmitRule => "invalid omit rule",
             Code::OmittedConstruct => "construct omitted",
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
@@ -144,6 +149,9 @@ impl Code {
             Code::InvalidInput => {
                 "The input is malformed JSON/YAML or is missing a required OpenAPI structure needed before feature auditing can continue."
             }
+            Code::UnknownSecurityScheme => {
+                "Every scheme named in a `security` requirement must be declared under `components.securitySchemes` as `http` bearer/basic, `apiKey`, `oauth2`, or `openIdConnect` so credentials can be attached at the right location."
+            }
             Code::InvalidOmitRule => {
                 "A compatibility omit rule must match at least one exact path, operation, component, pointer, or file-local pointer and cannot omit the document root."
             }
@@ -180,6 +188,7 @@ impl Code {
             Code::UnsupportedMediaType,
             Code::UnsupportedParameterStyle,
             Code::InvalidInput,
+            Code::UnknownSecurityScheme,
             Code::InvalidOmitRule,
             Code::OmitCreatedInvalidDocument,
             Code::ValidationKeywordIgnored,

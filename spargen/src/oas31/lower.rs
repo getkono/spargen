@@ -24,6 +24,7 @@ pub fn lower(
     resolver: &Resolver,
     diags: &mut Diagnostics,
 ) -> Result<Api, Aborted> {
+    let security_schemes = lower_security_schemes(document);
     let mut ctx = LowerCtx {
         document,
         resolver,
@@ -64,6 +65,37 @@ pub fn lower(
 
             let responses = ctx.lower_responses(&operation.responses);
 
+            let security: Vec<crate::ir::SecurityRequirement> = operation
+                .security
+                .as_ref()
+                .unwrap_or(&document.security)
+                .iter()
+                .map(lower_security_requirement)
+                .collect();
+            // Codegen builds per-operation credential tables from the scheme map, so every
+            // referenced scheme must have lowered; an undeclared or unsupported scheme would
+            // otherwise silently generate an unauthenticated call.
+            for requirement in &security {
+                for (scheme, _) in &requirement.0 {
+                    if !security_schemes.contains_key(scheme) {
+                        Diagnostic::error(
+                            Code::UnknownSecurityScheme,
+                            operation.provenance.clone(),
+                        )
+                        .message(format!(
+                            "security requirement references undeclared or unsupported \
+                             scheme `{}`",
+                            scheme.0
+                        ))
+                        .remedy(
+                            "declare the scheme under components.securitySchemes as http \
+                             bearer/basic, apiKey, oauth2, or openIdConnect",
+                        )
+                        .emit(ctx.diags);
+                    }
+                }
+            }
+
             operations.push(Operation {
                 id: OperationId(id),
                 method: *method,
@@ -71,13 +103,7 @@ pub fn lower(
                 params,
                 request_body,
                 responses,
-                security: operation
-                    .security
-                    .as_ref()
-                    .unwrap_or(&document.security)
-                    .iter()
-                    .map(lower_security_requirement)
-                    .collect(),
+                security,
                 deprecated: operation.deprecated,
                 docs: Docs {
                     title: None,
@@ -124,7 +150,7 @@ pub fn lower(
             .collect(),
         operations,
         types: ctx.graph,
-        security_schemes: lower_security_schemes(document),
+        security_schemes,
         provenance: document.provenance.clone(),
     };
     ctx.diags.into_result(api)

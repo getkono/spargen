@@ -16,6 +16,7 @@ the library API.
 | `E009` | Error | unsupported media type |
 | `E010` | Error | unsupported parameter style |
 | `E011` | Error | invalid input document |
+| `E012` | Error | unknown security scheme |
 | `E019` | Error | invalid omit rule |
 | `E020` | Error | omit profile created an invalid document |
 | `W001` | Warning | validation-only keyword ignored |

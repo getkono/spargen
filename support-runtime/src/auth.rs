@@ -55,6 +55,33 @@ pub enum Credential {
     Provider(TokenProvider),
 }
 
+/// How a security scheme carries its credential on the wire. Generated code builds these as
+/// static tables from the spec's `securitySchemes`; `oauth2`/`openIdConnect` schemes attach their
+/// caller-supplied token as a bearer credential.
+#[derive(Debug, Clone, Copy)]
+pub enum AuthKind {
+    /// `Authorization: Bearer <token>`.
+    Bearer,
+    /// `Authorization: Basic <base64>`.
+    Basic,
+    /// An `apiKey` sent as the named request header.
+    ApiKeyHeader(&'static str),
+    /// An `apiKey` sent as the named query parameter.
+    ApiKeyQuery(&'static str),
+    /// An `apiKey` sent as the named cookie.
+    ApiKeyCookie(&'static str),
+}
+
+/// One scheme reference inside an operation's security requirement: the `securitySchemes` key the
+/// credential is registered under, plus how it is carried.
+#[derive(Debug, Clone, Copy)]
+pub struct AuthScheme {
+    /// The `components.securitySchemes` key.
+    pub name: &'static str,
+    /// The wire carrier.
+    pub kind: AuthKind,
+}
+
 impl std::fmt::Debug for Credential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Secrets are redacted throughout (PRD FR4).

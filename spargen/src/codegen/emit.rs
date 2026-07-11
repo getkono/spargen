@@ -5,8 +5,8 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::ir::{
-    AdditionalProps, Api, ErrorShape, Field, MediaType, Operation, ParamLoc, Prim, ScalarRepr,
-    ScalarValue, SuccessShape, Ty, TypeDef, TypeKind,
+    AdditionalProps, Api, ApiKeyLoc, ErrorShape, Field, HttpScheme, MediaType, Operation, ParamLoc,
+    Prim, ScalarRepr, ScalarValue, SecurityScheme, SuccessShape, Ty, TypeDef, TypeKind,
 };
 use crate::name::Names;
 
@@ -41,7 +41,7 @@ pub(crate) fn emit_client(api: &Api, names: &Names) -> TokenStream {
     let methods = api
         .operations
         .iter()
-        .map(|operation| emit_operation(operation, names));
+        .map(|operation| emit_operation(operation, api, names));
     quote! {
         #(#params)*
         #(#errors)*
@@ -66,6 +66,19 @@ pub(crate) fn emit_client(api: &Api, names: &Names) -> TokenStream {
                 &self.core
             }
 
+            /// Register a credential for a named security scheme. Operations whose `security`
+            /// requirement cannot be satisfied by the registered credentials fail with a
+            /// request-construction error before anything is sent.
+            #[must_use]
+            pub fn with_credential(
+                mut self,
+                scheme: &str,
+                credential: support::Credential,
+            ) -> Self {
+                self.core.set_credential(scheme, credential);
+                self
+            }
+
             #(#methods)*
         }
     }
@@ -73,7 +86,7 @@ pub(crate) fn emit_client(api: &Api, names: &Names) -> TokenStream {
 
 /// Emit one operation method — a thin `#[inline]` shim over the non-generic `support` dispatch
 /// routines, so per-operation code stays tiny (PRD NFR2).
-pub(crate) fn emit_operation(operation: &Operation, names: &Names) -> TokenStream {
+pub(crate) fn emit_operation(operation: &Operation, api: &Api, names: &Names) -> TokenStream {
     let method_ident = names
         .operations
         .get(&operation.id)
@@ -182,6 +195,38 @@ pub(crate) fn emit_operation(operation: &Operation, names: &Names) -> TokenStrea
     } else {
         quote! { let request = request; }
     };
+    let attach_auth = if operation.security.is_empty() {
+        quote! {}
+    } else {
+        let alternatives = operation.security.iter().map(|requirement| {
+            let schemes = requirement.0.iter().map(|(id, _scopes)| {
+                let scheme = api
+                    .security_schemes
+                    .get(id)
+                    .expect("security scheme validated during lowering");
+                let name = &id.0;
+                let kind = match scheme {
+                    // Caller-supplied oauth2/oidc tokens attach as bearer credentials.
+                    SecurityScheme::Http(HttpScheme::Bearer)
+                    | SecurityScheme::OAuth2(_)
+                    | SecurityScheme::OpenIdConnect(_) => quote! { support::AuthKind::Bearer },
+                    SecurityScheme::Http(HttpScheme::Basic) => quote! { support::AuthKind::Basic },
+                    SecurityScheme::ApiKey { location, name } => match location {
+                        ApiKeyLoc::Header => quote! { support::AuthKind::ApiKeyHeader(#name) },
+                        ApiKeyLoc::Query => quote! { support::AuthKind::ApiKeyQuery(#name) },
+                        ApiKeyLoc::Cookie => quote! { support::AuthKind::ApiKeyCookie(#name) },
+                    },
+                };
+                quote! { support::AuthScheme { name: #name, kind: #kind } }
+            });
+            quote! { &[#(#schemes),*][..] }
+        });
+        quote! {
+            let request = support::attach_auth(&self.core, request, &[#(#alternatives),*])
+                .await
+                .map_err(support::Error::widen)?;
+        }
+    };
     let success_decode = match operation.responses.success() {
         SuccessShape::Unit => quote! {
             let status = response.status();
@@ -215,6 +260,7 @@ pub(crate) fn emit_operation(operation: &Operation, names: &Names) -> TokenStrea
                 .map_err(support::Error::widen)?;
             let request = self.core.http().request(#reqwest_method, url);
             #body_send
+            #attach_auth
             let request = request.build().map_err(support::Error::request_construction)?;
             let response = support::send(&self.core, request)
                 .await
@@ -296,9 +342,9 @@ pub(crate) fn emit_support() -> TokenStream {
         mod support {
             #(#modules)*
 
-            pub use auth::{AuthError, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
+            pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
-            pub use dispatch::{build_url, classify_error, decode_success, send};
+            pub use dispatch::{attach_auth, build_url, classify_error, decode_success, send};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use response::ResponseValue;
         }
