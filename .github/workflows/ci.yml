@@ -56,6 +56,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
 
+  package:
+    name: Package (self-contained)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Packages + runs an isolated verify build. Guards that the published .crate stays
+      # self-contained — the runtime sources reached via src/support/runtime/ symlinks must ship
+      # inside the crate and compile standalone.
+      - run: cargo publish --dry-run -p spargen
+
   corpus-smoke:
     name: Corpus smoke
     runs-on: ubuntu-latest
