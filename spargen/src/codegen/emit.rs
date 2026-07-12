@@ -612,7 +612,11 @@ fn emit_type_def(
             let additional = match &object.additional {
                 AdditionalProps::Typed(ty) => {
                     let ty = ty_tokens(**ty, names, options, false);
-                    quote! { #[serde(flatten)] pub additional: BTreeMap<String, #ty>, }
+                    let overflow = names
+                        .struct_overflow
+                        .get(&id)
+                        .expect("overflow field name allocated");
+                    quote! { #[serde(flatten)] pub #overflow: BTreeMap<String, #ty>, }
                 }
                 AdditionalProps::Allow | AdditionalProps::Deny => quote! {},
             };

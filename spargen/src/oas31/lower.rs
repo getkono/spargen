@@ -340,7 +340,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     self.insert_schema_type(schema, hint, TypeKind::Array(Box::new(item)))
                 }
             }
-            Some(JsonType::Object) | None if !schema.properties.is_empty() => {
+            Some(JsonType::Object) | None
+                if !schema.properties.is_empty() || !schema.pattern_properties.is_empty() =>
+            {
                 self.lower_object(schema, hint)?
             }
             Some(JsonType::Object) => self.lower_object(schema, hint)?,
@@ -367,26 +369,164 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 default,
             });
         }
-        let additional = match &schema.additional_properties {
-            Some(schema) => match schema.as_ref() {
-                SchemaOr::Bool(false) => AdditionalProps::Deny,
-                SchemaOr::Bool(true) => AdditionalProps::Allow,
-                schema => {
-                    let mut ty = self.lower_schema_or(schema, &format!("{hint}Additional"))?;
-                    self.warn_structural_default_or(schema, "an `additionalProperties` value");
-                    // A map value lives behind the map's own indirection; a cycle-closing ref here
-                    // needs no `Box`.
-                    ty.boxed = false;
-                    AdditionalProps::Typed(Box::new(ty))
-                }
-            },
-            None => AdditionalProps::Allow,
+        let additional = if schema.pattern_properties.is_empty() {
+            match &schema.additional_properties {
+                Some(schema) => match schema.as_ref() {
+                    SchemaOr::Bool(false) => AdditionalProps::Deny,
+                    SchemaOr::Bool(true) => AdditionalProps::Allow,
+                    schema => {
+                        let mut ty = self.lower_schema_or(schema, &format!("{hint}Additional"))?;
+                        self.warn_structural_default_or(schema, "an `additionalProperties` value");
+                        // A map value lives behind the map's own indirection; a cycle-closing ref
+                        // here needs no `Box`.
+                        ty.boxed = false;
+                        AdditionalProps::Typed(Box::new(ty))
+                    }
+                },
+                None => AdditionalProps::Allow,
+            }
+        } else {
+            self.lower_pattern_additional(schema, hint)?
         };
         Some(self.insert_schema_type(
             schema,
             hint,
             TypeKind::Struct(Struct { fields, additional }),
         ))
+    }
+
+    /// Lower the overflow policy for an object that declares `patternProperties`. The generated
+    /// struct captures every non-declared property into a single `#[serde(flatten)]` typed map, so
+    /// every `patternProperties` value schema — together with a typed `additionalProperties` value,
+    /// if any — must lower to the *same emitted Rust type*; otherwise a single map cannot type them.
+    ///
+    /// Homogeneity is decided by [`Self::same_map_value_type`], a bounded structural equivalence:
+    /// same `TypeId` (a shared `$ref`, or the single-entry case) is homogeneous, and distinct inline
+    /// leaf shapes (primitives, `Bytes`, `Any`, or arrays thereof) that emit the identical Rust type
+    /// collapse to one map — so `{type:string}` under two patterns yields one `BTreeMap<String,
+    /// String>`. Distinct inline composites (`Struct`/`Enum`/`Tuple`) stay heterogeneous and are
+    /// rejected (`E005`), since two different object shapes cannot share one map value type. The
+    /// first collected value type is used as the map's value type. Deterministic (graph lookups by
+    /// `TypeId`, source-order collection) and bounded (recurses only through `Array` elements).
+    fn lower_pattern_additional(&mut self, schema: &Schema, hint: &str) -> Option<AdditionalProps> {
+        // `additionalProperties: false` denies unknown keys, but the flatten map must capture the
+        // pattern-matched keys (which are themselves "unknown" to the named fields). Serde cannot do
+        // both, so this combination has no faithful representation.
+        if matches!(
+            schema.additional_properties.as_deref(),
+            Some(SchemaOr::Bool(false))
+        ) {
+            Diagnostic::error(Code::PatternPropertiesRejected, schema.provenance.clone())
+                .message(
+                    "`patternProperties` combined with `additionalProperties: false` cannot be \
+                     represented: a flatten map captures pattern values but cannot also deny other \
+                     unknown keys",
+                )
+                .remedy(
+                    "drop `additionalProperties: false`, or omit this API segment with \
+                     spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
+
+        // Collect the value types in deterministic source order: patternProperties entries first
+        // (IndexMap preserves source order), then a typed `additionalProperties` value if present.
+        let mut value_types: Vec<Ty> = Vec::new();
+        for (_pattern, child) in &schema.pattern_properties {
+            let ty = self.lower_schema_or(child, &format!("{hint}Value"))?;
+            self.warn_structural_default_or(child, "a `patternProperties` value");
+            value_types.push(ty);
+        }
+        if let Some(additional) = schema.additional_properties.as_deref() {
+            // `true`/absent leave unknown non-pattern keys unconstrained; the typed map still stands
+            // in for the overflow. Only a schema value adds another type that must agree.
+            if !matches!(additional, SchemaOr::Bool(_)) {
+                let ty = self.lower_schema_or(additional, &format!("{hint}Additional"))?;
+                self.warn_structural_default_or(additional, "an `additionalProperties` value");
+                value_types.push(ty);
+            }
+        }
+
+        let first = value_types[0];
+        if value_types
+            .iter()
+            .any(|ty| !self.same_map_value_type(first, *ty))
+        {
+            Diagnostic::error(Code::PatternPropertiesRejected, schema.provenance.clone())
+                .message(
+                    "`patternProperties`/`additionalProperties` value schemas lower to different \
+                     types; a single typed overflow map cannot represent them all",
+                )
+                .remedy(
+                    "make every pattern/additional value the same type (e.g. a shared `$ref` or the \
+                     same primitive), or omit this API segment with spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
+
+        let mut ty = first;
+        // A map value lives behind the map's own indirection; a cycle-closing ref needs no `Box`.
+        ty.boxed = false;
+        Some(AdditionalProps::Typed(Box::new(ty)))
+    }
+
+    /// Whether two lowered value types would emit the *same* Rust type as a shared map value, so
+    /// multiple `patternProperties`/`additionalProperties` values can collapse into one typed
+    /// overflow map. A bounded structural equivalence:
+    ///
+    /// * equal `TypeId` (with equal `nullable`) — a shared `$ref` or the single-entry case;
+    /// * otherwise, for distinct ids with equal `nullable`, compare the def kinds structurally but
+    ///   only for *leaf* shapes that have no per-inline-schema identity: `Primitive` (same `Prim`),
+    ///   `Bytes`, `Any`, and `Array` (recursing on the element). Composite kinds
+    ///   (`Struct`/`Enum`/`Tuple`) generate a distinct named Rust type per inline schema, so two
+    ///   such inline shapes are treated as heterogeneous (→ `E005`) rather than silently merged.
+    ///
+    /// `boxed` is deliberately ignored: it is a use-site indirection modifier, not part of the map
+    /// value's emitted type (the map value is never boxed).
+    ///
+    /// The `Array` recursion is *not* structurally bounded — array element types can form `$ref`
+    /// cycles (`A = [B]`, `B = [A]`) — so a visited-pair guard makes it terminate: an `(a.id, b.id)`
+    /// pair already on the comparison stack is a co-recursive back-edge and compares equal (the two
+    /// types are being compared identically along the cycle, so they are structurally equal there).
+    fn same_map_value_type(&self, a: Ty, b: Ty) -> bool {
+        self.same_map_value_type_guarded(a, b, &mut Vec::new())
+    }
+
+    fn same_map_value_type_guarded(
+        &self,
+        a: Ty,
+        b: Ty,
+        visiting: &mut Vec<(TypeId, TypeId)>,
+    ) -> bool {
+        if a.nullable != b.nullable {
+            return false;
+        }
+        if a.id == b.id {
+            return true;
+        }
+        let pair = (a.id, b.id);
+        if visiting.contains(&pair) {
+            // Co-recursive back-edge: the same pair is already being compared further up the stack.
+            // Along a cycle the two types are compared identically, so they are structurally equal.
+            return true;
+        }
+        visiting.push(pair);
+        let result = match (self.graph.get(a.id), self.graph.get(b.id)) {
+            (Some(a_def), Some(b_def)) => match (&a_def.kind, &b_def.kind) {
+                (TypeKind::Primitive(x), TypeKind::Primitive(y)) => x == y,
+                (TypeKind::Bytes, TypeKind::Bytes) => true,
+                (TypeKind::Any, TypeKind::Any) => true,
+                (TypeKind::Array(x), TypeKind::Array(y)) => {
+                    self.same_map_value_type_guarded(**x, **y, visiting)
+                }
+                _ => false,
+            },
+            _ => false,
+        };
+        visiting.pop();
+        result
     }
 
     /// Give a property's `default` its single explicit disposition. Returns `None` when the

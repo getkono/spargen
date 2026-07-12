@@ -23,7 +23,8 @@ pub enum Code {
     UnresolvedRef,
     /// A validation-only keyword (`pattern`, `minimum`, …) was ignored (W-class).
     ValidationKeywordIgnored,
-    /// `patternProperties` is not represented in generated types (matrix: Schema shape → R).
+    /// `patternProperties` cannot be represented as a typed overflow map — heterogeneous value
+    /// types, or combined with `additionalProperties: false` (matrix: Schema shape → R).
     PatternPropertiesRejected,
     /// `$dynamicRef`/`$dynamicAnchor` are rejected (matrix: Schema shape → R).
     DynamicRefRejected,
@@ -108,7 +109,7 @@ impl Code {
             Code::AbsoluteRefUnsupported => "absolute $ref unsupported",
             Code::UnresolvedRef => "unresolved $ref",
             Code::ValidationKeywordIgnored => "validation-only keyword ignored",
-            Code::PatternPropertiesRejected => "patternProperties unsupported",
+            Code::PatternPropertiesRejected => "patternProperties not representable as a typed map",
             Code::DynamicRefRejected => "dynamic reference unsupported",
             Code::NonDisjointUnion => "union variants are not disjoint",
             Code::NonScalarEnum => "enum values are not homogeneous scalars",
@@ -146,7 +147,7 @@ impl Code {
                 "The keyword affects runtime validation but not the static Rust shape. Spargen records a warning and generates the shape."
             }
             Code::PatternPropertiesRejected => {
-                "`patternProperties` changes object shape in a way Spargen does not represent yet. Use explicit properties or omit this API segment."
+                "`patternProperties` is represented as a typed overflow map (`#[serde(flatten)]`) when every pattern value schema — and any typed `additionalProperties` value — lowers to the same type; the key regex itself is validation-only and reported as `W001`. It is rejected only when a faithful map is impossible: heterogeneous value types (which one map cannot type), or a combination with `additionalProperties: false` (a flatten map cannot both capture pattern values and deny other unknown keys)."
             }
             Code::DynamicRefRejected => {
                 "`$dynamicRef` and `$dynamicAnchor` require dynamic schema-scope evaluation and are rejected."

@@ -55,6 +55,17 @@ fn absent_optional_fields_use_schema_defaults() {
     assert_eq!(settings.retries, 7);
     assert_eq!(settings.mode, Some(basic_client::types::Mode::Auto));
 }
+
+#[test]
+fn pattern_properties_capture_into_typed_overflow_map() {
+    // The declared `host` field is typed; every non-declared property is captured by the flatten
+    // `BTreeMap<String, String>` overflow that `patternProperties` lowered to.
+    let headers: basic_client::types::Headers =
+        serde_json::from_str(r#"{"host": "h", "x-a": "1", "x-b": "2"}"#).unwrap();
+    assert_eq!(headers.host.as_deref(), Some("h"));
+    assert_eq!(headers.additional.get("x-a").map(String::as_str), Some("1"));
+    assert_eq!(headers.additional.get("x-b").map(String::as_str), Some("2"));
+}
 "##,
     )
     .unwrap();
@@ -240,6 +251,31 @@ components:
         mode:
           $ref: "#/components/schemas/Mode"
           default: auto
+    # `patternProperties` composed with an explicit property: the declared `host` field plus a typed
+    # overflow map (`#[serde(flatten)] BTreeMap<String, String>`) for the pattern-matched keys. The
+    # key regex is validation-only (W001) and not enforced by the map.
+    Headers:
+      type: object
+      properties:
+        host:
+          type: string
+      patternProperties:
+        "^x-": { type: string }
+    # Object-ness comes *only* from `patternProperties` (no `type`, no `properties`): still a struct
+    # with empty fields and a typed overflow map, not an untyped `Any`.
+    Tags:
+      patternProperties:
+        "^tag-": { type: string }
+    # A declared property literally named `additional` alongside a typed overflow map: the synthetic
+    # flatten field must be allocated in the field scope and disambiguated, or two `pub additional:`
+    # fields would collide and the generated crate would fail to compile.
+    Bag:
+      type: object
+      properties:
+        additional:
+          type: string
+      patternProperties:
+        "^x-": { type: integer }
 "##;
 
 const SPEC_WITH_UNSUPPORTED_OPERATION: &str = r#"

@@ -48,7 +48,102 @@ paths: {}
 }
 
 #[test]
-fn e005_pattern_properties_rejected() {
+fn pattern_properties_lowers_to_typed_map_with_w001() {
+    // A representable `patternProperties` now GENERATES a typed overflow map instead of being
+    // rejected. Two inline `{type: string}` value schemas under different patterns collapse to one
+    // `BTreeMap<String, String>` (bounded structural equivalence over leaf primitives). The key
+    // regexes are validation-only and acknowledged as `W001`, never silently dropped.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Thing:
+      type: object
+      patternProperties:
+        "^x-": { type: string }
+        "^y-": { type: string }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::PatternPropertiesRejected),
+        "{report:#?}"
+    );
+    assert!(
+        has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+    // check/generate parity: the same disposition is reached without emitting.
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        has_code(&checked, Code::ValidationKeywordIgnored),
+        "{checked:#?}"
+    );
+}
+
+#[test]
+fn pattern_properties_cyclic_array_values_terminate() {
+    // Mutually-recursive array value schemas (`A = [B]`, `B = [A]`) form a cycle in the structural
+    // homogeneity comparison. The visited-pair guard must terminate (return an outcome, never abort
+    // with a stack overflow) and, since both patterns lower to the same array type, GENERATE one
+    // typed overflow map. The check/generate parity assertion catches a regression that reintroduces
+    // the crash.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    A: { type: array, items: { $ref: "#/components/schemas/B" } }
+    B: { type: array, items: { $ref: "#/components/schemas/A" } }
+    Thing:
+      type: object
+      patternProperties:
+        "^a-": { $ref: "#/components/schemas/A" }
+        "^b-": { $ref: "#/components/schemas/B" }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::PatternPropertiesRejected),
+        "{report:#?}"
+    );
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn e005_pattern_properties_heterogeneous_rejected() {
+    // Two pattern value schemas that lower to different types cannot share one typed map → E005.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    A: { type: string }
+    B: { type: integer }
+    Thing:
+      type: object
+      patternProperties:
+        "^s-": { $ref: "#/components/schemas/A" }
+        "^i-": { $ref: "#/components/schemas/B" }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::PatternPropertiesRejected));
+    // check/generate parity: the rejection fires in `check` too.
+    let checked = check(spec);
+    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::PatternPropertiesRejected));
+}
+
+#[test]
+fn e005_pattern_properties_with_deny_rejected() {
+    // `patternProperties` + `additionalProperties: false` cannot be faithfully represented → E005.
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -58,6 +153,7 @@ components:
   schemas:
     Thing:
       type: object
+      additionalProperties: false
       patternProperties:
         "^x-": { type: string }
 "##,

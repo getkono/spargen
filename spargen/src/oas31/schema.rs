@@ -19,6 +19,9 @@ pub struct Schema {
     pub required: Vec<String>,
     /// `additionalProperties`.
     pub additional_properties: Option<Box<SchemaOr>>,
+    /// `patternProperties`: key-regex → value schema. Lowering composes the value schemas into the
+    /// object's typed overflow map (the key regex itself is validation-only and surfaced as `W001`).
+    pub pattern_properties: IndexMap<String, SchemaOr>,
     /// `items`.
     pub items: Option<Box<SchemaOr>>,
     /// `prefixItems`.

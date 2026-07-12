@@ -9,7 +9,7 @@ the library API.
 | `E002` | Error | unsupported JSON Schema dialect |
 | `E003` | Error | absolute `$ref` unsupported |
 | `E004` | Error | unresolved `$ref` |
-| `E005` | Error | `patternProperties` unsupported |
+| `E005` | Error | `patternProperties` not representable as a typed map |
 | `E006` | Error | dynamic reference unsupported |
 | `E007` | Error | union variants are not disjoint |
 | `E008` | Error | enum values are not homogeneous scalars |

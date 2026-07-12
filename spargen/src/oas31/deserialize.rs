@@ -499,17 +499,6 @@ fn parse_schema_or(
     }
     let map = object(value, pointer, diags)?;
 
-    if map.get("patternProperties").is_some() {
-        Diagnostic::error(
-            Code::PatternPropertiesRejected,
-            provenance(
-                &pointer.push("patternProperties"),
-                map.get("patternProperties").unwrap(),
-            ),
-        )
-        .message("patternProperties is not represented in generated Rust types")
-        .emit(diags);
-    }
     if map.get("$dynamicRef").is_some() || map.get("$dynamicAnchor").is_some() {
         Diagnostic::error(Code::DynamicRefRejected, provenance(pointer, value))
             .message("$dynamicRef and $dynamicAnchor require dynamic schema scope evaluation")
@@ -543,6 +532,23 @@ fn parse_schema_or(
         additional_properties: map.get("additionalProperties").and_then(|value| {
             parse_schema_or(value, &pointer.push("additionalProperties"), diags).map(Box::new)
         }),
+        pattern_properties: map
+            .get("patternProperties")
+            .and_then(SpannedValue::as_object)
+            .map(|patterns| {
+                patterns
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        parse_schema_or(
+                            value,
+                            &pointer.push("patternProperties").push(&key.name),
+                            diags,
+                        )
+                        .map(|schema| (key.name.clone(), schema))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         items: map
             .get("items")
             .and_then(|value| parse_schema_or(value, &pointer.push("items"), diags).map(Box::new)),
