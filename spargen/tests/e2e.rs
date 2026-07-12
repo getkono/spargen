@@ -218,6 +218,26 @@ fn multi_status_response_enums_carry_typed_variants() {
         other => panic!("expected Status409, got {other:?}"),
     }
 }
+
+#[test]
+fn multipart_body_struct_has_typed_form_part_fields() {
+    // Issue #12: the multipart/form-data body lowered to a typed struct whose fields are the form
+    // parts. The binary `file` part is `bytes::Bytes` (its `serde` impls compile only because the
+    // synthesized Cargo.toml enabled bytes' `serde` feature), `caption` a required `String`, and the
+    // optional `count`/`tags` are `Option`. Constructing the value proves the field types; the
+    // generated `upload_file` method (compiled here) builds the `reqwest::multipart::Form` from it,
+    // which compiles only with reqwest's `multipart` feature enabled.
+    let body = basic_client::types::RequestBody {
+        file: bytes::Bytes::from_static(b"hello"),
+        caption: "a caption".to_owned(),
+        count: Some(3),
+        tags: Some(vec!["x".to_owned(), "y".to_owned()]),
+    };
+    assert_eq!(&body.file[..], b"hello");
+    assert_eq!(body.caption, "a caption");
+    assert_eq!(body.count, Some(3));
+    assert_eq!(body.tags.as_deref(), Some(&["x".to_owned(), "y".to_owned()][..]));
+}
 "##,
     )
     .unwrap();
@@ -351,6 +371,73 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
+  # multipart/form-data request body (Issue #12): the body is an object whose properties are the form
+  # parts. `file` is `format: binary` → a `bytes::Bytes` file part; `caption` a required text part;
+  # `count` an optional scalar text part; `tags` an optional array → a JSON-encoded text part. The
+  # generated method builds a `reqwest::multipart::Form` (compile-verifies the multipart emit AND that
+  # the synthesized Cargo.toml enabled reqwest's `multipart` feature and bytes' `serde` feature).
+  /upload:
+    post:
+      operationId: uploadFile
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, caption]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                caption:
+                  type: string
+                count:
+                  type: integer
+                tags:
+                  type: array
+                  items:
+                    type: string
+      responses:
+        "204":
+          description: No Content
+  # Binary in parameter / non-multipart body positions (Issue #12 regression guard): `format: binary`
+  # on a param has no faithful byte rendering, so it is represented as `String` (remapped) and stays
+  # renderable via `to_string()`; a `format: binary` text/plain body lowers to `bytes::Bytes` and is
+  # sent as a raw byte body (`request.body(body.clone())`), never `.to_string()` (`Bytes: !Display`).
+  # Compile-verified: without the fixes these positions generate with zero diagnostics yet fail to
+  # compile (the forbidden silent non-compile).
+  /blob/{token}:
+    get:
+      operationId: getBlob
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+            format: binary
+        - name: cursor
+          in: query
+          schema:
+            type: string
+            format: binary
+      responses:
+        "204":
+          description: No Content
+  /raw:
+    post:
+      operationId: postRaw
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "204":
+          description: No Content
 components:
   securitySchemes:
     bearer:

@@ -1,7 +1,7 @@
 use super::Ty;
 
-/// A supported request/response media type. Other media types (XML, multipart) are
-/// R-rejected in the frontend.
+/// A supported request/response media type. Other media types (e.g. XML) are R-rejected in the
+/// frontend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaType {
     /// `application/json` (canonical).
@@ -12,6 +12,9 @@ pub enum MediaType {
     OctetStream,
     /// `text/plain`.
     TextPlain,
+    /// `multipart/form-data` (request bodies): an object schema whose properties are the form
+    /// parts — binary/bytes properties become file parts, scalars/composites become text parts.
+    Multipart,
 }
 
 /// A request body (matrix: Bodies).

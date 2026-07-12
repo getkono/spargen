@@ -252,22 +252,28 @@ pub(crate) fn emit_operation(
             }
         }
     });
-    let body_send = if operation
+    let body_send = if let Some((ty, media)) = operation
         .request_body
         .as_ref()
-        .and_then(|body| body.ty)
-        .is_some()
+        .and_then(|body| body.ty.map(|ty| (ty, body.media)))
     {
-        match operation
-            .request_body
-            .as_ref()
-            .map(|body| body.media)
-            .unwrap_or(MediaType::Json)
-        {
-            MediaType::Json => quote! { request = request.json(body); },
-            MediaType::FormUrlEncoded => quote! { request = request.form(body); },
-            MediaType::TextPlain => quote! { request = request.body(body.to_string()); },
-            MediaType::OctetStream => quote! { request = request.body(body.clone()); },
+        // A raw byte body (`bytes::Bytes`, from `format: binary` / `contentEncoding: base64`) is sent
+        // as-is regardless of the declared media — `Bytes` is not `Display`, so it can never go
+        // through `.to_string()`. This must be checked before the media match so a `text/plain` (or
+        // any) media over a `Bytes` schema does not miscompile.
+        if matches!(
+            api.types.get(ty.id).map(|def| &def.kind),
+            Some(TypeKind::Bytes)
+        ) {
+            quote! { request = request.body(body.clone()); }
+        } else {
+            match media {
+                MediaType::Json => quote! { request = request.json(body); },
+                MediaType::FormUrlEncoded => quote! { request = request.form(body); },
+                MediaType::TextPlain => quote! { request = request.body(body.to_string()); },
+                MediaType::OctetStream => quote! { request = request.body(body.clone()); },
+                MediaType::Multipart => emit_multipart_body(ty, api, names),
+            }
         }
     } else {
         quote! {}
@@ -502,6 +508,65 @@ pub(crate) fn emit_operation(
                 #error_branch
             }
         }
+    }
+}
+
+/// Emit the `body_send` for a `multipart/form-data` request body: build a `reqwest::multipart::Form`
+/// from the typed body struct, one part per field in declaration order (part order is deterministic).
+/// A binary field (`bytes::Bytes`) becomes a file/bytes part; a scalar becomes a text part via
+/// `Display`; an object/array/union becomes a JSON-encoded text part. Optional fields (`Option<T>`)
+/// only add their part when `Some`. Lowering guarantees a multipart body is an object schema, so a
+/// non-struct body cannot reach here (it is rejected as `E009`); the fallback stays a no-op.
+fn emit_multipart_body(ty: Ty, api: &Api, names: &Names) -> TokenStream {
+    let Some(TypeKind::Struct(object)) = api.types.get(ty.id).map(|def| &def.kind) else {
+        return quote! {};
+    };
+    let parts = object.fields.iter().map(|field| {
+        let wire = &field.name.wire;
+        let field_ident = names
+            .fields
+            .get(&(ty.id, field.name.wire.clone()))
+            .expect("multipart body field name allocated");
+        // A field is accessed as `Option<T>` when it is optional (an extra `Option` wrapper) or the
+        // schema itself is nullable (`ty_tokens` already wrapped it) — mirroring `emit_field`.
+        let optional = !field.required || field.ty.nullable;
+        let kind = api.types.get(field.ty.id).map(|def| &def.kind);
+        // `receiver` is the value for method calls (`.to_vec()`/`.to_string()` auto-ref); `reference`
+        // is an explicit `&value` for `serde_json::to_string`, which takes `&T`. Splitting them keeps
+        // the emitted code free of `clippy::needless_borrow` on the method-call receivers.
+        let add_part = |receiver: &TokenStream, reference: &TokenStream| match kind {
+            // A binary/bytes property → a file/bytes part carrying the raw bytes.
+            Some(TypeKind::Bytes) => quote! {
+                form = form.part(#wire, reqwest::multipart::Part::bytes(#receiver.to_vec()));
+            },
+            // A scalar property → a text part rendered through `Display`.
+            Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {
+                form = form.text(#wire, #receiver.to_string());
+            },
+            // Any composite (object/array/tuple/union/untyped) property → a JSON-encoded text part.
+            _ => quote! {
+                form = form.text(
+                    #wire,
+                    serde_json::to_string(#reference).map_err(support::Error::request_construction)?,
+                );
+            },
+        };
+        if optional {
+            // `value` is already `&T` from the `if let Some(value) = &body.field` binding.
+            let stmt = add_part(&quote! { value }, &quote! { value });
+            quote! {
+                if let Some(value) = &body.#field_ident {
+                    #stmt
+                }
+            }
+        } else {
+            add_part(&quote! { body.#field_ident }, &quote! { &body.#field_ident })
+        }
+    });
+    quote! {
+        let mut form = reqwest::multipart::Form::new();
+        #(#parts)*
+        request = request.multipart(form);
     }
 }
 

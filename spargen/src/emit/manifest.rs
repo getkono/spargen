@@ -13,6 +13,19 @@ pub fn synth_cargo_toml(package: &PackageMeta, features: &FeatureSet) -> String 
         (false, true) => r#""time""#,
         (false, false) => "",
     };
+    // reqwest's `multipart` feature is added only when a `multipart/form-data` body is emitted, and
+    // `bytes`'s `serde` feature only when a `bytes::Bytes` struct field is emitted — both derived
+    // from the API so the manifest is deterministic and minimal.
+    let bytes_dep = if features.bytes_serde {
+        r#"bytes = { version = "1", features = ["serde"] }"#
+    } else {
+        r#"bytes = "1""#
+    };
+    let reqwest_features = if features.multipart {
+        r#""json", "multipart""#
+    } else {
+        r#""json""#
+    };
     format!(
         r#"[package]
 name = "{name}"
@@ -26,8 +39,8 @@ uuid = ["dep:uuid"]
 time = ["dep:time"]
 
 [dependencies]
-bytes = "1"
-reqwest = {{ version = "0.12", default-features = false, features = ["json"] }}
+{bytes_dep}
+reqwest = {{ version = "0.12", default-features = false, features = [{reqwest_features}] }}
 secrecy = "0.10"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"

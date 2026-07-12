@@ -250,6 +250,21 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
         features: emit::FeatureSet {
             uuid: config.features.uuid,
             time: config.features.time,
+            // Derived from the API so the synthesized manifest carries exactly the extra
+            // reqwest/bytes features the emitted code needs (deterministic, minimal).
+            multipart: api.operations.iter().any(|operation| {
+                operation
+                    .request_body
+                    .as_ref()
+                    .is_some_and(|body| body.media == ir::MediaType::Multipart)
+            }),
+            bytes_serde: api.types.iter().any(|(_, def)| {
+                matches!(&def.kind, ir::TypeKind::Struct(object)
+                if object.fields.iter().any(|field| matches!(
+                    api.types.get(field.ty.id).map(|def| &def.kind),
+                    Some(ir::TypeKind::Bytes)
+                )))
+            }),
         },
         spec: emit::SpecMeta {
             source: if config.omit.is_empty() {

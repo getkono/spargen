@@ -545,6 +545,113 @@ paths:
 }
 
 #[test]
+fn multipart_form_data_request_body_generates() {
+    // A `multipart/form-data` request body whose schema is an object (a file part + a text part) is
+    // now supported: it generates without E009 firing. check/generate stay in parity.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                caption:
+                  type: string
+      responses:
+        "204": { description: No Content }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        !has_code(&checked, Code::UnsupportedMediaType),
+        "{checked:#?}"
+    );
+}
+
+#[test]
+fn e009_multipart_non_object_body_rejected() {
+    // A `multipart/form-data` body whose schema is NOT an object has no properties to enumerate as
+    // form parts, so it stays rejected with the (narrowed) E009.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType));
+}
+
+#[test]
+fn binary_format_in_param_and_text_body_positions_generate() {
+    // Regression guard for `format: binary` → `bytes::Bytes` in positions rendered as strings: a
+    // binary PATH param, a binary QUERY param, and a `text/plain` body of `format: binary` must all
+    // generate cleanly (the e2e suite compile-verifies they do not silently miscompile). `Bytes` is
+    // not `Display`; params are remapped to `String` and a Bytes body is sent raw, never `.to_string`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /blob/{token}:
+    get:
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema: { type: string, format: binary }
+        - name: cursor
+          in: query
+          schema: { type: string, format: binary }
+      responses:
+        "204": { description: No Content }
+  /raw:
+    post:
+      requestBody:
+        required: true
+        content:
+          text/plain:
+            schema: { type: string, format: binary }
+      responses:
+        "204": { description: No Content }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
 fn e010_unsupported_parameter_style() {
     let report = generate(
         r##"

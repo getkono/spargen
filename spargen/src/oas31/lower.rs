@@ -266,7 +266,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.lower_enum(std::slice::from_ref(value), schema, hint);
         }
 
-        if schema.content_encoding.as_deref() == Some("base64") {
+        // A binary payload — `contentEncoding: base64` or `format: binary` (the OpenAPI file/upload
+        // marker) — lowers to raw `bytes::Bytes` rather than a `String`, so a multipart file part
+        // carries bytes and a byte body is not misdecoded as UTF-8.
+        if schema.content_encoding.as_deref() == Some("base64")
+            || schema.format.as_deref() == Some("binary")
+        {
             return Some(self.insert_schema_type(schema, hint, TypeKind::Bytes));
         }
 
@@ -1275,6 +1280,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(ty)
     }
 
+    /// A parameter is always rendered to a wire string — path/query/header/cookie interpolation or a
+    /// serialized content value — and `bytes::Bytes` (from `format: binary` / `contentEncoding:
+    /// base64`) is not `Display` and has no faithful string rendering. `format: binary` on a
+    /// parameter is conventionally just an opaque string, so a parameter whose type lowered to raw
+    /// bytes is represented as a plain `String` instead — keeping the parameter renderable and
+    /// matching the pre-`Bytes` behavior. Body/multipart binary lowering is unaffected.
+    fn remap_binary_param(&mut self, ty: Ty, hint: &str) -> Ty {
+        if matches!(
+            self.graph.get(ty.id).map(|def| &def.kind),
+            Some(TypeKind::Bytes)
+        ) {
+            let mut remapped = self.insert_type(
+                hint,
+                TypeKind::Primitive(Prim::String),
+                Docs::default(),
+                None,
+            );
+            remapped.nullable = ty.nullable;
+            remapped
+        } else {
+            ty
+        }
+    }
+
     fn lower_parameter(&mut self, parameter: &ParameterObject) -> Option<Parameter> {
         let location = match parameter.location.as_str() {
             "path" => ParamLoc::Path,
@@ -1309,13 +1338,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         };
         let ty = if let Some(schema) = &parameter.schema {
-            self.lower_schema_ref(schema, &parameter.name)?
+            let ty = self.lower_schema_ref(schema, &parameter.name)?;
+            self.remap_binary_param(ty, &parameter.name)
         } else if let Some((media, object)) = parameter.content.iter().next() {
             let media = lower_media_type(media, &parameter.provenance, self.diags)?;
             let ty = object
                 .schema
                 .as_ref()
                 .and_then(|schema| self.lower_schema_ref(schema, &parameter.name))?;
+            let ty = self.remap_binary_param(ty, &parameter.name);
             let default_display = self.param_default_display(object.schema.as_ref(), ty);
             return Some(Parameter {
                 name: parameter.name.clone(),
@@ -1355,6 +1386,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .and_then(|schema| self.lower_schema_ref(schema, "RequestBody"));
         if let Some(schema) = object.schema.as_ref() {
             self.warn_structural_default_ref(schema, "a request body schema");
+        }
+        // A `multipart/form-data` body is emitted as a `reqwest::multipart::Form` whose parts are the
+        // fields of an object schema. A concrete non-object type (or a multipart body with no schema
+        // at all) has no fields to enumerate as parts, so it stays unsupported (`E009`, narrowed)
+        // rather than silently degrade. A schema that *failed* to lower for its own reason (`ty` is
+        // `None` though a schema was declared) has already emitted that diagnostic — don't pile a
+        // misleading "must be an object" E009 on top of it.
+        if media == MediaType::Multipart {
+            let is_struct = matches!(
+                ty.and_then(|ty| self.graph.get(ty.id)).map(|def| &def.kind),
+                Some(TypeKind::Struct(_))
+            );
+            let schema_failed_to_lower = object.schema.is_some() && ty.is_none();
+            if !is_struct && !schema_failed_to_lower {
+                Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                    .message(
+                        "a `multipart/form-data` request body must be an object schema; its \
+                         properties are the form parts, so a non-object multipart body is not \
+                         representable",
+                    )
+                    .remedy(
+                        "give the multipart body an object schema with a property per form part, \
+                         or omit this API segment with spargen::omit!",
+                    )
+                    .emit(self.diags);
+            }
         }
         Some(RequestBody { media, ty })
     }
@@ -1551,6 +1608,7 @@ fn lower_media_type(
         "application/x-www-form-urlencoded" => MediaType::FormUrlEncoded,
         "application/octet-stream" => MediaType::OctetStream,
         "text/plain" => MediaType::TextPlain,
+        "multipart/form-data" => MediaType::Multipart,
         other => {
             Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
                 .message(format!("media type `{other}` is not supported"))
@@ -1570,6 +1628,9 @@ fn choose_media<'a, T>(
     }
     for preferred in [
         "application/json",
+        // Multipart ranks after JSON — a JSON alternative still wins when both are offered — but
+        // before the remaining single-value media so a documented file-upload body is generated.
+        "multipart/form-data",
         "application/x-www-form-urlencoded",
         "application/octet-stream",
         "text/plain",

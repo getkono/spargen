@@ -157,7 +157,7 @@ impl Code {
                 "Enums and const values must be homogeneous scalar sets. A `null` member (or `\"null\"` in the schema's type array) is allowed: it is stripped and makes the generated type nullable (`Option<Enum>`), and a value set of only `null` lowers to a nullable untyped value. Sets that mix distinct scalar kinds (e.g. a string with an integer) or that contain object/array members are rejected."
             }
             Code::UnsupportedMediaType => {
-                "Only application/json, application/x-www-form-urlencoded, application/octet-stream, and text/plain are currently generated."
+                "Only application/json, application/x-www-form-urlencoded, application/octet-stream, text/plain, and multipart/form-data (request bodies) are currently generated. A multipart/form-data body must be an object schema — its properties become the form parts (a binary/bytes property is a file part, a scalar or composite becomes a text part) — so a non-object multipart body is rejected here."
             }
             Code::UnsupportedParameterStyle => {
                 "Only simple/form styles and JSON content-typed parameters are generated. Deep object, pipe-delimited, and space-delimited styles are rejected."
