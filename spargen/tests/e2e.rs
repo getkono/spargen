@@ -180,6 +180,44 @@ fn disjoint_union_round_trips_without_wrapper() {
         serde_json::from_str(r#"["a","b"]"#).unwrap();
     assert_eq!(serde_json::to_string(&list).unwrap(), r#"["a","b"]"#);
 }
+
+#[test]
+fn multi_status_response_enums_carry_typed_variants() {
+    // Issue #10: the two success statuses lowered to a `GetMultiResponse` enum and the two error
+    // statuses to a `GetMultiError` enum, each variant carrying that status's typed body. The
+    // variants deserialize their bodies (the same `serde_json::from_slice` the generated dispatch
+    // runs after selecting by HTTP status), proving the types are real and payload-carrying — not
+    // `serde_json::Value`.
+    let ok: basic_client::types::MultiOk = serde_json::from_str(r#"{"ok":"yes"}"#).unwrap();
+    match basic_client::GetMultiResponse::Status200(ok) {
+        basic_client::GetMultiResponse::Status200(body) => assert_eq!(body.ok, "yes"),
+        other => panic!("expected Status200, got {other:?}"),
+    }
+    let created: basic_client::types::MultiCreated =
+        serde_json::from_str(r#"{"id":7}"#).unwrap();
+    match basic_client::GetMultiResponse::Status201(created) {
+        basic_client::GetMultiResponse::Status201(body) => assert_eq!(body.id, 7),
+        other => panic!("expected Status201, got {other:?}"),
+    }
+    // The documented bodyless 204 is a payload-free unit variant (carries no body).
+    assert!(matches!(
+        basic_client::GetMultiResponse::Status204,
+        basic_client::GetMultiResponse::Status204
+    ));
+
+    let not_found: basic_client::types::NotFoundError =
+        serde_json::from_str(r#"{"reason":"gone"}"#).unwrap();
+    match basic_client::GetMultiError::Status404(not_found) {
+        basic_client::GetMultiError::Status404(body) => assert_eq!(body.reason, "gone"),
+        other => panic!("expected Status404, got {other:?}"),
+    }
+    let conflict: basic_client::types::ConflictError =
+        serde_json::from_str(r#"{"detail":"dup"}"#).unwrap();
+    match basic_client::GetMultiError::Status409(conflict) {
+        basic_client::GetMultiError::Status409(body) => assert_eq!(body.detail, "dup"),
+        other => panic!("expected Status409, got {other:?}"),
+    }
+}
 "##,
     )
     .unwrap();
@@ -277,6 +315,42 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/User"
+  # Multi-status responses (Issue #10): TWO success statuses (200/201) with different bodies lower
+  # to a typed `GetMultiResponse` enum, and TWO error statuses (404/409) with different bodies to a
+  # typed `GetMultiError` enum — no `serde_json::Value`, no `serde(untagged)`. Decode dispatches by
+  # HTTP status. Here we compile-verify the enums and construct/deserialize their variants.
+  /multi:
+    get:
+      operationId: getMulti
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiCreated"
+        # A documented bodyless success alongside 2+ bodied successes → a payload-free unit variant
+        # (Issue #10 follow-up): not silently dropped, decoded without reading a body.
+        "204":
+          description: No Content
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
 components:
   securitySchemes:
     bearer:
@@ -495,6 +569,31 @@ components:
           properties:
             label:
               type: string
+    # Distinct bodies for the multi-status `getMulti` operation (Issue #10).
+    MultiOk:
+      type: object
+      required: [ok]
+      properties:
+        ok:
+          type: string
+    MultiCreated:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: integer
+    NotFoundError:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+    ConflictError:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
 "##;
 
 const SPEC_WITH_UNSUPPORTED_OPERATION: &str = r#"

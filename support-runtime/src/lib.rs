@@ -33,7 +33,8 @@ pub use auth::{
 };
 pub use client::{ClientConfig, ClientCore};
 pub use dispatch::{
-    attach_auth, build_url, classify_error, decode_success, send, unexpected_status, StatusSpec,
+    attach_auth, build_url, classify_error, decode_success, read_error_body, read_success_body,
+    send, unexpected_status, StatusSpec,
 };
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
 pub use response::ResponseValue;

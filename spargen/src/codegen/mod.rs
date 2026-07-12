@@ -10,8 +10,8 @@ mod format;
 
 use camino::Utf8PathBuf;
 
-use crate::diag::{Code, Diagnostic, Diagnostics};
-use crate::ir::{Api, ErrorShape, SuccessShape};
+use crate::diag::Diagnostics;
+use crate::ir::Api;
 use crate::name::Names;
 use quote::quote;
 
@@ -59,32 +59,17 @@ pub struct GeneratedCode {
 /// Generate the Rust source for a client from the IR and allocated names.
 ///
 /// Output is deterministic: item ordering does not depend on input map ordering, so checked-in code
-/// produces stable diffs. Any codegen-time diagnostic flows through `diags`.
+/// produces stable diffs. `diags` is retained for any future codegen-time diagnostic; codegen emits
+/// none today (every spec construct is decided during lowering).
 pub fn generate(
     api: &Api,
     names: &Names,
     options: &CodegenOptions,
     diags: &mut Diagnostics,
 ) -> GeneratedCode {
-    for operation in &api.operations {
-        let degraded = match operation.responses.success() {
-            SuccessShape::Enum => Some("success"),
-            _ => match operation.responses.error() {
-                ErrorShape::Enum => Some("error"),
-                _ => None,
-            },
-        };
-        if let Some(kind) = degraded {
-            Diagnostic::warning(Code::ResponseDegradedToValue, operation.provenance.clone())
-                .message(format!(
-                    "operation `{}` documents multiple {kind} bodies; the {kind} type is \
-                     generated as serde_json::Value",
-                    operation.id.0
-                ))
-                .remedy("restructure the responses, or omit the operation with spargen::omit!")
-                .emit(diags);
-        }
-    }
+    // Codegen emits no diagnostics of its own: multi-status responses are now lowered to typed
+    // per-operation response enums rather than degraded (the retired W003).
+    let _ = diags;
     let support = emit::emit_support();
     let models = emit::emit_models(api, names, options);
     let client = emit::emit_client(api, names, options);

@@ -166,6 +166,34 @@ where
     Ok(ResponseValue::new(status, headers, value))
 }
 
+/// Read a success response body whole, returning its status, headers, and raw bytes so generated
+/// code can select the matching per-status variant and decode it. Non-generic: the per-variant
+/// `serde_json::from_slice` (and the error taxonomy on failure) stays in the thin generated shim,
+/// which owns the status→variant table and its distinct body types.
+pub async fn read_success_body(
+    response: Response,
+) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Bytes), Error<Infallible>> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.bytes().await.map_err(Error::from_reqwest)?;
+    Ok((status, headers, body))
+}
+
+/// Read a non-success response body capped at `max_error_body`, returning its status, headers, the
+/// (capped) bytes, and whether they were truncated. Generated code for a multi-status error enum
+/// picks the documented variant by status and decodes it (→ [`Error::Api`], or [`Error::Decode`] on
+/// parse failure); a status matching no documented selector becomes [`Error::UnexpectedStatus`].
+/// The `E` parameter only threads the taxonomy through a transport failure while reading.
+pub async fn read_error_body<E>(
+    core: &ClientCore,
+    response: Response,
+) -> Result<(reqwest::StatusCode, reqwest::header::HeaderMap, Bytes, bool), Error<E>> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let (body, truncated) = read_capped(core, response).await?;
+    Ok((status, headers, body, truncated))
+}
+
 /// A status selector an operation documents as an error response. Generated code passes these as
 /// static tables so classification distinguishes documented from undocumented statuses.
 #[derive(Debug, Clone, Copy)]
@@ -455,5 +483,224 @@ mod tests {
 
         assert!(StatusSpec::Any.matches(StatusCode::OK));
         assert!(StatusSpec::Any.matches(StatusCode::IM_A_TEAPOT));
+    }
+
+    use std::convert::Infallible;
+
+    use super::{read_error_body, read_success_body};
+    use crate::{Error, ResponseValue};
+
+    /// Synthesize an in-memory `reqwest::Response` (no server, no runtime) so the body readers can be
+    /// driven with a poll-once noop waker.
+    fn json_response(status: u16, body: &str) -> reqwest::Response {
+        reqwest::Response::from(
+            http::Response::builder()
+                .status(status)
+                .body(body.to_owned())
+                .expect("valid synthetic response"),
+        )
+    }
+
+    #[test]
+    fn read_success_body_returns_status_and_bytes() {
+        let response = json_response(201, r#"{"ok":true}"#);
+        let (status, _headers, body) = poll_ready(read_success_body(response)).unwrap();
+        assert_eq!(status, reqwest::StatusCode::CREATED);
+        assert_eq!(&body[..], br#"{"ok":true}"#);
+    }
+
+    #[test]
+    fn read_error_body_truncates_at_cap() {
+        let mut core = core();
+        core.config_mut().max_error_body = 4;
+        let response = json_response(500, "0123456789");
+        let (status, _headers, body, truncated) =
+            poll_ready(read_error_body::<std::convert::Infallible>(&core, response)).unwrap();
+        assert_eq!(status, reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(truncated);
+        assert_eq!(body.len(), 4);
+        assert_eq!(&body[..], b"0123");
+    }
+
+    // Stand-ins for a generated multi-status SUCCESS enum: two success statuses, distinct bodies.
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct Created {
+        id: u32,
+    }
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct Accepted {
+        job: String,
+    }
+    #[derive(Debug, PartialEq)]
+    enum SuccessEnum {
+        Status200(Created),
+        Status202(Accepted),
+    }
+
+    /// Mirror of the generated per-status success dispatch: read once, select the variant whose
+    /// selector matches (vec order = precedence), decode into it, else an undocumented-success error.
+    fn dispatch_success(
+        response: reqwest::Response,
+    ) -> Result<ResponseValue<SuccessEnum>, Error<Infallible>> {
+        let (status, headers, body) = poll_ready(read_success_body(response))?;
+        if StatusSpec::Exact(200).matches(status) {
+            let value =
+                serde_json::from_slice::<Created>(&body).map_err(|error| Error::Decode {
+                    path: error.to_string(),
+                    body: body.clone(),
+                    truncated: false,
+                })?;
+            return Ok(ResponseValue::new(
+                status,
+                headers,
+                SuccessEnum::Status200(value),
+            ));
+        }
+        if StatusSpec::Exact(202).matches(status) {
+            let value =
+                serde_json::from_slice::<Accepted>(&body).map_err(|error| Error::Decode {
+                    path: error.to_string(),
+                    body: body.clone(),
+                    truncated: false,
+                })?;
+            return Ok(ResponseValue::new(
+                status,
+                headers,
+                SuccessEnum::Status202(value),
+            ));
+        }
+        Err(Error::UnexpectedStatus {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    #[test]
+    fn success_dispatch_selects_variant_per_status() {
+        let created = dispatch_success(json_response(200, r#"{"id":7}"#)).unwrap();
+        assert_eq!(*created.inner(), SuccessEnum::Status200(Created { id: 7 }));
+        let accepted = dispatch_success(json_response(202, r#"{"job":"j"}"#)).unwrap();
+        assert_eq!(
+            *accepted.inner(),
+            SuccessEnum::Status202(Accepted {
+                job: "j".to_owned()
+            })
+        );
+    }
+
+    #[test]
+    fn success_dispatch_undocumented_status_has_no_untyped_fallback() {
+        // 201 is a success status matching no documented variant → an unexpected-status error, never
+        // a silent `serde_json::Value`.
+        let error = dispatch_success(json_response(201, r#"{"id":1}"#)).unwrap_err();
+        assert!(matches!(error, Error::UnexpectedStatus { .. }));
+    }
+
+    #[test]
+    fn success_dispatch_parse_failure_is_decode() {
+        let error = dispatch_success(json_response(200, "not json")).unwrap_err();
+        assert!(matches!(error, Error::Decode { .. }));
+    }
+
+    // Stand-ins for a generated multi-status ERROR enum: an exact status plus a range that would
+    // also cover it — precedence must prefer the exact selector (it is checked first).
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct Conflict {
+        conflict: String,
+    }
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    struct ClientError {
+        message: String,
+    }
+    #[derive(Debug, PartialEq)]
+    enum ApiError {
+        Status409(Conflict),
+        Status4xx(ClientError),
+    }
+
+    /// Mirror of the generated per-status error classification: read capped, select by status (exact
+    /// before range), decode → `Api`; a parse failure → `Decode`; an undocumented status →
+    /// `UnexpectedStatus`.
+    fn dispatch_error(response: reqwest::Response) -> Error<ApiError> {
+        let core = core();
+        let (status, headers, body, truncated) =
+            match poll_ready(read_error_body::<ApiError>(&core, response)) {
+                Ok(parts) => parts,
+                Err(error) => return error,
+            };
+        if StatusSpec::Exact(409).matches(status) {
+            return match serde_json::from_slice::<Conflict>(&body) {
+                Ok(value) => Error::Api(ResponseValue::new(
+                    status,
+                    headers,
+                    ApiError::Status409(value),
+                )),
+                Err(error) => Error::Decode {
+                    path: error.to_string(),
+                    body,
+                    truncated,
+                },
+            };
+        }
+        if StatusSpec::Range(4).matches(status) {
+            return match serde_json::from_slice::<ClientError>(&body) {
+                Ok(value) => Error::Api(ResponseValue::new(
+                    status,
+                    headers,
+                    ApiError::Status4xx(value),
+                )),
+                Err(error) => Error::Decode {
+                    path: error.to_string(),
+                    body,
+                    truncated,
+                },
+            };
+        }
+        Error::UnexpectedStatus {
+            status,
+            headers,
+            body,
+        }
+    }
+
+    #[test]
+    fn error_dispatch_exact_selector_beats_range() {
+        // 409 matches both `Exact(409)` and `Range(4)`; the exact variant wins because it is tried
+        // first, preserving spec precedence.
+        match dispatch_error(json_response(409, r#"{"conflict":"dup"}"#)) {
+            Error::Api(value) => assert_eq!(
+                *value.inner(),
+                ApiError::Status409(Conflict {
+                    conflict: "dup".to_owned()
+                })
+            ),
+            other => panic!("expected Api(Status409), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_dispatch_range_matches_other_4xx() {
+        match dispatch_error(json_response(404, r#"{"message":"nope"}"#)) {
+            Error::Api(value) => assert_eq!(
+                *value.inner(),
+                ApiError::Status4xx(ClientError {
+                    message: "nope".to_owned()
+                })
+            ),
+            other => panic!("expected Api(Status4xx), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_dispatch_undocumented_status_is_unexpected() {
+        let error = dispatch_error(json_response(500, r#"{}"#));
+        assert!(matches!(error, Error::UnexpectedStatus { .. }));
+    }
+
+    #[test]
+    fn error_dispatch_parse_failure_is_decode() {
+        let error = dispatch_error(json_response(409, "not json"));
+        assert!(matches!(error, Error::Decode { .. }));
     }
 }

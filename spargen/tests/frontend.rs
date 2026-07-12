@@ -1054,7 +1054,48 @@ components:
 }
 
 #[test]
-fn w003_response_degraded_to_value_still_generates() {
+fn multi_status_success_bodies_generate_a_typed_enum_without_w003() {
+    // Two success statuses with DIFFERENT bodies used to degrade to `serde_json::Value` (W003).
+    // W003 is retired: the success type is now a typed per-operation response enum, generated with
+    // no diagnostic at all.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BodyA" }
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BodyB" }
+components:
+  schemas:
+    BodyA:
+      type: object
+      properties:
+        a: { type: string }
+    BodyB:
+      type: object
+      properties:
+        b: { type: string }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    // No diagnostics at all — the retired W003 must not fire under any code.
+    assert!(report.diagnostics.is_empty(), "{report:#?}");
+}
+
+#[test]
+fn multi_status_error_bodies_generate_a_typed_enum_without_w003() {
+    // Two error statuses with DIFFERENT bodies likewise generate a typed error enum, no W003.
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -1068,13 +1109,13 @@ paths:
           content:
             application/json:
               schema: { type: string }
-        "400":
-          description: Bad
+        "404":
+          description: Not Found
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrA" }
-        "404":
-          description: Not Found
+        "409":
+          description: Conflict
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrB" }
@@ -1091,5 +1132,75 @@ components:
 "##,
     );
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
-    assert!(has_code(&report, Code::ResponseDegradedToValue));
+    assert!(report.diagnostics.is_empty(), "{report:#?}");
+}
+
+#[test]
+fn multi_status_enum_precedence_emits_exact_arm_before_range_and_a_bodyless_unit_variant() {
+    // Both classes list a RANGE before an overlapping EXACT in document order (and mix in a bodyless
+    // 204). The emitter must reorder to exact-before-range so a real 200/409 dispatches to its exact
+    // variant, and the bodyless 204 must appear as a payload-free unit variant — never a silent drop.
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec_path,
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /p:
+    get:
+      operationId: getP
+      responses:
+        "2XX":
+          description: RangeOk
+          content: { application/json: { schema: { $ref: "#/components/schemas/RangeOk" } } }
+        "200":
+          description: ExactOk
+          content: { application/json: { schema: { $ref: "#/components/schemas/ExactOk" } } }
+        "204":
+          description: No Content
+        "4XX":
+          description: RangeErr
+          content: { application/json: { schema: { $ref: "#/components/schemas/RangeErr" } } }
+        "409":
+          description: Conflict
+          content: { application/json: { schema: { $ref: "#/components/schemas/Conflict" } } }
+components:
+  schemas:
+    RangeOk: { type: object, properties: { r: { type: string } } }
+    ExactOk: { type: object, properties: { e: { type: string } } }
+    RangeErr: { type: object, properties: { x: { type: string } } }
+    Conflict: { type: object, properties: { c: { type: string } } }
+"##,
+    )
+    .unwrap();
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&Config::new(
+        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
+        OutputTarget::Module(Utf8PathBuf::from_path_buf(out.clone()).unwrap()),
+    ));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics.is_empty(), "{report:#?}");
+
+    let code = std::fs::read_to_string(&out).unwrap();
+    // Success dispatch: the exact 200 arm is emitted (and thus checked) before the 2XX range arm.
+    let exact_200 = code.find("Exact(200u16)").expect("exact 200 selector");
+    let range_2xx = code.find("Range(2u8)").expect("2XX range selector");
+    assert!(
+        exact_200 < range_2xx,
+        "exact 200 must precede the 2XX range in the emitted decode chain"
+    );
+    // Error classification: the exact 409 arm precedes the 4XX range arm.
+    let exact_409 = code.find("Exact(409u16)").expect("exact 409 selector");
+    let range_4xx = code.find("Range(4u8)").expect("4XX range selector");
+    assert!(
+        exact_409 < range_4xx,
+        "exact 409 must precede the 4XX range in the emitted classification chain"
+    );
+    // The bodyless 204 is a payload-free unit variant, not dropped and not a `serde_json::Value`.
+    assert!(
+        code.contains("Status204,"),
+        "bodyless 204 must emit a unit variant"
+    );
 }

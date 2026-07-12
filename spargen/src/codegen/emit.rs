@@ -42,6 +42,10 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
         .operations
         .iter()
         .map(|operation| emit_error_enum(operation, names, options));
+    let response_enums = api
+        .operations
+        .iter()
+        .map(|operation| emit_response_enum(operation, names, options));
     let methods = api
         .operations
         .iter()
@@ -51,6 +55,7 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
     quote! {
         #(#params)*
         #(#errors)*
+        #(#response_enums)*
 
         #client_docs
         #[allow(dead_code)]
@@ -304,7 +309,9 @@ pub(crate) fn emit_operation(
         ErrorShape::None => quote! {
             Err(support::unexpected_status::<#error_ty>(&self.core, response).await)
         },
-        _ => {
+        // A single documented error body: classify against the documented status table into the
+        // aliased `E` (or `Error::UnexpectedStatus` for an undocumented status).
+        ErrorShape::Single(_) => {
             let mut documented = operation
                 .responses
                 .by_status
@@ -338,6 +345,57 @@ pub(crate) fn emit_operation(
                 )
             }
         }
+        // Multiple documented error bodies: read the capped body once, then dispatch by status in
+        // precedence order (exact before range before default) into the matching enum variant →
+        // `Error::Api`; a parse failure → `Error::Decode`; an undocumented status →
+        // `Error::UnexpectedStatus` (capped body preserved either way).
+        ErrorShape::Enum(entries) => {
+            let arms = entries.iter().map(|(spec, ty)| {
+                let spec_tokens = runtime_status_spec(*spec);
+                let variant_ident = status_variant_ident(*spec);
+                match ty {
+                    // Bodied status: decode into the variant's type → `Api`, or `Decode` on failure.
+                    Some(ty) => {
+                        let ty = ty_tokens(*ty, names, options, true);
+                        quote! {
+                            if #spec_tokens.matches(status) {
+                                return Err(match serde_json::from_slice::<#ty>(&body) {
+                                    Ok(value) => support::Error::Api(support::ResponseValue::new(
+                                        status,
+                                        headers,
+                                        #error_ident::#variant_ident(value),
+                                    )),
+                                    Err(error) => support::Error::Decode {
+                                        path: error.to_string(),
+                                        body,
+                                        truncated,
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    // Documented bodyless error status: the unit variant → `Api`, no body parse.
+                    None => quote! {
+                        if #spec_tokens.matches(status) {
+                            return Err(support::Error::Api(support::ResponseValue::new(
+                                status,
+                                headers,
+                                #error_ident::#variant_ident,
+                            )));
+                        }
+                    },
+                }
+            });
+            quote! {
+                let (status, headers, body, truncated) =
+                    match support::read_error_body::<#error_ty>(&self.core, response).await {
+                        Ok(parts) => parts,
+                        Err(error) => return Err(error),
+                    };
+                #(#arms)*
+                Err(support::Error::UnexpectedStatus { status, headers, body })
+            }
+        }
     };
     let success_decode = match operation.responses.success() {
         SuccessShape::Unit => quote! {
@@ -345,11 +403,63 @@ pub(crate) fn emit_operation(
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         },
-        _ => quote! {
+        SuccessShape::Plain(_) => quote! {
             support::decode_success::<#success_ty>(&self.core, response)
                 .await
                 .map_err(support::Error::widen)
         },
+        // Multi-status success: read the body once, then dispatch by status in precedence order
+        // (exact before range before default) into the matching variant. A success status matching
+        // no documented variant is an unexpected-status error — there is no untyped fallback.
+        SuccessShape::Enum(entries) => {
+            let method_ident = names
+                .operations
+                .get(&operation.id)
+                .expect("operation name allocated");
+            let enum_ident = success_enum_ident(method_ident);
+            let arms = entries.iter().map(|(spec, ty)| {
+                let spec_tokens = runtime_status_spec(*spec);
+                let variant_ident = status_variant_ident(*spec);
+                match ty {
+                    // Bodied status: parse the read body into the variant's type.
+                    Some(ty) => {
+                        let ty = ty_tokens(*ty, names, options, true);
+                        quote! {
+                            if #spec_tokens.matches(status) {
+                                let value = serde_json::from_slice::<#ty>(&body)
+                                    .map_err(|error| support::Error::<#error_ty>::Decode {
+                                        path: error.to_string(),
+                                        body: body.clone(),
+                                        truncated: false,
+                                    })?;
+                                return Ok(support::ResponseValue::new(
+                                    status,
+                                    headers,
+                                    #enum_ident::#variant_ident(value),
+                                ));
+                            }
+                        }
+                    }
+                    // Documented bodyless status (e.g. `204`): the unit variant, no body parse.
+                    None => quote! {
+                        if #spec_tokens.matches(status) {
+                            return Ok(support::ResponseValue::new(
+                                status,
+                                headers,
+                                #enum_ident::#variant_ident,
+                            ));
+                        }
+                    },
+                }
+            });
+            quote! {
+                let (status, headers, body) = support::read_success_body(response)
+                    .await
+                    .map_err(support::Error::widen)?;
+                #(#arms)*
+                Err(support::Error::<#error_ty>::UnexpectedStatus { status, headers, body })
+            }
+        }
     };
 
     let args = required_params
@@ -532,6 +642,55 @@ pub(crate) fn emit_params_struct(
     }
 }
 
+/// Emit an operation's multi-status success response enum, one payload-carrying variant per
+/// documented success status (empty when the operation has zero or one success body). The variant
+/// is selected by HTTP status at decode time, so the enum derives only `Debug, Clone` — no
+/// whole-enum `Deserialize`, no `serde(untagged)`.
+pub(crate) fn emit_response_enum(
+    operation: &Operation,
+    names: &Names,
+    options: &CodegenOptions,
+) -> TokenStream {
+    match operation.responses.success() {
+        SuccessShape::Enum(entries) => {
+            let method_ident = names
+                .operations
+                .get(&operation.id)
+                .expect("operation name allocated");
+            let ident = success_enum_ident(method_ident);
+            let variants = entries
+                .iter()
+                .map(|(spec, ty)| response_variant_def(*spec, *ty, names, options));
+            quote! {
+                #[allow(dead_code)]
+                #[derive(Debug, Clone)]
+                pub enum #ident {
+                    #(#variants)*
+                }
+            }
+        }
+        _ => quote! {},
+    }
+}
+
+/// One response-enum variant definition: a payload-carrying `Status2xx(types::T)` for a bodied
+/// status, or a payload-free `Status204` unit variant for a documented bodyless status.
+fn response_variant_def(
+    spec: crate::ir::StatusSpec,
+    ty: Option<Ty>,
+    names: &Names,
+    options: &CodegenOptions,
+) -> TokenStream {
+    let variant_ident = status_variant_ident(spec);
+    match ty {
+        Some(ty) => {
+            let ty = ty_tokens(ty, names, options, true);
+            quote! { #variant_ident(#ty), }
+        }
+        None => quote! { #variant_ident, },
+    }
+}
+
 /// Emit an operation's typed error enum (or type alias for a single error body).
 pub(crate) fn emit_error_enum(
     operation: &Operation,
@@ -543,17 +702,36 @@ pub(crate) fn emit_error_enum(
         .get(&operation.id)
         .expect("operation name allocated");
     let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
-    let error_ty = match operation.responses.error() {
-        ErrorShape::Single(ty) => ty_tokens(ty, names, options, true),
-        // Multiple documented error bodies fall back to Value (reported as W003 by `generate`).
-        ErrorShape::Enum => quote! { serde_json::Value },
+    match operation.responses.error() {
+        // Multiple documented error bodies → a payload-carrying enum, one variant per status. The
+        // variant is chosen by HTTP status at classification time, so it derives no whole-enum
+        // `Deserialize` (and never `serde(untagged)`); each variant's body is decoded on its own.
+        ErrorShape::Enum(entries) => {
+            let variants = entries
+                .iter()
+                .map(|(spec, ty)| response_variant_def(*spec, *ty, names, options));
+            quote! {
+                #[allow(dead_code)]
+                #[derive(Debug, Clone)]
+                pub enum #error_ident {
+                    #(#variants)*
+                }
+            }
+        }
+        // A single documented error body: a plain alias to that type.
+        ErrorShape::Single(ty) => {
+            let ty = ty_tokens(ty, names, options, true);
+            quote! {
+                #[allow(dead_code)]
+                pub type #error_ident = #ty;
+            }
+        }
         // No documented error body: every non-success status is Error::UnexpectedStatus, and the
         // uninhabited alias makes Error::Api impossible to construct.
-        ErrorShape::None => quote! { std::convert::Infallible },
-    };
-    quote! {
-        #[allow(dead_code)]
-        pub type #error_ident = #error_ty;
+        ErrorShape::None => quote! {
+            #[allow(dead_code)]
+            pub type #error_ident = std::convert::Infallible;
+        },
     }
 }
 
@@ -591,7 +769,7 @@ pub(crate) fn emit_support() -> TokenStream {
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
-            pub use dispatch::{attach_auth, build_url, classify_error, decode_success, send, unexpected_status, StatusSpec};
+            pub use dispatch::{attach_auth, build_url, classify_error, decode_success, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use response::ResponseValue;
         }
@@ -1045,7 +1223,46 @@ fn success_type(operation: &Operation, names: &Names, options: &CodegenOptions) 
     match operation.responses.success() {
         SuccessShape::Unit => quote! { () },
         SuccessShape::Plain(ty) => ty_tokens(ty, names, options, true),
-        SuccessShape::Enum => quote! { serde_json::Value },
+        SuccessShape::Enum(_) => {
+            let method_ident = names
+                .operations
+                .get(&operation.id)
+                .expect("operation name allocated");
+            let ident = success_enum_ident(method_ident);
+            quote! { #ident }
+        }
+    }
+}
+
+/// The type name of an operation's multi-status success response enum, derived from the method name
+/// (mirroring how the error enum is named `{Method}Error`).
+fn success_enum_ident(method_ident: &crate::name::Ident) -> proc_macro2::Ident {
+    format_ident!("{}Response", to_pascal(method_ident.as_str()))
+}
+
+/// The `PascalCase` variant identifier for a documented status selector: `Status200` for an exact
+/// code, `Status2xx` for a range, and `Default` for the `default` response (carried as the
+/// `Range(0)` sentinel by [`Responses::error`]). Deterministic and, within one enum, unique by
+/// construction (each selector appears once). Routed through the `name` escaper for validity.
+fn status_variant_ident(spec: crate::ir::StatusSpec) -> proc_macro2::Ident {
+    let raw = match spec {
+        crate::ir::StatusSpec::Exact(code) => format!("Status{code}"),
+        crate::ir::StatusSpec::Range(0) => "Default".to_owned(),
+        crate::ir::StatusSpec::Range(prefix) => format!("Status{prefix}xx"),
+    };
+    format_ident!(
+        "{}",
+        crate::name::escape(&raw, crate::name::IdentRole::Variant).as_str()
+    )
+}
+
+/// The runtime [`support::StatusSpec`] tokens for a documented status selector. The `default`
+/// sentinel (`Range(0)`) maps to `Any`, matching how the single-error-body path builds its table.
+fn runtime_status_spec(spec: crate::ir::StatusSpec) -> TokenStream {
+    match spec {
+        crate::ir::StatusSpec::Exact(code) => quote! { support::StatusSpec::Exact(#code) },
+        crate::ir::StatusSpec::Range(0) => quote! { support::StatusSpec::Any },
+        crate::ir::StatusSpec::Range(prefix) => quote! { support::StatusSpec::Range(#prefix) },
     }
 }
 

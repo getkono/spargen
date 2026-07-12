@@ -43,9 +43,6 @@ pub enum Code {
     /// A `security` requirement references a scheme that is not declared under
     /// `components.securitySchemes` (or is of an unsupported type) (matrix: Security).
     UnknownSecurityScheme,
-    /// An operation documents multiple success or error bodies; the combined body is generated as
-    /// `serde_json::Value` because per-status enums are not yet emitted (matrix: Responses).
-    ResponseDegradedToValue,
     /// `allOf` members could not be reconciled into a single merged type — conflicting property
     /// types, conflicting `additionalProperties`, an object/scalar mix, incompatible scalars, or a
     /// direct recursive `$ref` member whose fields are not yet known (matrix: Schema shape).
@@ -68,7 +65,7 @@ pub enum Code {
 }
 
 impl Code {
-    /// The stable string form, e.g. `"E001"` or `"W003"`.
+    /// The stable string form, e.g. `"E001"` or `"W004"`.
     pub fn as_str(self) -> &'static str {
         match self {
             Code::UnsupportedOpenApiVersion => "E001",
@@ -85,7 +82,6 @@ impl Code {
             Code::ServerInitiatedFlowIgnored => "W002",
             Code::InvalidInput => "E011",
             Code::UnknownSecurityScheme => "E012",
-            Code::ResponseDegradedToValue => "W003",
             Code::AllOfIrreconcilable => "E013",
             Code::OutputDrifted => "W004",
             Code::OmittedConstruct => "W009",
@@ -121,7 +117,6 @@ impl Code {
             Code::ServerInitiatedFlowIgnored => "server-initiated flow ignored",
             Code::InvalidInput => "invalid input document",
             Code::UnknownSecurityScheme => "unknown security scheme",
-            Code::ResponseDegradedToValue => "response body degrades to serde_json::Value",
             Code::AllOfIrreconcilable => "irreconcilable allOf composition",
             Code::OutputDrifted => "checked-in output drifted",
             Code::InvalidOmitRule => "invalid omit rule",
@@ -176,9 +171,6 @@ impl Code {
             Code::UnknownSecurityScheme => {
                 "Every scheme named in a `security` requirement must be declared under `components.securitySchemes` as `http` bearer/basic, `apiKey`, `oauth2`, or `openIdConnect` so credentials can be attached at the right location."
             }
-            Code::ResponseDegradedToValue => {
-                "The operation documents multiple success or multiple error bodies. Spargen does not yet generate per-status response enums, so the body type is `serde_json::Value` — typed, but weaker than the spec. Restructure the responses or omit the operation if this is unacceptable."
-            }
             Code::AllOfIrreconcilable => {
                 "`allOf` members are merged into one type: object members flatten into a single struct (union of properties; a property required by any member is required; `additionalProperties` merged conservatively — a member that denies unknown keys wins), and all-scalar members that lower to the same primitive collapse to that primitive. It is rejected as irreconcilable only when the members cannot form one type: a property name appears with conflicting lowered types across members, `additionalProperties` conflict (e.g. two different typed value schemas), object and scalar members are mixed, distinct scalar members disagree, or a member is a direct recursive `$ref` to the component currently being lowered (its fields are not yet known). Restructure the composition or omit this API segment with `spargen::omit!`."
             }
@@ -230,7 +222,6 @@ impl Code {
             Code::OmitCreatedInvalidDocument,
             Code::ValidationKeywordIgnored,
             Code::ServerInitiatedFlowIgnored,
-            Code::ResponseDegradedToValue,
             Code::OutputDrifted,
             Code::OmittedConstruct,
             Code::SchemaDefaultNotApplied,
