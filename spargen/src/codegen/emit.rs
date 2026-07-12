@@ -116,6 +116,19 @@ pub(crate) fn emit_operation(
     let success_ty = success_type(operation, names, options);
     let error_ty = quote! { #error_ident };
     let docs = doc_tokens(&operation.docs);
+    // Required parameters are positional method arguments with no attribute slot of their own, so a
+    // required parameter's `default` is surfaced in the method rustdoc instead.
+    let param_default_docs = operation
+        .params
+        .iter()
+        .filter(|param| param.required)
+        .filter_map(|param| {
+            param.default_display.as_ref().map(|default| {
+                let note = format!("Parameter `{}` default: `{default}`.", param.name);
+                quote! { #[doc = #note] }
+            })
+        })
+        .collect::<Vec<_>>();
     let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
 
     let required_params = operation
@@ -345,6 +358,7 @@ pub(crate) fn emit_operation(
         .collect::<Vec<_>>();
     quote! {
         #docs
+        #(#param_default_docs)*
         #deprecated
         #[inline]
         pub async fn #method_ident(
@@ -484,11 +498,16 @@ pub(crate) fn emit_params_struct(
             );
             let wire = &param.name;
             let ty = ty_tokens(param.ty, names, options, true);
-            let note = param
-                .deprecated
-                .then(|| quote! { #[doc = "Deprecated per the spec."] });
+            let mut notes: Vec<String> = Vec::new();
+            if param.deprecated {
+                notes.push("Deprecated per the spec.".to_owned());
+            }
+            if let Some(default) = &param.default_display {
+                notes.push(format!("Default: `{default}`."));
+            }
+            let notes = notes.iter().map(|note| quote! { #[doc = #note] });
             quote! {
-                #note
+                #(#notes)*
                 #[serde(rename = #wire, skip_serializing_if = "Option::is_none")]
                 pub #ident: Option<#ty>,
             }
@@ -586,6 +605,10 @@ fn emit_type_def(
                 .fields
                 .iter()
                 .map(|field| emit_field(id, field, names, options));
+            let providers = object
+                .fields
+                .iter()
+                .filter_map(|field| emit_default_provider(id, field, names, options));
             let additional = match &object.additional {
                 AdditionalProps::Typed(ty) => {
                     let ty = ty_tokens(**ty, names, options, false);
@@ -602,6 +625,7 @@ fn emit_type_def(
                     #(#fields)*
                     #additional
                 }
+                #(#providers)*
             }
         }
         TypeKind::Enum(enumeration) if enumeration.repr == ScalarRepr::String => {
@@ -674,23 +698,102 @@ fn emit_field(
     if !field.required || field.ty.nullable {
         ty = quote! { Option<#ty> };
     }
-    let default =
-        (!field.required).then(|| quote! { default, skip_serializing_if = "Option::is_none", });
-    let mut notes: Vec<&str> = Vec::new();
+    // An optional field always deserializes an absent value; when the spec gives a representable
+    // scalar default, point serde at a generated provider so the default fills in rather than
+    // `None`. Otherwise fall back to `Option::default()` (`None`).
+    let serde_default = if field.required {
+        quote! {}
+    } else if field
+        .default
+        .as_ref()
+        .is_some_and(|default| default.applied.is_some())
+    {
+        let provider = default_provider_ident(id, ident).to_string();
+        quote! { default = #provider, skip_serializing_if = "Option::is_none", }
+    } else {
+        quote! { default, skip_serializing_if = "Option::is_none", }
+    };
+    let mut notes: Vec<String> = Vec::new();
     if field.deprecated {
-        notes.push("Deprecated per the spec.");
+        notes.push("Deprecated per the spec.".to_owned());
     }
     if field.read_only {
-        notes.push("Read-only: set by the server; ignored in requests.");
+        notes.push("Read-only: set by the server; ignored in requests.".to_owned());
     }
     if field.write_only {
-        notes.push("Write-only: sent in requests; absent from responses.");
+        notes.push("Write-only: sent in requests; absent from responses.".to_owned());
+    }
+    if let Some(default) = &field.default {
+        notes.push(default.doc_note.clone());
     }
     let notes = notes.iter().map(|note| quote! { #[doc = #note] });
     quote! {
         #(#notes)*
-        #[serde(rename = #wire, #default)]
+        #[serde(rename = #wire, #serde_default)]
         pub #ident: #ty,
+    }
+}
+
+/// The deterministic identifier of a field's generated serde default-provider function. Derived
+/// from the owning type's dense id plus the field's Rust identifier, so it is stable across runs
+/// and cannot collide with a `PascalCase` type ident or another field's provider.
+fn default_provider_ident(
+    id: crate::ir::TypeId,
+    field_ident: &crate::name::Ident,
+) -> proc_macro2::Ident {
+    format_ident!(
+        "default_{}_{}",
+        id.0,
+        field_ident.as_str().trim_start_matches("r#")
+    )
+}
+
+/// Emit a field's serde default-provider function, when its `default` is a representable scalar
+/// wired through serde. The function returns `Option<T>` matching the (optional) field's Rust type.
+fn emit_default_provider(
+    id: crate::ir::TypeId,
+    field: &Field,
+    names: &Names,
+    options: &CodegenOptions,
+) -> Option<TokenStream> {
+    let applied = field.default.as_ref()?.applied.as_ref()?;
+    let field_ident = names
+        .fields
+        .get(&(id, field.name.wire.clone()))
+        .expect("field name allocated");
+    let fn_ident = default_provider_ident(id, field_ident);
+    let inner_ty = ty_tokens(field.ty, names, options, false);
+    let value = default_value_tokens(applied, field.ty, names);
+    Some(quote! {
+        fn #fn_ident() -> Option<#inner_ty> {
+            Some(#value)
+        }
+    })
+}
+
+/// Render a representable default as a Rust literal (or generated enum variant) for the field's
+/// Rust type.
+fn default_value_tokens(value: &crate::ir::DefaultValue, ty: Ty, names: &Names) -> TokenStream {
+    use crate::ir::DefaultValue;
+    match value {
+        DefaultValue::Bool(value) => quote! { #value },
+        DefaultValue::Int(value) => {
+            let literal = proc_macro2::Literal::i64_unsuffixed(*value);
+            quote! { #literal }
+        }
+        DefaultValue::Float(value) => {
+            let literal = proc_macro2::Literal::f64_unsuffixed(*value);
+            quote! { #literal }
+        }
+        DefaultValue::Str(value) => quote! { #value.to_owned() },
+        DefaultValue::EnumVariant(value) => {
+            let enum_ident = names.types.get(&ty.id).expect("enum type name allocated");
+            let variant_ident = names
+                .variants
+                .get(&(ty.id, value.clone()))
+                .expect("variant name allocated");
+            quote! { #enum_ident::#variant_ident }
+        }
     }
 }
 

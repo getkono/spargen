@@ -96,6 +96,10 @@ pub struct Parameter {
     pub style: ParamStyle,
     /// `deprecated` → `#[deprecated]`.
     pub deprecated: bool,
+    /// The rendered `default` value, if the parameter schema declared one. Documented in rustdoc
+    /// (never serde-wired: a params struct is only serialized, and a server-side default means the
+    /// client may legitimately omit the value).
+    pub default_display: Option<String>,
 }
 
 /// Where a parameter is carried.

@@ -37,6 +37,33 @@ fn generates_standalone_crate_for_basic_oas31_api() {
         .status()
         .unwrap();
     assert!(status.success());
+
+    // Prove the wired serde defaults actually deserialize: an absent optional field with a
+    // representable scalar default fills in the default instead of `None`, while a required field
+    // (default rustdoc-only) still comes from the payload.
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/defaults.rs"),
+        r##"
+#[test]
+fn absent_optional_fields_use_schema_defaults() {
+    let settings: basic_client::types::Settings =
+        serde_json::from_str(r#"{"retries": 7}"#).unwrap();
+    assert_eq!(settings.color.as_deref(), Some("red"));
+    assert_eq!(settings.enabled, Some(true));
+    assert_eq!(settings.ratio, Some(1.5));
+    assert_eq!(settings.retries, 7);
+    assert_eq!(settings.mode, Some(basic_client::types::Mode::Auto));
+}
+"##,
+    )
+    .unwrap();
+    let status = Command::new("cargo")
+        .arg("test")
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
 
 #[test]
@@ -106,6 +133,11 @@ paths:
           required: true
           schema:
             type: string
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
       responses:
         "200":
           description: OK
@@ -176,6 +208,38 @@ components:
       type: object
       additionalProperties:
         $ref: "#/components/schemas/Dict"
+    # `default` on the component schema itself → documented on the generated `Mode` type.
+    Mode:
+      type: string
+      enum: [auto, manual]
+      default: auto
+    # Exercises schema `default`: representable scalar defaults on optional fields are wired via
+    # generated serde providers; a required field's default is rustdoc-only.
+    Settings:
+      type: object
+      required: [retries]
+      properties:
+        color:
+          type: string
+          default: red
+        enabled:
+          type: boolean
+          default: true
+        ratio:
+          type: number
+          default: 1.5
+        retries:
+          type: integer
+          default: 3
+        # Out-of-range for i32: must NOT be serde-wired (rustdoc-only, W005). If a regression wired
+        # `Some(5000000000)` into `Option<i32>`, the generated crate's `cargo check` would fail.
+        wide:
+          type: integer
+          format: int32
+          default: 5000000000
+        mode:
+          $ref: "#/components/schemas/Mode"
+          default: auto
 "##;
 
 const SPEC_WITH_UNSUPPORTED_OPERATION: &str = r#"

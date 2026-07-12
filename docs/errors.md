@@ -24,4 +24,5 @@ the library API.
 | `W002` | Warning | server-initiated flow ignored |
 | `W003` | Warning | response body degrades to `serde_json::Value` |
 | `W004` | Warning | checked-in output drifted |
+| `W005` | Warning | schema default not applied |
 | `W009` | Warning | construct omitted |

@@ -316,6 +316,217 @@ webhooks:
     assert!(has_code(&report, Code::ServerInitiatedFlowIgnored));
 }
 
+const W005_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Thing:
+      type: object
+      properties:
+        count:
+          type: integer
+          default: "not-a-number"
+        meta:
+          type: object
+          default: { a: 1 }
+"##;
+
+#[test]
+fn w005_schema_default_not_applied_still_generates() {
+    let report = generate(W005_SPEC);
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(has_code(&report, Code::SchemaDefaultNotApplied));
+}
+
+/// `check` runs the same lowering as `generate`, so the W005 disposition fires identically.
+#[test]
+fn w005_check_generate_parity() {
+    let report = check(W005_SPEC);
+    assert_eq!(report.outcome, Outcome::Clean, "{report:#?}");
+    assert!(has_code(&report, Code::SchemaDefaultNotApplied));
+}
+
+/// A representable scalar default on an optional field is applied via serde and must not raise
+/// W005 (or any error): generation succeeds and the field is documented with its default.
+#[test]
+fn representable_scalar_default_applies_without_w005() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Thing:
+      type: object
+      properties:
+        color:
+          type: string
+          default: "red"
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::SchemaDefaultNotApplied),
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != spargen::Severity::Error),
+        "{report:#?}"
+    );
+}
+
+/// A parameter `default` is documented in rustdoc (never serde-wired) — generation is clean and
+/// must NOT raise W005 (parameters always have a documentation home).
+#[test]
+fn parameter_default_documented_without_w005() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      parameters:
+        - name: per_page
+          in: query
+          schema: { type: integer, default: 30 }
+        - name: sort
+          in: query
+          required: true
+          schema: { type: string, default: name }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::SchemaDefaultNotApplied),
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != spargen::Severity::Error),
+        "{report:#?}"
+    );
+}
+
+/// A `default` on a component schema itself (here an enum) is documented on the generated named
+/// type — generation is clean, with no W005 and no double-handling.
+#[test]
+fn component_root_default_documented_without_w005() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Mode:
+      type: string
+      enum: [auto, manual]
+      default: auto
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::SchemaDefaultNotApplied),
+        "{report:#?}"
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != spargen::Severity::Error),
+        "{report:#?}"
+    );
+}
+
+/// A `default` in a structural position with no field home — array `items` and an
+/// `additionalProperties` value — is non-silent: it fires W005 and still generates.
+#[test]
+fn structural_defaults_fire_w005_and_still_generate() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Tags:
+      type: array
+      items: { type: string, default: hi }
+    Counts:
+      type: object
+      additionalProperties: { type: integer, default: 5 }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(
+        has_code(&report, Code::SchemaDefaultNotApplied),
+        "{report:#?}"
+    );
+}
+
+/// An out-of-range integer default for the field's width (`int32` here) is NOT representable: it
+/// must fire W005 and stay rustdoc-only, never rendered into a literal that fails to compile.
+#[test]
+fn out_of_range_int_default_fires_w005_and_is_not_wired() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Thing:
+      type: object
+      properties:
+        big:
+          type: integer
+          format: int32
+          default: 5000000000
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(
+        has_code(&report, Code::SchemaDefaultNotApplied),
+        "{report:#?}"
+    );
+}
+
+/// A component that is a bare `$ref` with a sibling `default` drops the default when the reference
+/// resolves; it must be acknowledged with W005 rather than lost silently, and still generate.
+#[test]
+fn component_root_ref_with_default_fires_w005_and_still_generates() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Bar:
+      type: string
+    Alias:
+      $ref: "#/components/schemas/Bar"
+      default: aliased
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(
+        has_code(&report, Code::SchemaDefaultNotApplied),
+        "{report:#?}"
+    );
+}
+
 #[test]
 fn w003_response_degraded_to_value_still_generates() {
     let report = generate(

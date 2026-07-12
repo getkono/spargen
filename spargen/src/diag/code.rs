@@ -57,6 +57,10 @@ pub enum Code {
     OmittedConstruct,
     /// A compatibility omit profile created an invalid remaining document.
     OmitCreatedInvalidDocument,
+    /// A schema `default` value could not be applied as a deserialization default (it is not a
+    /// scalar matching the field's type); it is documented in rustdoc but not wired (matrix: Schema
+    /// shape → W).
+    SchemaDefaultNotApplied,
 }
 
 impl Code {
@@ -83,6 +87,7 @@ impl Code {
             Code::OmittedConstruct => "W009",
             Code::InvalidOmitRule => "E019",
             Code::OmitCreatedInvalidDocument => "E020",
+            Code::SchemaDefaultNotApplied => "W005",
         }
     }
 
@@ -118,6 +123,7 @@ impl Code {
             Code::InvalidOmitRule => "invalid omit rule",
             Code::OmittedConstruct => "construct omitted",
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
+            Code::SchemaDefaultNotApplied => "schema default not applied",
         }
     }
 
@@ -184,6 +190,9 @@ impl Code {
             Code::OmitCreatedInvalidDocument => {
                 "After applying omit rules, the remaining document is structurally invalid. Omit dependent consumers too, or fix the source schema."
             }
+            Code::SchemaDefaultNotApplied => {
+                "A `default` is applied as a serde deserialization default only when it is a single scalar (bool/integer/number/string) that matches the field's own scalar type or one of its enum variants. Object, array, null, heterogeneous, or type-mismatched defaults cannot be lowered to a Rust literal, so the value is recorded in the field's rustdoc but not wired — deserialization of an absent field yields `None` rather than the default."
+            }
         }
     }
 
@@ -220,6 +229,7 @@ impl Code {
             Code::ResponseDegradedToValue,
             Code::OutputDrifted,
             Code::OmittedConstruct,
+            Code::SchemaDefaultNotApplied,
         ];
         ALL
     }

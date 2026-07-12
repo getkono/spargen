@@ -23,8 +23,8 @@ pub use operation::{
     Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate,
 };
 pub use types::{
-    AdditionalProps, Field, Prim, PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty,
-    TypeDef, TypeGraph, TypeId, TypeKind,
+    AdditionalProps, DefaultValue, Field, FieldDefault, Prim, PropertyName, ScalarEnum, ScalarRepr,
+    ScalarValue, Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
 };
 
 /// The whole lowered API: the single artifact frontends produce and backends consume.

@@ -37,6 +37,8 @@ pub struct Schema {
     pub enum_values: Option<Vec<SpannedValue>>,
     /// `const` value.
     pub const_value: Option<SpannedValue>,
+    /// `default` value (spanned, so a non-representable default can be diagnosed by pointer).
+    pub default: Option<SpannedValue>,
     /// `format` (annotation vocabulary; drives feature-gated type mappings).
     pub format: Option<String>,
     /// `contentEncoding` (e.g. `base64` → bytes).

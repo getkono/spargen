@@ -263,7 +263,7 @@ fn parse_parameter(
         style: value.get("style").and_then(string).map(str::to_owned),
         schema: value
             .get("schema")
-            .and_then(|value| parse_ref_or(value, &pointer.push("schema"), diags, parse_schema)),
+            .and_then(|value| parse_schema_ref_or(value, &pointer.push("schema"), diags)),
         content: value
             .get("content")
             .map(|value| parse_media_map(value, &pointer.push("content"), diags))
@@ -342,11 +342,10 @@ fn parse_media_map(
                         key.name.clone(),
                         MediaTypeObject {
                             schema: value.get("schema").and_then(|schema| {
-                                parse_ref_or(
+                                parse_schema_ref_or(
                                     schema,
                                     &pointer.push(&key.name).push("schema"),
                                     diags,
-                                    parse_schema,
                                 )
                             }),
                         },
@@ -366,12 +365,22 @@ fn parse_components(
     let Some(map) = object(value, pointer, diags) else {
         return components;
     };
-    components.schemas = parse_component_map(
-        map.get("schemas"),
-        &pointer.push("schemas"),
-        diags,
-        parse_schema,
-    );
+    // Schema components use `parse_schema_ref_or` (not the generic `parse_component_map`) so a
+    // component-root `$ref`+`default` is acknowledged with `W005` rather than silently dropped.
+    components.schemas = map
+        .get("schemas")
+        .and_then(SpannedValue::as_object)
+        .map(|schemas| {
+            let schemas_pointer = pointer.push("schemas");
+            schemas
+                .iter()
+                .filter_map(|(key, value)| {
+                    parse_schema_ref_or(value, &schemas_pointer.push(&key.name), diags)
+                        .map(|item| (key.name.clone(), item))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     components.responses = parse_component_map(
         map.get("responses"),
         &pointer.push("responses"),
@@ -434,6 +443,36 @@ fn parse_security_scheme(
         location: value.get("in").and_then(string).map(str::to_owned),
         name: value.get("name").and_then(string).map(str::to_owned),
     })
+}
+
+/// Parse a schema position that may be a `$ref` or an inline [`Schema`]. Unlike the generic
+/// [`parse_ref_or`], a `default` declared *alongside* a `$ref` here is a schema `default` that the
+/// reference-resolution drops on the floor; acknowledge it as `W005` so it is never silently lost.
+/// Property-position `$ref`+`default` is handled elsewhere (via `SchemaOr`) and does not reach here.
+fn parse_schema_ref_or(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<RefOr<Schema>> {
+    if let Some(reference) = value.get("$ref").and_then(string) {
+        if let Some(default) = value.get("default") {
+            Diagnostic::warning(
+                Code::SchemaDefaultNotApplied,
+                provenance(&pointer.push("default"), default),
+            )
+            .message(
+                "a schema `default` declared alongside `$ref` is dropped when the reference \
+                 resolves and is not applied",
+            )
+            .remedy("move the default onto the referenced schema, or set the value explicitly")
+            .emit(diags);
+        }
+        Some(RefOr::Ref(Reference {
+            reference: reference.to_owned(),
+        }))
+    } else {
+        parse_schema(value, pointer, diags).map(RefOr::Item)
+    }
 }
 
 fn parse_schema(
@@ -535,6 +574,7 @@ fn parse_schema_or(
             .and_then(array)
             .map(<[SpannedValue]>::to_vec),
         const_value: map.get("const").cloned(),
+        default: map.get("default").cloned(),
         format: map.get("format").and_then(string).map(str::to_owned),
         content_encoding: map
             .get("contentEncoding")

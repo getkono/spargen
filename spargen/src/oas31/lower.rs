@@ -4,10 +4,10 @@ use indexmap::IndexMap;
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics};
 use crate::ir::{
-    AdditionalProps, Api, ApiKeyLoc, Docs, Field, HttpScheme, Info, MediaType, Operation,
-    OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim, PropertyName,
-    RequestBody, Response, Responses, ScalarEnum, ScalarRepr, ScalarValue, SchemeId,
-    SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+    AdditionalProps, Api, ApiKeyLoc, DefaultValue, Docs, Field, FieldDefault, HttpScheme, Info,
+    MediaType, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate,
+    Prim, PropertyName, RequestBody, Response, Responses, ScalarEnum, ScalarRepr, ScalarValue,
+    SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
 };
 use crate::name::synth_operation_id;
 use crate::source::{Node, Number, SpannedValue};
@@ -183,7 +183,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let lowered = self.lower_schema(schema, name);
         self.in_progress.remove(name);
         let mut ty = lowered?;
-        let (popped_id, def) = self.graph.pop_last().expect("component root def");
+        let (popped_id, mut def) = self.graph.pop_last().expect("component root def");
         // Hard invariant (release too): a component root's def is always the last graph insert
         // during its own body lowering (children insert first). If future lowering (allOf/union
         // wrappers) ever inserts a derived type *after* the root, this fails loudly here instead
@@ -192,6 +192,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             popped_id, ty.id,
             "component root was not the last inserted def"
         );
+        // A `default` on the component schema itself has no field to carry it; document it on the
+        // named type's rustdoc rather than dropping it. (A component that is a bare `$ref`+`default`
+        // never reaches here — it parses to `RefOr::Ref` and is acknowledged as W005 at parse time
+        // — so this only sees inline component schemas.) Pure pop-then-mutate: no graph insert
+        // happens here, so the last-insert invariant asserted above still holds.
+        if let Some(raw) = &schema.default {
+            let note = format!("Default: `{}`.", default_display_for(raw, Some(&def.kind)));
+            append_doc_note(&mut def.docs, note);
+        }
         self.graph.fill(root_id, def);
         ty.id = root_id;
         self.components.insert(name.to_owned(), root_id);
@@ -308,11 +317,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     let mut items = Vec::new();
                     for (index, child) in schema.prefix_items.iter().enumerate() {
                         items.push(self.lower_schema_or(child, &format!("{hint}Item{index}"))?);
+                        self.warn_structural_default_or(child, "a tuple `prefixItems` entry");
                     }
                     self.insert_schema_type(schema, hint, TypeKind::Tuple(items))
                 } else {
                     let mut item = match &schema.items {
-                        Some(items) => self.lower_schema_or(items, &format!("{hint}Item"))?,
+                        Some(items) => {
+                            let item = self.lower_schema_or(items, &format!("{hint}Item"))?;
+                            self.warn_structural_default_or(items, "array `items`");
+                            item
+                        }
                         None => self.insert_type(
                             &format!("{hint}Item"),
                             TypeKind::Any,
@@ -341,13 +355,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut fields = Vec::new();
         for (name, child) in &schema.properties {
             let ty = self.lower_schema_or(child, &format!("{hint}{name}"))?;
+            let is_required = required.contains(name);
+            let default = self.field_default(child, ty, is_required);
             fields.push(Field {
                 name: PropertyName { wire: name.clone() },
                 ty,
-                required: required.contains(name),
+                required: is_required,
                 deprecated: schema.deprecated,
                 read_only: schema.read_only,
                 write_only: schema.write_only,
+                default,
             });
         }
         let additional = match &schema.additional_properties {
@@ -356,6 +373,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 SchemaOr::Bool(true) => AdditionalProps::Allow,
                 schema => {
                     let mut ty = self.lower_schema_or(schema, &format!("{hint}Additional"))?;
+                    self.warn_structural_default_or(schema, "an `additionalProperties` value");
                     // A map value lives behind the map's own indirection; a cycle-closing ref here
                     // needs no `Box`.
                     ty.boxed = false;
@@ -369,6 +387,86 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             hint,
             TypeKind::Struct(Struct { fields, additional }),
         ))
+    }
+
+    /// Give a property's `default` its single explicit disposition. Returns `None` when the
+    /// property declared no `default`; otherwise a [`FieldDefault`] whose `applied` is set only for
+    /// a representable scalar on a plain optional field. A non-representable default emits `W005`.
+    fn field_default(&mut self, child: &SchemaOr, ty: Ty, required: bool) -> Option<FieldDefault> {
+        let SchemaOr::Schema(schema) = child else {
+            return None;
+        };
+        let raw = schema.default.as_ref()?;
+        let classified = classify_default(raw);
+        let kind = self.graph.get(ty.id).map(|def| &def.kind);
+        match representable_default(&classified, kind) {
+            Some(value) => {
+                let display = default_display(&value);
+                // A serde default only fires for an absent field on deserialization, so it is wired
+                // only for a plain optional (non-required, non-nullable) scalar. A required field is
+                // always present, and a nullable field already carries `Option`; both are documented
+                // in rustdoc instead of silently ignored.
+                let applied = (!required && !ty.nullable).then_some(value);
+                Some(FieldDefault {
+                    doc_note: format!("Default: `{display}`."),
+                    applied,
+                })
+            }
+            None => {
+                Diagnostic::warning(Code::SchemaDefaultNotApplied, schema.provenance.clone())
+                    .message(
+                        "schema `default` is not a scalar matching the field type; it is \
+                         documented in rustdoc but not applied as a deserialization default",
+                    )
+                    .remedy(
+                        "use a scalar default matching the field's own type, or set the value \
+                         explicitly at each call site",
+                    )
+                    .emit(self.diags);
+                Some(FieldDefault {
+                    doc_note: format!("Default (not applied): `{}`.", raw_display(raw)),
+                    applied: None,
+                })
+            }
+        }
+    }
+
+    /// Render the rustdoc `Default:` note for a parameter's schema `default`, if it declared one.
+    /// Parameter defaults are documented but never serde-wired.
+    fn param_default_display(&self, schema: Option<&RefOr<Schema>>, ty: Ty) -> Option<String> {
+        let RefOr::Item(schema) = schema? else {
+            return None;
+        };
+        let raw = schema.default.as_ref()?;
+        let kind = self.graph.get(ty.id).map(|def| &def.kind);
+        Some(default_display_for(raw, kind))
+    }
+
+    /// A `default` in a structural position with no field/parameter/type home of its own —
+    /// array `items`, tuple `prefixItems`, `additionalProperties` value, or a request/response body
+    /// root — cannot be applied or documented against a named item, so it is reported as `W005`
+    /// rather than dropped silently.
+    fn warn_structural_default_or(&mut self, schema: &SchemaOr, position: &str) {
+        if let SchemaOr::Schema(schema) = schema {
+            self.warn_structural_default(schema, position);
+        }
+    }
+
+    fn warn_structural_default_ref(&mut self, schema: &RefOr<Schema>, position: &str) {
+        if let RefOr::Item(schema) = schema {
+            self.warn_structural_default(schema, position);
+        }
+    }
+
+    fn warn_structural_default(&mut self, schema: &Schema, position: &str) {
+        if schema.default.is_some() {
+            Diagnostic::warning(Code::SchemaDefaultNotApplied, schema.provenance.clone())
+                .message(format!(
+                    "schema `default` on {position} has no field to carry it and is not applied"
+                ))
+                .remedy("move the default onto a named property, or set the value explicitly")
+                .emit(self.diags);
+        }
     }
 
     fn lower_enum(&mut self, values: &[SpannedValue], schema: &Schema, hint: &str) -> Option<Ty> {
@@ -451,6 +549,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .schema
                 .as_ref()
                 .and_then(|schema| self.lower_schema_ref(schema, &parameter.name))?;
+            let default_display = self.param_default_display(object.schema.as_ref(), ty);
             return Some(Parameter {
                 name: parameter.name.clone(),
                 location,
@@ -458,6 +557,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 required: parameter.required || location == ParamLoc::Path,
                 style: ParamStyle::Content(media),
                 deprecated: parameter.deprecated,
+                default_display,
             });
         } else {
             self.insert_type(
@@ -467,6 +567,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(parameter.provenance.clone()),
             )
         };
+        let default_display = self.param_default_display(parameter.schema.as_ref(), ty);
         Some(Parameter {
             name: parameter.name.clone(),
             location,
@@ -474,6 +575,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             required: parameter.required || location == ParamLoc::Path,
             style,
             deprecated: parameter.deprecated,
+            default_display,
         })
     }
 
@@ -484,6 +586,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .schema
             .as_ref()
             .and_then(|schema| self.lower_schema_ref(schema, "RequestBody"));
+        if let Some(schema) = object.schema.as_ref() {
+            self.warn_structural_default_ref(schema, "a request body schema");
+        }
         Some(RequestBody { media, ty })
     }
 
@@ -515,6 +620,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .schema
                     .as_ref()
                     .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody"));
+                if let Some(schema) = object.schema.as_ref() {
+                    self.warn_structural_default_ref(schema, "a response body schema");
+                }
                 Some((media, ty))
             },
         );
@@ -740,6 +848,143 @@ fn parse_path_template(path: &str) -> PathTemplate {
     PathTemplate {
         raw: path.to_owned(),
         segments,
+    }
+}
+
+/// A `default` value classified into the scalar kinds that can back a Rust literal, or `Other` for
+/// anything (object/array/null) that cannot.
+enum RawDefault {
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Other,
+}
+
+fn classify_default(value: &SpannedValue) -> RawDefault {
+    match &value.node {
+        Node::Bool(value) => RawDefault::Bool(*value),
+        Node::Number(Number::Int(value)) => RawDefault::Int(*value),
+        Node::Number(Number::UInt(value)) => {
+            i64::try_from(*value).map_or(RawDefault::Float(*value as f64), RawDefault::Int)
+        }
+        Node::Number(Number::Float(value)) => RawDefault::Float(*value),
+        Node::String(value) => RawDefault::Str(value.clone()),
+        Node::Null | Node::Array(_) | Node::Object(_) => RawDefault::Other,
+    }
+}
+
+/// Decide whether a classified `default` is representable against the field's lowered type: a
+/// `Primitive` of the matching scalar kind, or a `ScalarEnum` value that is one of its variants.
+fn representable_default(raw: &RawDefault, kind: Option<&TypeKind>) -> Option<DefaultValue> {
+    let kind = kind?;
+    match (raw, kind) {
+        (RawDefault::Bool(value), TypeKind::Primitive(Prim::Bool)) => {
+            Some(DefaultValue::Bool(*value))
+        }
+        // Width-check the literal so an out-of-range `int32` default is treated as
+        // non-representable (→ W005, rustdoc-only) rather than rendered into code that fails to
+        // compile. `i64` fields always fit.
+        (RawDefault::Int(value), TypeKind::Primitive(Prim::I32))
+            if i32::try_from(*value).is_ok() =>
+        {
+            Some(DefaultValue::Int(*value))
+        }
+        (RawDefault::Int(value), TypeKind::Primitive(Prim::I64)) => Some(DefaultValue::Int(*value)),
+        (RawDefault::Int(value), TypeKind::Primitive(Prim::F64)) => {
+            Some(DefaultValue::Float(*value as f64))
+        }
+        (RawDefault::Float(value), TypeKind::Primitive(Prim::F64)) => {
+            Some(DefaultValue::Float(*value))
+        }
+        (RawDefault::Str(value), TypeKind::Primitive(Prim::String)) => {
+            Some(DefaultValue::Str(value.clone()))
+        }
+        (RawDefault::Str(value), TypeKind::Enum(enumeration))
+            if enumeration.repr == ScalarRepr::String
+                && enumeration
+                    .variants
+                    .iter()
+                    .any(|variant| matches!(variant, ScalarValue::String(v) if v == value)) =>
+        {
+            Some(DefaultValue::EnumVariant(value.clone()))
+        }
+        (RawDefault::Int(value), TypeKind::Enum(enumeration))
+            if enumeration.repr == ScalarRepr::Int
+                && enumeration
+                    .variants
+                    .iter()
+                    .any(|variant| matches!(variant, ScalarValue::Int(v) if v == value)) =>
+        {
+            Some(DefaultValue::Int(*value))
+        }
+        (RawDefault::Bool(value), TypeKind::Enum(enumeration))
+            if enumeration.repr == ScalarRepr::Bool
+                && enumeration
+                    .variants
+                    .iter()
+                    .any(|variant| matches!(variant, ScalarValue::Bool(v) if v == value)) =>
+        {
+            Some(DefaultValue::Bool(*value))
+        }
+        _ => None,
+    }
+}
+
+/// Render any `default` for a rustdoc note — nicely when it is representable against `kind`, else
+/// as compact JSON. Used by the document-only positions (parameters, component roots) that never
+/// serde-wire a default but must still surface it.
+fn default_display_for(raw: &SpannedValue, kind: Option<&TypeKind>) -> String {
+    match representable_default(&classify_default(raw), kind) {
+        Some(value) => default_display(&value),
+        None => raw_display(raw),
+    }
+}
+
+/// Render a representable default for its rustdoc `Default:` note.
+fn default_display(value: &DefaultValue) -> String {
+    match value {
+        DefaultValue::Bool(value) => value.to_string(),
+        DefaultValue::Int(value) => value.to_string(),
+        DefaultValue::Float(value) => value.to_string(),
+        DefaultValue::Str(value) | DefaultValue::EnumVariant(value) => value.clone(),
+    }
+}
+
+/// Render an arbitrary default value as compact JSON-ish text for the rustdoc note of a
+/// non-representable (`W005`) default.
+fn raw_display(value: &SpannedValue) -> String {
+    match &value.node {
+        Node::Null => "null".to_owned(),
+        Node::Bool(value) => value.to_string(),
+        Node::Number(Number::Int(value)) => value.to_string(),
+        Node::Number(Number::UInt(value)) => value.to_string(),
+        Node::Number(Number::Float(value)) => value.to_string(),
+        Node::String(value) => format!("{value:?}"),
+        Node::Array(items) => {
+            let items = items.iter().map(raw_display).collect::<Vec<_>>().join(", ");
+            format!("[{items}]")
+        }
+        Node::Object(map) => {
+            let entries = map
+                .iter()
+                .map(|(key, value)| format!("{:?}: {}", key.name, raw_display(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{entries}}}")
+        }
+    }
+}
+
+/// Append a note as a trailing rustdoc paragraph on a type's [`Docs`], used to surface a
+/// component-root `default` on the generated named type.
+fn append_doc_note(docs: &mut Docs, note: String) {
+    match &mut docs.description {
+        Some(description) => {
+            description.push_str("\n\n");
+            description.push_str(&note);
+        }
+        None => docs.description = Some(note),
     }
 }
 
