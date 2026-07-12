@@ -112,8 +112,80 @@ pub enum TypeKind {
     Tuple(Vec<Ty>),
     /// Raw bytes (`octet-stream` / `contentEncoding: base64`).
     Bytes,
+    /// A tagged or structurally-disjoint union (`oneOf`/`anyOf`).
+    Union(Union),
     /// An untyped value (`{}` / `true` schema). Faithful representation of an untyped spec node.
     Any,
+}
+
+/// A `oneOf`/`anyOf` union lowered to a Rust enum. Never `serde(untagged)` and never degraded to
+/// `serde_json::Value`: it is emitted either as an internally-tagged enum (a `discriminator`) or as
+/// an enum with a content-inspecting custom `Deserialize`/`Serialize` proven statically disjoint.
+#[derive(Debug, Clone)]
+pub struct Union {
+    /// The variants, in spec (source) order.
+    pub variants: Vec<UnionVariant>,
+    /// How the union is (de)serialized.
+    pub strategy: UnionStrategy,
+}
+
+/// One variant of a [`Union`]: a name hint (allocated to a Rust variant identifier by `name`) and
+/// the variant's payload type.
+#[derive(Debug, Clone)]
+pub struct UnionVariant {
+    /// The preferred variant name; the Rust identifier is allocated by `name` (keyed by this hint).
+    pub name_hint: String,
+    /// The variant's payload type.
+    pub ty: Ty,
+}
+
+/// The (de)serialization strategy of a [`Union`].
+#[derive(Debug, Clone)]
+pub enum UnionStrategy {
+    /// A `discriminator` → a custom `Deserialize`/`Serialize` that reads/writes the tag field on a
+    /// buffered `serde_json::Value` (NOT serde's `#[serde(tag = ...)]`, which would consume the tag
+    /// out of the buffer and break variants that declare the discriminator as a required property).
+    /// Each variant carries the tag value that selects it.
+    Discriminated {
+        /// The discriminator `propertyName` — the tag field read from / written into the object.
+        tag_field: String,
+        /// The tag value per variant, parallel to [`Union::variants`].
+        tags: Vec<String>,
+    },
+    /// No discriminator, but the variants were proven statically disjoint → a custom
+    /// content-inspecting `Deserialize`/`Serialize`. Each variant carries the feature that
+    /// unambiguously selects it.
+    Disjoint {
+        /// The discriminating feature per variant, parallel to [`Union::variants`].
+        features: Vec<DisjointFeature>,
+    },
+}
+
+/// The statically-proven feature that selects a [`UnionStrategy::Disjoint`] variant when inspecting
+/// a buffered `serde_json::Value`.
+#[derive(Debug, Clone)]
+pub enum DisjointFeature {
+    /// The variant occupies a distinct JSON primitive category (dispatch on `Value::is_*`).
+    JsonType(JsonCategory),
+    /// The variant is an object carrying a required property whose name appears in no other variant
+    /// (dispatch on `Value::get(key).is_some()`).
+    RequiredKey(String),
+}
+
+/// A JSON primitive category for disjointness by JSON type. `number` and `integer` share
+/// [`Number`](JsonCategory::Number) — they overlap on the wire, so they are never disjoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonCategory {
+    /// A JSON string.
+    String,
+    /// A JSON number (integer or floating-point).
+    Number,
+    /// A JSON boolean.
+    Boolean,
+    /// A JSON array.
+    Array,
+    /// A JSON object.
+    Object,
 }
 
 /// A scalar primitive. Numeric wire types map to fixed Rust scalars; `format`-based type mappings

@@ -114,6 +114,72 @@ fn all_of_merged_struct_carries_every_member_field() {
     assert_eq!(account.label, "L");
     assert_eq!(account.owner.as_deref(), Some("o"));
 }
+
+#[test]
+fn discriminated_union_round_trips_with_tag() {
+    // Cat DECLARES `petType` as a required property — the shape that broke serde internal tagging
+    // ("missing field petType"). The custom buffer-to-Value Deserialize hands the WHOLE value to the
+    // variant, so Cat's own `pet_type` field is filled, and re-serialization keeps the tag.
+    let pet: basic_client::types::Pet =
+        serde_json::from_str(r#"{"petType": "cat", "name": "Whiskers"}"#).unwrap();
+    match &pet {
+        basic_client::types::Pet::Cat(cat) => {
+            assert_eq!(cat.name, "Whiskers");
+            assert_eq!(cat.pet_type, "cat");
+        }
+        other => panic!("expected Cat variant, got {other:?}"),
+    }
+    let json = serde_json::to_value(&pet).unwrap();
+    assert_eq!(json["petType"], "cat");
+    assert_eq!(json["name"], "Whiskers");
+
+    // Dog does NOT declare `petType`; the custom Serialize re-inserts the tag it would otherwise
+    // lack, and deserialization still routes by the tag.
+    let dog: basic_client::types::Pet =
+        serde_json::from_str(r#"{"petType": "dog", "bark": true}"#).unwrap();
+    assert!(matches!(dog, basic_client::types::Pet::Dog(_)));
+    let json = serde_json::to_value(&dog).unwrap();
+    assert_eq!(json["petType"], "dog");
+    assert_eq!(json["bark"], true);
+}
+
+#[test]
+fn nullable_variant_union_resolves_null_at_option() {
+    // A `null` payload resolves at the outer `Option` (variant nullability hoisted to the union),
+    // and non-null string/array content routes to the right disjoint variant and re-serializes as a
+    // bare value.
+    let null: basic_client::types::User =
+        serde_json::from_str(r#"{"id": "u", "name": "n", "notes": null}"#).unwrap();
+    assert!(null.notes.is_none());
+
+    let text: basic_client::types::User =
+        serde_json::from_str(r#"{"id": "u", "name": "n", "notes": "hi"}"#).unwrap();
+    assert_eq!(
+        serde_json::to_value(&text.notes).unwrap(),
+        serde_json::json!("hi")
+    );
+
+    let list: basic_client::types::User =
+        serde_json::from_str(r#"{"id": "u", "name": "n", "notes": ["a", "b"]}"#).unwrap();
+    assert_eq!(
+        serde_json::to_value(&list.notes).unwrap(),
+        serde_json::json!(["a", "b"])
+    );
+}
+
+#[test]
+fn disjoint_union_round_trips_without_wrapper() {
+    // A `string` payload deserializes to the string variant and re-serializes as a BARE string —
+    // no tag, no wrapper (Issue #9, strategy B custom Serialize).
+    let text: basic_client::types::StringOrList =
+        serde_json::from_str(r#""hello""#).unwrap();
+    assert_eq!(serde_json::to_string(&text).unwrap(), r#""hello""#);
+
+    // An `array` payload deserializes to the array variant and re-serializes as a bare array.
+    let list: basic_client::types::StringOrList =
+        serde_json::from_str(r#"["a","b"]"#).unwrap();
+    assert_eq!(serde_json::to_string(&list).unwrap(), r#"["a","b"]"#);
+}
 "##,
     )
     .unwrap();
@@ -237,6 +303,60 @@ components:
           $ref: "#/components/schemas/Dict"
         priority:
           $ref: "#/components/schemas/Priority"
+        # Discriminated union (Issue #9): an internally-tagged enum over object `$ref` variants.
+        pet:
+          $ref: "#/components/schemas/Pet"
+        # Undiscriminated but provably-disjoint union (string vs array JSON category): an enum with a
+        # content-inspecting custom Deserialize/Serialize — no wrapper on the wire.
+        alias:
+          $ref: "#/components/schemas/StringOrList"
+        # Nullable union variant (Issue #9 fix 2): the string variant is `{type: [string, null]}`;
+        # its nullability is HOISTED to the union so this field is `Option<...>` and a `null` payload
+        # resolves to `None` rather than erroring in the custom Deserialize.
+        notes:
+          $ref: "#/components/schemas/StringListOrNull"
+    # Discriminated union: `petType` selects the object variant. Cat DECLARES `petType` as a required
+    # property (the shape that broke serde internal tagging — "missing field petType"); the custom
+    # buffer-to-Value Deserialize hands the WHOLE value to the variant, so Cat keeps its own tag.
+    Cat:
+      type: object
+      required: [petType, name]
+      properties:
+        petType:
+          type: string
+        name:
+          type: string
+    # Dog does NOT declare `petType`; on serialize the custom Serialize re-inserts the tag.
+    Dog:
+      type: object
+      required: [bark]
+      properties:
+        bark:
+          type: boolean
+    Pet:
+      oneOf:
+        - $ref: "#/components/schemas/Cat"
+        - $ref: "#/components/schemas/Dog"
+      discriminator:
+        propertyName: petType
+        mapping:
+          cat: "#/components/schemas/Cat"
+          dog: "#/components/schemas/Dog"
+    # Disjoint by JSON type category: a bare string or a list of strings. Serializes WITHOUT any tag
+    # or wrapper — the active variant's inner value is emitted directly.
+    StringOrList:
+      oneOf:
+        - type: string
+        - type: array
+          items:
+            type: string
+    # Nullable-variant union: the string member is nullable, hoisted to make the whole union nullable.
+    StringListOrNull:
+      oneOf:
+        - type: [string, "null"]
+        - type: array
+          items:
+            type: string
     # Self-recursive: `parent` is a direct back-edge (→ Option<Box<TreeNode>>) and `children`
     # recurses through an array (→ Vec<TreeNode>; the Vec supplies the indirection). Without
     # boxing the direct `parent` back-edge the

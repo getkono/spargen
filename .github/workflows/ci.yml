@@ -79,8 +79,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json > /tmp/spargen-github-30.json || test $? -eq 1
       - run: grep -q E001 /tmp/spargen-github-30.json
-      - run: cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json > /tmp/spargen-ollama.json || test $? -eq 1
-      - run: grep -q E007 /tmp/spargen-ollama.json
+      # ollama now generates (union lowering, #9): check must succeed with no rejection.
+      - run: cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json
       - run: cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
 
   example:

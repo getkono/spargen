@@ -4,10 +4,11 @@ use indexmap::IndexMap;
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics};
 use crate::ir::{
-    AdditionalProps, Api, ApiKeyLoc, DefaultValue, Docs, Field, FieldDefault, HttpScheme, Info,
-    MediaType, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate,
-    Prim, PropertyName, RequestBody, Response, Responses, ScalarEnum, ScalarRepr, ScalarValue,
-    SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+    AdditionalProps, Api, ApiKeyLoc, DefaultValue, DisjointFeature, Docs, Field, FieldDefault,
+    HttpScheme, Info, JsonCategory, MediaType, Operation, OperationId, ParamLoc, ParamStyle,
+    Parameter, PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response, Responses,
+    ScalarEnum, ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty,
+    TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionStrategy, UnionVariant,
 };
 use crate::name::synth_operation_id;
 use crate::source::{Node, Number, SpannedValue};
@@ -254,24 +255,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.lower_all_of(schema, hint);
         }
 
-        if (!schema.one_of.is_empty() || !schema.any_of.is_empty())
-            && schema.discriminator.is_none()
-        {
-            Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
-                .message("oneOf/anyOf without a discriminator is not statically proven disjoint")
-                .remedy("add a discriminator or omit this API segment with spargen::omit!")
-                .emit(self.diags);
-            return None;
-        }
-
         if !schema.one_of.is_empty() || !schema.any_of.is_empty() {
-            Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
-                .message("discriminated oneOf/anyOf lowering is not implemented in this slice")
-                .remedy(
-                    "omit this API segment with spargen::omit! until union lowering is extended",
-                )
-                .emit(self.diags);
-            return None;
+            return self.lower_union(schema, hint);
         }
 
         if let Some(enumeration) = &schema.enum_values {
@@ -365,6 +350,282 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             hint,
             TypeKind::Struct(Struct { fields, additional }),
         ))
+    }
+
+    /// Lower a `oneOf`/`anyOf` union. `null` members are stripped and make the union `nullable`
+    /// (`Option<Union>`), exactly like a `"null"` in a type array; a 2-member union whose other
+    /// member is null collapses to `Option<TheOtherType>` with no enum. The remaining variants are
+    /// represented WITHOUT `serde(untagged)` and without degrading to `serde_json::Value`:
+    ///
+    /// * with a `discriminator` → an internally-tagged enum ([`UnionStrategy::Internal`]); each
+    ///   variant must lower to an object (serde internal tagging requires struct-like variants),
+    ///   otherwise the discriminator is not representable → `E007`.
+    /// * without one → an enum with a custom content-inspecting `Deserialize`/`Serialize`
+    ///   ([`UnionStrategy::Disjoint`]), but only when the variants are *provably* disjoint by JSON
+    ///   type category or by a unique required key; otherwise → `E007` (narrowed).
+    ///
+    /// Every variant type inserts before the union def, so the [`TypeKind::Union`] is the final
+    /// graph insert — preserving the [`Self::ensure_component`] last-insert invariant when the union
+    /// is a component body.
+    fn lower_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        // Gather the member schemas in deterministic order (oneOf, then anyOf).
+        let members: Vec<&SchemaOr> = schema.one_of.iter().chain(schema.any_of.iter()).collect();
+
+        // A `"null"` in the enclosing type array, or a null-only member, makes the union nullable.
+        let mut nullable = schema.types.types.contains(&JsonType::Null);
+        let mut real_members: Vec<&SchemaOr> = Vec::new();
+        for member in members {
+            if member_is_null_only(member) {
+                nullable = true;
+            } else {
+                real_members.push(member);
+            }
+        }
+
+        // Only null members remained: a faithful nullable untyped value.
+        if real_members.is_empty() {
+            let mut ty = self.insert_schema_type(schema, hint, TypeKind::Any);
+            ty.nullable = true;
+            return Some(ty);
+        }
+
+        // A single real member (the rest were null): `Option<ThatType>`, no enum needed. Re-emit the
+        // member's kind as this position's own def so it is the final graph insert — mirroring the
+        // allOf single-member collapse — which keeps the `ensure_component` last-insert invariant
+        // when the union is a component body (a bare `$ref` member would otherwise return an existing
+        // id and leave the popped root mismatched).
+        if real_members.len() == 1 {
+            let inner = self.lower_schema_or(real_members[0], hint)?;
+            let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
+            let mut ty = self.insert_schema_type(schema, hint, kind);
+            ty.nullable = inner.nullable || nullable;
+            ty.boxed = inner.boxed;
+            return Some(ty);
+        }
+
+        // Lower every real variant first (their defs — especially `$ref` components — insert before
+        // the union def below), recording the `$ref` component name for tag/variant naming.
+        let mut variants: Vec<UnionVariant> = Vec::new();
+        let mut ref_names: Vec<Option<String>> = Vec::new();
+        let mut used_hints: HashSet<String> = HashSet::new();
+        for (index, member) in real_members.iter().enumerate() {
+            let (mut ty, ref_name) =
+                self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
+            // Hoist a variant's own nullability up to the union: a `null` payload then resolves at the
+            // outer `Option<Union>` (→ `None`), and the discriminated/disjoint dispatch below only
+            // ever inspects non-null content — otherwise a variant like `{type: [string, null]}`
+            // would be categorized `String` yet have no `null` arm in the custom `Deserialize`.
+            nullable = nullable || ty.nullable;
+            ty.nullable = false;
+            let base_hint = ref_name
+                .clone()
+                .unwrap_or_else(|| format!("{hint}Variant{index}"));
+            // Keep hints unique so `name` allocates one identifier per variant (the hint keys the
+            // per-union variant table).
+            let mut name_hint = base_hint.clone();
+            let mut disambiguator = 2usize;
+            while !used_hints.insert(name_hint.clone()) {
+                name_hint = format!("{base_hint}{disambiguator}");
+                disambiguator += 1;
+            }
+            variants.push(UnionVariant { name_hint, ty });
+            ref_names.push(ref_name);
+        }
+
+        let strategy = if let Some(discriminator) = &schema.discriminator {
+            self.discriminated_strategy(schema, &variants, &ref_names, discriminator)?
+        } else {
+            self.disjoint_strategy(schema, &variants)?
+        };
+
+        let mut ty =
+            self.insert_schema_type(schema, hint, TypeKind::Union(Union { variants, strategy }));
+        ty.nullable = nullable;
+        Some(ty)
+    }
+
+    /// Lower one union member, returning its type and — when the member is a `$ref` to a component —
+    /// that component's name (used to derive the variant name and implicit discriminator tag).
+    fn lower_union_variant(
+        &mut self,
+        member: &SchemaOr,
+        hint: &str,
+    ) -> Option<(Ty, Option<String>)> {
+        if let SchemaOr::Schema(schema) = member {
+            if let Some(reference) = &schema.reference {
+                if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                    let ty = self.ensure_component(name)?;
+                    return Some((ty, Some(name.to_owned())));
+                }
+            }
+        }
+        let ty = self.lower_schema_or(member, hint)?;
+        Some((ty, None))
+    }
+
+    /// Build the discriminated strategy for a discriminated union. Each variant must lower to an
+    /// object (the tag is read/written on an object), otherwise `E007` (narrowed). The tag value
+    /// comes from `discriminator.mapping` (matched by `$ref`) when present, otherwise from the
+    /// variant's own `$ref` component name (implicit mapping).
+    fn discriminated_strategy(
+        &mut self,
+        schema: &Schema,
+        variants: &[UnionVariant],
+        ref_names: &[Option<String>],
+        discriminator: &super::Discriminator,
+    ) -> Option<UnionStrategy> {
+        let mut tags = Vec::new();
+        for (variant, ref_name) in variants.iter().zip(ref_names) {
+            if !matches!(
+                self.graph.get(variant.ty.id).map(|def| &def.kind),
+                Some(TypeKind::Struct(_))
+            ) {
+                return self.reject_union(
+                    schema,
+                    "a discriminated union variant is not an object type; the discriminator tag is \
+                     read from an object, so every variant must be a struct (a `$ref` to an object \
+                     component or an inline object)",
+                );
+            }
+            // Prefer an explicit mapping entry that points at this variant's component; fall back to
+            // the component name (implicit mapping). A mapping value may be a bare name or a full
+            // `#/components/schemas/Name` pointer.
+            let tag = ref_name
+                .as_ref()
+                .and_then(|name| {
+                    discriminator
+                        .mapping
+                        .iter()
+                        .find(|(_, target)| {
+                            target.as_str() == name
+                                || target.strip_prefix("#/components/schemas/") == Some(name)
+                        })
+                        .map(|(key, _)| key.clone())
+                        .or_else(|| Some(name.clone()))
+                })
+                .unwrap_or_else(|| variant.name_hint.clone());
+            tags.push(tag);
+        }
+        Some(UnionStrategy::Discriminated {
+            tag_field: discriminator.property_name.clone(),
+            tags,
+        })
+    }
+
+    /// Build the disjoint strategy for an undiscriminated union, or reject with narrowed `E007` when
+    /// the variants are not provably disjoint. Two proofs are attempted in order:
+    ///
+    /// 1. **JSON-type-disjoint**: every variant occupies a distinct JSON primitive category
+    ///    (`number` and `integer` share one category, so they never separate).
+    /// 2. **Required-key-disjoint**: every variant is a *closed* object (`additionalProperties:
+    ///    false`) with at least one required property whose name appears in no other variant. Closed
+    ///    is essential — an open object could carry another variant's unique key as an extra field
+    ///    and be misrouted, so open-object required-key unions are never provably disjoint.
+    fn disjoint_strategy(
+        &mut self,
+        schema: &Schema,
+        variants: &[UnionVariant],
+    ) -> Option<UnionStrategy> {
+        // Proof 1: pairwise-distinct JSON type categories.
+        let categories: Option<Vec<JsonCategory>> =
+            variants.iter().map(|v| self.json_category(v.ty)).collect();
+        if let Some(categories) = categories {
+            let all_distinct = categories.iter().enumerate().all(|(i, cat)| {
+                categories
+                    .iter()
+                    .enumerate()
+                    .all(|(j, other)| i == j || cat != other)
+            });
+            if all_distinct {
+                return Some(UnionStrategy::Disjoint {
+                    features: categories
+                        .into_iter()
+                        .map(DisjointFeature::JsonType)
+                        .collect(),
+                });
+            }
+        }
+
+        // Proof 2: object variants each carrying a unique required key.
+        if let Some(keys) = self.required_key_features(variants) {
+            return Some(UnionStrategy::Disjoint {
+                features: keys.into_iter().map(DisjointFeature::RequiredKey).collect(),
+            });
+        }
+
+        self.reject_union(
+            schema,
+            "oneOf/anyOf variants are not provably disjoint: they neither occupy distinct JSON \
+             type categories (integer and number overlap) nor are all closed objects \
+             (additionalProperties: false) with a unique required key per variant, so a payload \
+             cannot be routed to one variant unambiguously",
+        )
+    }
+
+    /// The JSON primitive category a lowered variant type serializes as, or `None` when it cannot be
+    /// statically categorized (an untyped `Any`, raw `Bytes`, or a nested union).
+    fn json_category(&self, ty: Ty) -> Option<JsonCategory> {
+        Some(match &self.graph.get(ty.id)?.kind {
+            TypeKind::Primitive(Prim::Bool) => JsonCategory::Boolean,
+            TypeKind::Primitive(Prim::I32 | Prim::I64 | Prim::F64) => JsonCategory::Number,
+            TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date) => {
+                JsonCategory::String
+            }
+            TypeKind::Struct(_) => JsonCategory::Object,
+            TypeKind::Array(_) | TypeKind::Tuple(_) => JsonCategory::Array,
+            TypeKind::Enum(enumeration) => match enumeration.repr {
+                ScalarRepr::String => JsonCategory::String,
+                ScalarRepr::Int => JsonCategory::Number,
+                ScalarRepr::Bool => JsonCategory::Boolean,
+            },
+            TypeKind::Bytes | TypeKind::Any | TypeKind::Union(_) => return None,
+        })
+    }
+
+    /// If every variant lowers to a *closed* object (`additionalProperties: false`) with at least
+    /// one required property whose name appears in no other variant, return that unique required key
+    /// per variant (source order); else `None`. Closed is required for soundness: an open object
+    /// could carry another variant's unique key as an extra field, misrouting the payload.
+    fn required_key_features(&self, variants: &[UnionVariant]) -> Option<Vec<String>> {
+        let structs: Option<Vec<&Struct>> = variants
+            .iter()
+            .map(|v| match &self.graph.get(v.ty.id)?.kind {
+                // Only closed objects are sound discriminators by required-key presence.
+                TypeKind::Struct(structure)
+                    if matches!(structure.additional, AdditionalProps::Deny) =>
+                {
+                    Some(structure)
+                }
+                _ => None,
+            })
+            .collect();
+        let structs = structs?;
+        let mut keys = Vec::new();
+        for (index, structure) in structs.iter().enumerate() {
+            let others: HashSet<&str> = structs
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .flat_map(|(_, s)| s.fields.iter().map(|f| f.name.wire.as_str()))
+                .collect();
+            let key = structure
+                .fields
+                .iter()
+                .find(|field| field.required && !others.contains(field.name.wire.as_str()))?;
+            keys.push(key.name.wire.clone());
+        }
+        Some(keys)
+    }
+
+    fn reject_union<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(
+                "add a discriminator, restructure the variants to be disjoint, or omit this API \
+                 segment with spargen::omit!",
+            )
+            .emit(self.diags);
+        None
     }
 
     /// Lower an object schema's `properties`/`required`/`additionalProperties` into the pieces of a
@@ -1537,6 +1798,24 @@ fn member_provenance(member: &SchemaOr) -> crate::diag::Provenance {
         SchemaOr::Schema(schema) => schema.provenance.clone(),
         SchemaOr::Bool(_) => crate::diag::Provenance::new(crate::diag::JsonPointer::root(), None),
     }
+}
+
+/// Whether a union member is a null-only schema (`{type: "null"}`) — stripped from the union and
+/// folded into its nullability, exactly like a `"null"` in a type array. A bare `$ref` member is
+/// never null-only here (it names a component with its own shape); only an inline `type: null`
+/// node with no other constraints counts.
+fn member_is_null_only(member: &SchemaOr) -> bool {
+    let SchemaOr::Schema(schema) = member else {
+        return false;
+    };
+    schema.reference.is_none()
+        && schema.types.types == [JsonType::Null]
+        && schema.one_of.is_empty()
+        && schema.any_of.is_empty()
+        && schema.all_of.is_empty()
+        && schema.enum_values.is_none()
+        && schema.const_value.is_none()
+        && schema.properties.is_empty()
 }
 
 fn schema_is_nullable(schema: &Schema) -> bool {

@@ -31,7 +31,7 @@ Fast corpus smoke checks:
 
 ```bash
 cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json
-cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json  # expected: E007
+cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json  # expected: generates (W001 only)
 cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
 ```
 

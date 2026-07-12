@@ -114,6 +114,22 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                     );
                 }
             }
+            TypeKind::Union(union) => {
+                // Union variants share the scalar-enum `variants` table, keyed by `(TypeId, hint)`.
+                // A type id is either an enum or a union, so the two never collide; hints are made
+                // unique per union at lowering time, keeping this allocation injective in scope.
+                let mut scope = Scope::default();
+                for variant in &union.variants {
+                    names.variants.insert(
+                        (id, variant.name_hint.clone()),
+                        scope.alloc(
+                            &variant.name_hint,
+                            IdentRole::Variant,
+                            &def.provenance.pointer,
+                        ),
+                    );
+                }
+            }
             _ => {}
         }
     }

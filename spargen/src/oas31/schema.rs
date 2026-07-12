@@ -91,10 +91,10 @@ pub enum JsonType {
     String,
 }
 
-/// An OAS `discriminator` object. Lowering currently only tests for its presence; the fields are
-/// retained for the discriminated-union lowering that will consume them.
+/// An OAS `discriminator` object, consumed by discriminated-union lowering to build an
+/// internally-tagged enum: `property_name` is the serde tag field and `mapping` supplies each
+/// variant's tag value (falling back to the variant's `$ref` component name).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Discriminator {
     /// `propertyName`.
     pub property_name: String,

@@ -36,9 +36,10 @@ revision = "d47859ce495496196df211e939702364492a2b7f"
 upstream_path = "docs/openapi.yaml"
 sha256 = "d54e2ef5c24a396662ca7222af31ab3e26a642efbd2bb060d921b9393e9fef87"
 license = "MIT"
-# Rejected today: several oneOf unions (e.g. string | string[]) carry no discriminator and
-# disjoint-union lowering is not implemented, so E007 fires under both check and generate.
-expect = "reject:E007"
+# Its oneOf unions (e.g. string | string[], string | object) carry no discriminator but are
+# structurally disjoint by JSON type, so union lowering (#9) generates them via a custom
+# content-inspecting deserialize. Generates clean (one W001 for a validation-only keyword).
+expect = "generate"
 
 [[case]]
 id = "openapi-boilerplate"

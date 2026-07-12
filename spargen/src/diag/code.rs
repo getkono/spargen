@@ -28,8 +28,9 @@ pub enum Code {
     PatternPropertiesRejected,
     /// `$dynamicRef`/`$dynamicAnchor` are rejected (matrix: Schema shape → R).
     DynamicRefRejected,
-    /// A `oneOf`/`anyOf` with non-disjoint variant sets cannot be deserialized unambiguously;
-    /// names the overlapping variants and suggests a `discriminator`.
+    /// A `oneOf`/`anyOf` union could not be represented: a discriminated variant is not an object,
+    /// or an undiscriminated union is not provably disjoint (by JSON type category, or a unique
+    /// required key across closed object variants) so a payload cannot be routed unambiguously.
     NonDisjointUnion,
     /// A heterogeneous or structured `enum`/`const` value set is rejected.
     NonScalarEnum,
@@ -155,7 +156,7 @@ impl Code {
                 "`$dynamicRef` and `$dynamicAnchor` require dynamic schema-scope evaluation and are rejected."
             }
             Code::NonDisjointUnion => {
-                "A `oneOf`/`anyOf` without a discriminator must be statically disjoint. Add a discriminator or omit the unsupported operation/schema."
+                "`oneOf`/`anyOf` unions are lowered to Rust enums with a custom `Deserialize`/`Serialize` — never `serde(untagged)` and never degraded to `serde_json::Value`. A union with a `discriminator` reads/writes the tag field on a buffered value, so every variant must be an object (a `$ref` to an object component or an inline object); a primitive/array/untyped variant is rejected. A union without a discriminator is emitted only when it is statically disjoint: either every variant occupies a distinct JSON type category (integer and number share one category and never separate), or every variant is a *closed* object (`additionalProperties: false`) with at least one required property whose name appears in no other variant — closed is required because an open object could carry another variant's unique key as an extra field and be misrouted. It is rejected only when neither proof holds — overlapping JSON types, open or non-uniquely-keyed object variants, an untyped variant, or a variant that is itself a union. Add or fix the discriminator, make the object variants closed with disjoint required keys, or omit this API segment with `spargen::omit!`."
             }
             Code::NonScalarEnum => {
                 "Enums and const values must be homogeneous scalar sets. A `null` member (or `\"null\"` in the schema's type array) is allowed: it is stripped and makes the generated type nullable (`Option<Enum>`), and a value set of only `null` lowers to a nullable untyped value. Sets that mix distinct scalar kinds (e.g. a string with an integer) or that contain object/array members are rejected."

@@ -181,6 +181,32 @@ components:
 
 #[test]
 fn e007_non_disjoint_union() {
+    // `integer | number` share the JSON numeric category (they overlap on the wire), so the union is
+    // NOT provably disjoint → E007 (narrowed). A payload `1` could match either variant.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    U:
+      oneOf:
+        - type: integer
+        - type: number
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::NonDisjointUnion));
+    // check/generate parity.
+    let checked = check(spec);
+    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::NonDisjointUnion));
+}
+
+#[test]
+fn e007_overlapping_required_keys_rejected() {
+    // Two object variants that share their only required key are not disjoint by key presence, and
+    // both are the Object JSON category → no proof holds → E007.
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -190,12 +216,231 @@ components:
   schemas:
     U:
       oneOf:
-        - type: string
-        - type: integer
+        - type: object
+          required: [kind]
+          properties: { kind: { type: string }, a: { type: string } }
+        - type: object
+          required: [kind]
+          properties: { kind: { type: string }, b: { type: string } }
 "##,
     );
     assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::NonDisjointUnion));
+}
+
+#[test]
+fn string_integer_union_generates() {
+    // `string | integer` occupy distinct JSON type categories (string vs number) → provably disjoint
+    // → GENERATES (this replaced the old, incorrect E007 fixture, which asserted rejection here).
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    U:
+      oneOf:
+        - type: string
+        - type: integer
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn discriminated_union_with_mapping_generates() {
+    // A `discriminator` with an explicit mapping over object `$ref` variants → an internally-tagged
+    // enum. Generates without E007. check/generate parity.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Cat:
+      type: object
+      required: [name]
+      properties: { name: { type: string } }
+    Dog:
+      type: object
+      required: [bark]
+      properties: { bark: { type: boolean } }
+    Pet:
+      oneOf:
+        - $ref: "#/components/schemas/Cat"
+        - $ref: "#/components/schemas/Dog"
+      discriminator:
+        propertyName: petType
+        mapping:
+          cat: "#/components/schemas/Cat"
+          dog: "#/components/schemas/Dog"
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn e007_discriminated_non_object_variant_rejected() {
+    // A discriminated variant that is not an object (a primitive) cannot be internally tagged → E007.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Cat:
+      type: object
+      required: [name]
+      properties: { name: { type: string } }
+    Pet:
+      oneOf:
+        - $ref: "#/components/schemas/Cat"
+        - type: string
+      discriminator:
+        propertyName: petType
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::NonDisjointUnion));
+}
+
+#[test]
+fn disjoint_string_array_union_generates() {
+    // `string | string[]` occupy distinct JSON type categories (string vs array) → provably disjoint
+    // (ollama's dominant shape). Generates without E007.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    U:
+      oneOf:
+        - type: string
+        - type: array
+          items: { type: string }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn required_key_disjoint_objects_generate() {
+    // Two CLOSED object variants (`additionalProperties: false`) each with a unique required key
+    // (`a` / `b`) → provably disjoint by key presence → GENERATES with a content-inspecting custom
+    // Deserialize. Closed is required for soundness (see `e007_open_object_required_key_rejected`).
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    A:
+      type: object
+      additionalProperties: false
+      required: [a]
+      properties: { a: { type: string } }
+    B:
+      type: object
+      additionalProperties: false
+      required: [b]
+      properties: { b: { type: string } }
+    U:
+      oneOf:
+        - $ref: "#/components/schemas/A"
+        - $ref: "#/components/schemas/B"
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn e007_open_object_required_key_rejected() {
+    // OPEN object variants (default `additionalProperties`) are NOT provably disjoint by required
+    // key: a payload for B could carry A's key `a` as an extra field and be misrouted → E007.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    A:
+      type: object
+      required: [a]
+      properties: { a: { type: string } }
+    B:
+      type: object
+      required: [b]
+      properties: { b: { type: string } }
+    U:
+      oneOf:
+        - $ref: "#/components/schemas/A"
+        - $ref: "#/components/schemas/B"
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::NonDisjointUnion));
+    let checked = check(spec);
+    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn nullable_variant_hoists_to_option() {
+    // A variant that is itself nullable (`{type: [string, "null"]}`) has its nullability HOISTED to
+    // the union: the union becomes `Option<Enum>` and the string/array variants stay disjoint. A
+    // `null` payload resolves at the outer `Option`, so the custom Deserialize only sees non-null.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    U:
+      oneOf:
+        - type: [string, "null"]
+        - type: array
+          items: { type: string }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn nullable_union_collapses_to_option() {
+    // A 2-member union where one member is `{type: "null"}` strips the null and collapses to
+    // `Option<String>` — no enum, no E007. Generates.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    U:
+      oneOf:
+        - type: string
+        - type: "null"
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]

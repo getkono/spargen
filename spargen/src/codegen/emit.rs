@@ -5,8 +5,9 @@ use proc_macro2::TokenStream;
 use quote::{format_ident, quote};
 
 use crate::ir::{
-    AdditionalProps, Api, ApiKeyLoc, ErrorShape, Field, HttpScheme, MediaType, Operation, ParamLoc,
-    Prim, ScalarRepr, ScalarValue, SecurityScheme, SuccessShape, Ty, TypeDef, TypeKind,
+    AdditionalProps, Api, ApiKeyLoc, DisjointFeature, ErrorShape, Field, HttpScheme, JsonCategory,
+    MediaType, Operation, ParamLoc, Prim, ScalarRepr, ScalarValue, SecurityScheme, SuccessShape,
+    Ty, TypeDef, TypeKind, UnionStrategy,
 };
 use crate::name::Names;
 
@@ -690,6 +691,177 @@ fn emit_type_def(
             };
             quote! { #docs pub type #ident = #ty; }
         }
+        TypeKind::Union(union) => match &union.strategy {
+            // Strategy A: a discriminator → a custom `Deserialize`/`Serialize` over a buffered
+            // `serde_json::Value`. NOT serde `#[serde(tag = ...)]`: internal tagging consumes the tag
+            // field out of the buffer, so a variant struct that declares the discriminator as a
+            // (usually required) property would fail with "missing field". Instead the WHOLE value is
+            // handed to the selected variant (it keeps its own tag field), and on serialize the tag is
+            // re-inserted only when the variant did not already write it. No `untagged`, no `Value`
+            // degrade.
+            UnionStrategy::Discriminated { tag_field, tags } => {
+                let variant_defs = union.variants.iter().map(|variant| {
+                    let variant_ident = names
+                        .variants
+                        .get(&(id, variant.name_hint.clone()))
+                        .expect("union variant name allocated");
+                    let ty = ty_tokens(variant.ty, names, options, false);
+                    quote! { #variant_ident(#ty), }
+                });
+                let de_arms = union.variants.iter().zip(tags).map(|(variant, tag)| {
+                    let variant_ident = names
+                        .variants
+                        .get(&(id, variant.name_hint.clone()))
+                        .expect("union variant name allocated");
+                    quote! {
+                        #tag => serde_json::from_value(value)
+                            .map(#ident::#variant_ident)
+                            .map_err(serde::de::Error::custom),
+                    }
+                });
+                let ser_arms = union.variants.iter().zip(tags).map(|(variant, tag)| {
+                    let variant_ident = names
+                        .variants
+                        .get(&(id, variant.name_hint.clone()))
+                        .expect("union variant name allocated");
+                    quote! {
+                        #ident::#variant_ident(inner) => (
+                            serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
+                            #tag,
+                        ),
+                    }
+                });
+                let missing_tag = format!(
+                    "missing discriminator field `{tag_field}` for union {}",
+                    ident.as_str()
+                );
+                let unknown_tag =
+                    format!("unknown discriminator value for union {}", ident.as_str());
+                quote! {
+                    #docs
+                    #deprecated
+                    #[derive(Debug, Clone)]
+                    pub enum #ident {
+                        #(#variant_defs)*
+                    }
+
+                    impl<'de> serde::Deserialize<'de> for #ident {
+                        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                        where
+                            D: serde::Deserializer<'de>,
+                        {
+                            let value = serde_json::Value::deserialize(deserializer)?;
+                            let tag = value
+                                .get(#tag_field)
+                                .and_then(serde_json::Value::as_str)
+                                .map(std::borrow::ToOwned::to_owned)
+                                .ok_or_else(|| serde::de::Error::custom(#missing_tag))?;
+                            match tag.as_str() {
+                                #(#de_arms)*
+                                _ => Err(serde::de::Error::custom(#unknown_tag)),
+                            }
+                        }
+                    }
+
+                    impl serde::Serialize for #ident {
+                        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                        where
+                            S: serde::Serializer,
+                        {
+                            let (mut value, tag) = match self {
+                                #(#ser_arms)*
+                            };
+                            if let serde_json::Value::Object(map) = &mut value {
+                                map.entry(#tag_field.to_owned())
+                                    .or_insert_with(|| serde_json::Value::String(tag.to_owned()));
+                            }
+                            value.serialize(serializer)
+                        }
+                    }
+                }
+            }
+            // Strategy B: no discriminator but statically-disjoint variants → an enum with a custom
+            // content-inspecting `Deserialize` (buffer the value, dispatch on the proven feature) and
+            // a `Serialize` that emits just the active variant's inner value (no wrapper, no tag).
+            UnionStrategy::Disjoint { features } => {
+                let variant_defs = union.variants.iter().map(|variant| {
+                    let variant_ident = names
+                        .variants
+                        .get(&(id, variant.name_hint.clone()))
+                        .expect("union variant name allocated");
+                    let ty = ty_tokens(variant.ty, names, options, false);
+                    quote! { #variant_ident(#ty), }
+                });
+                let de_arms = union
+                    .variants
+                    .iter()
+                    .zip(features)
+                    .map(|(variant, feature)| {
+                        let variant_ident = names
+                            .variants
+                            .get(&(id, variant.name_hint.clone()))
+                            .expect("union variant name allocated");
+                        let predicate = match feature {
+                            DisjointFeature::JsonType(category) => match category {
+                                JsonCategory::String => quote! { value.is_string() },
+                                JsonCategory::Number => quote! { value.is_number() },
+                                JsonCategory::Boolean => quote! { value.is_boolean() },
+                                JsonCategory::Array => quote! { value.is_array() },
+                                JsonCategory::Object => quote! { value.is_object() },
+                            },
+                            DisjointFeature::RequiredKey(key) => {
+                                quote! { value.get(#key).is_some() }
+                            }
+                        };
+                        quote! {
+                            if #predicate {
+                                return serde_json::from_value(value)
+                                    .map(#ident::#variant_ident)
+                                    .map_err(serde::de::Error::custom);
+                            }
+                        }
+                    });
+                let ser_arms = union.variants.iter().map(|variant| {
+                    let variant_ident = names
+                        .variants
+                        .get(&(id, variant.name_hint.clone()))
+                        .expect("union variant name allocated");
+                    quote! { #ident::#variant_ident(inner) => inner.serialize(serializer), }
+                });
+                let error_message =
+                    format!("data did not match any variant of union {}", ident.as_str());
+                quote! {
+                    #docs
+                    #deprecated
+                    #[derive(Debug, Clone)]
+                    pub enum #ident {
+                        #(#variant_defs)*
+                    }
+
+                    impl<'de> serde::Deserialize<'de> for #ident {
+                        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                        where
+                            D: serde::Deserializer<'de>,
+                        {
+                            let value = serde_json::Value::deserialize(deserializer)?;
+                            #(#de_arms)*
+                            Err(serde::de::Error::custom(#error_message))
+                        }
+                    }
+
+                    impl serde::Serialize for #ident {
+                        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                        where
+                            S: serde::Serializer,
+                        {
+                            match self {
+                                #(#ser_arms)*
+                            }
+                        }
+                    }
+                }
+            }
+        },
         _ => {
             let ty = type_kind_tokens(&def.kind, api, names, options);
             quote! { #docs pub type #ident = #ty; }
@@ -833,7 +1005,7 @@ fn type_kind_tokens(
         }
         TypeKind::Bytes => quote! { bytes::Bytes },
         TypeKind::Any => quote! { serde_json::Value },
-        TypeKind::Struct(_) | TypeKind::Enum(_) => {
+        TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Union(_) => {
             unreachable!("named definitions emitted separately")
         }
     }
