@@ -156,7 +156,7 @@ impl Code {
                 "A `oneOf`/`anyOf` without a discriminator must be statically disjoint. Add a discriminator or omit the unsupported operation/schema."
             }
             Code::NonScalarEnum => {
-                "Enums and const values must be homogeneous scalar sets. Structured or mixed-type value sets are rejected."
+                "Enums and const values must be homogeneous scalar sets. A `null` member (or `\"null\"` in the schema's type array) is allowed: it is stripped and makes the generated type nullable (`Option<Enum>`), and a value set of only `null` lowers to a nullable untyped value. Sets that mix distinct scalar kinds (e.g. a string with an integer) or that contain object/array members are rejected."
             }
             Code::UnsupportedMediaType => {
                 "Only application/json, application/x-www-form-urlencoded, application/octet-stream, and text/plain are currently generated."

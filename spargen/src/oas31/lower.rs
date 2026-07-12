@@ -146,40 +146,51 @@ struct LowerCtx<'a, 'doc> {
     resolver: &'a Resolver<'doc>,
     diags: &'a mut Diagnostics,
     graph: TypeGraph,
-    components: HashMap<String, TypeId>,
-    /// Components currently being lowered, mapped to the id reserved for their root. A `$ref` that
-    /// re-enters a name still in this map is a cycle-closing back-edge and is boxed against the
-    /// reserved id.
-    in_progress: HashMap<String, TypeId>,
+    /// Lowered components, mapped to their root id and nullability. Nullability is carried so a
+    /// `$ref` consumer wraps the type in `Option` when the component itself is nullable (a
+    /// `"null"` in its type array, or a `null` enum/const member) — otherwise a null-mixed enum
+    /// used via `$ref` would emit a non-`Option` field that rejects a conforming `null` payload.
+    components: HashMap<String, (TypeId, bool)>,
+    /// Components currently being lowered, mapped to the id reserved for their root and their
+    /// nullability (computed at reserve time from the schema). A `$ref` that re-enters a name still
+    /// in this map is a cycle-closing back-edge and is boxed against the reserved id, carrying the
+    /// same nullability a completed lowering would.
+    in_progress: HashMap<String, (TypeId, bool)>,
 }
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn ensure_component(&mut self, name: &str) -> Option<Ty> {
-        if let Some(id) = self.components.get(name).copied() {
+        if let Some(&(id, nullable)) = self.components.get(name) {
             return Some(Ty {
                 id,
-                nullable: false,
+                nullable,
                 boxed: false,
             });
         }
-        if let Some(&id) = self.in_progress.get(name) {
+        if let Some(&(id, nullable)) = self.in_progress.get(name) {
             // Re-entered while still lowering this component: a cycle-closing `$ref` back-edge.
             // Box the reference so the recursive type has a finite size instead of rejecting it;
             // the reserved id will hold the root def once the in-progress body finishes.
             return Some(Ty {
                 id,
-                nullable: false,
+                nullable,
                 boxed: true,
             });
         }
         let RefOr::Item(schema) = self.document.components.schemas.get(name)? else {
             return None;
         };
+        // Nullability is a pure function of the component's own schema — the same inputs
+        // `lower_schema`/`lower_enum` use — so computing it once at reserve time lets every `$ref`
+        // consumer (cache hit, back-edge, or fresh) agree on it without waiting for the body to
+        // finish. No graph insert happens here, so the last-insert invariant below is preserved.
+        let nullable = schema_is_nullable(schema);
         // Reserve the root id before lowering the body so any back-edge encountered mid-body can
         // box a reference to it. The root's def is inserted last (children first) and then lifted
         // into this reserved slot, which keeps ids dense and stable.
         let root_id = self.graph.reserve();
-        self.in_progress.insert(name.to_owned(), root_id);
+        self.in_progress
+            .insert(name.to_owned(), (root_id, nullable));
         let lowered = self.lower_schema(schema, name);
         self.in_progress.remove(name);
         let mut ty = lowered?;
@@ -203,7 +214,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.graph.fill(root_id, def);
         ty.id = root_id;
-        self.components.insert(name.to_owned(), root_id);
+        // Use the reserve-time nullability consistently, so a direct return and a later cache hit
+        // yield an identical `Ty` (it matches what the body lowering computed).
+        ty.nullable = nullable;
+        self.components.insert(name.to_owned(), (root_id, nullable));
         Some(ty)
     }
 
@@ -610,14 +624,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn lower_enum(&mut self, values: &[SpannedValue], schema: &Schema, hint: &str) -> Option<Ty> {
+        // A `null` member — or `"null"` in the schema's own type array — makes the enum/const
+        // nullable: strip the nulls, lower the remaining scalars as the enum, and wrap the result
+        // in `Option`. The enum/const branch returns before `lower_schema` computes `nullable`, so
+        // the nullability has to be decided here from both sources.
+        let has_null = schema.types.types.contains(&JsonType::Null)
+            || values.iter().any(|value| matches!(value.node, Node::Null));
+        // Declared order is preserved (minus nulls) so double generation stays byte-identical.
+        let remainder: Vec<&SpannedValue> = values
+            .iter()
+            .filter(|value| !matches!(value.node, Node::Null))
+            .collect();
+
+        // Only `null` members remained (`enum: [null]` / `const: null`): no scalar variants to
+        // lower, so emit a faithful nullable `Any` rather than rejecting.
+        if remainder.is_empty() {
+            let mut ty = self.insert_schema_type(schema, hint, TypeKind::Any);
+            ty.nullable = true;
+            return Some(ty);
+        }
+
         let mut variants = Vec::new();
         let mut repr = None;
-        for value in values {
+        for value in remainder {
             let scalar = match scalar_value(value) {
                 Some(value) => value,
                 None => {
                     Diagnostic::error(Code::NonScalarEnum, schema.provenance.clone())
-                        .message("enum/const values must be homogeneous scalars")
+                        .message(
+                            "enum/const values must be scalars (object/array members are not \
+                             representable as enum variants)",
+                        )
                         .emit(self.diags);
                     return None;
                 }
@@ -638,14 +675,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             variants.push(scalar);
         }
-        Some(self.insert_schema_type(
+        // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate that
+        // preserves the component-root last-insert invariant asserted in `ensure_component`.
+        let mut ty = self.insert_schema_type(
             schema,
             hint,
             TypeKind::Enum(ScalarEnum {
                 repr: repr.unwrap_or(ScalarRepr::String),
                 variants,
             }),
-        ))
+        );
+        ty.nullable = has_null;
+        Some(ty)
     }
 
     fn lower_parameter(&mut self, parameter: &ParameterObject) -> Option<Parameter> {
@@ -1126,6 +1167,22 @@ fn append_doc_note(docs: &mut Docs, note: String) {
         }
         None => docs.description = Some(note),
     }
+}
+
+/// Whether a schema accepts `null`: a `"null"` member of its type array, or a `null` `enum` member
+/// or `const`. Computed at component reserve time so `$ref` consumers wrap the type in `Option`,
+/// and it agrees with the `nullable` that [`LowerCtx::lower_schema`]/[`LowerCtx::lower_enum`]
+/// compute from the same schema.
+fn schema_is_nullable(schema: &Schema) -> bool {
+    schema.types.types.contains(&JsonType::Null)
+        || schema
+            .enum_values
+            .as_ref()
+            .is_some_and(|values| values.iter().any(|value| matches!(value.node, Node::Null)))
+        || schema
+            .const_value
+            .as_ref()
+            .is_some_and(|value| matches!(value.node, Node::Null))
 }
 
 fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {

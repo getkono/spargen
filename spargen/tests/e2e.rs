@@ -66,6 +66,42 @@ fn pattern_properties_capture_into_typed_overflow_map() {
     assert_eq!(headers.additional.get("x-a").map(String::as_str), Some("1"));
     assert_eq!(headers.additional.get("x-b").map(String::as_str), Some("2"));
 }
+
+#[test]
+fn null_mixed_enum_field_is_option_of_enum() {
+    // The null-mixed `Priority` enum lowered to a real Rust enum used behind `Option`: an absent
+    // field and an explicit `null` both deserialize to `None`; a string value to the variant.
+    let absent: basic_client::types::User =
+        serde_json::from_str(r#"{"id": "u", "name": "n"}"#).unwrap();
+    assert_eq!(absent.priority, None);
+
+    let explicit_null: basic_client::types::User =
+        serde_json::from_str(r#"{"id": "u", "name": "n", "priority": null}"#).unwrap();
+    assert_eq!(explicit_null.priority, None);
+
+    let set: basic_client::types::User =
+        serde_json::from_str(r#"{"id": "u", "name": "n", "priority": "high"}"#).unwrap();
+    assert_eq!(set.priority, Some(basic_client::types::Priority::High));
+}
+
+#[test]
+fn component_nullability_propagates_through_ref() {
+    // A REQUIRED field referencing the nullable `Priority` component is `Option<Priority>`: the key
+    // must be present, but `null` deserializes to `None` and a string to the variant. This only
+    // holds if the component's nullability propagated to the `$ref` use site.
+    let null_priority: basic_client::types::Ticket =
+        serde_json::from_str(r#"{"priority": null, "history": []}"#).unwrap();
+    assert_eq!(null_priority.priority, None);
+
+    // An array of the nullable component is `Vec<Option<Priority>>`: a `null` element is accepted.
+    let set: basic_client::types::Ticket =
+        serde_json::from_str(r#"{"priority": "high", "history": ["low", null]}"#).unwrap();
+    assert_eq!(set.priority, Some(basic_client::types::Priority::High));
+    assert_eq!(
+        set.history,
+        vec![Some(basic_client::types::Priority::Low), None]
+    );
+}
 "##,
     )
     .unwrap();
@@ -149,6 +185,13 @@ paths:
           schema:
             type: integer
             default: 1
+        # Optional nullable query param (Issue #6): `type: [integer, "null"]` lowers to a nullable
+        # `Ty`, which `ty_tokens` renders as `Option<i64>`. The params struct must NOT wrap it again
+        # (`Option<Option<i64>>` would not serialize — `Option<i64>: !Display`).
+        - name: filter
+          in: query
+          schema:
+            type: [integer, "null"]
       responses:
         "200":
           description: OK
@@ -180,6 +223,8 @@ components:
           $ref: "#/components/schemas/Category"
         dict:
           $ref: "#/components/schemas/Dict"
+        priority:
+          $ref: "#/components/schemas/Priority"
     # Self-recursive: `parent` is a direct back-edge (→ Option<Box<TreeNode>>) and `children`
     # recurses through an array (→ Vec<TreeNode>; the Vec supplies the indirection). Without
     # boxing the direct `parent` back-edge the
@@ -219,6 +264,27 @@ components:
       type: object
       additionalProperties:
         $ref: "#/components/schemas/Dict"
+    # Null-mixed enum (Issue #6): the `null` member is stripped and the remaining homogeneous string
+    # scalars lower as a real Rust enum; the `"null"` in the type array makes every use nullable, so
+    # a field of this type is emitted as `Option<Priority>`. An absent or `null` value deserializes
+    # to `None`; a string value to the matching variant.
+    Priority:
+      type: [string, "null"]
+      enum: [low, medium, high, null]
+    # Propagation of component nullability through `$ref` (Issue #6): a REQUIRED field whose type is
+    # the nullable `Priority` component must still be `Option<Priority>` (present, but may be `null`),
+    # and an array of the component must be `Vec<Option<Priority>>` (a null element is accepted).
+    # Before propagation these emitted `Priority` / `Vec<Priority>` and rejected a conforming `null`.
+    Ticket:
+      type: object
+      required: [priority, history]
+      properties:
+        priority:
+          $ref: "#/components/schemas/Priority"
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/Priority"
     # `default` on the component schema itself → documented on the generated `Mode` type.
     Mode:
       type: string

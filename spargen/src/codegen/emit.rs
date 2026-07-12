@@ -497,7 +497,17 @@ pub(crate) fn emit_params_struct(
                     .trim_start_matches("r#")
             );
             let wire = &param.name;
-            let ty = ty_tokens(param.ty, names, options, true);
+            // Every struct param is optional, so the field is always an `Option`. `ty_tokens`
+            // already wraps a nullable param (`"null"` in its type array) in `Option`, so only wrap
+            // again when it did not — otherwise a nullable optional param becomes `Option<Option<T>>`
+            // and the query/header `value.to_string()` serialization would not compile
+            // (`Option<T>: !Display`). Absent and `null` both collapse to `None`.
+            let ty = if param.ty.nullable {
+                ty_tokens(param.ty, names, options, true)
+            } else {
+                let inner = ty_tokens(param.ty, names, options, true);
+                quote! { Option<#inner> }
+            };
             let mut notes: Vec<String> = Vec::new();
             if param.deprecated {
                 notes.push("Deprecated per the spec.".to_owned());
@@ -509,7 +519,7 @@ pub(crate) fn emit_params_struct(
             quote! {
                 #(#notes)*
                 #[serde(rename = #wire, skip_serializing_if = "Option::is_none")]
-                pub #ident: Option<#ty>,
+                pub #ident: #ty,
             }
         });
     quote! {
@@ -698,8 +708,12 @@ fn emit_field(
         .get(&(id, field.name.wire.clone()))
         .expect("field name allocated");
     let wire = &field.name.wire;
+    // `ty_tokens` already wraps a nullable type in `Option` (`"null"` in the type array), so only an
+    // *optional* non-nullable field needs the extra `Option` here — wrapping a nullable field again
+    // would yield `Option<Option<T>>`. A required nullable field stays a single `Option<T>` (present
+    // but may be `null`); an optional field of either kind is a single `Option<T>`.
     let mut ty = ty_tokens(field.ty, names, options, false);
-    if !field.required || field.ty.nullable {
+    if !field.required && !field.ty.nullable {
         ty = quote! { Option<#ty> };
     }
     // An optional field always deserializes an absent value; when the spec gives a representable

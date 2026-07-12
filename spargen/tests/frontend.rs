@@ -200,6 +200,7 @@ components:
 
 #[test]
 fn e008_non_scalar_enum() {
+    // Mixed scalar kinds with no null are genuinely unrepresentable: still E008.
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -213,6 +214,68 @@ components:
     );
     assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::NonScalarEnum));
+}
+
+#[test]
+fn e008_stays_for_object_member_enum() {
+    // Object (or array) enum members have no scalar-variant representation: still E008.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Structured:
+      enum: [{ a: 1 }]
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::NonScalarEnum));
+}
+
+#[test]
+fn null_mixed_scalar_enum_generates() {
+    // A `null` member is stripped; the remaining homogeneous string scalars lower as a nullable
+    // enum (`Option<Enum>`). No E008, and generation succeeds. check/generate parity.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Severity:
+      type: [string, "null"]
+      enum: [low, medium, high, null]
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
+
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(!has_code(&checked, Code::NonScalarEnum), "{checked:#?}");
+}
+
+#[test]
+fn all_null_enum_generates_as_nullable() {
+    // A value set of only `null` has no scalar remainder: it lowers to a faithful nullable untyped
+    // value rather than being rejected.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Nothing:
+      enum: [null]
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
+
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
