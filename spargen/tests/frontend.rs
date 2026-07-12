@@ -209,10 +209,10 @@ fn e013_check_generate_parity() {
     assert!(has_code(&report, Code::AllOfUnsupported));
 }
 
-/// A property that `$ref`s its own schema previously recursed forever; lowering must now terminate
-/// with a diagnostic instead of hanging.
+/// A self-referential component (`Node.next -> Node`) once recursed forever, then was rejected as
+/// E014. It must now generate: the cycle-closing `$ref` is boxed so the recursive type is finite.
 #[test]
-fn e014_recursive_ref_terminates() {
+fn self_recursive_ref_generates() {
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -227,8 +227,49 @@ components:
           $ref: "#/components/schemas/Node"
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::RecursiveRefUnsupported));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != spargen::Severity::Error),
+        "recursive schema must not raise an error: {report:#?}"
+    );
+}
+
+/// Mutually-recursive components (`A -> B -> A`, including recursion through an array) must also
+/// generate: exactly one back-edge in the cycle is boxed.
+#[test]
+fn mutually_recursive_refs_generate() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    A:
+      type: object
+      properties:
+        b:
+          $ref: "#/components/schemas/B"
+    B:
+      type: object
+      properties:
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/A"
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .all(|d| d.severity != spargen::Severity::Error),
+        "mutually-recursive schemas must not raise an error: {report:#?}"
+    );
 }
 
 #[test]

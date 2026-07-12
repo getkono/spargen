@@ -131,6 +131,51 @@ components:
           type: string
         name:
           type: string
+        tree:
+          $ref: "#/components/schemas/TreeNode"
+        category:
+          $ref: "#/components/schemas/Category"
+        dict:
+          $ref: "#/components/schemas/Dict"
+    # Self-recursive: `parent` is a direct back-edge (→ Option<Box<TreeNode>>) and `children`
+    # recurses through an array (→ Vec<TreeNode>; the Vec supplies the indirection). Without
+    # boxing the direct `parent` back-edge the
+    # generated struct would have infinite size and fail to compile.
+    TreeNode:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: string
+        parent:
+          $ref: "#/components/schemas/TreeNode"
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/TreeNode"
+    # Mutually recursive: Category <-> Item. One of the two edges in the cycle is boxed.
+    Category:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        item:
+          $ref: "#/components/schemas/Item"
+    Item:
+      type: object
+      required: [label]
+      properties:
+        label:
+          type: string
+        category:
+          $ref: "#/components/schemas/Category"
+    # Self-recursive through additionalProperties (→ BTreeMap<String, Dict>; the map supplies
+    # the indirection).
+    Dict:
+      type: object
+      additionalProperties:
+        $ref: "#/components/schemas/Dict"
 "##;
 
 const SPEC_WITH_UNSUPPORTED_OPERATION: &str = r#"

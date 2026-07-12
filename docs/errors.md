@@ -18,7 +18,6 @@ the library API.
 | `E011` | Error | invalid input document |
 | `E012` | Error | unknown security scheme |
 | `E013` | Error | `allOf` composition unsupported |
-| `E014` | Error | recursive `$ref` unsupported |
 | `E019` | Error | invalid omit rule |
 | `E020` | Error | omit profile created an invalid document |
 | `W001` | Warning | validation-only keyword ignored |

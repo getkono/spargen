@@ -49,8 +49,6 @@ pub enum Code {
     /// `generate --check` found checked-in output that drifted from (or is missing against) the
     /// spec.
     OutputDrifted,
-    /// A `$ref` cycle was found; recursive types are not generated (matrix: Schema shape).
-    RecursiveRefUnsupported,
     /// The input could not be parsed or violates a required structural OpenAPI shape.
     InvalidInput,
     /// A compatibility omit rule did not match a source construct or attempted an invalid removal.
@@ -82,7 +80,6 @@ impl Code {
             Code::ResponseDegradedToValue => "W003",
             Code::AllOfUnsupported => "E013",
             Code::OutputDrifted => "W004",
-            Code::RecursiveRefUnsupported => "E014",
             Code::OmittedConstruct => "W009",
             Code::InvalidOmitRule => "E019",
             Code::OmitCreatedInvalidDocument => "E020",
@@ -118,7 +115,6 @@ impl Code {
             Code::ResponseDegradedToValue => "response body degrades to serde_json::Value",
             Code::AllOfUnsupported => "allOf composition unsupported",
             Code::OutputDrifted => "checked-in output drifted",
-            Code::RecursiveRefUnsupported => "recursive $ref unsupported",
             Code::InvalidOmitRule => "invalid omit rule",
             Code::OmittedConstruct => "construct omitted",
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
@@ -179,9 +175,6 @@ impl Code {
             Code::OutputDrifted => {
                 "The checked-in generated code no longer matches what this spec and spargen version produce. Re-run `spargen generate` and commit the result."
             }
-            Code::RecursiveRefUnsupported => {
-                "The schema references itself through `$ref`. Boxed recursive types are not generated yet; break the cycle in the source schema or omit this API segment."
-            }
             Code::InvalidOmitRule => {
                 "A compatibility omit rule must match at least one exact path, operation, component, pointer, or file-local pointer and cannot omit the document root."
             }
@@ -220,7 +213,6 @@ impl Code {
             Code::InvalidInput,
             Code::UnknownSecurityScheme,
             Code::AllOfUnsupported,
-            Code::RecursiveRefUnsupported,
             Code::InvalidOmitRule,
             Code::OmitCreatedInvalidDocument,
             Code::ValidationKeywordIgnored,

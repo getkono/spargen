@@ -1,6 +1,6 @@
 use indexmap::IndexMap;
 
-use crate::diag::Provenance;
+use crate::diag::{JsonPointer, Provenance};
 
 use super::Docs;
 
@@ -22,6 +22,37 @@ impl TypeGraph {
         let id = TypeId(self.defs.len() as u32);
         self.defs.insert(id, def);
         id
+    }
+
+    /// Reserve a dense id backed by a placeholder def, to be replaced via [`fill`](Self::fill)
+    /// before lowering finishes.
+    ///
+    /// Reserving a component's root id *before* its body is lowered lets a `$ref` back-edge
+    /// discovered mid-body box a reference to the (not-yet-filled) root, breaking the cycle so a
+    /// recursive schema generates a finite Rust type instead of being rejected. Every reserved id
+    /// must be filled before it can be emitted; the placeholder is a valid (if meaningless) def so
+    /// a leak on an already-failing (rejected) lowering is harmless rather than a sentinel.
+    pub fn reserve(&mut self) -> TypeId {
+        self.insert(TypeDef {
+            name_hint: String::new(),
+            kind: TypeKind::Any,
+            docs: Docs::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+        })
+    }
+
+    /// Replace the def at an already-present id (typically a [`reserve`](Self::reserve)d
+    /// placeholder). The id's position — and therefore [`iter`](Self::iter) order — is preserved.
+    pub fn fill(&mut self, id: TypeId, def: TypeDef) {
+        debug_assert!(self.defs.contains_key(&id), "fill of an unreserved id");
+        self.defs.insert(id, def);
+    }
+
+    /// Remove and return the most recently inserted `(id, def)` pair. Used to lift a component
+    /// root — always the last def inserted while lowering its body — into its reserved id, which
+    /// keeps ids dense (the freed id is immediately reused by the next insert).
+    pub fn pop_last(&mut self) -> Option<(TypeId, TypeDef)> {
+        self.defs.pop()
     }
 
     /// The definition for `id`, if present.

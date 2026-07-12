@@ -30,7 +30,7 @@ pub fn lower(
         diags,
         graph: TypeGraph::default(),
         components: HashMap::new(),
-        in_progress: HashSet::new(),
+        in_progress: HashMap::new(),
     };
 
     for (name, schema) in &document.components.schemas {
@@ -147,8 +147,10 @@ struct LowerCtx<'a, 'doc> {
     diags: &'a mut Diagnostics,
     graph: TypeGraph,
     components: HashMap<String, TypeId>,
-    /// Components currently being lowered, for `$ref`-cycle detection.
-    in_progress: HashSet<String>,
+    /// Components currently being lowered, mapped to the id reserved for their root. A `$ref` that
+    /// re-enters a name still in this map is a cycle-closing back-edge and is boxed against the
+    /// reserved id.
+    in_progress: HashMap<String, TypeId>,
 }
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -160,28 +162,39 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 boxed: false,
             });
         }
+        if let Some(&id) = self.in_progress.get(name) {
+            // Re-entered while still lowering this component: a cycle-closing `$ref` back-edge.
+            // Box the reference so the recursive type has a finite size instead of rejecting it;
+            // the reserved id will hold the root def once the in-progress body finishes.
+            return Some(Ty {
+                id,
+                nullable: false,
+                boxed: true,
+            });
+        }
         let RefOr::Item(schema) = self.document.components.schemas.get(name)? else {
             return None;
         };
-        if !self.in_progress.insert(name.to_owned()) {
-            // Re-entered while still lowering this component: a `$ref` cycle. Without this guard
-            // lowering would recurse forever.
-            Diagnostic::error(Code::RecursiveRefUnsupported, schema.provenance.clone())
-                .message(format!(
-                    "schema `{name}` references itself through $ref; recursive types are not \
-                     generated"
-                ))
-                .remedy(
-                    "break the cycle in the source schema or omit this API segment with \
-                         spargen::omit!",
-                )
-                .emit(self.diags);
-            return None;
-        }
-        let ty = self.lower_schema(schema, name);
+        // Reserve the root id before lowering the body so any back-edge encountered mid-body can
+        // box a reference to it. The root's def is inserted last (children first) and then lifted
+        // into this reserved slot, which keeps ids dense and stable.
+        let root_id = self.graph.reserve();
+        self.in_progress.insert(name.to_owned(), root_id);
+        let lowered = self.lower_schema(schema, name);
         self.in_progress.remove(name);
-        let ty = ty?;
-        self.components.insert(name.to_owned(), ty.id);
+        let mut ty = lowered?;
+        let (popped_id, def) = self.graph.pop_last().expect("component root def");
+        // Hard invariant (release too): a component root's def is always the last graph insert
+        // during its own body lowering (children insert first). If future lowering (allOf/union
+        // wrappers) ever inserts a derived type *after* the root, this fails loudly here instead
+        // of silently relocating the wrong def and dangling `components[name]`.
+        assert_eq!(
+            popped_id, ty.id,
+            "component root was not the last inserted def"
+        );
+        self.graph.fill(root_id, def);
+        ty.id = root_id;
+        self.components.insert(name.to_owned(), root_id);
         Some(ty)
     }
 
@@ -298,7 +311,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     self.insert_schema_type(schema, hint, TypeKind::Tuple(items))
                 } else {
-                    let item = match &schema.items {
+                    let mut item = match &schema.items {
                         Some(items) => self.lower_schema_or(items, &format!("{hint}Item"))?,
                         None => self.insert_type(
                             &format!("{hint}Item"),
@@ -307,6 +320,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             None,
                         ),
                     };
+                    // A `Vec` already provides the heap indirection that breaks a `$ref` cycle, so a
+                    // back-edge closing through an array never needs its own `Box`.
+                    item.boxed = false;
                     self.insert_schema_type(schema, hint, TypeKind::Array(Box::new(item)))
                 }
             }
@@ -338,9 +354,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(schema) => match schema.as_ref() {
                 SchemaOr::Bool(false) => AdditionalProps::Deny,
                 SchemaOr::Bool(true) => AdditionalProps::Allow,
-                schema => AdditionalProps::Typed(Box::new(
-                    self.lower_schema_or(schema, &format!("{hint}Additional"))?,
-                )),
+                schema => {
+                    let mut ty = self.lower_schema_or(schema, &format!("{hint}Additional"))?;
+                    // A map value lives behind the map's own indirection; a cycle-closing ref here
+                    // needs no `Box`.
+                    ty.boxed = false;
+                    AdditionalProps::Typed(Box::new(ty))
+                }
             },
             None => AdditionalProps::Allow,
         };

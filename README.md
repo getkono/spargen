@@ -83,12 +83,13 @@ assert_eq!(report.outcome, spargen::Outcome::Generated);
 
 Implemented and verified today: the full pipeline for a substantial 3.1 subset — objects,
 arrays, tuples, maps, scalar primitives and `format` mappings, homogeneous scalar enums,
-`$ref`s, path/query/header/cookie parameters, JSON / form-urlencoded / octet-stream / text
+`$ref`s (including self- and mutually-recursive schemas, whose cycle-closing references are
+boxed), path/query/header/cookie parameters, JSON / form-urlencoded / octet-stream / text
 bodies, per-status responses, auth attachment, and the complete diagnostics surface
 (`check` / `generate` / `explain`, `--format json`, stable codes, batch reporting).
 
 Not yet implemented — all rejected or warned loudly, never silent: `allOf` merging (`E013`),
-`oneOf`/`anyOf` unions (`E007`), recursive `$ref` cycles (`E014`), `multipart`/XML bodies
+`oneOf`/`anyOf` unions (`E007`), `multipart`/XML bodies
 (`E009`), multi-status response enums (degrade to `serde_json::Value` with `W003`). Diagnostics
 carry file-level rather than line-precise spans for now. Large real-world specs (e.g. GitHub's)
 exercise unsupported constructs and are expected to reject; the pinned [corpus](docs/corpus.md)
