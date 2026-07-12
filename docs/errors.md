@@ -17,7 +17,7 @@ the library API.
 | `E010` | Error | unsupported parameter style |
 | `E011` | Error | invalid input document |
 | `E012` | Error | unknown security scheme |
-| `E013` | Error | `allOf` composition unsupported |
+| `E013` | Error | irreconcilable `allOf` composition |
 | `E019` | Error | invalid omit rule |
 | `E020` | Error | omit profile created an invalid document |
 | `W001` | Warning | validation-only keyword ignored |

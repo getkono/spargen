@@ -102,6 +102,18 @@ fn component_nullability_propagates_through_ref() {
         vec![Some(basic_client::types::Priority::Low), None]
     );
 }
+
+#[test]
+fn all_of_merged_struct_carries_every_member_field() {
+    // `Account` merged a `$ref` base (id, required), an inline member (label, required) and a
+    // sibling property (owner, optional). Required fields are plain, the optional is `Option`, and a
+    // payload carrying all three deserializes into the single flattened struct.
+    let account: basic_client::types::Account =
+        serde_json::from_str(r#"{"id": "a1", "label": "L", "owner": "o"}"#).unwrap();
+    assert_eq!(account.id, "a1");
+    assert_eq!(account.label, "L");
+    assert_eq!(account.owner.as_deref(), Some("o"));
+}
 "##,
     )
     .unwrap();
@@ -342,6 +354,27 @@ components:
           type: string
       patternProperties:
         "^x-": { type: integer }
+    # allOf merge (Issue #8): `Account` flattens a `$ref` base (id, required), an inline member
+    # (label, required) and the enclosing schema's own sibling property (owner, optional) into ONE
+    # struct. All fields must be present and correctly typed in the generated `Account` type.
+    AccountBase:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+    Account:
+      type: object
+      properties:
+        owner:
+          type: string
+      allOf:
+        - $ref: "#/components/schemas/AccountBase"
+        - type: object
+          required: [label]
+          properties:
+            label:
+              type: string
 "##;
 
 const SPEC_WITH_UNSUPPORTED_OPERATION: &str = r#"

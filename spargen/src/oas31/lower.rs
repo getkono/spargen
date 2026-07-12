@@ -251,15 +251,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         if !schema.all_of.is_empty() {
-            // Generating a type that ignores allOf subschemas would silently drop fields.
-            Diagnostic::error(Code::AllOfUnsupported, schema.provenance.clone())
-                .message("allOf composition is not merged into generated types")
-                .remedy(
-                    "flatten the composition in the source schema or omit this API segment with \
-                     spargen::omit!",
-                )
-                .emit(self.diags);
-            return None;
+            return self.lower_all_of(schema, hint);
         }
 
         if (!schema.one_of.is_empty() || !schema.any_of.is_empty())
@@ -367,6 +359,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn lower_object(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        let (fields, additional) = self.object_body(schema, hint)?;
+        Some(self.insert_schema_type(
+            schema,
+            hint,
+            TypeKind::Struct(Struct { fields, additional }),
+        ))
+    }
+
+    /// Lower an object schema's `properties`/`required`/`additionalProperties` into the pieces of a
+    /// [`Struct`] *without* inserting the struct itself. Shared by [`Self::lower_object`] and the
+    /// `allOf` merge, which collects field/additional pieces from several members before inserting a
+    /// single merged struct as the final graph insert (the `ensure_component` last-insert invariant).
+    fn object_body(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+    ) -> Option<(Vec<Field>, AdditionalProps)> {
         let required = schema.required.iter().cloned().collect::<HashSet<_>>();
         let mut fields = Vec::new();
         for (name, child) in &schema.properties {
@@ -402,11 +411,327 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else {
             self.lower_pattern_additional(schema, hint)?
         };
-        Some(self.insert_schema_type(
+        Some((fields, additional))
+    }
+
+    /// Merge an `allOf` composition (plus the enclosing schema's own sibling
+    /// `properties`/`required`/`additionalProperties`) into a single typed [`TypeKind`].
+    ///
+    /// Members are gathered in a deterministic order — every `allOf` entry in source order, then the
+    /// enclosing schema's own object siblings — flattening `$ref` members by *copying* their fields
+    /// (the referenced component still exists as its own named type) and recursing into nested
+    /// `allOf`. The gathered members are then combined:
+    ///
+    /// * **all object members** → one flattened [`Struct`]: the union of properties in first-seen
+    ///   order (a property in two members with the same lowered type deduplicates; with *different*
+    ///   lowered types it is irreconcilable → `E013`), the union of `required` (a property required by
+    ///   any member is required), and a conservatively merged `additionalProperties` (a member that
+    ///   denies unknown keys wins over `allow`/`typed`; two different typed value schemas → `E013`);
+    /// * **all scalar members** that lower to the same primitive → collapse to that primitive (a
+    ///   validation-only refinement like `{type: string, minLength: 5}` is a scalar member); distinct
+    ///   scalars → `E013`;
+    /// * an **object/scalar mix** → `E013`.
+    ///
+    /// Every path inserts its result type as the *final* graph insert (all member/property/component
+    /// types insert first), so an `allOf` used as a component body still satisfies the
+    /// [`Self::ensure_component`] last-insert invariant.
+    fn lower_all_of(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        let mut contributions = Vec::new();
+        self.gather_all_of(schema, hint, &mut contributions)?;
+
+        let has_object = contributions
+            .iter()
+            .any(|c| matches!(c, Contribution::Object { .. }));
+        let scalars: Vec<Ty> = contributions
+            .iter()
+            .filter_map(|c| match c {
+                Contribution::Scalar(ty) => Some(*ty),
+                Contribution::Object { .. } => None,
+            })
+            .collect();
+
+        // Object-vs-scalar mix has no single representable type.
+        if has_object && !scalars.is_empty() {
+            return self.reject_all_of(
+                schema,
+                "an `allOf` mixes object and scalar members, which cannot form one type",
+            );
+        }
+
+        // All-scalar allOf: every member must lower to the same emitted type; collapse to it rather
+        // than synthesizing a struct. `same_map_value_type` is the same bounded structural
+        // equivalence used for typed overflow maps (equal leaf shapes, equal `$ref` ids).
+        if !has_object {
+            let Some(first) = scalars.first().copied() else {
+                // Only no-constraint members (`true`/`{}`) remained: a faithful open object.
+                let ty = self.insert_schema_type(
+                    schema,
+                    hint,
+                    TypeKind::Struct(Struct {
+                        fields: Vec::new(),
+                        additional: AdditionalProps::Allow,
+                    }),
+                );
+                return Some(self.with_all_of_nullability(schema, ty));
+            };
+            if scalars
+                .iter()
+                .any(|ty| !self.same_map_value_type(first, *ty))
+            {
+                return self.reject_all_of(
+                    schema,
+                    "`allOf` scalar members lower to different types and cannot be reconciled",
+                );
+            }
+            // Re-emit the shared scalar as the final graph insert so the invariant holds even when
+            // the allOf is a component body (the per-member scalar inserts above are left dead —
+            // `#[allow(dead_code)]` on the models module — rather than threading a reserved id).
+            let kind = self.graph.get(first.id).map(|def| def.kind.clone())?;
+            let mut ty = self.insert_schema_type(schema, hint, kind);
+            ty.nullable = first.nullable;
+            return Some(self.with_all_of_nullability(schema, ty));
+        }
+
+        // All object members: flatten into one struct. Property union preserves first-seen order.
+        let mut fields: IndexMap<String, Field> = IndexMap::new();
+        let mut required: Vec<String> = Vec::new();
+        let mut additional = AdditionalProps::Allow;
+        for contribution in &contributions {
+            let Contribution::Object {
+                fields: member_fields,
+                additional: member_additional,
+                required: member_required,
+            } = contribution
+            else {
+                continue;
+            };
+            for name in member_required {
+                if !required.contains(name) {
+                    required.push(name.clone());
+                }
+            }
+            match self.merge_additional(&additional, member_additional) {
+                Some(merged) => additional = merged,
+                None => {
+                    return self.reject_all_of(
+                        schema,
+                        "`allOf` members declare conflicting `additionalProperties`",
+                    );
+                }
+            }
+            for field in member_fields {
+                match fields.get_mut(&field.name.wire) {
+                    Some(existing) => {
+                        // Same property in two members: identical lowered types deduplicate; a type
+                        // mismatch is irreconcilable (never silently drop or pick one).
+                        if !self.same_map_value_type(existing.ty, field.ty) {
+                            return self.reject_all_of(
+                                schema,
+                                "a property appears in multiple `allOf` members with conflicting \
+                                 types",
+                            );
+                        }
+                        existing.required = existing.required || field.required;
+                    }
+                    None => {
+                        fields.insert(field.name.wire.clone(), field.clone());
+                    }
+                }
+            }
+        }
+
+        // Apply the required union, then keep required fields consistent: a serde default only fires
+        // for an absent optional field, so a field promoted to required by another member drops its
+        // applied default (it stays documented in rustdoc).
+        let mut fields: Vec<Field> = fields.into_values().collect();
+        for field in &mut fields {
+            if required.contains(&field.name.wire) {
+                field.required = true;
+            }
+            if field.required {
+                if let Some(default) = &mut field.default {
+                    default.applied = None;
+                }
+            }
+        }
+
+        let ty = self.insert_schema_type(
             schema,
             hint,
             TypeKind::Struct(Struct { fields, additional }),
-        ))
+        );
+        Some(self.with_all_of_nullability(schema, ty))
+    }
+
+    /// Gather every member of `schema.all_of` (source order) plus the enclosing schema's own object
+    /// siblings (last), pushing a [`Contribution`] per constraining member.
+    fn gather_all_of(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
+        for (index, member) in schema.all_of.iter().enumerate() {
+            self.gather_member(member, &format!("{hint}Member{index}"), out)?;
+        }
+        // The enclosing schema may carry its own object keywords beside `allOf`; fold them in last.
+        if schema_is_object_like(schema) {
+            let (member_fields, member_additional) = self.object_body(schema, hint)?;
+            out.push(Contribution::Object {
+                fields: member_fields,
+                additional: member_additional,
+                required: schema.required.clone(),
+            });
+        }
+        Some(())
+    }
+
+    fn gather_member(
+        &mut self,
+        member: &SchemaOr,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
+        let schema = match member {
+            // A `true`/`{}` member imposes no constraint.
+            SchemaOr::Bool(true) => return Some(()),
+            SchemaOr::Bool(false) => {
+                return self
+                    .reject_all_of_unit(member_provenance(member), "an `allOf` member is `false`");
+            }
+            SchemaOr::Schema(schema) => schema.as_ref(),
+        };
+
+        if let Some(reference) = &schema.reference {
+            if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                // A `$ref` to a component still being lowered is a direct recursive allOf member
+                // whose fields are not yet known — irreconcilable (distinct from a member with
+                // recursive *fields*, which lowers fine).
+                if self.in_progress.contains_key(name) {
+                    return self.reject_all_of_unit(
+                        schema.provenance.clone(),
+                        "an `allOf` member is a direct recursive `$ref` to the component being \
+                         lowered",
+                    );
+                }
+                let ty = self.ensure_component(name)?;
+                self.push_ref_member(ty, out);
+                return Some(());
+            }
+            // Non-component refs resolve (or error) exactly as `lower_schema` does; treat the target
+            // as an inline member.
+            let resolved = self
+                .resolver
+                .resolve(reference, &schema.provenance.pointer, self.diags)
+                .ok()?;
+            let target = resolved.schema.clone();
+            return self.gather_inline(&target, hint, out);
+        }
+
+        if !schema.all_of.is_empty() {
+            // Nested allOf: flatten its members (and its own siblings) into the same accumulator.
+            return self.gather_all_of(schema, hint, out);
+        }
+
+        self.gather_inline(schema, hint, out)
+    }
+
+    /// Turn a resolved `$ref` member's already-lowered type into a contribution: an object component
+    /// contributes a *copy* of its fields/`additionalProperties`; any other kind is a scalar member.
+    fn push_ref_member(&mut self, ty: Ty, out: &mut Vec<Contribution>) {
+        match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Struct(structure)) => {
+                let fields = structure.fields.clone();
+                let required = fields
+                    .iter()
+                    .filter(|field| field.required)
+                    .map(|field| field.name.wire.clone())
+                    .collect();
+                let additional = structure.additional.clone();
+                out.push(Contribution::Object {
+                    fields,
+                    additional,
+                    required,
+                });
+            }
+            _ => out.push(Contribution::Scalar(ty)),
+        }
+    }
+
+    fn gather_inline(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
+        if schema_is_object_like(schema) {
+            let (fields, additional) = self.object_body(schema, hint)?;
+            out.push(Contribution::Object {
+                fields,
+                additional,
+                required: schema.required.clone(),
+            });
+        } else if schema_imposes_scalar(schema) {
+            let ty = self.lower_schema(schema, hint)?;
+            out.push(Contribution::Scalar(ty));
+        }
+        // Otherwise the member is a pure annotation (`{description: ...}`): no constraint.
+        Some(())
+    }
+
+    /// Merge two `additionalProperties` policies for an `allOf` intersection. `Deny` dominates (a
+    /// value must satisfy every member, so any member denying unknown keys forbids them outright);
+    /// two typed value schemas must lower to the same type. Returns `None` when irreconcilable.
+    fn merge_additional(
+        &self,
+        acc: &AdditionalProps,
+        next: &AdditionalProps,
+    ) -> Option<AdditionalProps> {
+        Some(match (acc, next) {
+            (AdditionalProps::Deny, _) | (_, AdditionalProps::Deny) => AdditionalProps::Deny,
+            (AdditionalProps::Typed(x), AdditionalProps::Typed(y)) => {
+                if self.same_map_value_type(**x, **y) {
+                    AdditionalProps::Typed(x.clone())
+                } else {
+                    return None;
+                }
+            }
+            (AdditionalProps::Typed(x), AdditionalProps::Allow)
+            | (AdditionalProps::Allow, AdditionalProps::Typed(x)) => {
+                AdditionalProps::Typed(x.clone())
+            }
+            (AdditionalProps::Allow, AdditionalProps::Allow) => AdditionalProps::Allow,
+        })
+    }
+
+    /// Apply the enclosing `allOf` schema's own nullability (a `"null"` in its type array) to the
+    /// merged type. Set after the final insert — a pure mutate that preserves the last-insert
+    /// invariant.
+    fn with_all_of_nullability(&self, schema: &Schema, mut ty: Ty) -> Ty {
+        if schema.types.types.contains(&JsonType::Null) {
+            ty.nullable = true;
+        }
+        ty
+    }
+
+    fn reject_all_of(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
+        self.reject_all_of_unit(schema.provenance.clone(), message);
+        None
+    }
+
+    fn reject_all_of_unit(
+        &mut self,
+        provenance: crate::diag::Provenance,
+        message: &str,
+    ) -> Option<()> {
+        Diagnostic::error(Code::AllOfIrreconcilable, provenance)
+            .message(message.to_owned())
+            .remedy(
+                "restructure the composition so members agree, or omit this API segment with \
+                 spargen::omit!",
+            )
+            .emit(self.diags);
+        None
     }
 
     /// Lower the overflow policy for an object that declares `patternProperties`. The generated
@@ -1173,6 +1498,47 @@ fn append_doc_note(docs: &mut Docs, note: String) {
 /// or `const`. Computed at component reserve time so `$ref` consumers wrap the type in `Option`,
 /// and it agrees with the `nullable` that [`LowerCtx::lower_schema`]/[`LowerCtx::lower_enum`]
 /// compute from the same schema.
+/// One `allOf` member's contribution to the merged type: either a set of object fields (with its
+/// `additionalProperties` policy and its own `required` names) to flatten, or a scalar/leaf type.
+enum Contribution {
+    Object {
+        fields: Vec<Field>,
+        additional: AdditionalProps,
+        required: Vec<String>,
+    },
+    Scalar(Ty),
+}
+
+/// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`
+/// policy, a `required` set, or an explicit `object` type — and so contributes fields to an `allOf`
+/// merge rather than a scalar.
+fn schema_is_object_like(schema: &Schema) -> bool {
+    !schema.properties.is_empty()
+        || !schema.pattern_properties.is_empty()
+        || schema.additional_properties.is_some()
+        || !schema.required.is_empty()
+        || schema.types.types.contains(&JsonType::Object)
+}
+
+/// Whether a non-object schema still imposes a scalar/leaf constraint (a non-null primitive type,
+/// an `enum`/`const`, or `contentEncoding`) — as opposed to a pure annotation member (`{}` /
+/// `{description: ...}`) that constrains nothing.
+fn schema_imposes_scalar(schema: &Schema) -> bool {
+    schema.types.types.iter().any(|ty| *ty != JsonType::Null)
+        || schema.enum_values.is_some()
+        || schema.const_value.is_some()
+        || schema.content_encoding.is_some()
+}
+
+/// The provenance of an `allOf` member for diagnostics — the schema's own provenance, or the
+/// document root for a bare boolean member that carries none.
+fn member_provenance(member: &SchemaOr) -> crate::diag::Provenance {
+    match member {
+        SchemaOr::Schema(schema) => schema.provenance.clone(),
+        SchemaOr::Bool(_) => crate::diag::Provenance::new(crate::diag::JsonPointer::root(), None),
+    }
+}
+
 fn schema_is_nullable(schema: &Schema) -> bool {
     schema.types.types.contains(&JsonType::Null)
         || schema

@@ -340,7 +340,11 @@ paths:
     assert!(has_code(&report, Code::UnknownSecurityScheme));
 }
 
-const ALL_OF_SPEC: &str = r##"
+/// A single-member `allOf` now MERGES into one typed struct instead of being rejected (E013 is
+/// repurposed to mean "irreconcilable composition"). Generation succeeds with no E013.
+#[test]
+fn all_of_single_member_merges_into_struct() {
+    let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths: {}
@@ -352,20 +356,138 @@ components:
           properties:
             a: { type: string }
 "##;
-
-#[test]
-fn e013_all_of_unsupported() {
-    let report = generate(ALL_OF_SPEC);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::AllOfUnsupported));
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
 
-/// `check` must run the same lowering as `generate`, so an R-class construct rejects identically.
+/// `allOf: [{$ref: Base}, {properties: {extra}}]` flattens the referenced component's fields plus
+/// the inline member's fields into one struct.
+#[test]
+fn all_of_ref_plus_inline_members_merge() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Base:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+    Derived:
+      allOf:
+        - $ref: "#/components/schemas/Base"
+        - type: object
+          properties:
+            extra: { type: integer }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+}
+
+/// A nested `allOf` (an `allOf` member that itself has an `allOf`) flattens recursively into one
+/// struct.
+#[test]
+fn all_of_nested_merges() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Nested:
+      allOf:
+        - allOf:
+            - type: object
+              properties:
+                a: { type: string }
+        - type: object
+          properties:
+            b: { type: string }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+}
+
+/// `allOf` beside the enclosing schema's own sibling `properties`: both sets of fields merge.
+#[test]
+fn all_of_beside_sibling_properties_merges() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Sibling:
+      type: object
+      properties:
+        own: { type: string }
+      allOf:
+        - type: object
+          properties:
+            base: { type: string }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+}
+
+/// A property declared with different lowered types in two `allOf` members is irreconcilable → E013.
+const ALL_OF_CONFLICT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Conflict:
+      allOf:
+        - type: object
+          properties:
+            x: { type: string }
+        - type: object
+          properties:
+            x: { type: integer }
+"##;
+
+#[test]
+fn e013_all_of_conflicting_property_types_rejected() {
+    let report = generate(ALL_OF_CONFLICT_SPEC);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfIrreconcilable));
+}
+
+/// Mixing an object member with a scalar member has no single representable type → E013.
+#[test]
+fn e013_all_of_object_scalar_mix_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Mixed:
+      allOf:
+        - type: object
+          properties:
+            a: { type: string }
+        - type: string
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfIrreconcilable));
+}
+
+/// `check` must run the same lowering as `generate`, so an irreconcilable `allOf` rejects
+/// identically through both entry points (check/generate parity).
 #[test]
 fn e013_check_generate_parity() {
-    let report = check(ALL_OF_SPEC);
+    let report = check(ALL_OF_CONFLICT_SPEC);
     assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::AllOfUnsupported));
+    assert!(has_code(&report, Code::AllOfIrreconcilable));
 }
 
 /// A self-referential component (`Node.next -> Node`) once recursed forever, then was rejected as

@@ -45,8 +45,10 @@ pub enum Code {
     /// An operation documents multiple success or error bodies; the combined body is generated as
     /// `serde_json::Value` because per-status enums are not yet emitted (matrix: Responses).
     ResponseDegradedToValue,
-    /// `allOf` composition is not merged into generated types (matrix: Schema shape).
-    AllOfUnsupported,
+    /// `allOf` members could not be reconciled into a single merged type — conflicting property
+    /// types, conflicting `additionalProperties`, an object/scalar mix, incompatible scalars, or a
+    /// direct recursive `$ref` member whose fields are not yet known (matrix: Schema shape).
+    AllOfIrreconcilable,
     /// `generate --check` found checked-in output that drifted from (or is missing against) the
     /// spec.
     OutputDrifted,
@@ -83,7 +85,7 @@ impl Code {
             Code::InvalidInput => "E011",
             Code::UnknownSecurityScheme => "E012",
             Code::ResponseDegradedToValue => "W003",
-            Code::AllOfUnsupported => "E013",
+            Code::AllOfIrreconcilable => "E013",
             Code::OutputDrifted => "W004",
             Code::OmittedConstruct => "W009",
             Code::InvalidOmitRule => "E019",
@@ -119,7 +121,7 @@ impl Code {
             Code::InvalidInput => "invalid input document",
             Code::UnknownSecurityScheme => "unknown security scheme",
             Code::ResponseDegradedToValue => "response body degrades to serde_json::Value",
-            Code::AllOfUnsupported => "allOf composition unsupported",
+            Code::AllOfIrreconcilable => "irreconcilable allOf composition",
             Code::OutputDrifted => "checked-in output drifted",
             Code::InvalidOmitRule => "invalid omit rule",
             Code::OmittedConstruct => "construct omitted",
@@ -176,8 +178,8 @@ impl Code {
             Code::ResponseDegradedToValue => {
                 "The operation documents multiple success or multiple error bodies. Spargen does not yet generate per-status response enums, so the body type is `serde_json::Value` — typed, but weaker than the spec. Restructure the responses or omit the operation if this is unacceptable."
             }
-            Code::AllOfUnsupported => {
-                "`allOf` object merging is not implemented; generating a type that ignores subschemas would silently drop fields. Flatten the composition in the source schema or omit this API segment."
+            Code::AllOfIrreconcilable => {
+                "`allOf` members are merged into one type: object members flatten into a single struct (union of properties; a property required by any member is required; `additionalProperties` merged conservatively — a member that denies unknown keys wins), and all-scalar members that lower to the same primitive collapse to that primitive. It is rejected as irreconcilable only when the members cannot form one type: a property name appears with conflicting lowered types across members, `additionalProperties` conflict (e.g. two different typed value schemas), object and scalar members are mixed, distinct scalar members disagree, or a member is a direct recursive `$ref` to the component currently being lowered (its fields are not yet known). Restructure the composition or omit this API segment with `spargen::omit!`."
             }
             Code::OutputDrifted => {
                 "The checked-in generated code no longer matches what this spec and spargen version produce. Re-run `spargen generate` and commit the result."
@@ -222,7 +224,7 @@ impl Code {
             Code::UnsupportedParameterStyle,
             Code::InvalidInput,
             Code::UnknownSecurityScheme,
-            Code::AllOfUnsupported,
+            Code::AllOfIrreconcilable,
             Code::InvalidOmitRule,
             Code::OmitCreatedInvalidDocument,
             Code::ValidationKeywordIgnored,
