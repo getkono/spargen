@@ -26,6 +26,7 @@ mod client;
 mod dispatch;
 mod error;
 mod response;
+mod stream;
 
 pub use auth::{
     AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture,
@@ -38,3 +39,4 @@ pub use dispatch::{
 };
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
 pub use response::ResponseValue;
+pub use stream::{EventStream, Framing};

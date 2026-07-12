@@ -545,6 +545,120 @@ paths:
 }
 
 #[test]
+fn sse_response_body_generates() {
+    // Issue #14: a `text/event-stream` (SSE) success response is now a typed stream, not `E009`. It
+    // generates without the code firing, and check/generate stay in parity.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            text/event-stream:
+              schema: { type: object, required: [seq], properties: { seq: { type: integer } } }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        !has_code(&checked, Code::UnsupportedMediaType),
+        "{checked:#?}"
+    );
+}
+
+#[test]
+fn ndjson_response_body_generates() {
+    // Issue #14: an `application/x-ndjson` success response is a typed stream, not `E009`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /lines:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/x-ndjson:
+              schema: { type: string }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        !has_code(&checked, Code::UnsupportedMediaType),
+        "{checked:#?}"
+    );
+}
+
+#[test]
+fn json_alternative_wins_over_stream_media_on_same_response() {
+    // When a response offers BOTH a whole-body (JSON) and a streaming alternative, media selection
+    // deterministically picks JSON — the operation is a normal `ResponseValue<T>`, not a stream —
+    // and generation succeeds with no `E009`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /both:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            text/event-stream:
+              schema: { type: object }
+            application/json:
+              schema: { type: object, required: [id], properties: { id: { type: string } } }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn e009_streaming_request_body_rejected() {
+    // Streaming media is response-only: a `text/event-stream` REQUEST body has no representation and
+    // stays rejected with the (narrowed) E009.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /push:
+    post:
+      requestBody:
+        content:
+          text/event-stream:
+            schema: { type: object }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType));
+}
+
+#[test]
 fn multipart_form_data_request_body_generates() {
     // A `multipart/form-data` request body whose schema is an object (a file part + a text part) is
     // now supported: it generates without E009 firing. check/generate stay in parity.

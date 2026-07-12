@@ -238,6 +238,18 @@ fn multipart_body_struct_has_typed_form_part_fields() {
     assert_eq!(body.count, Some(3));
     assert_eq!(body.tags.as_deref(), Some(&["x".to_owned(), "y".to_owned()][..]));
 }
+
+#[test]
+fn streaming_op_item_type_is_typed_not_json_value() {
+    // Issue #14: the SSE `/chat/stream` response schema lowered to a real `ChatChunk` type — the
+    // streamed item of the `EventStream<ChatChunk>` the `stream_chat` method returns (that signature
+    // and the embedded runtime `EventStream` are compile-verified by this crate's build). The item
+    // type is a typed struct, never `serde_json::Value`; deserializing a frame the way the runtime's
+    // `next` does proves it.
+    let chunk: basic_client::types::ChatChunk =
+        serde_json::from_str(r#"{"delta": "hi"}"#).unwrap();
+    assert_eq!(chunk.delta, "hi");
+}
 "##,
     )
     .unwrap();
@@ -438,6 +450,20 @@ paths:
       responses:
         "204":
           description: No Content
+  # Streaming response (Issue #14): a `text/event-stream` success response lowers to a streaming
+  # operation whose method returns `support::EventStream<ChatChunk>` instead of `ResponseValue<T>`.
+  # Compile-verifies both the streaming method signature and the embedded runtime `EventStream`
+  # (framing + manual async `next`) — with reqwest's `.chunk()` needing no `stream` feature.
+  /chat/stream:
+    get:
+      operationId: streamChat
+      responses:
+        "200":
+          description: OK
+          content:
+            text/event-stream:
+              schema:
+                $ref: "#/components/schemas/ChatChunk"
 components:
   securitySchemes:
     bearer:
@@ -680,6 +706,13 @@ components:
       required: [detail]
       properties:
         detail:
+          type: string
+    # Streamed item type for the `/chat/stream` SSE operation (Issue #14).
+    ChatChunk:
+      type: object
+      required: [delta]
+      properties:
+        delta:
           type: string
 "##;
 

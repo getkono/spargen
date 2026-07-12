@@ -15,6 +15,33 @@ pub enum MediaType {
     /// `multipart/form-data` (request bodies): an object schema whose properties are the form
     /// parts — binary/bytes properties become file parts, scalars/composites become text parts.
     Multipart,
+    /// `text/event-stream` (Server-Sent Events, response bodies): a stream of items decoded from
+    /// the event `data:` fields. Lowered to a streaming operation returning `EventStream<T>`.
+    EventStream,
+    /// `application/x-ndjson` (newline-delimited JSON, response bodies): a stream of items, one per
+    /// line. Lowered to a streaming operation returning `EventStream<T>`.
+    Ndjson,
+}
+
+impl MediaType {
+    /// The stream framing for a streaming response media type, or `None` for a non-streaming media.
+    pub fn stream_framing(self) -> Option<Framing> {
+        match self {
+            MediaType::EventStream => Some(Framing::Sse),
+            MediaType::Ndjson => Some(Framing::Ndjson),
+            _ => None,
+        }
+    }
+}
+
+/// How a streaming response body is framed into typed items. Mirrors the runtime `Framing` enum;
+/// codegen maps each variant to its `support::Framing` counterpart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Framing {
+    /// Server-Sent Events (`text/event-stream`).
+    Sse,
+    /// Newline-delimited JSON (`application/x-ndjson`).
+    Ndjson,
 }
 
 /// A request body (matrix: Bodies).
@@ -51,6 +78,10 @@ impl StatusSpec {
 pub struct Response {
     /// The response body type, if any.
     pub body: Option<Ty>,
+    /// For a streaming response (chosen media `text/event-stream` or `application/x-ndjson`), the
+    /// framing of the streamed items; `None` for a whole-body response. The `body` is the item
+    /// type `T` when this is `Some`.
+    pub stream: Option<Framing>,
 }
 
 /// The full set of responses for an operation: per-status entries plus an optional `default`.
@@ -93,6 +124,42 @@ impl Responses {
                 SuccessShape::Enum(entries)
             },
         )
+    }
+
+    /// Whether the operation's success response is a typed *stream* (`text/event-stream` or
+    /// `application/x-ndjson`), and if so its framing plus the streamed item type `T`. Streaming is
+    /// scoped to the single-success-body case: it fires only when exactly one success response
+    /// carries a body and that body was lowered from a streaming media. The generated method then
+    /// returns `EventStream<T>` in place of `ResponseValue<T>`. A JSON alternative on the same
+    /// response wins during media selection (see `choose_media`), so it never reaches here as a
+    /// stream. Multiple bodied success statuses fall back to the normal (non-streaming) shape.
+    pub fn stream_success(&self) -> Option<(Framing, Ty)> {
+        let responses = self.success_responses();
+        let mut bodied = responses
+            .into_iter()
+            .filter(|response| response.body.is_some());
+        match (bodied.next(), bodied.next()) {
+            (Some(response), None) => {
+                let framing = response.stream?;
+                let body = response.body?;
+                Some((framing, body))
+            }
+            _ => None,
+        }
+    }
+
+    /// The operation's success responses in document order: the `default` response alone when no
+    /// explicit statuses are declared (it is then the sole success), otherwise the 2xx entries.
+    /// Mirrors the success/error split used by [`Self::success`].
+    fn success_responses(&self) -> Vec<&Response> {
+        if self.by_status.is_empty() {
+            return self.default.iter().collect();
+        }
+        self.by_status
+            .iter()
+            .filter(|(status, _)| is_success_status(*status))
+            .map(|(_, response)| response)
+            .collect()
     }
 
     /// The error shape of the operation. Zero documented error bodies yields `None`; one yields the
@@ -198,7 +265,10 @@ mod tests {
     }
 
     fn resp(body: Option<u32>) -> Response {
-        Response { body: body.map(ty) }
+        Response {
+            body: body.map(ty),
+            stream: None,
+        }
     }
 
     #[test]

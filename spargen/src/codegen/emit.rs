@@ -273,6 +273,9 @@ pub(crate) fn emit_operation(
                 MediaType::TextPlain => quote! { request = request.body(body.to_string()); },
                 MediaType::OctetStream => quote! { request = request.body(body.clone()); },
                 MediaType::Multipart => emit_multipart_body(ty, api, names),
+                // Streaming media are response-only; a streaming request body is rejected during
+                // lowering (narrowed `E009`), so this arm is unreachable for any emitted operation.
+                MediaType::EventStream | MediaType::Ndjson => quote! {},
             }
         }
     } else {
@@ -468,6 +471,33 @@ pub(crate) fn emit_operation(
         }
     };
 
+    // A streaming success response (`text/event-stream` / `application/x-ndjson`) returns an
+    // `EventStream<T>` instead of a `ResponseValue<T>`: on success the whole `response` is handed
+    // to the stream with its framing mode, and items are decoded lazily as the caller pulls them.
+    // The error path is unchanged (streaming error bodies are out of scope). `success_ty` is the
+    // streamed item type `T` — `stream_success` fires only in the single-success-body case, where
+    // `success()` is `Plain(T)` and `success_type` renders `T`.
+    let stream_framing = operation
+        .responses
+        .stream_success()
+        .map(|(framing, _)| framing);
+    let (return_ok_ty, success_decode) = match stream_framing {
+        Some(framing) => {
+            let framing_tokens = match framing {
+                crate::ir::Framing::Sse => quote! { support::Framing::Sse },
+                crate::ir::Framing::Ndjson => quote! { support::Framing::Ndjson },
+            };
+            (
+                quote! { support::EventStream<#success_ty> },
+                quote! { Ok(support::EventStream::new(response, #framing_tokens)) },
+            )
+        }
+        None => (
+            quote! { support::ResponseValue<#success_ty> },
+            success_decode,
+        ),
+    };
+
     let args = required_params
         .into_iter()
         .chain(params_arg)
@@ -481,7 +511,7 @@ pub(crate) fn emit_operation(
         pub async fn #method_ident(
             &self,
             #(#args),*
-        ) -> Result<support::ResponseValue<#success_ty>, support::Error<#error_ty>> {
+        ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
             let mut path = #path_init.to_owned();
             #(#path_replacements)*
             let mut query: Vec<(&str, String)> = Vec::new();
@@ -837,6 +867,7 @@ pub(crate) fn emit_support() -> TokenStream {
             pub use dispatch::{attach_auth, build_url, classify_error, decode_success, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use response::ResponseValue;
+            pub use stream::{EventStream, Framing};
         }
     }
 }

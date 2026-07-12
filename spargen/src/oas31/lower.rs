@@ -1380,6 +1380,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
         let (media_name, object) = choose_media(&body.content, &body.provenance, self.diags)?;
         let media = lower_media_type(media_name, &body.provenance, self.diags)?;
+        // Streaming media is a response-only construct: a `text/event-stream` / `application/x-ndjson`
+        // *request* body has no representation here, so it stays rejected (narrowed `E009`) rather
+        // than silently degrade. (`choose_media` only picks it when no whole-body alternative exists.)
+        if media.stream_framing().is_some() {
+            Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                .message(format!(
+                    "media type `{media_name}` is only supported for streaming response bodies, \
+                     not request bodies"
+                ))
+                .remedy("send a non-streaming request body, or omit this API segment with spargen::omit!")
+                .emit(self.diags);
+            return None;
+        }
         let ty = object
             .schema
             .as_ref()
@@ -1450,8 +1463,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some((media, ty))
             },
         );
+        // A streaming response media (`text/event-stream` / `application/x-ndjson`) records its
+        // framing; the body is then the streamed item type `T`. A whole-body response has no
+        // framing. Streaming only takes effect when this is the operation's single success body
+        // (see `Responses::stream_success`).
+        let stream = body.and_then(|(media, _)| media.stream_framing());
         Some(Response {
             body: body.and_then(|(_, ty)| ty),
+            stream,
         })
     }
 
@@ -1609,6 +1628,8 @@ fn lower_media_type(
         "application/octet-stream" => MediaType::OctetStream,
         "text/plain" => MediaType::TextPlain,
         "multipart/form-data" => MediaType::Multipart,
+        "text/event-stream" => MediaType::EventStream,
+        "application/x-ndjson" => MediaType::Ndjson,
         other => {
             Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
                 .message(format!("media type `{other}` is not supported"))
@@ -1634,6 +1655,11 @@ fn choose_media<'a, T>(
         "application/x-www-form-urlencoded",
         "application/octet-stream",
         "text/plain",
+        // Streaming response media rank last — a JSON (or any whole-body) alternative on the same
+        // response still wins — but a streaming-only response selects its stream media rather than
+        // falling through to the `E009` rejection below.
+        "text/event-stream",
+        "application/x-ndjson",
     ] {
         if let Some(value) = content.get(preferred) {
             return Some((preferred, value));
