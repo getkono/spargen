@@ -12,6 +12,7 @@ use super::{
 };
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
+const OAS32_DIALECT: &str = "https://spec.openapis.org/oas/3.2/dialect/base";
 
 /// Build the typed [`Document`] from a loaded [`InputBundle`], carrying spans through.
 pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<Document, Aborted> {
@@ -25,22 +26,38 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
     if !version_supported(openapi_text) {
         Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance(&root_pointer, openapi_value))
             .message(format!(
-                "unsupported OpenAPI version `{openapi_text}`; spargen currently implements 3.1.x"
+                "unsupported OpenAPI version `{openapi_text}`; spargen implements 3.1.x and 3.2.x"
             ))
-            .remedy("use an OpenAPI 3.1.x document; 3.0.x is rejected because it uses different schema semantics")
+            .remedy("use an OpenAPI 3.1.x or 3.2.x document; 3.0.x is rejected because it uses different schema semantics")
             .emit(diags);
         return Err(Aborted);
     }
 
+    // OpenAPI 3.2 is a compatible superset of 3.1: same JSON Schema 2020-12 dialect, additive
+    // Path/Operation fields. It lowers through this frontend unchanged; the 3.2-only constructs that
+    // are NOT lowered are acknowledged with `W010` (never silently dropped) as they are encountered.
+    if let Some(self_uri) = root.get("$self") {
+        Diagnostic::warning(
+            Code::Oas32ConstructIgnored,
+            provenance(&root_pointer.push("$self"), self_uri),
+        )
+        .message(
+            "`$self` (OpenAPI 3.2) sets the document's base URI for reference resolution; it does \
+             not change locally-generated client code",
+        )
+        .emit(diags);
+    }
+
     if let Some(dialect) = root.get("jsonSchemaDialect") {
-        if string(dialect) != Some(OAS31_DIALECT) {
+        let dialect_text = string(dialect);
+        if dialect_text != Some(OAS31_DIALECT) && dialect_text != Some(OAS32_DIALECT) {
             Diagnostic::error(
                 Code::UnsupportedDialect,
                 provenance(&root_pointer.push("jsonSchemaDialect"), dialect),
             )
-            .message("jsonSchemaDialect is not the OAS 3.1 base dialect")
+            .message("jsonSchemaDialect is not the OAS 3.1 or 3.2 base dialect")
             .remedy(format!(
-                "set jsonSchemaDialect to `{OAS31_DIALECT}` or omit it"
+                "set jsonSchemaDialect to `{OAS31_DIALECT}` or `{OAS32_DIALECT}`, or omit it"
             ))
             .emit(diags);
         }
@@ -101,7 +118,12 @@ fn version_supported(value: &str) -> bool {
     let (Some(major), Some(minor), Some(patch)) = (parts.next(), parts.next(), parts.next()) else {
         return false;
     };
-    parts.next().is_none() && major == "3" && minor == "1" && patch.parse::<u16>().is_ok()
+    // 3.1.x and 3.2.x share the same JSON Schema 2020-12 semantics and lower through one frontend;
+    // 3.0.x, sub-3.1, and any 3.3+/malformed version stay genuinely unsupported (`E001`).
+    parts.next().is_none()
+        && major == "3"
+        && (minor == "1" || minor == "2")
+        && patch.parse::<u16>().is_ok()
 }
 
 fn parse_info(
@@ -176,6 +198,20 @@ fn parse_path_item(
                 operations.insert(method, operation);
             }
         }
+    }
+    // OpenAPI 3.2's `additionalOperations` map declares custom/extension HTTP methods on the path.
+    // spargen does not generate client methods for arbitrary methods; acknowledge it with `W010`
+    // rather than silently dropping it. (The new fixed `QUERY` method IS lowered, via `parse_method`.)
+    if let Some(additional) = value.get("additionalOperations") {
+        Diagnostic::warning(
+            Code::Oas32ConstructIgnored,
+            provenance(&pointer.push("additionalOperations"), additional),
+        )
+        .message(
+            "`additionalOperations` (OpenAPI 3.2) declares custom HTTP methods on this path; \
+             spargen generates no client method for them",
+        )
+        .emit(diags);
     }
     let parameters = value
         .get("parameters")
@@ -345,6 +381,16 @@ fn parse_media_map(
                                 parse_schema_ref_or(
                                     schema,
                                     &pointer.push(&key.name).push("schema"),
+                                    diags,
+                                )
+                            }),
+                            // OpenAPI 3.2 `itemSchema`: the per-item type for sequential/streaming
+                            // media. Parsed here so streaming responses can type their `EventStream`
+                            // item and so a stray `itemSchema` is never silently dropped downstream.
+                            item_schema: value.get("itemSchema").and_then(|schema| {
+                                parse_schema_ref_or(
+                                    schema,
+                                    &pointer.push(&key.name).push("itemSchema"),
                                     diags,
                                 )
                             }),
@@ -786,6 +832,8 @@ fn parse_method(value: &str) -> Option<Method> {
         "head" => Method::Head,
         "patch" => Method::Patch,
         "trace" => Method::Trace,
+        // The `QUERY` method is a fixed path-item field added by OpenAPI 3.2.
+        "query" => Method::Query,
         _ => return None,
     })
 }

@@ -1477,6 +1477,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             "query" => ParamLoc::Query,
             "header" => ParamLoc::Header,
             "cookie" => ParamLoc::Cookie,
+            // OpenAPI 3.2's `in: querystring` treats the whole URL query string as a single
+            // `content`-typed value. spargen does not model that; acknowledge it with `W010` and
+            // skip the parameter so the rest of the operation still generates the compatible subset.
+            "querystring" => {
+                Diagnostic::warning(Code::Oas32ConstructIgnored, parameter.provenance.clone())
+                    .message(
+                        "`in: querystring` (OpenAPI 3.2) treats the entire query string as one \
+                         value; this parameter is not generated",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
             _ => {
                 Diagnostic::error(Code::InvalidInput, parameter.provenance.clone())
                     .message(format!(
@@ -1560,6 +1572,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
             return None;
         }
+        // A streaming request body is already rejected above, so any `itemSchema` reaching here sits
+        // on a non-streaming media where it is meaningless; acknowledge it with `W010` rather than
+        // dropping it silently.
+        if object.item_schema.is_some() {
+            Diagnostic::warning(Code::Oas32ConstructIgnored, body.provenance.clone())
+                .message(
+                    "`itemSchema` (OpenAPI 3.2) applies only to sequential/streaming media; on this \
+                     request body it is not used",
+                )
+                .emit(self.diags);
+        }
         let ty = object
             .schema
             .as_ref()
@@ -1620,11 +1643,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let body = choose_media(&response.content, &response.provenance, self.diags).and_then(
             |(media_name, object)| {
                 let media = lower_media_type(media_name, &response.provenance, self.diags)?;
-                let ty = object
-                    .schema
-                    .as_ref()
-                    .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody"));
-                if let Some(schema) = object.schema.as_ref() {
+                // For a sequential/streaming media (`text/event-stream` / `application/x-ndjson`),
+                // OpenAPI 3.2 gives the PER-ITEM type in `itemSchema`; a whole-body `schema` does not
+                // apply to a stream, so `itemSchema` is preferred (falling back to `schema` for the
+                // pre-3.2 form where the item type was written as `schema`). On a non-streaming media
+                // `itemSchema` is meaningless: acknowledge it with `W010` and use `schema`.
+                let schema_source = if media.stream_framing().is_some() {
+                    object.item_schema.as_ref().or(object.schema.as_ref())
+                } else {
+                    if object.item_schema.is_some() {
+                        Diagnostic::warning(
+                            Code::Oas32ConstructIgnored,
+                            response.provenance.clone(),
+                        )
+                        .message(
+                            "`itemSchema` (OpenAPI 3.2) applies only to sequential/streaming media; \
+                             on this non-streaming media it is not used",
+                        )
+                        .emit(self.diags);
+                    }
+                    object.schema.as_ref()
+                };
+                let ty =
+                    schema_source.and_then(|schema| self.lower_schema_ref(schema, "ResponseBody"));
+                if let Some(schema) = schema_source {
                     self.warn_structural_default_ref(schema, "a response body schema");
                 }
                 Some((media, ty))

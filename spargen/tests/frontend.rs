@@ -302,6 +302,255 @@ paths: {}
 }
 
 #[test]
+fn oas32_document_with_compatible_constructs_generates() {
+    // OpenAPI 3.2 is a compatible superset of 3.1: a 3.2 document using only 3.1-compatible
+    // constructs lowers through the same frontend and generates — no `E001`, no warnings.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /ping:
+    get:
+      operationId: ping
+      responses:
+        '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedOpenApiVersion),
+        "{report:#?}"
+    );
+    // check/generate parity: the same acceptance is reached without emitting.
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        !has_code(&checked, Code::UnsupportedOpenApiVersion),
+        "{checked:#?}"
+    );
+}
+
+#[test]
+fn oas30_document_still_rejected_e001() {
+    // Widening to accept 3.2 must not accept 3.0: it uses different schema semantics and stays
+    // rejected with `E001`.
+    let report = generate(
+        r##"
+openapi: 3.0.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::UnsupportedOpenApiVersion),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn oas32_base_dialect_accepted() {
+    // The OAS 3.2 base dialect string is accepted alongside the 3.1 one — both are the JSON Schema
+    // 2020-12-based OAS dialect. No `E002`.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+jsonSchemaDialect: https://spec.openapis.org/oas/3.2/dialect/base
+paths:
+  /ping:
+    get:
+      operationId: ping
+      responses:
+        '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
+}
+
+#[test]
+fn oas32_query_method_operation_generates() {
+    // The OpenAPI 3.2 fixed `QUERY` path-item method is fully supported: it lowers to an operation
+    // and generates a client method like any other verb — no warning, no rejection.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    query:
+      operationId: searchItems
+      responses:
+        '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::Oas32ConstructIgnored),
+        "{report:#?}"
+    );
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn oas32_self_warns_w010_and_generates() {
+    // `$self` sets the document base URI for reference resolution; it does not change locally
+    // generated code, so it is acknowledged with `W010` and generation still succeeds.
+    let spec = r##"
+openapi: 3.2.0
+$self: https://api.example.com/openapi.yaml
+info: { title: T, version: 1.0.0 }
+paths:
+  /ping:
+    get:
+      operationId: ping
+      responses:
+        '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::Oas32ConstructIgnored),
+        "{report:#?}"
+    );
+    // check/generate parity.
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        has_code(&checked, Code::Oas32ConstructIgnored),
+        "{checked:#?}"
+    );
+}
+
+#[test]
+fn oas32_additional_operations_warns_w010_and_generates() {
+    // `additionalOperations` declares custom HTTP methods spargen does not generate; the fixed `get`
+    // still generates while the custom method is acknowledged with `W010`.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200': { description: ok }
+    additionalOperations:
+      COPY:
+        operationId: copyPets
+        responses:
+          '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::Oas32ConstructIgnored),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn oas32_querystring_param_warns_w010_and_generates() {
+    // An `in: querystring` parameter treats the whole query string as one value; spargen skips it
+    // with `W010` and still generates the rest of the operation.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    get:
+      operationId: search
+      parameters:
+        - name: q
+          in: querystring
+          content:
+            application/x-www-form-urlencoded:
+              schema:
+                type: object
+      responses:
+        '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::Oas32ConstructIgnored),
+        "{report:#?}"
+    );
+    // The `querystring` param must NOT be rejected as an invalid location.
+    assert!(!has_code(&report, Code::InvalidInput), "{report:#?}");
+}
+
+#[test]
+fn oas32_stream_item_schema_types_the_stream_not_dropped() {
+    // OpenAPI 3.2 gives a sequential/streaming media its per-item type in `itemSchema` (not
+    // `schema`). A `text/event-stream` response typed only via `itemSchema` must lower to a typed
+    // streaming body — the operation still generates, the item type is NOT dropped to a bodyless
+    // `()`, and no `itemSchema` warning fires (on streaming media it IS used).
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      operationId: streamEvents
+      responses:
+        '200':
+          description: ok
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: "#/components/schemas/Event"
+components:
+  schemas:
+    Event:
+      type: object
+      required: [seq]
+      properties:
+        seq: { type: integer }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::Oas32ConstructIgnored),
+        "{report:#?}"
+    );
+    // check/generate parity.
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        !has_code(&checked, Code::Oas32ConstructIgnored),
+        "{checked:#?}"
+    );
+}
+
+#[test]
+fn oas32_item_schema_on_non_streaming_media_warns_w010() {
+    // `itemSchema` is only meaningful for sequential/streaming media. On a plain JSON response it is
+    // acknowledged with `W010` (not silently dropped) and generation still succeeds via `schema`.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /thing:
+    get:
+      operationId: getThing
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { type: string }
+              itemSchema: { type: integer }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::Oas32ConstructIgnored),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn pattern_properties_lowers_to_typed_map_with_w001() {
     // A representable `patternProperties` now GENERATES a typed overflow map instead of being
     // rejected. Two inline `{type: string}` value schemas under different patterns collapse to one

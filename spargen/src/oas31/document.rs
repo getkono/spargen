@@ -129,6 +129,10 @@ pub struct ResponseObject {
 #[derive(Debug, Clone)]
 pub struct MediaTypeObject {
     pub schema: Option<RefOr<Schema>>,
+    /// OpenAPI 3.2 `itemSchema`: the per-item type for a sequential/streaming media
+    /// (`text/event-stream`, `application/x-ndjson`). For a streaming response it supplies the
+    /// streamed item type `T`; on a non-streaming media it is meaningless and acknowledged (`W010`).
+    pub item_schema: Option<RefOr<Schema>>,
 }
 
 /// `components`. Only the maps spargen consumes are modeled.

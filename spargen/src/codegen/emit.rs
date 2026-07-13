@@ -1417,6 +1417,11 @@ fn reqwest_method(method: crate::ir::Method) -> TokenStream {
         crate::ir::Method::Head => quote! { reqwest::Method::HEAD },
         crate::ir::Method::Patch => quote! { reqwest::Method::PATCH },
         crate::ir::Method::Trace => quote! { reqwest::Method::TRACE },
+        // reqwest has no `QUERY` constant (OpenAPI 3.2's new fixed method), so build it from the
+        // token bytes. `QUERY` is a valid HTTP method token, so `from_bytes` never fails here.
+        crate::ir::Method::Query => quote! {
+            reqwest::Method::from_bytes(b"QUERY").expect("QUERY is a valid HTTP method token")
+        },
     }
 }
 

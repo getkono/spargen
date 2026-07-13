@@ -69,6 +69,9 @@ pub enum Code {
     /// An unsupported XML representation hint (`xml.namespace`, `xml.prefix`, or `xml.wrapped`) was
     /// ignored; only `xml.name`/`xml.attribute` are honored (matrix: Media → W).
     XmlHintIgnored,
+    /// An OpenAPI 3.2-only construct (`$self`, `additionalOperations`, `in: querystring`) was
+    /// acknowledged but not lowered into generated code (matrix: Version → W).
+    Oas32ConstructIgnored,
 }
 
 impl Code {
@@ -97,6 +100,7 @@ impl Code {
             Code::OmitCreatedInvalidDocument => "E020",
             Code::SchemaDefaultNotApplied => "W005",
             Code::XmlHintIgnored => "W006",
+            Code::Oas32ConstructIgnored => "W010",
         }
     }
 
@@ -134,6 +138,7 @@ impl Code {
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
             Code::SchemaDefaultNotApplied => "schema default not applied",
             Code::XmlHintIgnored => "unsupported XML hint ignored",
+            Code::Oas32ConstructIgnored => "OpenAPI 3.2 construct ignored",
         }
     }
 
@@ -141,10 +146,10 @@ impl Code {
     pub fn explain(self) -> &'static str {
         match self {
             Code::UnsupportedOpenApiVersion => {
-                "The root `openapi` field must declare `3.1.x`. OpenAPI 3.0.x uses a different schema dialect and is rejected rather than converted."
+                "The root `openapi` field must declare `3.1.x` or `3.2.x`. OpenAPI 3.2 is a compatible superset of 3.1 (same JSON Schema 2020-12 semantics) and is accepted through the same frontend. OpenAPI 3.0.x uses a different schema dialect and is rejected rather than converted."
             }
             Code::UnsupportedDialect => {
-                "`jsonSchemaDialect`, when present, must be the OAS 3.1 base dialect (`https://spec.openapis.org/oas/3.1/dialect/base`)."
+                "`jsonSchemaDialect`, when present, must be the OAS 3.1 base dialect (`https://spec.openapis.org/oas/3.1/dialect/base`) or the OAS 3.2 base dialect (`https://spec.openapis.org/oas/3.2/dialect/base`); both are the JSON Schema 2020-12-based OAS dialect."
             }
             Code::AbsoluteRefUnsupported => {
                 "Remote (`http`/`https`) `$ref` resolution is hermetic: `generate` and `check` never touch the network. A remote ref is resolved only from a locally vendored copy whose bytes are hash-pinned in `spargen.lock`. This error fires when a remote ref is not yet pinned there (or names an unfetchable absolute-URI scheme such as `urn:`). Run `spargen lock <spec>` to fetch, vendor under `.spargen/vendor/`, and pin it — then `generate`/`check` resolve it offline. Alternatively, vendor the document by hand and reference it with a relative file path."
@@ -203,6 +208,9 @@ impl Code {
             Code::SchemaDefaultNotApplied => {
                 "A `default` is applied as a serde deserialization default only when it is a single scalar (bool/integer/number/string) that matches the field's own scalar type or one of its enum variants. Object, array, null, heterogeneous, or type-mismatched defaults cannot be lowered to a Rust literal, so the value is recorded in the field's rustdoc but not wired — deserialization of an absent field yields `None` rather than the default."
             }
+            Code::Oas32ConstructIgnored => {
+                "OpenAPI 3.2 is accepted through the 3.1 frontend, but a handful of 3.2-only constructs describe behavior spargen does not generate a client for, and are acknowledged with this warning rather than silently dropped. `$self` sets the document's base URI for reference resolution and does not change locally-generated code. `additionalOperations` declares custom/extension HTTP methods on a path item, for which no client method is emitted. An `in: querystring` parameter treats the entire URL query string as a single value; that parameter is skipped and the rest of the operation still generates. The new fixed `QUERY` method is fully supported and does NOT trigger this warning."
+            }
             Code::XmlHintIgnored => {
                 "XML request/response bodies honor the `xml.name` (element/attribute rename) and `xml.attribute` (serialize as an XML attribute via quick-xml's `@name` convention) hints on a field, but only for a schema used *exclusively* as an XML body. A serde `rename` is format-agnostic — it would also rewrite the JSON wire names — so `xml.name`/`xml.attribute` are NOT applied to a schema that is also reachable from a JSON/form/multipart/text body, a response, or a parameter (or that is not used as an XML body at all); the field keeps its normal wire name and this warning fires, so JSON is never corrupted. The `xml.namespace`, `xml.prefix`, and `xml.wrapped` (wrapped arrays) hints are never represented — quick-xml serde has no faithful mapping for them — so they are always ignored with this warning rather than silently honored or rejected."
             }
@@ -244,6 +252,7 @@ impl Code {
             Code::OmittedConstruct,
             Code::SchemaDefaultNotApplied,
             Code::XmlHintIgnored,
+            Code::Oas32ConstructIgnored,
         ];
         ALL
     }

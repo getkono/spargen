@@ -5,7 +5,7 @@ the library API.
 
 | Code | Severity | Title |
 | --- | --- | --- |
-| `E001` | Error | unsupported OpenAPI version |
+| `E001` | Error | unsupported OpenAPI version (3.1.x and 3.2.x are supported) |
 | `E002` | Error | unsupported JSON Schema dialect |
 | `E003` | Error | remote `$ref` not pinned |
 | `E004` | Error | unresolved `$ref` |
@@ -27,3 +27,4 @@ the library API.
 | `W005` | Warning | schema default not applied |
 | `W006` | Warning | unsupported XML hint ignored |
 | `W009` | Warning | construct omitted |
+| `W010` | Warning | OpenAPI 3.2 construct ignored |

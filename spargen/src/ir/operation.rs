@@ -17,6 +17,8 @@ pub enum Method {
     Head,
     Patch,
     Trace,
+    /// The `QUERY` method, added as a fixed path-item field by OpenAPI 3.2.
+    Query,
 }
 
 impl Method {
@@ -31,6 +33,7 @@ impl Method {
             Method::Head => "head",
             Method::Patch => "patch",
             Method::Trace => "trace",
+            Method::Query => "query",
         }
     }
 }

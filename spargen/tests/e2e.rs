@@ -322,6 +322,71 @@ fn rejects_openapi_30_without_conversion() {
 }
 
 #[test]
+fn generates_standalone_crate_for_oas32_api_with_query_method() {
+    // OpenAPI 3.2 lowers through the same frontend. This spec exercises the new fixed `QUERY`
+    // method (which must emit a real client method) alongside a plain `get`, and must produce a
+    // standalone crate that passes `cargo check` + `cargo clippy -D warnings`.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, OAS32_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = spargen::generate(&Config::new(
+        Utf8PathBuf::from_path_buf(spec).unwrap(),
+        OutputTarget::Crate {
+            dir: Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
+            name: "oas32_client".to_owned(),
+        },
+    ));
+
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(report
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.severity != spargen::Severity::Error));
+
+    let status = Command::new("cargo")
+        .arg("check")
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    let status = Command::new("cargo")
+        .args(["clippy", "--", "-D", "warnings"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    // The QUERY operation lowered to a real client method (compile-verified above); prove the
+    // method exists in the emitted source so a regression that drops QUERY is caught.
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("pub async fn search_records"),
+        "QUERY operation should emit a client method"
+    );
+    assert!(
+        generated.contains("reqwest::Method::from_bytes(b\"QUERY\")"),
+        "QUERY method should be built from its token bytes"
+    );
+
+    // The OpenAPI 3.2 streaming response typed its item via `itemSchema` (no `schema`): the operation
+    // must return `EventStream<Event>` — the item type is the typed struct, not dropped to a bodyless
+    // `()`. A regression that ignores `itemSchema` would collapse this to `-> ResponseValue<()>`.
+    let flat: String = generated.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("pub async fn stream_events"),
+        "streaming operation should emit a client method"
+    );
+    assert!(
+        flat.contains("support :: EventStream < types :: Event >")
+            || flat.contains("support::EventStream<types::Event>"),
+        "itemSchema must type the EventStream item as the typed struct, not be dropped: {flat}"
+    );
+}
+
+#[test]
 fn omit_overlay_removes_unsupported_operation() {
     let temp = tempfile::tempdir().unwrap();
     let spec = temp.path().join("openapi.yaml");
@@ -853,3 +918,70 @@ paths:
         "204":
           description: No Content
 "#;
+
+const OAS32_SPEC: &str = r##"
+openapi: 3.2.0
+info:
+  title: Records
+  version: 1.0.0
+servers:
+  - url: https://example.com/api
+paths:
+  /records:
+    get:
+      operationId: listRecords
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Record"
+    query:
+      operationId: searchRecords
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Query"
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Record"
+  /events:
+    get:
+      operationId: streamEvents
+      responses:
+        "200":
+          description: ok
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: "#/components/schemas/Event"
+components:
+  schemas:
+    Record:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string }
+        name: { type: string }
+    Query:
+      type: object
+      properties:
+        term: { type: string }
+    Event:
+      type: object
+      required: [seq]
+      properties:
+        seq: { type: integer }
+        payload: { type: string }
+"##;
