@@ -800,12 +800,21 @@ fn emit_multipart_body(ty: Ty, api: &Api, names: &Names) -> TokenStream {
 }
 
 fn param_ident(param: &crate::ir::Parameter, role: crate::name::IdentRole) -> proc_macro2::Ident {
-    format_ident!(
-        "{}",
-        crate::name::escape(&param.name, role)
-            .as_str()
-            .trim_start_matches("r#")
-    )
+    escaped_token(&param.name, role)
+}
+
+/// Build the `proc_macro2::Ident` for an escaped name, PRESERVING raw escaping: a keyword like
+/// `type` escapes to `r#type`, which must become a raw identifier token (`Ident::new_raw`) — NOT a
+/// bare `type` (an invalid keyword token that fails to parse). This is the token equivalent of the
+/// name subsystem's `Ident` `ToTokens`; use it wherever an escaped param/field name is turned into
+/// a `proc_macro2::Ident` directly instead of going through a `name::Ident`.
+fn escaped_token(name: &str, role: crate::name::IdentRole) -> proc_macro2::Ident {
+    let escaped = crate::name::escape(name, role);
+    let span = proc_macro2::Span::call_site();
+    match escaped.as_str().strip_prefix("r#") {
+        Some(raw) => proc_macro2::Ident::new_raw(raw, span),
+        None => proc_macro2::Ident::new(escaped.as_str(), span),
+    }
 }
 
 /// Render a parameter value expression to its wire string: JSON for `content`-typed parameters,
@@ -899,14 +908,8 @@ pub(crate) fn emit_params_struct(
         .collect();
     // The setter method reuses the field ident verbatim (same escaping/keyword handling), so
     // build it once per param.
-    let field_ident = |param: &crate::ir::Parameter| {
-        format_ident!(
-            "{}",
-            crate::name::escape(&param.name, crate::name::IdentRole::Field)
-                .as_str()
-                .trim_start_matches("r#")
-        )
-    };
+    let field_ident =
+        |param: &crate::ir::Parameter| escaped_token(&param.name, crate::name::IdentRole::Field);
     let fields = optional.iter().map(|param| {
         let ident = field_ident(param);
         let wire = &param.name;

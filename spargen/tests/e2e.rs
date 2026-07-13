@@ -730,6 +730,12 @@ paths:
           in: query
           schema:
             type: [integer, "null"]
+        # Rust-keyword-named param: must escape to `r#type` (field, arg, setter, wire name `type`),
+        # not a bare `type` keyword token (which failed to parse -> a compile_error! safety net).
+        - name: type
+          in: query
+          schema:
+            type: string
       responses:
         "200":
           description: OK
