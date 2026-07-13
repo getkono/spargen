@@ -25,6 +25,8 @@ pub enum Command {
     Lock(LockArgs),
     /// Show extended documentation for a diagnostic code.
     Explain(ExplainArgs),
+    /// Report the semver impact of regenerating the client from a newer spec.
+    Diff(DiffArgs),
 }
 
 /// Arguments for `spargen generate`.
@@ -106,6 +108,22 @@ pub struct LockArgs {
     /// Path to the root OpenAPI document. Remote `$ref`s reachable from it are fetched, vendored
     /// under `.spargen/vendor/`, and pinned in `spargen.lock` beside the spec.
     pub spec: Utf8PathBuf,
+    /// Output format for the report.
+    #[arg(long, value_enum, default_value_t = Format::Human)]
+    pub format: Format,
+}
+
+/// Arguments for `spargen diff`.
+#[derive(Debug, Args)]
+pub struct DiffArgs {
+    /// Path to the OLD (baseline) OpenAPI document.
+    pub old: Utf8PathBuf,
+    /// Path to the NEW (candidate) OpenAPI document.
+    pub new: Utf8PathBuf,
+    /// Exit non-zero (status 1) when the diff is a breaking (`major`) change — a CI gate. Without
+    /// this flag `diff` always exits 0 (a spec that fails to lower still exits 1 either way).
+    #[arg(long)]
+    pub exit_code: bool,
     /// Output format for the report.
     #[arg(long, value_enum, default_value_t = Format::Human)]
     pub format: Format,

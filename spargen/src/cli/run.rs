@@ -129,6 +129,30 @@ pub fn run(cli: Cli) -> ExitCode {
                 ExitStatus::Ok.into()
             }
         }
+        Command::Diff(args) => {
+            let old = Config::new(
+                args.old,
+                OutputTarget::Module("__spargen_diff_old.rs".into()),
+            );
+            let new = Config::new(
+                args.new,
+                OutputTarget::Module("__spargen_diff_new.rs".into()),
+            );
+            let outcome = crate::diff(&old, &new);
+            render_diff(&outcome, args.format);
+            // A spec that fails to lower is a hard error (status 1) regardless of `--exit-code`;
+            // otherwise a breaking diff fails only when the caller opted into the CI gate.
+            match &outcome.report {
+                None => ExitStatus::Diagnostics.into(),
+                Some(report) => {
+                    if args.exit_code && report.bump == crate::Impact::Major {
+                        ExitStatus::Diagnostics.into()
+                    } else {
+                        ExitStatus::Ok.into()
+                    }
+                }
+            }
+        }
         Command::Explain(args) => match explain(&args.code) {
             Some(text) => {
                 match args.format {
@@ -217,6 +241,79 @@ fn render_diagnostics_human(diagnostics: &[crate::Diagnostic]) {
         if let Some(remedy) = &diagnostic.remedy {
             eprintln!("  help: {remedy}");
         }
+    }
+}
+
+/// Render a `spargen diff` outcome in the requested format. A spec that failed to lower is reported
+/// as such (with its rejection diagnostics); otherwise the classified change list, the overall
+/// recommended bump, and a one-line summary are printed.
+fn render_diff(outcome: &crate::DiffOutcome, format: Format) {
+    match format {
+        Format::Human => {
+            let mut rejected = false;
+            if let Some(report) = &outcome.old_rejection {
+                eprintln!("error: the OLD spec failed to lower; cannot diff:");
+                render_diagnostics_human(&report.diagnostics);
+                rejected = true;
+            }
+            if let Some(report) = &outcome.new_rejection {
+                eprintln!("error: the NEW spec failed to lower; cannot diff:");
+                render_diagnostics_human(&report.diagnostics);
+                rejected = true;
+            }
+            if rejected {
+                return;
+            }
+            if let Some(report) = &outcome.report {
+                for change in &report.changes {
+                    println!(
+                        "{:>5} [{}] {}: {}",
+                        change.impact.as_str(),
+                        change.kind.code(),
+                        change.location,
+                        change.detail
+                    );
+                }
+                println!("{}", report.summary());
+                println!("recommended bump: {}", report.bump.as_str());
+            }
+        }
+        Format::Json => {
+            println!("{}", serde_json::to_string(&diff_json(outcome)).unwrap());
+        }
+    }
+}
+
+fn diff_json(outcome: &crate::DiffOutcome) -> serde_json::Value {
+    match &outcome.report {
+        Some(report) => serde_json::json!({
+            "ok": true,
+            "bump": report.bump.as_str(),
+            "summary": report.summary(),
+            "changes": report.changes.iter().map(|change| {
+                serde_json::json!({
+                    "impact": change.impact.as_str(),
+                    "code": change.kind.code(),
+                    "location": change.location,
+                    "detail": change.detail,
+                })
+            }).collect::<Vec<_>>(),
+        }),
+        None => serde_json::json!({
+            "ok": false,
+            "old_rejected": outcome.old_rejection.is_some(),
+            "new_rejected": outcome.new_rejection.is_some(),
+            "old_diagnostics": outcome
+                .old_rejection
+                .as_ref()
+                .map(|report| diagnostics_json(&report.diagnostics))
+                .unwrap_or_default(),
+            "new_diagnostics": outcome
+                .new_rejection
+                .as_ref()
+                .map(|report| diagnostics_json(&report.diagnostics))
+                .unwrap_or_default(),
+        }),
     }
 }
 

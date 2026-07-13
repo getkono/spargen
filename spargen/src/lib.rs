@@ -39,6 +39,7 @@ mod name;
 mod oas31;
 mod source;
 mod support;
+mod surface;
 
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -51,6 +52,7 @@ pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule};
 pub use diag::{Code, Diagnostic, JsonPointer, Severity, Span};
 #[cfg(feature = "remote-fetch")]
 pub use source::{VendorReport, VendoredRef};
+pub use surface::{Change, ChangeKind, DiffReport, Impact};
 
 /// Feature toggles for the generated output (both default **on**). Disabling one falls
 /// back to `String` for the corresponding `format` mappings — a deliberate, documented loss of
@@ -179,6 +181,58 @@ pub fn check(config: &Config) -> Report {
     }
 }
 
+/// The result of a [`diff`] run: the semver-impact report when both specs lowered, plus each
+/// spec's rejection [`Report`] when it failed to lower.
+///
+/// `report` is `Some` iff **both** specs lowered successfully. When a spec rejects (used an R-class
+/// construct, failed validation, …), its diagnostics are surfaced in `old_rejection` / `new_rejection`
+/// and no diff is produced — the surfaces are simply not comparable. `diff` never panics on a bad spec.
+#[derive(Debug, Clone)]
+pub struct DiffOutcome {
+    /// The semver-impact diff, present iff both specs lowered successfully.
+    pub report: Option<DiffReport>,
+    /// The old spec's rejection report, if it failed to lower.
+    pub old_rejection: Option<Report>,
+    /// The new spec's rejection report, if it failed to lower.
+    pub new_rejection: Option<Report>,
+}
+
+/// Diff the **public API surface** of the client that would be generated from `old` versus `new`,
+/// classifying the change as a semver bump (`major` breaking / `minor` additive / `patch` no-op).
+///
+/// Per the product contract, "the semver surface is the public API of generated output": this runs
+/// the frontend (parse → lower → name-allocate) on both specs, models what a consumer of the
+/// generated client sees (operations, their params/body/return types, and the public model types),
+/// and reports every difference with its impact. A pure analysis step — it never writes output nor
+/// touches the runtime. Deterministic: the same pair of specs yields a byte-identical report.
+pub fn diff(old: &Config, new: &Config) -> DiffOutcome {
+    let mut old_diags = diag::Diagnostics::new(old.batch_cap);
+    let mut new_diags = diag::Diagnostics::new(new.batch_cap);
+    let old_lowered = lower_frontend(old, &mut old_diags);
+    let new_lowered = lower_frontend(new, &mut new_diags);
+
+    match (old_lowered, new_lowered) {
+        (Ok((old_api, old_names)), Ok((new_api, new_names))) => {
+            let old_surface = surface::build(&old_api, &old_names);
+            let new_surface = surface::build(&new_api, &new_names);
+            DiffOutcome {
+                report: Some(surface::diff(&old_surface, &new_surface)),
+                old_rejection: None,
+                new_rejection: None,
+            }
+        }
+        (old_lowered, new_lowered) => DiffOutcome {
+            report: None,
+            old_rejection: old_lowered
+                .is_err()
+                .then(|| report(old_diags, Outcome::Rejected)),
+            new_rejection: new_lowered
+                .is_err()
+                .then(|| report(new_diags, Outcome::Rejected)),
+        },
+    }
+}
+
 /// Extended documentation for a stable diagnostic code, backing `spargen explain E###` and the
 /// published errors index.
 pub fn explain(code: &str) -> Option<&'static str> {
@@ -218,50 +272,58 @@ enum PipelineMode {
     Check,
 }
 
-fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
-    let mut diags = diag::Diagnostics::new(config.batch_cap);
+/// Run the whole frontend — `source` → `oas31` (validate/parse/audit/lower) → IR invariants →
+/// `name` allocation — and return the lowered [`Api`](ir::Api) plus its allocated
+/// [`Names`](name::Names). This is the exact work `generate` and `check` share before codegen, and
+/// the sole input `diff` needs; on any rejection it returns `Err(())` with `diags` already carrying
+/// the error diagnostics.
+fn lower_frontend(
+    config: &Config,
+    diags: &mut diag::Diagnostics,
+) -> Result<(ir::Api, name::Names), ()> {
+    let mut bundle = source::InputBundle::load(&config.spec, diags).map_err(|_| ())?;
 
-    let mut bundle = match source::InputBundle::load(&config.spec, &mut diags) {
-        Ok(bundle) => bundle,
-        Err(_) => return report(diags, Outcome::Rejected),
-    };
-
-    if !config.omit.is_empty() && config.omit.apply(&mut bundle, &mut diags).is_err() {
-        return report(diags, Outcome::Rejected);
+    if !config.omit.is_empty() && config.omit.apply(&mut bundle, diags).is_err() {
+        return Err(());
     }
 
     let validator = oas31::MetaSchemaValidator::load_vendored();
-    validator.validate(bundle.root(), &mut diags);
+    validator.validate(bundle.root(), diags);
     if diags.has_errors() {
-        return report(diags, Outcome::Rejected);
+        return Err(());
     }
 
-    let document = match oas31::parse_document(&bundle, &mut diags) {
-        Ok(document) => document,
-        Err(_) => return report(diags, Outcome::Rejected),
-    };
+    let document = oas31::parse_document(&bundle, diags).map_err(|_| ())?;
 
     let resolver = oas31::Resolver::new(&document, &bundle);
-    oas31::audit(&document, &mut diags);
+    oas31::audit(&document, diags);
     if diags.has_errors() {
-        return report(diags, Outcome::Rejected);
+        return Err(());
     }
 
     // `check` runs the full frontend — lowering, IR invariants, and name allocation — so it fires
     // exactly the diagnostics `generate` would, just without emitting code.
-    let api = match oas31::lower(&document, &resolver, &mut diags) {
-        Ok(api) => api,
-        Err(_) => return report(diags, Outcome::Rejected),
-    };
-    ir::check_invariants(&api, &mut diags);
+    let api = oas31::lower(&document, &resolver, diags).map_err(|_| ())?;
+    ir::check_invariants(&api, diags);
     if diags.has_errors() {
-        return report(diags, Outcome::Rejected);
+        return Err(());
     }
 
-    let names = name::allocate(&api, &mut diags);
+    let names = name::allocate(&api, diags);
     if diags.has_errors() {
-        return report(diags, Outcome::Rejected);
+        return Err(());
     }
+
+    Ok((api, names))
+}
+
+fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
+    let mut diags = diag::Diagnostics::new(config.batch_cap);
+
+    let (api, names) = match lower_frontend(config, &mut diags) {
+        Ok(pair) => pair,
+        Err(()) => return report(diags, Outcome::Rejected),
+    };
 
     if matches!(mode, PipelineMode::Check) {
         return report(diags, Outcome::Clean);
