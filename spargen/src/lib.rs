@@ -46,7 +46,7 @@ pub mod cli;
 
 use std::str::FromStr;
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
 pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule};
 pub use diag::{Code, Diagnostic, JsonPointer, Severity, Span};
@@ -230,6 +230,30 @@ pub fn diff(old: &Config, new: &Config) -> DiffOutcome {
                 .is_err()
                 .then(|| report(new_diags, Outcome::Rejected)),
         },
+    }
+}
+
+/// The filesystem paths [`generate`]/[`check`] read for `config`: the root spec, every
+/// relative-file `$ref` target reachable from it, and each vendored remote copy. This is the raw
+/// on-disk footprint of a spec — the CLI `--watch` loop builds its watch set on top of it (adding
+/// the config and lock files).
+///
+/// Best-effort and side-effect-free: it loads the bundle only (no lowering, no output, no
+/// network). If the spec cannot even be loaded (e.g. it is momentarily malformed mid-edit), the
+/// returned list is just the spec path, so a watcher can still wait for it to be fixed.
+/// Deterministic for a given on-disk state.
+pub fn source_files(config: &Config) -> Vec<Utf8PathBuf> {
+    let mut diags = diag::Diagnostics::new(config.batch_cap);
+    match source::InputBundle::load(&config.spec, &mut diags) {
+        Ok(bundle) => {
+            let mut paths: Vec<Utf8PathBuf> =
+                bundle.source_paths().map(Utf8Path::to_path_buf).collect();
+            if !paths.iter().any(|path| path == &config.spec) {
+                paths.push(config.spec.clone());
+            }
+            paths
+        }
+        Err(_) => vec![config.spec.clone()],
     }
 }
 

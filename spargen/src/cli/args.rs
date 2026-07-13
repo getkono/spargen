@@ -43,6 +43,10 @@ pub struct GenerateArgs {
     /// Emit a standalone publishable crate rather than a module.
     #[arg(long)]
     pub as_crate: bool,
+    /// Watch the spec (and its referenced files, config, and lock) and regenerate on every change.
+    /// Runs until interrupted (Ctrl-C).
+    #[arg(long)]
+    pub watch: bool,
     /// Auto-carve: instead of failing on rejections, omit the minimal set of unsupported constructs
     /// (each reported via W009) and generate the rest. Un-carvable rejections are still reported.
     #[arg(long)]

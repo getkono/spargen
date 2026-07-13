@@ -50,6 +50,9 @@ pub fn run(cli: Cli) -> ExitCode {
             let mut config = Config::new(args.spec, output);
             apply_settings(&mut config, settings);
             config.check_only = args.check;
+            if args.watch {
+                return super::watch::watch(&config, args.config.as_deref(), args.format);
+            }
             let report = generate(&config);
             render_report(&report, args.format);
             status_for_report(&report).into()
@@ -194,7 +197,7 @@ fn config_error(error: ConfigError) -> ExitCode {
     ExitStatus::Usage.into()
 }
 
-fn status_for_report(report: &crate::Report) -> ExitStatus {
+pub(super) fn status_for_report(report: &crate::Report) -> ExitStatus {
     match report.outcome {
         Outcome::Generated | Outcome::Clean => {
             if report
@@ -212,7 +215,7 @@ fn status_for_report(report: &crate::Report) -> ExitStatus {
     }
 }
 
-fn render_report(report: &crate::Report, format: Format) {
+pub(super) fn render_report(report: &crate::Report, format: Format) {
     match format {
         Format::Human => render_diagnostics_human(&report.diagnostics),
         Format::Json => {

@@ -16,7 +16,7 @@ default = ["cli", "uuid", "time"]
 # Gates the `spargen` binary and its CLI-only dependencies so `cargo install spargen` works
 # out of the box while library builds stay lean. The colored-output deps
 # (anstream/anstyle) are added with the diagnostic renderer implementation.
-cli = ["dep:clap", "dep:toml", "remote-fetch"]
+cli = ["dep:clap", "dep:toml", "dep:notify-debouncer-mini", "remote-fetch"]
 # `format: uuid` / `date-time` / `date` type mappings in generated output. Default on;
 # disabling falls back to `String`. The teeth live in the emitted crate's own manifest.
 uuid = []
@@ -46,6 +46,9 @@ clap = { workspace = true, optional = true }
 # Config-file (`spargen.toml`) parsing is a CLI-only concern, so `toml` rides on the `cli`
 # feature — a library/`build.rs` build (which constructs `Config` directly) never pulls it.
 toml = { workspace = true, optional = true }
+# File watching for `generate --watch` — a CLI concern, so it rides the `cli` feature and never
+# appears in a library/build.rs graph nor the generated-output runtime.
+notify-debouncer-mini = { workspace = true, optional = true }
 # Remote-fetch (feature-gated): the ONLY networked path, used by `spargen lock` to vendor
 # remote `$ref`s. Not in the runtime graph of generated output — this is the generator only.
 reqwest = { version = "0.12", default-features = false, features = [

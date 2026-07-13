@@ -21,6 +21,10 @@ allow = [
     # used by `spargen lock`. A permissive data license; the generated-output runtime graph is
     # unaffected (it carries its own default-features-off reqwest).
     "CDLA-Permissive-2.0",
+    # `notify` (the CLI `generate --watch` file watcher, via `notify-debouncer-mini`) is dedicated
+    # to the public domain under CC0-1.0 — maximally permissive. CLI-only: it never enters a
+    # library/build.rs graph nor the generated-output runtime.
+    "CC0-1.0",
 ]
 confidence-threshold = 0.9
 

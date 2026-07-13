@@ -33,6 +33,9 @@ syn = { version = "2.0", features = ["full"] }
 prettyplease = "0.2"
 clap = { version = "4.5", features = ["derive"] }
 toml = "0.8"
+# Debounced filesystem watching for the CLI `generate --watch` loop. CLI-only (rides the `cli`
+# feature); never enters a library/build.rs graph or the generated-output runtime.
+notify-debouncer-mini = "0.4"
 proptest = "1.11"
 tempfile = "3.10"
 

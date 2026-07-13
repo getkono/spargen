@@ -9,6 +9,7 @@ mod args;
 mod config;
 mod exit;
 mod run;
+mod watch;
 
 pub use args::{CheckArgs, Cli, Command, DiffArgs, ExplainArgs, Format, GenerateArgs, LockArgs};
 pub use config::{CliOverrides, ConfigError, OmitFlags, Settings};

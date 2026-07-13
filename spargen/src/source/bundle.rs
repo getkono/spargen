@@ -145,6 +145,13 @@ impl InputBundle {
         self.url_to_file.get(url).copied()
     }
 
+    /// The filesystem paths of every loaded document: the root spec, each relative-file `$ref`
+    /// target reachable from it, and each vendored remote copy. Used to compute the `--watch`
+    /// file set (a spec's full on-disk footprint). Order follows load order (root first).
+    pub fn source_paths(&self) -> impl Iterator<Item = &Utf8Path> {
+        self.files.values().map(|file| file.path.as_path())
+    }
+
     /// Find a loaded file by its stored path, exact first and suffix second for ergonomic
     /// file-local omit rules.
     pub(crate) fn file_id_for_path(&self, path: &str) -> Option<FileId> {
