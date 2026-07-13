@@ -21,6 +21,8 @@ pub enum Command {
     Generate(GenerateArgs),
     /// Audit a spec's feature support without generating code.
     Check(CheckArgs),
+    /// Fetch, vendor, and hash-pin remote `$ref`s into `spargen.lock` (the only networked step).
+    Lock(LockArgs),
     /// Show extended documentation for a diagnostic code.
     Explain(ExplainArgs),
 }
@@ -56,6 +58,17 @@ pub struct CheckArgs {
     /// Path to the root OpenAPI document.
     pub spec: Utf8PathBuf,
     /// Output format for the audit.
+    #[arg(long, value_enum, default_value_t = Format::Human)]
+    pub format: Format,
+}
+
+/// Arguments for `spargen lock`.
+#[derive(Debug, Args)]
+pub struct LockArgs {
+    /// Path to the root OpenAPI document. Remote `$ref`s reachable from it are fetched, vendored
+    /// under `.spargen/vendor/`, and pinned in `spargen.lock` beside the spec.
+    pub spec: Utf8PathBuf,
+    /// Output format for the report.
     #[arg(long, value_enum, default_value_t = Format::Human)]
     pub format: Format,
 }

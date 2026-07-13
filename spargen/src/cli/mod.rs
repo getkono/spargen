@@ -9,6 +9,6 @@ mod args;
 mod exit;
 mod run;
 
-pub use args::{CheckArgs, Cli, Command, ExplainArgs, Format, GenerateArgs};
+pub use args::{CheckArgs, Cli, Command, ExplainArgs, Format, GenerateArgs, LockArgs};
 pub use exit::ExitStatus;
 pub use run::run;

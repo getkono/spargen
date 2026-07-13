@@ -11,7 +11,7 @@ use crate::ir::{
     TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionStrategy, UnionVariant, XmlField,
 };
 use crate::name::synth_operation_id;
-use crate::source::{Node, Number, SpannedValue};
+use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
 use super::{
     Document, JsonType, ParameterObject, RefOr, RequestBodyObject, Resolver, ResponseObject,
@@ -32,6 +32,9 @@ pub fn lower(
         graph: TypeGraph::default(),
         components: HashMap::new(),
         in_progress: HashMap::new(),
+        remote_components: HashMap::new(),
+        remote_in_progress: HashMap::new(),
+        remote_alias_stack: HashSet::new(),
     };
 
     for (name, schema) in &document.components.schemas {
@@ -179,6 +182,17 @@ struct LowerCtx<'a, 'doc> {
     /// in this map is a cycle-closing back-edge and is boxed against the reserved id, carrying the
     /// same nullability a completed lowering would.
     in_progress: HashMap<String, (TypeId, bool)>,
+    /// The remote-`$ref` analogue of [`Self::components`], keyed by the absolute `url#fragment`. A
+    /// remote ref resolves to a fresh owned schema each call, so — unlike local components — it has
+    /// no `document`-level identity; this map gives it one, so repeated remote uses share one
+    /// generated type and, together with [`Self::remote_in_progress`], recursion terminates.
+    remote_components: HashMap<String, (TypeId, bool)>,
+    /// Remote refs currently being lowered (same role as [`Self::in_progress`] for components): a
+    /// re-entered `url#fragment` is a cycle-closing back-edge and is boxed against its reserved id.
+    remote_in_progress: HashMap<String, (TypeId, bool)>,
+    /// Guards a chain of bare-`$ref` (alias) remote documents so an alias cycle terminates instead
+    /// of recursing forever; a real (object/enum/…) remote schema uses the reserve/box machinery.
+    remote_alias_stack: HashSet<String>,
 }
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -244,6 +258,74 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(ty)
     }
 
+    /// Lower a remote (`http`/`https`) `$ref` to a shared, cycle-safe type — the remote analogue of
+    /// [`Self::ensure_component`], keyed by the absolute `url#fragment`. Resolution is hermetic (the
+    /// schema comes from the vendored, hash-pinned copy already in the bundle; no network). A remote
+    /// ref re-entered while its own body is still lowering — a self- or mutually-recursive vendored
+    /// schema — returns a boxed back-edge against the reserved root id, so recursion terminates and
+    /// generates a finite (boxed) type instead of overflowing the stack.
+    fn ensure_remote(&mut self, reference: &str) -> Option<Ty> {
+        if let Some(&(id, nullable)) = self.remote_components.get(reference) {
+            return Some(Ty {
+                id,
+                nullable,
+                boxed: false,
+            });
+        }
+        if let Some(&(id, nullable)) = self.remote_in_progress.get(reference) {
+            return Some(Ty {
+                id,
+                nullable,
+                boxed: true,
+            });
+        }
+        let resolved = self
+            .resolver
+            .resolve(reference, &crate::diag::JsonPointer::root(), self.diags)
+            .ok()?;
+        let schema = resolved.schema.into_owned();
+
+        // A vendored document that is itself a bare `$ref` is an alias with no body to reserve a
+        // root for. Chain to its target under a cycle guard (so an alias loop terminates) rather
+        // than through the reserve/pop machinery, which assumes the body inserts a fresh root.
+        if schema.reference.is_some() {
+            if !self.remote_alias_stack.insert(reference.to_owned()) {
+                Diagnostic::error(Code::UnresolvedRef, self.document.provenance.clone())
+                    .message(format!("remote $ref `{reference}` forms an alias cycle"))
+                    .emit(self.diags);
+                return None;
+            }
+            let ty = self.lower_schema(&schema, reference);
+            self.remote_alias_stack.remove(reference);
+            return ty;
+        }
+
+        let nullable = schema_is_nullable(&schema);
+        let root_id = self.graph.reserve();
+        self.remote_in_progress
+            .insert(reference.to_owned(), (root_id, nullable));
+        let lowered = self.lower_schema(&schema, reference);
+        self.remote_in_progress.remove(reference);
+        let mut ty = lowered?;
+        let (popped_id, mut def) = self.graph.pop_last().expect("remote root def");
+        // Same last-insert invariant as `ensure_component`: the remote type's root is the final
+        // graph insert during its own body lowering (children insert first).
+        assert_eq!(
+            popped_id, ty.id,
+            "remote root was not the last inserted def"
+        );
+        if let Some(raw) = &schema.default {
+            let note = format!("Default: `{}`.", default_display_for(raw, Some(&def.kind)));
+            append_doc_note(&mut def.docs, note);
+        }
+        self.graph.fill(root_id, def);
+        ty.id = root_id;
+        ty.nullable = nullable;
+        self.remote_components
+            .insert(reference.to_owned(), (root_id, nullable));
+        Some(ty)
+    }
+
     fn lower_schema_or(&mut self, schema: &SchemaOr, hint: &str) -> Option<Ty> {
         match schema {
             SchemaOr::Bool(true) => {
@@ -266,11 +348,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if let Some(name) = reference.strip_prefix("#/components/schemas/") {
                 return self.ensure_component(name);
             }
+            // Remote refs go through the cycle-safe, deduped remote path (keyed by `url#fragment`),
+            // mirroring `ensure_component`; a bare relative/other ref falls through to `resolve`,
+            // which reports it (E003/E004).
+            if is_remote_ref(reference) {
+                return self.ensure_remote(reference);
+            }
             let resolved = self
                 .resolver
                 .resolve(reference, &schema.provenance.pointer, self.diags)
                 .ok()?;
-            return self.lower_schema(resolved.schema, hint);
+            return self.lower_schema(&resolved.schema, hint);
         }
 
         if !schema.all_of.is_empty() {
@@ -948,13 +1036,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 self.push_ref_member(ty, out);
                 return Some(());
             }
+            // A remote `$ref` member goes through the cycle-safe remote path, exactly like a
+            // component member: a member still being lowered is a direct recursive ref whose fields
+            // are not yet known (irreconcilable), otherwise its shared type contributes its fields.
+            if is_remote_ref(reference) {
+                if self.remote_in_progress.contains_key(reference) {
+                    return self.reject_all_of_unit(
+                        schema.provenance.clone(),
+                        "an `allOf` member is a direct recursive remote `$ref` to the schema being \
+                         lowered",
+                    );
+                }
+                let ty = self.ensure_remote(reference)?;
+                self.push_ref_member(ty, out);
+                return Some(());
+            }
             // Non-component refs resolve (or error) exactly as `lower_schema` does; treat the target
             // as an inline member.
             let resolved = self
                 .resolver
                 .resolve(reference, &schema.provenance.pointer, self.diags)
                 .ok()?;
-            let target = resolved.schema.clone();
+            let target = resolved.schema.into_owned();
             return self.gather_inline(&target, hint, out);
         }
 
@@ -1589,6 +1692,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             RefOr::Ref(reference) => {
                 if let Some(name) = reference.reference.strip_prefix("#/components/schemas/") {
                     self.ensure_component(name)
+                } else if is_remote_ref(&reference.reference) {
+                    self.ensure_remote(&reference.reference)
                 } else {
                     let resolved = self
                         .resolver
@@ -1598,7 +1703,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             self.diags,
                         )
                         .ok()?;
-                    self.lower_schema(resolved.schema, hint)
+                    self.lower_schema(&resolved.schema, hint)
                 }
             }
         }

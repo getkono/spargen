@@ -33,6 +33,260 @@ fn has_code(report: &Report, code: Code) -> bool {
     report.diagnostics.iter().any(|d| d.code == code)
 }
 
+/// A remote-`$ref` spec fixture referencing a single vendored schema, plus a helper to lay it out
+/// in a tempdir with a hand-written lock + vendored file (no network) and run `generate`/`check`.
+mod remote {
+    use super::*;
+
+    // The exact bytes of the vendored remote document and their real SHA-256 (see the module test
+    // asserting spargen's own `sha256` matches this). A mismatch here is a pin-drift fixture.
+    const GIZMO_YAML: &str = "type: object\nproperties:\n  id:\n    type: string\n";
+    const GIZMO_SHA256: &str = "6d9d14b78ee36c68c62cfbde1e06186a7ded59991eb2f5b6aa8b4503209d8974";
+    const GIZMO_URL: &str = "https://api.example.com/schemas/gizmo.yaml";
+    const GIZMO_VENDOR_PATH: &str = "api.example.com/schemas/gizmo.yaml";
+
+    fn spec() -> String {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths:\n\
+             \x20 /gizmo:\n\
+             \x20   get:\n\
+             \x20     operationId: getGizmo\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema:\n\
+             \x20               $ref: \"{GIZMO_URL}\"\n"
+        )
+    }
+
+    fn lock(sha256: &str) -> String {
+        format!(
+            "version = 1\n\n[[remote]]\nurl = \"{GIZMO_URL}\"\nsha256 = \"{sha256}\"\npath = \"{GIZMO_VENDOR_PATH}\"\n"
+        )
+    }
+
+    /// Write the spec and (optionally) a lock + vendored file into a fresh tempdir, then run the
+    /// pipeline. Returns the report and the generated module text (when generation ran).
+    fn run(
+        with_lock: Option<String>,
+        with_vendor: Option<&str>,
+        check_only: bool,
+    ) -> (Report, tempfile::TempDir, camino::Utf8PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), spec()).unwrap();
+        if let Some(lock) = with_lock {
+            std::fs::write(dir.join("spargen.lock"), lock).unwrap();
+        }
+        if let Some(vendor) = with_vendor {
+            let path = dir.join(".spargen/vendor").join(GIZMO_VENDOR_PATH);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, vendor).unwrap();
+        }
+        let out = dir.join("client.rs");
+        let config = spargen::Config::new(
+            dir.join("openapi.yaml"),
+            spargen::OutputTarget::Module(out.clone()),
+        );
+        let report = if check_only {
+            spargen::check(&config)
+        } else {
+            spargen::generate(&config)
+        };
+        (report, temp, out)
+    }
+
+    #[test]
+    fn unpinned_remote_ref_is_e003_with_remedy() {
+        // No lock present ⇒ the remote ref is unpinned. This must be rejected with the *narrowed*
+        // E003 and an actionable remedy pointing at `spargen lock`.
+        let (report, _temp, _out) = run(None, None, false);
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        let diag = report
+            .diagnostics
+            .iter()
+            .find(|d| d.code == Code::AbsoluteRefUnsupported)
+            .expect("E003 fires");
+        let remedy = diag.remedy.as_deref().unwrap_or_default();
+        assert!(
+            remedy.contains("spargen lock"),
+            "actionable remedy: {remedy}"
+        );
+        assert!(!has_code(&report, Code::VendoredRefDrift), "{report:#?}");
+    }
+
+    #[test]
+    fn pinned_remote_ref_resolves_hermetically_to_typed_schema() {
+        // Lock pins the correct sha256 and the vendored bytes match ⇒ the remote ref resolves with
+        // no network and lowers to a typed struct (never `serde_json::Value`).
+        let (report, _temp, out) = run(Some(lock(GIZMO_SHA256)), Some(GIZMO_YAML), false);
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::AbsoluteRefUnsupported),
+            "{report:#?}"
+        );
+        assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+        let generated = std::fs::read_to_string(&out).expect("module written");
+        assert!(
+            generated.contains("id"),
+            "the vendored schema's field is emitted:\n{generated}"
+        );
+
+        // check/generate parity: `check` resolves the same remote ref, also without network.
+        let (checked, _temp2, _out2) = run(Some(lock(GIZMO_SHA256)), Some(GIZMO_YAML), true);
+        assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+        assert!(
+            !has_code(&checked, Code::AbsoluteRefUnsupported),
+            "{checked:#?}"
+        );
+    }
+
+    #[test]
+    fn drifted_vendored_content_is_e021() {
+        // The vendored bytes are fine, but the lock pins a different sha256 ⇒ the lock is the source
+        // of truth, so the drift is refused (E021) rather than silently used.
+        let wrong_sha = "0".repeat(64);
+        let (report, _temp, _out) = run(Some(lock(&wrong_sha)), Some(GIZMO_YAML), false);
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::VendoredRefDrift), "{report:#?}");
+    }
+
+    #[test]
+    fn missing_vendored_file_is_e021() {
+        // Lock pins the ref but the vendored copy is absent ⇒ drift (nothing to hash against).
+        let (report, _temp, _out) = run(Some(lock(GIZMO_SHA256)), None, false);
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::VendoredRefDrift), "{report:#?}");
+    }
+
+    /// Lay out `spec` + `lock` + arbitrary vendored files `(vendor-relative path, bytes)` in a
+    /// fresh tempdir, then run the pipeline (no network). Returns the report and generated module
+    /// path.
+    fn run_layout(
+        spec: &str,
+        lock: Option<&str>,
+        vendor: &[(&str, &str)],
+        check_only: bool,
+    ) -> (Report, tempfile::TempDir, camino::Utf8PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), spec).unwrap();
+        if let Some(lock) = lock {
+            std::fs::write(dir.join("spargen.lock"), lock).unwrap();
+        }
+        for (rel, content) in vendor {
+            let path = dir.join(".spargen/vendor").join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, content).unwrap();
+        }
+        let out = dir.join("client.rs");
+        let config = spargen::Config::new(
+            dir.join("openapi.yaml"),
+            spargen::OutputTarget::Module(out.clone()),
+        );
+        let report = if check_only {
+            spargen::check(&config)
+        } else {
+            spargen::generate(&config)
+        };
+        (report, temp, out)
+    }
+
+    fn responds_with(url: &str) -> String {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths:\n\
+             \x20 /it:\n\
+             \x20   get:\n\
+             \x20     operationId: getIt\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema:\n\
+             \x20               $ref: \"{url}\"\n"
+        )
+    }
+
+    #[test]
+    fn self_recursive_remote_schema_generates_boxed_not_stack_overflow() {
+        // A vendored remote schema that refers to ITSELF (a linked-list `next`) must terminate at
+        // lowering with a boxed back-edge — ordinary OpenAPI — instead of recursing forever.
+        const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
+        const NODE_YAML: &str = "type: object\nproperties:\n  id:\n    type: string\n  next:\n    $ref: \"https://api.example.com/schemas/node.yaml\"\n";
+        const NODE_SHA: &str = "926f0bc154b93b63208fb4895964ca3e7f67ae3bd7b5f6882156edcefb08fffb";
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \"api.example.com/schemas/node.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/node.yaml", NODE_YAML)];
+
+        let (report, _temp, out) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        let generated = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            generated.contains("Box"),
+            "recursion is closed with a boxed field:\n{generated}"
+        );
+
+        // check/generate parity: a regression that reintroduces the crash must fail here too, and
+        // both must return an outcome rather than aborting.
+        let (checked, _t2, _o2) = run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
+        assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    }
+
+    #[test]
+    fn mutually_recursive_remote_docs_generate_boxed() {
+        // a.yaml ↔ b.yaml reference each other across two vendored documents; the cross-doc cycle
+        // must terminate (boxed) rather than overflow.
+        const A_URL: &str = "https://api.example.com/schemas/a.yaml";
+        const A_YAML: &str = "type: object\nproperties:\n  b:\n    $ref: \"https://api.example.com/schemas/b.yaml\"\n";
+        const A_SHA: &str = "bb995ec038973f6ca10fd6674a76a516dc29962fcdf061e1ad49717b2f6e2544";
+        const B_URL: &str = "https://api.example.com/schemas/b.yaml";
+        const B_YAML: &str = "type: object\nproperties:\n  a:\n    $ref: \"https://api.example.com/schemas/a.yaml\"\n";
+        const B_SHA: &str = "62d1762eb79467f3a7204c626a7a268647910a218ac4b344a878a6421c300674";
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{A_URL}\"\nsha256 = \"{A_SHA}\"\npath = \"api.example.com/schemas/a.yaml\"\n\n[[remote]]\nurl = \"{B_URL}\"\nsha256 = \"{B_SHA}\"\npath = \"api.example.com/schemas/b.yaml\"\n"
+        );
+        let vendor = [
+            ("api.example.com/schemas/a.yaml", A_YAML),
+            ("api.example.com/schemas/b.yaml", B_YAML),
+        ];
+        let (report, _temp, out) = run_layout(&responds_with(A_URL), Some(&lock), &vendor, false);
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        let generated = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            generated.contains("Box"),
+            "cross-doc cycle is boxed:\n{generated}"
+        );
+    }
+
+    #[test]
+    fn traversal_vendor_path_in_lock_is_rejected_without_reading() {
+        // A hand-edited lock whose `path` escapes the vendor dir must be rejected at lock-parse
+        // time — before any file is opened — rather than reading an arbitrary file.
+        for bad_path in ["../../etc/passwd", "/etc/passwd"] {
+            let lock = format!(
+                "version = 1\n\n[[remote]]\nurl = \"{GIZMO_URL}\"\nsha256 = \"{GIZMO_SHA256}\"\npath = \"{bad_path}\"\n"
+            );
+            let (report, _temp, _out) = run(Some(lock), Some(GIZMO_YAML), false);
+            assert_eq!(report.outcome, Outcome::Rejected, "{bad_path}: {report:#?}");
+            assert!(
+                has_code(&report, Code::InvalidInput),
+                "{bad_path} rejected at parse: {report:#?}"
+            );
+            // It never reached resolution, so no drift/unpinned diagnostic fires.
+            assert!(!has_code(&report, Code::VendoredRefDrift), "{report:#?}");
+        }
+    }
+}
+
 #[test]
 fn e002_unsupported_dialect() {
     let report = generate(

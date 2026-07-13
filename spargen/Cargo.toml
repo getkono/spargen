@@ -16,11 +16,16 @@ default = ["cli", "uuid", "time"]
 # Gates the `spargen` binary and its CLI-only dependencies so `cargo install spargen` works
 # out of the box while library builds stay lean. The colored-output deps
 # (anstream/anstyle) are added with the diagnostic renderer implementation.
-cli = ["dep:clap"]
+cli = ["dep:clap", "remote-fetch"]
 # `format: uuid` / `date-time` / `date` type mappings in generated output. Default on;
 # disabling falls back to `String`. The teeth live in the emitted crate's own manifest.
 uuid = []
 time = []
+# Enables the reqwest-backed remote fetcher behind `spargen lock`. This is the ONLY place the
+# generator touches the network; `generate`/`check` never do. It is pulled in by `cli` so the
+# installed binary can vendor remote `$ref`s, and kept as a separate feature so a library-only
+# build (e.g. from `build.rs`) can opt in without the whole CLI.
+remote-fetch = ["dep:reqwest"]
 
 [dependencies]
 # diag
@@ -38,6 +43,12 @@ syn = { workspace = true }
 prettyplease = { workspace = true }
 # cli (feature-gated)
 clap = { workspace = true, optional = true }
+# Remote-fetch (feature-gated): the ONLY networked path, used by `spargen lock` to vendor
+# remote `$ref`s. Not in the runtime graph of generated output — this is the generator only.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "rustls-tls",
+], optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

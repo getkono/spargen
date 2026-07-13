@@ -7,7 +7,7 @@ the library API.
 | --- | --- | --- |
 | `E001` | Error | unsupported OpenAPI version |
 | `E002` | Error | unsupported JSON Schema dialect |
-| `E003` | Error | absolute `$ref` unsupported |
+| `E003` | Error | remote `$ref` not pinned |
 | `E004` | Error | unresolved `$ref` |
 | `E005` | Error | `patternProperties` not representable as a typed map |
 | `E006` | Error | dynamic reference unsupported |
@@ -20,6 +20,7 @@ the library API.
 | `E013` | Error | irreconcilable `allOf` composition |
 | `E019` | Error | invalid omit rule |
 | `E020` | Error | omit profile created an invalid document |
+| `E021` | Error | vendored remote `$ref` drifted from lock |
 | `W001` | Warning | validation-only keyword ignored |
 | `W002` | Warning | server-initiated flow ignored |
 | `W004` | Warning | checked-in output drifted |

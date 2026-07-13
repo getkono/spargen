@@ -40,6 +40,58 @@ pub fn run(cli: Cli) -> ExitCode {
             render_report(&report, args.format);
             status_for_report(&report).into()
         }
+        Command::Lock(args) => {
+            let config = Config::new(args.spec, OutputTarget::Module("__spargen_lock.rs".into()));
+            let outcome = crate::vendor(&config);
+            let has_errors = outcome
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == crate::Severity::Error);
+            match args.format {
+                Format::Human => {
+                    render_diagnostics_human(&outcome.diagnostics);
+                    if let Some(report) = &outcome.report {
+                        if report.refs.is_empty() {
+                            println!("no remote $refs found; wrote {}", report.lock_path);
+                        } else {
+                            println!(
+                                "vendored {} remote document(s) under {}:",
+                                report.refs.len(),
+                                report.vendor_dir
+                            );
+                            for vendored in &report.refs {
+                                println!("  {} -> {}", vendored.url, vendored.path);
+                            }
+                            println!("wrote {}", report.lock_path);
+                        }
+                    }
+                }
+                Format::Json => {
+                    println!(
+                        "{}",
+                        serde_json::json!({
+                            "lock": outcome.report.as_ref().map(|report| report.lock_path.to_string()),
+                            "vendor_dir": outcome.report.as_ref().map(|report| report.vendor_dir.to_string()),
+                            "vendored": outcome.report.as_ref().map(|report| {
+                                report.refs.iter().map(|vendored| {
+                                    serde_json::json!({
+                                        "url": vendored.url,
+                                        "path": vendored.path,
+                                        "sha256": vendored.sha256,
+                                    })
+                                }).collect::<Vec<_>>()
+                            }).unwrap_or_default(),
+                            "diagnostics": diagnostics_json(&outcome.diagnostics),
+                        })
+                    );
+                }
+            }
+            if outcome.report.is_none() || has_errors {
+                ExitStatus::Diagnostics.into()
+            } else {
+                ExitStatus::Ok.into()
+            }
+        }
         Command::Explain(args) => match explain(&args.code) {
             Some(text) => {
                 match args.format {
@@ -84,38 +136,48 @@ fn status_for_report(report: &crate::Report) -> ExitStatus {
 
 fn render_report(report: &crate::Report, format: Format) {
     match format {
-        Format::Human => {
-            for diagnostic in &report.diagnostics {
-                let severity = match diagnostic.severity {
-                    crate::Severity::Error => "error",
-                    crate::Severity::Warning => "warning",
-                };
-                eprintln!(
-                    "{severity}[{}]: {}\n  pointer: {}",
-                    diagnostic.code, diagnostic.message, diagnostic.pointer
-                );
-                if let Some(remedy) = &diagnostic.remedy {
-                    eprintln!("  help: {remedy}");
-                }
-            }
-        }
+        Format::Human => render_diagnostics_human(&report.diagnostics),
         Format::Json => {
             println!(
                 "{}",
                 serde_json::json!({
                     "outcome": format!("{:?}", report.outcome),
-                    "diagnostics": report.diagnostics.iter().map(|diagnostic| {
-                        serde_json::json!({
-                            "code": diagnostic.code.as_str(),
-                            "severity": diagnostic.severity,
-                            "pointer": diagnostic.pointer,
-                            "span": diagnostic.span,
-                            "message": diagnostic.message,
-                            "remedy": diagnostic.remedy,
-                        })
-                    }).collect::<Vec<_>>()
+                    "diagnostics": diagnostics_json(&report.diagnostics),
                 })
             );
         }
     }
+}
+
+/// Render diagnostics to stderr in the rustc-style human format (also used by `spargen lock`).
+fn render_diagnostics_human(diagnostics: &[crate::Diagnostic]) {
+    for diagnostic in diagnostics {
+        let severity = match diagnostic.severity {
+            crate::Severity::Error => "error",
+            crate::Severity::Warning => "warning",
+        };
+        eprintln!(
+            "{severity}[{}]: {}\n  pointer: {}",
+            diagnostic.code, diagnostic.message, diagnostic.pointer
+        );
+        if let Some(remedy) = &diagnostic.remedy {
+            eprintln!("  help: {remedy}");
+        }
+    }
+}
+
+fn diagnostics_json(diagnostics: &[crate::Diagnostic]) -> Vec<serde_json::Value> {
+    diagnostics
+        .iter()
+        .map(|diagnostic| {
+            serde_json::json!({
+                "code": diagnostic.code.as_str(),
+                "severity": diagnostic.severity,
+                "pointer": diagnostic.pointer,
+                "span": diagnostic.span,
+                "message": diagnostic.message,
+                "remedy": diagnostic.remedy,
+            })
+        })
+        .collect()
 }

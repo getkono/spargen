@@ -49,6 +49,8 @@ use camino::Utf8PathBuf;
 
 pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule};
 pub use diag::{Code, Diagnostic, JsonPointer, Severity, Span};
+#[cfg(feature = "remote-fetch")]
+pub use source::{VendorReport, VendoredRef};
 
 /// Feature toggles for the generated output (both default **on**). Disabling one falls
 /// back to `String` for the corresponding `format` mappings — a deliberate, documented loss of
@@ -168,6 +170,33 @@ pub fn check(config: &Config) -> Report {
 /// published errors index.
 pub fn explain(code: &str) -> Option<&'static str> {
     Code::from_str(code).ok().map(Code::explain)
+}
+
+/// The outcome of a [`vendor`] run: the report (present on success) and any diagnostics.
+#[cfg(feature = "remote-fetch")]
+#[derive(Debug, Clone)]
+pub struct VendorOutcome {
+    /// The vendored-refs report, or `None` if vendoring failed.
+    pub report: Option<VendorReport>,
+    /// Diagnostics emitted while vendoring (fetch failures, unfetchable schemes, …).
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Fetch, vendor, and hash-pin every remote (`http`/`https`) `$ref` reachable from `config.spec`,
+/// writing copies under `.spargen/vendor/` and (re)writing `spargen.lock` next to the spec.
+///
+/// This is the **only** spargen entry point that performs network I/O — `generate` and `check`
+/// resolve remote refs purely from the vendored, pinned copies this step produces, so builds stay
+/// hermetic. Backed by `reqwest` and gated behind the `remote-fetch` feature (implied by `cli`).
+#[cfg(feature = "remote-fetch")]
+pub fn vendor(config: &Config) -> VendorOutcome {
+    let mut diags = diag::Diagnostics::new(config.batch_cap);
+    let fetcher = source::ReqwestFetcher;
+    let report = source::vendor(&config.spec, &fetcher, &mut diags).ok();
+    VendorOutcome {
+        report,
+        diagnostics: diags.items().to_vec(),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

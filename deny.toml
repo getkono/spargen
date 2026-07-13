@@ -17,6 +17,10 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # Mozilla's bundled CA roots (`webpki-roots`), reached through the reqwest rustls-tls stack
+    # used by `spargen lock`. A permissive data license; the generated-output runtime graph is
+    # unaffected (it carries its own default-features-off reqwest).
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

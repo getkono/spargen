@@ -475,7 +475,7 @@ fn parse_schema_ref_or(
     }
 }
 
-fn parse_schema(
+pub(super) fn parse_schema(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,

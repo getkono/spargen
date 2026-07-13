@@ -87,6 +87,23 @@ impl SpannedValue {
         self.as_object()?.get(key)
     }
 
+    /// Navigate an RFC 6901 `pointer` (as in a `$ref` fragment), returning the addressed value.
+    pub(crate) fn pointer(&self, pointer: &JsonPointer) -> Option<&SpannedValue> {
+        if pointer.as_str().is_empty() {
+            return Some(self);
+        }
+        let mut current = self;
+        for token in pointer.as_str().strip_prefix('/')?.split('/') {
+            let token = unescape_pointer_token(token)?;
+            current = match &current.node {
+                Node::Object(object) => object.get(&token)?,
+                Node::Array(array) => array.get(token.parse::<usize>().ok()?)?,
+                _ => return None,
+            };
+        }
+        Some(current)
+    }
+
     /// Remove the value at `pointer`, returning it when it existed.
     pub(crate) fn remove_pointer(&mut self, pointer: &JsonPointer) -> Option<SpannedValue> {
         if pointer.as_str().is_empty() {
@@ -172,6 +189,11 @@ impl SpannedMap {
     /// Iterate members in source order.
     pub fn iter(&self) -> impl Iterator<Item = (&SpannedKey, &SpannedValue)> {
         self.entries.iter().map(|(k, v)| (k, v))
+    }
+
+    /// Mutably iterate member values in source order.
+    pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut SpannedValue> {
+        self.entries.iter_mut().map(|(_, v)| v)
     }
 }
 

@@ -17,10 +17,14 @@ pub enum Code {
     UnsupportedOpenApiVersion,
     /// `jsonSchemaDialect` is not the default OAS 3.1 dialect.
     UnsupportedDialect,
-    /// A `$ref` targets an absolute URL; only local relative-file refs are supported.
+    /// A remote (`http`/`https`) `$ref` is not pinned in `spargen.lock` (or is an unfetchable
+    /// absolute-URI scheme). Remote refs resolve only from vendored, hash-pinned copies.
     AbsoluteRefUnsupported,
     /// A `$ref` could not be resolved within the input bundle.
     UnresolvedRef,
+    /// A vendored remote `$ref` document drifted from its `spargen.lock` pin (sha256 mismatch, or
+    /// the vendored copy is missing) — the lock is the source of truth, so it is refused.
+    VendoredRefDrift,
     /// A validation-only keyword (`pattern`, `minimum`, …) was ignored (W-class).
     ValidationKeywordIgnored,
     /// `patternProperties` cannot be represented as a typed overflow map — heterogeneous value
@@ -75,6 +79,7 @@ impl Code {
             Code::UnsupportedDialect => "E002",
             Code::AbsoluteRefUnsupported => "E003",
             Code::UnresolvedRef => "E004",
+            Code::VendoredRefDrift => "E021",
             Code::ValidationKeywordIgnored => "W001",
             Code::PatternPropertiesRejected => "E005",
             Code::DynamicRefRejected => "E006",
@@ -109,8 +114,9 @@ impl Code {
         match self {
             Code::UnsupportedOpenApiVersion => "unsupported OpenAPI version",
             Code::UnsupportedDialect => "unsupported JSON Schema dialect",
-            Code::AbsoluteRefUnsupported => "absolute $ref unsupported",
+            Code::AbsoluteRefUnsupported => "remote $ref not pinned",
             Code::UnresolvedRef => "unresolved $ref",
+            Code::VendoredRefDrift => "vendored remote $ref drifted from lock",
             Code::ValidationKeywordIgnored => "validation-only keyword ignored",
             Code::PatternPropertiesRejected => "patternProperties not representable as a typed map",
             Code::DynamicRefRejected => "dynamic reference unsupported",
@@ -141,10 +147,13 @@ impl Code {
                 "`jsonSchemaDialect`, when present, must be the OAS 3.1 base dialect (`https://spec.openapis.org/oas/3.1/dialect/base`)."
             }
             Code::AbsoluteRefUnsupported => {
-                "Remote or absolute-URL `$ref` targets are not fetched. Vendor them locally and reference them by relative file path."
+                "Remote (`http`/`https`) `$ref` resolution is hermetic: `generate` and `check` never touch the network. A remote ref is resolved only from a locally vendored copy whose bytes are hash-pinned in `spargen.lock`. This error fires when a remote ref is not yet pinned there (or names an unfetchable absolute-URI scheme such as `urn:`). Run `spargen lock <spec>` to fetch, vendor under `.spargen/vendor/`, and pin it — then `generate`/`check` resolve it offline. Alternatively, vendor the document by hand and reference it with a relative file path."
             }
             Code::UnresolvedRef => {
                 "A `$ref` target could not be found in the loaded input bundle. Check the file path and JSON Pointer fragment."
+            }
+            Code::VendoredRefDrift => {
+                "A remote `$ref` is pinned in `spargen.lock`, but its vendored copy under `.spargen/vendor/` is missing or its bytes no longer match the pinned sha256. The lock is the source of truth, so the drifted content is refused rather than used silently. Re-run `spargen lock <spec>` to re-vendor and re-pin, or restore the vendored file to its pinned bytes."
             }
             Code::ValidationKeywordIgnored => {
                 "The keyword affects runtime validation but not the static Rust shape. Spargen records a warning and generates the shape."
@@ -217,6 +226,7 @@ impl Code {
             Code::UnsupportedDialect,
             Code::AbsoluteRefUnsupported,
             Code::UnresolvedRef,
+            Code::VendoredRefDrift,
             Code::PatternPropertiesRejected,
             Code::DynamicRefRejected,
             Code::NonDisjointUnion,
