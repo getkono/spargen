@@ -21,6 +21,7 @@ the library API.
 | `E019` | Error | invalid omit rule |
 | `E020` | Error | omit profile created an invalid document |
 | `E021` | Error | vendored remote `$ref` drifted from lock |
+| `E022` | Error | duplicate object key |
 | `W001` | Warning | validation-only keyword ignored |
 | `W002` | Warning | server-initiated flow ignored |
 | `W004` | Warning | checked-in output drifted |

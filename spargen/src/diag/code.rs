@@ -56,6 +56,9 @@ pub enum Code {
     OutputDrifted,
     /// The input could not be parsed or violates a required structural OpenAPI shape.
     InvalidInput,
+    /// An object declares the same key twice; the duplicate makes the member ambiguous, so it is
+    /// rejected rather than silently collapsed to one occurrence.
+    DuplicateObjectKey,
     /// A compatibility omit rule did not match a source construct or attempted an invalid removal.
     InvalidOmitRule,
     /// A compatibility omit profile removed a construct.
@@ -92,6 +95,7 @@ impl Code {
             Code::UnsupportedParameterStyle => "E010",
             Code::ServerInitiatedFlowIgnored => "W002",
             Code::InvalidInput => "E011",
+            Code::DuplicateObjectKey => "E022",
             Code::UnknownSecurityScheme => "E012",
             Code::AllOfIrreconcilable => "E013",
             Code::OutputDrifted => "W004",
@@ -130,6 +134,7 @@ impl Code {
             Code::UnsupportedParameterStyle => "unsupported parameter style",
             Code::ServerInitiatedFlowIgnored => "server-initiated flow ignored",
             Code::InvalidInput => "invalid input document",
+            Code::DuplicateObjectKey => "duplicate object key",
             Code::UnknownSecurityScheme => "unknown security scheme",
             Code::AllOfIrreconcilable => "irreconcilable allOf composition",
             Code::OutputDrifted => "checked-in output drifted",
@@ -187,6 +192,9 @@ impl Code {
             Code::InvalidInput => {
                 "The input is malformed JSON/YAML or is missing a required OpenAPI structure needed before feature auditing can continue."
             }
+            Code::DuplicateObjectKey => {
+                "An object (JSON or YAML mapping) declares the same key more than once. Duplicate keys make the member ambiguous — a reader cannot tell which value wins, and downstream a duplicated `properties` name or schema keyword would resolve inconsistently — so spargen rejects the document at parse time and points at the second occurrence rather than silently keeping one. Remove or rename the duplicate key."
+            }
             Code::UnknownSecurityScheme => {
                 "Every scheme named in a `security` requirement must be declared under `components.securitySchemes` as `http` bearer/basic, `apiKey`, `oauth2`, or `openIdConnect` so credentials can be attached at the right location."
             }
@@ -235,6 +243,7 @@ impl Code {
             Code::AbsoluteRefUnsupported,
             Code::UnresolvedRef,
             Code::VendoredRefDrift,
+            Code::DuplicateObjectKey,
             Code::PatternPropertiesRejected,
             Code::DynamicRefRejected,
             Code::NonDisjointUnion,

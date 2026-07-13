@@ -299,6 +299,50 @@ paths: {}
     );
     assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedDialect));
+    // The diagnostic must point at the offending value on line 4 (column 20, where the
+    // `jsonSchemaDialect` value begins), not at line 1 / the whole file. This pins the
+    // span-preserving parser: pre-fix, every node carried the root (whole-file) span.
+    let dialect = report
+        .diagnostics
+        .iter()
+        .find(|d| d.code == Code::UnsupportedDialect)
+        .expect("UnsupportedDialect diagnostic");
+    let span = dialect.span.expect("dialect diagnostic has a span");
+    assert_eq!(span.start.line, 4, "{dialect:#?}");
+    assert_eq!(span.start.col, 20, "{dialect:#?}");
+}
+
+#[test]
+fn e022_duplicate_object_key_is_rejected() {
+    // A mapping that declares the same key twice used to be silently collapsed (JSON: last-wins;
+    // YAML: `YamlLoader` errored) — now it is uniformly rejected with a stable code and a precise
+    // span at the second (duplicate) occurrence, so a duplicated `type`/`properties` name cannot
+    // silently reach lowering.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Foo:
+      type: object
+      type: string
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::DuplicateObjectKey), "{report:#?}");
+    // The diagnostic points at the duplicate `type` on line 9, not line 1.
+    let dup = report
+        .diagnostics
+        .iter()
+        .find(|d| d.code == Code::DuplicateObjectKey)
+        .expect("duplicate-key diagnostic");
+    assert_eq!(dup.span.expect("span").start.line, 9, "{dup:#?}");
+
+    // check/generate parity: parsing runs before lowering, so `check` rejects identically.
+    let checked = check(spec);
+    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::DuplicateObjectKey), "{checked:#?}");
 }
 
 #[test]
