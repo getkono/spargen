@@ -46,6 +46,10 @@ let report = spargen::generate(&spargen::Config::new(
 assert_eq!(report.outcome, spargen::Outcome::Generated);
 ```
 
+Generating a client from a spec that a Rust server framework emits (utoipa, aide, poem-openapi)?
+The [framework round-trip recipes](docs/recipes.md) cover how each exports its OpenAPI document,
+the version it emits, and the idioms spargen handles.
+
 ### Generated surface
 
 - `Client::new(base_url)` / `Client::with_client(reqwest::Client, base_url)` — the injected
