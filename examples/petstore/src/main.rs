@@ -1,10 +1,15 @@
 //! Drives the generated petstore client end to end against a local mock server: typed models,
 //! query/header/path parameters, JSON bodies, bearer auth, typed API errors, undocumented-status
-//! handling, and the transient-failure classifier. Everything runs on 127.0.0.1 — no external
-//! API, no real credentials.
+//! handling, the transient-failure classifier, and the bring-your-own-policy retry adapter.
+//! Everything runs on 127.0.0.1 — no external API, no real credentials.
 
+use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use secrecy::SecretString;
 
@@ -14,9 +19,39 @@ mod petstore {
     include!(concat!(env!("OUT_DIR"), "/petstore.rs"));
 }
 
-use petstore::{types, Client, Credential, Error};
+use petstore::{
+    exponential_backoff, types, Client, Credential, Error, HttpBackend, ReqwestBackend,
+    RetryBackend, RetryOutcome, RetryPolicy,
+};
 
 const TOKEN: &str = "let-me-in";
+
+/// How many times the flaky route has been hit; it fails transiently (503) on the first attempt,
+/// then serves 200 — so a retrying client succeeds where a plain one would surface the 503.
+static FLAKY_HITS: AtomicU32 = AtomicU32::new(0);
+
+/// A bring-your-own retry policy: retry transient outcomes with exponential backoff, up to a cap.
+/// The wait is built from the caller's own async timer (`tokio::time::sleep`) — the spargen runtime
+/// ships no timer and never depends on tokio; timing is supplied here.
+struct ExponentialBackoff {
+    max_retries: u32,
+}
+
+impl RetryPolicy for ExponentialBackoff {
+    fn retry<'a>(
+        &'a self,
+        attempt: u32,
+        outcome: &RetryOutcome<'_>,
+    ) -> Option<Pin<Box<dyn Future<Output = ()> + Send + 'a>>> {
+        if attempt < self.max_retries && outcome.is_transient() {
+            let wait =
+                exponential_backoff(attempt, Duration::from_millis(10), Duration::from_millis(200));
+            Some(Box::pin(tokio::time::sleep(wait)))
+        } else {
+            None
+        }
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -95,6 +130,30 @@ async fn main() {
         other => panic!("expected an unexpected-status error, got {other:?}"),
     }
 
+    // Bring-your-own-policy retry: wrap the default transport in a `RetryBackend` and install it via
+    // `Client::with_backend`. The flaky route returns 503 once (a transient outcome) then 200; the
+    // policy retries with a tokio-timed exponential backoff, so the call ultimately succeeds. The
+    // client itself is unchanged — retry is a transport-seam wrapper, not a code path in `Client`.
+    let retry_backend: Arc<dyn HttpBackend> = Arc::new(RetryBackend::new(
+        Arc::new(ReqwestBackend::new(reqwest::Client::new())),
+        Arc::new(ExponentialBackoff { max_retries: 5 }),
+    ));
+    let retrying = Client::with_backend(retry_backend, &base_url)
+        .unwrap()
+        .with_credential("bearerAuth", Credential::Bearer(SecretString::from(TOKEN)));
+    let recovered = retrying
+        .get_pet("flaky".to_owned())
+        .await
+        .expect("retry recovers from the transient 503");
+    assert_eq!(recovered.status(), 200);
+    assert_eq!(recovered.into_inner().name, "Comet");
+    // The route was hit more than once, proving the retry actually replayed the request.
+    assert!(FLAKY_HITS.load(Ordering::SeqCst) >= 2);
+    println!(
+        "retry recovered a flaky route after {} attempt(s)",
+        FLAKY_HITS.load(Ordering::SeqCst)
+    );
+
     println!("petstore example: all checks passed");
 }
 
@@ -164,6 +223,21 @@ fn handle(mut stream: TcpStream) {
                 "200 OK",
                 r#"{"id":"1","name":"Rex","status":"available"}"#.to_owned(),
             ),
+            // A transiently-failing route: 503 on the first hit, 200 afterward. Exercises the
+            // retry adapter — a plain client sees the 503, a retrying one recovers.
+            ("GET", "/pets/flaky") => {
+                if FLAKY_HITS.fetch_add(1, Ordering::SeqCst) == 0 {
+                    (
+                        "503 Service Unavailable",
+                        r#"{"message":"try again"}"#.to_owned(),
+                    )
+                } else {
+                    (
+                        "200 OK",
+                        r#"{"id":"flaky","name":"Comet","status":"available"}"#.to_owned(),
+                    )
+                }
+            }
             ("GET", _) => ("404 Not Found", r#"{"message":"no such pet"}"#.to_owned()),
             ("DELETE", "/pets/1") => ("204 No Content", String::new()),
             _ => (

@@ -958,6 +958,7 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;
+            pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy};
             pub use stream::{EventStream, Framing};
             pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
             #xml_reexport

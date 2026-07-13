@@ -370,6 +370,54 @@ fn custom_http_backend_plugs_into_non_generic_client() {
     let _reqwest_backend: std::sync::Arc<dyn basic_client::HttpBackend> =
         std::sync::Arc::new(basic_client::ReqwestBackend::new(reqwest::Client::new()));
 }
+
+#[test]
+fn retry_backend_wraps_an_inner_backend() {
+    // Issue #17: the retry adapter is re-exported at the crate root (`basic_client::RetryBackend`
+    // / `RetryPolicy` / `RetryOutcome` / `exponential_backoff`). A consumer implements a policy
+    // that decides retry AND supplies the wait (bring-your-own timing — no tokio in the runtime),
+    // wraps their backend in a `RetryBackend`, and installs it via `Client::with_backend`, all
+    // without `Client` becoming generic. This construction test compiles under clippy -D warnings;
+    // the runtime crate's own tests prove the retry loop actually retries.
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::time::Duration;
+
+    #[derive(Debug)]
+    struct TrivialBackend;
+    impl basic_client::HttpBackend for TrivialBackend {
+        fn execute(&self, _request: reqwest::Request) -> basic_client::ExecuteFuture<'_> {
+            Box::pin(async { unreachable!("transport is never exercised in this construction test") })
+        }
+    }
+
+    struct BackoffPolicy;
+    impl basic_client::RetryPolicy for BackoffPolicy {
+        fn retry<'a>(
+            &'a self,
+            attempt: u32,
+            outcome: &basic_client::RetryOutcome<'_>,
+        ) -> Option<Pin<Box<dyn Future<Output = ()> + Send + 'a>>> {
+            if attempt < 3 && outcome.is_transient() {
+                // A real policy would await the caller's timer here (e.g. tokio::time::sleep); a
+                // ready future keeps this construction test runtime-free.
+                let _wait = basic_client::exponential_backoff(
+                    attempt,
+                    Duration::from_millis(50),
+                    Duration::from_secs(2),
+                );
+                Some(Box::pin(std::future::ready(())))
+            } else {
+                None
+            }
+        }
+    }
+
+    let inner: std::sync::Arc<dyn basic_client::HttpBackend> = std::sync::Arc::new(TrivialBackend);
+    let retry = basic_client::RetryBackend::new(inner, std::sync::Arc::new(BackoffPolicy));
+    let backend: std::sync::Arc<dyn basic_client::HttpBackend> = std::sync::Arc::new(retry);
+    let _client = basic_client::Client::with_backend(backend, "https://api.example.com").unwrap();
+}
 "##,
     )
     .unwrap();
