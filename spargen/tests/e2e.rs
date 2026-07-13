@@ -250,6 +250,44 @@ fn streaming_op_item_type_is_typed_not_json_value() {
         serde_json::from_str(r#"{"delta": "hi"}"#).unwrap();
     assert_eq!(chunk.delta, "hi");
 }
+
+#[test]
+fn xml_body_types_carry_attribute_and_rename() {
+    // Issue #13: the XML request/response bodies lowered to typed structs whose serde wire names
+    // honor the `xml` hints — `XmlOrder.id` is an attribute (`xml.attribute` → serde `@id`), `sku` a
+    // child element, and `XmlReceipt.code` is renamed via `xml.name` to `ReceiptCode`. The generated
+    // crate depends on quick-xml (proving the conditional `xml` feature was enabled in its
+    // Cargo.toml), so this exercises the same codec the `submit_order` method's `to_xml`/decode use.
+    let order = basic_client::types::XmlOrder {
+        id: 42,
+        sku: "ABC".to_owned(),
+    };
+    let xml = quick_xml::se::to_string(&order).unwrap();
+    assert!(xml.contains("id=\"42\""), "{xml}");
+    assert!(xml.contains("<sku>ABC</sku>"), "{xml}");
+
+    let receipt: basic_client::types::XmlReceipt =
+        quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
+    assert_eq!(receipt.code, "OK");
+    assert_eq!(receipt.note, None);
+}
+
+#[test]
+fn json_only_schema_with_xml_metadata_keeps_original_json_names() {
+    // Issue #13 regression guard: `JsonMeta` carries `xml.attribute`/`xml.name` hints but is used
+    // only by a JSON operation, so the format-agnostic serde rename is SUPPRESSED. JSON must use the
+    // original `id`/`sku` names — deserializing a normal server payload succeeds and re-serializing
+    // produces the same names (never `@id`/`ProductSku`), proving JSON is uncorrupted.
+    let parsed: basic_client::types::JsonMeta =
+        serde_json::from_str(r#"{"id": 5, "sku": "Z9"}"#).unwrap();
+    assert_eq!(parsed.id, 5);
+    assert_eq!(parsed.sku, "Z9");
+    let back = serde_json::to_string(&parsed).unwrap();
+    assert!(back.contains(r#""id":5"#), "{back}");
+    assert!(back.contains(r#""sku":"Z9""#), "{back}");
+    assert!(!back.contains("@id"), "{back}");
+    assert!(!back.contains("ProductSku"), "{back}");
+}
 "##,
     )
     .unwrap();
@@ -450,6 +488,47 @@ paths:
       responses:
         "204":
           description: No Content
+  # XML request + response bodies (Issue #13): both lower to typed structs and are
+  # serialized/decoded through the embedded quick-xml codec — compile-verifies that the synthesized
+  # Cargo.toml enabled quick-xml (the `xml` feature) and that the embedded `support::xml` helpers
+  # (`to_xml`, `decode_success_xml`) compile. `id` carries `xml.attribute` (serde `@id`) and `code`
+  # an `xml.name` rename; both are honored, an unsupported `xml.namespace` on `note` warns (W006).
+  /xml/order:
+    post:
+      operationId: submitOrder
+      requestBody:
+        required: true
+        content:
+          application/xml:
+            schema:
+              $ref: "#/components/schemas/XmlOrder"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/xml:
+              schema:
+                $ref: "#/components/schemas/XmlReceipt"
+  # JSON body carrying `xml` metadata (Issue #13 regression guard): the schema has `xml.attribute`
+  # and `xml.name` hints but is used only by a JSON operation. The format-agnostic serde rename must
+  # NOT be applied (it would corrupt JSON), so `JsonMeta` keeps its `id`/`sku` wire names — the
+  # suppression is acknowledged as W006. Round-trip is compile+run verified below.
+  /json/meta:
+    post:
+      operationId: postJsonMeta
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/JsonMeta"
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JsonMeta"
   # Streaming response (Issue #14): a `text/event-stream` success response lowers to a streaming
   # operation whose method returns `support::EventStream<ChatChunk>` instead of `ResponseValue<T>`.
   # Compile-verifies both the streaming method signature and the embedded runtime `EventStream`
@@ -714,6 +793,41 @@ components:
       properties:
         delta:
           type: string
+    # XML request body (Issue #13): `id` is an XML attribute (serde `@id`), `sku` a plain element.
+    XmlOrder:
+      type: object
+      required: [id, sku]
+      properties:
+        id:
+          type: integer
+          xml: { attribute: true }
+        sku:
+          type: string
+    # XML response body (Issue #13): `code` renamed via `xml.name`; `note` carries an unsupported
+    # `xml.namespace` hint (→ W006, still generates).
+    XmlReceipt:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          xml: { name: "ReceiptCode" }
+        note:
+          type: string
+          xml: { namespace: "urn:example:receipt" }
+    # JSON-only schema carrying `xml` metadata (Issue #13 regression guard): the same hint shapes as
+    # `XmlOrder`, but reachable only from a JSON body — the rename must be suppressed so JSON is
+    # correct.
+    JsonMeta:
+      type: object
+      required: [id, sku]
+      properties:
+        id:
+          type: integer
+          xml: { attribute: true }
+        sku:
+          type: string
+          xml: { name: "ProductSku" }
 "##;
 
 const SPEC_WITH_UNSUPPORTED_OPERATION: &str = r#"

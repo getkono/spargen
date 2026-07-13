@@ -24,4 +24,5 @@ the library API.
 | `W002` | Warning | server-initiated flow ignored |
 | `W004` | Warning | checked-in output drifted |
 | `W005` | Warning | schema default not applied |
+| `W006` | Warning | unsupported XML hint ignored |
 | `W009` | Warning | construct omitted |

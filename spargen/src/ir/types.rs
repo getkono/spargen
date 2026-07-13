@@ -60,6 +60,12 @@ impl TypeGraph {
         self.defs.get(&id)
     }
 
+    /// A mutable borrow of the definition for `id`, for in-place post-lowering adjustments that do
+    /// not change ids or insertion order (e.g. suppressing an XML field rename on a shared type).
+    pub fn get_mut(&mut self, id: TypeId) -> Option<&mut TypeDef> {
+        self.defs.get_mut(&id)
+    }
+
     /// Iterate `(id, def)` pairs in insertion order.
     pub fn iter(&self) -> impl Iterator<Item = (TypeId, &TypeDef)> {
         self.defs.iter().map(|(id, def)| (*id, def))
@@ -237,6 +243,40 @@ pub struct Field {
     /// The JSON Schema `default` disposition, if the field declared one. `None` when the field has
     /// no `default`.
     pub default: Option<FieldDefault>,
+    /// XML representation hints (`xml.name` / `xml.attribute`) applied when the field's owning type
+    /// is serialized as XML. Default (no hint) leaves the field's normal wire name and element form.
+    pub xml: XmlField,
+}
+
+/// The supported XML representation hints for a struct field, lowered from the OpenAPI `xml` object.
+/// Only `name` (element/attribute rename) and `attribute` (serialize as an XML attribute) are
+/// honored; unsupported hints (namespace/prefix/wrapped arrays) are reported as `W006` during
+/// lowering and otherwise ignored. Applied via serde `rename` at emit time — attributes use
+/// quick-xml's `@name` convention.
+#[derive(Debug, Clone, Default)]
+pub struct XmlField {
+    /// `xml.name`: the wire element (or attribute) name, overriding the property name.
+    pub name: Option<String>,
+    /// `xml.attribute: true`: serialize this field as an XML attribute (`@name`) rather than a child
+    /// element.
+    pub attribute: bool,
+}
+
+impl XmlField {
+    /// The effective serde wire name for this field under XML: the `xml.name` override (or the given
+    /// property wire name), prefixed with `@` when the field is an attribute. Returns `None` when no
+    /// XML hint applies, so codegen keeps the plain property wire name.
+    pub fn wire_override(&self, property_wire: &str) -> Option<String> {
+        if self.name.is_none() && !self.attribute {
+            return None;
+        }
+        let base = self.name.as_deref().unwrap_or(property_wire);
+        Some(if self.attribute {
+            format!("@{base}")
+        } else {
+            base.to_owned()
+        })
+    }
 }
 
 /// A field's JSON Schema `default` disposition. Every `default` is given exactly one of three

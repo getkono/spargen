@@ -70,7 +70,7 @@ pub fn generate(
     // Codegen emits no diagnostics of its own: multi-status responses are now lowered to typed
     // per-operation response enums rather than degraded (the retired W003).
     let _ = diags;
-    let support = emit::emit_support();
+    let support = emit::emit_support(api.uses_xml());
     let models = emit::emit_models(api, names, options);
     let client = emit::emit_client(api, names, options);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the

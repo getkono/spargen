@@ -265,6 +265,9 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
                     Some(ir::TypeKind::Bytes)
                 )))
             }),
+            // Pull in quick-xml exactly when the API uses an XML body (same predicate that gates the
+            // embedded `support::xml` module), so the manifest and embedded code stay in lockstep.
+            xml: api.uses_xml(),
         },
         spec: emit::SpecMeta {
             source: if config.omit.is_empty() {

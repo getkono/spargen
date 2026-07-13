@@ -52,3 +52,14 @@ pub fn runtime_files() -> &'static [SupportFile] {
     ];
     FILES
 }
+
+/// The XML codec runtime source, embedded only when an output uses an `application/xml` / `text/xml`
+/// body (see [`crate::ir::Api::uses_xml`]). Kept out of [`runtime_files`] so a non-XML output never
+/// carries the `quick-xml`-dependent module; its bytes still ship inside the published crate through
+/// the `runtime/xml.rs` symlink so any XML-using consumer gets self-contained output.
+pub fn xml_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "xml.rs",
+        contents: include_str!("runtime/xml.rs"),
+    }
+}

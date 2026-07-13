@@ -27,6 +27,11 @@ mod dispatch;
 mod error;
 mod response;
 mod stream;
+// The XML codec pulls in the optional `quick-xml` dependency, so it is compiled only under the
+// `xml` feature; the default runtime dependency set (reqwest/serde/serde_json/bytes/secrecy) stays
+// unchanged. A generated client embeds this module only when its spec uses an XML body.
+#[cfg(feature = "xml")]
+mod xml;
 
 pub use auth::{
     AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture,
@@ -40,3 +45,5 @@ pub use dispatch::{
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
 pub use response::ResponseValue;
 pub use stream::{EventStream, Framing};
+#[cfg(feature = "xml")]
+pub use xml::{classify_error_xml, decode_success_xml, to_xml};

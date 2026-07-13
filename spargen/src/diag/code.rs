@@ -62,6 +62,9 @@ pub enum Code {
     /// scalar matching the field's type); it is documented in rustdoc but not wired (matrix: Schema
     /// shape → W).
     SchemaDefaultNotApplied,
+    /// An unsupported XML representation hint (`xml.namespace`, `xml.prefix`, or `xml.wrapped`) was
+    /// ignored; only `xml.name`/`xml.attribute` are honored (matrix: Media → W).
+    XmlHintIgnored,
 }
 
 impl Code {
@@ -88,6 +91,7 @@ impl Code {
             Code::InvalidOmitRule => "E019",
             Code::OmitCreatedInvalidDocument => "E020",
             Code::SchemaDefaultNotApplied => "W005",
+            Code::XmlHintIgnored => "W006",
         }
     }
 
@@ -123,6 +127,7 @@ impl Code {
             Code::OmittedConstruct => "construct omitted",
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
             Code::SchemaDefaultNotApplied => "schema default not applied",
+            Code::XmlHintIgnored => "unsupported XML hint ignored",
         }
     }
 
@@ -157,7 +162,7 @@ impl Code {
                 "Enums and const values must be homogeneous scalar sets. A `null` member (or `\"null\"` in the schema's type array) is allowed: it is stripped and makes the generated type nullable (`Option<Enum>`), and a value set of only `null` lowers to a nullable untyped value. Sets that mix distinct scalar kinds (e.g. a string with an integer) or that contain object/array members are rejected."
             }
             Code::UnsupportedMediaType => {
-                "Only application/json, application/x-www-form-urlencoded, application/octet-stream, text/plain, and multipart/form-data (request bodies) are currently generated; a streaming response media (text/event-stream or application/x-ndjson) generates a typed async EventStream<T>. A multipart/form-data body must be an object schema — its properties become the form parts (a binary/bytes property is a file part, a scalar or composite becomes a text part) — so a non-object multipart body is rejected here. text/event-stream and application/x-ndjson are supported only for response bodies, so a streaming request body is rejected."
+                "Only application/json, application/xml (and text/xml), application/x-www-form-urlencoded, application/octet-stream, text/plain, and multipart/form-data (request bodies) are currently generated; a streaming response media (text/event-stream or application/x-ndjson) generates a typed async EventStream<T>. An application/xml or text/xml body lowers to the same typed struct as JSON and is serialized/decoded through the runtime's feature-gated quick-xml codec (JSON still wins when both are offered); it is supported only as an operation's single success or single error body, so an XML body in a multi-status response enum is rejected. A multipart/form-data body must be an object schema — its properties become the form parts (a binary/bytes property is a file part, a scalar or composite becomes a text part) — so a non-object multipart body is rejected here. text/event-stream and application/x-ndjson are supported only for response bodies, so a streaming request body is rejected."
             }
             Code::UnsupportedParameterStyle => {
                 "Only simple/form styles and JSON content-typed parameters are generated. Deep object, pipe-delimited, and space-delimited styles are rejected."
@@ -188,6 +193,9 @@ impl Code {
             }
             Code::SchemaDefaultNotApplied => {
                 "A `default` is applied as a serde deserialization default only when it is a single scalar (bool/integer/number/string) that matches the field's own scalar type or one of its enum variants. Object, array, null, heterogeneous, or type-mismatched defaults cannot be lowered to a Rust literal, so the value is recorded in the field's rustdoc but not wired — deserialization of an absent field yields `None` rather than the default."
+            }
+            Code::XmlHintIgnored => {
+                "XML request/response bodies honor the `xml.name` (element/attribute rename) and `xml.attribute` (serialize as an XML attribute via quick-xml's `@name` convention) hints on a field, but only for a schema used *exclusively* as an XML body. A serde `rename` is format-agnostic — it would also rewrite the JSON wire names — so `xml.name`/`xml.attribute` are NOT applied to a schema that is also reachable from a JSON/form/multipart/text body, a response, or a parameter (or that is not used as an XML body at all); the field keeps its normal wire name and this warning fires, so JSON is never corrupted. The `xml.namespace`, `xml.prefix`, and `xml.wrapped` (wrapped arrays) hints are never represented — quick-xml serde has no faithful mapping for them — so they are always ignored with this warning rather than silently honored or rejected."
             }
         }
     }
@@ -225,6 +233,7 @@ impl Code {
             Code::OutputDrifted,
             Code::OmittedConstruct,
             Code::SchemaDefaultNotApplied,
+            Code::XmlHintIgnored,
         ];
         ALL
     }

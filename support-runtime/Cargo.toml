@@ -14,12 +14,19 @@ publish = false
 # spargen crate, and nothing project-specific. The emitted crate additionally carries the
 # feature-gated `uuid`/`time` mappings; those live in the synthesized crate manifest (emit),
 # not here, since this crate holds only the runtime, not the generated models.
+# The `xml` feature adds an XML request/response body codec backed by `quick-xml`. It is OFF by
+# default, so the default dependency set stays exactly reqwest/serde/serde_json/bytes/secrecy; a
+# generated client turns it on only when its spec uses an `application/xml` / `text/xml` body.
+[features]
+xml = ["dep:quick-xml"]
+
 [dependencies]
 reqwest = { version = "0.12", default-features = false }
 serde = "1.0"
 serde_json = "1.0"
 bytes = "1"
 secrecy = "0.10"
+quick-xml = { version = "0.37", features = ["serialize"], optional = true }
 
 # Test-only: synthesize in-memory `reqwest::Response`s (via `http::Response`) to exercise the body
 # readers with a poll-once noop waker — no async runtime, and never embedded (the test module is

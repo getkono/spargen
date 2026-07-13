@@ -8,7 +8,7 @@ use super::{
     Components, Discriminator, Document, Info, JsonType, MediaTypeObject, OperationObject,
     ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject, ResponseObject,
     ResponsesObject, Schema, SchemaOr, SecurityRequirement, SecuritySchemeObject, Server, TypeSet,
-    ValidationKeywords,
+    ValidationKeywords, XmlHints,
 };
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
@@ -586,6 +586,7 @@ fn parse_schema_or(
             .get("contentEncoding")
             .and_then(string)
             .map(str::to_owned),
+        xml: map.get("xml").and_then(parse_xml),
         validation: parse_validation(map),
         deprecated: map
             .get("deprecated")
@@ -643,6 +644,26 @@ fn parse_discriminator(
                     .collect()
             })
             .unwrap_or_default(),
+    })
+}
+
+/// Parse the OpenAPI `xml` object. Malformed shapes (a non-object `xml`) yield `None`; individual
+/// missing keys default. Lowering later warns (`W006`) on the unsupported namespace/prefix/wrapped
+/// hints, so they are captured here rather than dropped at parse time.
+fn parse_xml(value: &SpannedValue) -> Option<XmlHints> {
+    let _ = value.as_object()?;
+    Some(XmlHints {
+        name: value.get("name").and_then(string).map(str::to_owned),
+        attribute: value
+            .get("attribute")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
+        namespace: value.get("namespace").and_then(string).map(str::to_owned),
+        prefix: value.get("prefix").and_then(string).map(str::to_owned),
+        wrapped: value
+            .get("wrapped")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
     })
 }
 

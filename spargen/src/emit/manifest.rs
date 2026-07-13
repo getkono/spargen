@@ -26,6 +26,13 @@ pub fn synth_cargo_toml(package: &PackageMeta, features: &FeatureSet) -> String 
     } else {
         r#""json""#
     };
+    // `quick-xml` is pulled in only when an XML body is emitted — the embedded `support::xml` module
+    // (serialize/decode) is conditional on the same flag, so a non-XML client carries no quick-xml.
+    let xml_dep = if features.xml {
+        "\nquick-xml = { version = \"0.37\", features = [\"serialize\"] }"
+    } else {
+        ""
+    };
     format!(
         r#"[package]
 name = "{name}"
@@ -43,7 +50,7 @@ time = ["dep:time"]
 reqwest = {{ version = "0.12", default-features = false, features = [{reqwest_features}] }}
 secrecy = "0.10"
 serde = {{ version = "1", features = ["derive"] }}
-serde_json = "1"
+serde_json = "1"{xml_dep}
 uuid = {{ version = "1", features = ["serde"], optional = true }}
 time = {{ version = "0.3", features = ["serde", "formatting", "parsing"], optional = true }}
 "#,

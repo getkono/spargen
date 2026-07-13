@@ -8,7 +8,7 @@ use crate::ir::{
     HttpScheme, Info, JsonCategory, MediaType, Operation, OperationId, ParamLoc, ParamStyle,
     Parameter, PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response, Responses,
     ScalarEnum, ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty,
-    TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionStrategy, UnionVariant,
+    TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionStrategy, UnionVariant, XmlField,
 };
 use crate::name::synth_operation_id;
 use crate::source::{Node, Number, SpannedValue};
@@ -65,6 +65,23 @@ pub fn lower(
                 .and_then(|body| ctx.lower_request_body(&body));
 
             let responses = ctx.lower_responses(&operation.responses);
+            // XML decode is scoped to the single-body success/error paths. An XML body that would
+            // land in a multi-status response enum is rejected cleanly (narrowed `E009`) rather than
+            // silently decoded as JSON.
+            if responses.xml_in_multi_status() {
+                Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
+                    .message(
+                        "an application/xml (or text/xml) response body is only supported as an \
+                         operation's single success or single error body; it cannot participate in \
+                         a multi-status response enum",
+                    )
+                    .remedy(
+                        "give the operation a single XML-bodied success/error response, use JSON \
+                         for the multi-status responses, or omit this API segment with \
+                         spargen::omit!",
+                    )
+                    .emit(ctx.diags);
+            }
 
             let security: Vec<crate::ir::SecurityRequirement> = operation
                 .security
@@ -116,6 +133,11 @@ pub fn lower(
             });
         }
     }
+
+    // `xml.name`/`xml.attribute` become a format-agnostic serde `rename`, so they may only be applied
+    // to a schema used *exclusively* as an XML body — otherwise the rename would corrupt the JSON
+    // wire format. Suppress (and warn `W006` on) the rename for any shared/non-XML-reachable type.
+    gate_xml_field_renames(&mut ctx.graph, &operations, ctx.diags);
 
     let api = Api {
         info: Info {
@@ -648,6 +670,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let ty = self.lower_schema_or(child, &format!("{hint}{name}"))?;
             let is_required = required.contains(name);
             let default = self.field_default(child, ty, is_required);
+            let xml = self.field_xml(child);
             fields.push(Field {
                 name: PropertyName { wire: name.clone() },
                 ty,
@@ -656,6 +679,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 read_only: schema.read_only,
                 write_only: schema.write_only,
                 default,
+                xml,
             });
         }
         let additional = if schema.pattern_properties.is_empty() {
@@ -678,6 +702,46 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.lower_pattern_additional(schema, hint)?
         };
         Some((fields, additional))
+    }
+
+    /// Lower a property's OpenAPI `xml` hints into the field's [`XmlField`]. Only `xml.name` and
+    /// `xml.attribute` are represented (applied as a serde rename at emit time); the unsupported
+    /// `xml.namespace`/`xml.prefix`/`xml.wrapped` hints are warned once as `W006` and otherwise
+    /// ignored — never silently honored. A `$ref` property carries no inline `xml` object here.
+    fn field_xml(&mut self, child: &SchemaOr) -> XmlField {
+        let SchemaOr::Schema(schema) = child else {
+            return XmlField::default();
+        };
+        let Some(hints) = &schema.xml else {
+            return XmlField::default();
+        };
+        let mut unsupported: Vec<&str> = Vec::new();
+        if hints.namespace.is_some() {
+            unsupported.push("namespace");
+        }
+        if hints.prefix.is_some() {
+            unsupported.push("prefix");
+        }
+        if hints.wrapped {
+            unsupported.push("wrapped");
+        }
+        if !unsupported.is_empty() {
+            Diagnostic::warning(Code::XmlHintIgnored, schema.provenance.clone())
+                .message(format!(
+                    "unsupported XML hint(s) `{}` ignored; only `xml.name` and `xml.attribute` are \
+                     honored",
+                    unsupported.join("`, `")
+                ))
+                .remedy(
+                    "remove the unsupported xml hint, or accept that the field serializes by its \
+                     local name without a namespace/prefix/array wrapper",
+                )
+                .emit(self.diags);
+        }
+        XmlField {
+            name: hints.name.clone(),
+            attribute: hints.attribute,
+        }
     }
 
     /// Merge an `allOf` composition (plus the enclosing schema's own sibling
@@ -1469,6 +1533,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // (see `Responses::stream_success`).
         let stream = body.and_then(|(media, _)| media.stream_framing());
         Some(Response {
+            media: body.map(|(media, _)| media),
             body: body.and_then(|(_, ty)| ty),
             stream,
         })
@@ -1617,6 +1682,136 @@ fn lower_security_schemes(document: &Document) -> IndexMap<SchemeId, SecuritySch
     schemes
 }
 
+/// Suppress `xml.name`/`xml.attribute` renames on any type that is not XML-dedicated, warning `W006`.
+///
+/// A serde `rename` applies to every serde format, so honoring an `xml.name`/`xml.attribute` hint on
+/// a struct field also rewrites that field's JSON wire name. That is only safe when the owning type
+/// is used *exclusively* as an XML body. This walks the type graph from each operation's bodies and
+/// parameters, partitions types into XML-reachable and non-XML-reachable, and for any struct that
+/// carries an appliable XML hint but is *not* (XML-reachable AND NOT non-XML-reachable), clears the
+/// hint (restoring the property's normal wire name so JSON stays correct) and emits one `W006` — so
+/// the ignored hint is never silent. XML-dedicated types keep their hints.
+fn gate_xml_field_renames(
+    graph: &mut TypeGraph,
+    operations: &[Operation],
+    diags: &mut Diagnostics,
+) {
+    // Cheap guard: nothing to gate (and nothing to warn) unless some field carries an XML hint.
+    let any_hint = graph.iter().any(|(_, def)| {
+        matches!(&def.kind, TypeKind::Struct(object)
+            if object.fields.iter().any(|field| field.xml.name.is_some() || field.xml.attribute))
+    });
+    if !any_hint {
+        return;
+    }
+
+    let mut xml_roots: Vec<TypeId> = Vec::new();
+    let mut non_xml_roots: Vec<TypeId> = Vec::new();
+    for operation in operations {
+        if let Some(body) = &operation.request_body {
+            if let Some(ty) = body.ty {
+                if body.media == MediaType::Xml {
+                    xml_roots.push(ty.id);
+                } else {
+                    non_xml_roots.push(ty.id);
+                }
+            }
+        }
+        let responses = operation
+            .responses
+            .by_status
+            .iter()
+            .map(|(_, response)| response)
+            .chain(operation.responses.default.as_ref());
+        for response in responses {
+            if let Some(ty) = response.body {
+                if response.media == Some(MediaType::Xml) {
+                    xml_roots.push(ty.id);
+                } else {
+                    non_xml_roots.push(ty.id);
+                }
+            }
+        }
+        for param in &operation.params {
+            non_xml_roots.push(param.ty.id);
+        }
+    }
+
+    let xml_reachable = reachable_types(graph, &xml_roots);
+    let non_xml_reachable = reachable_types(graph, &non_xml_roots);
+
+    let to_suppress: Vec<TypeId> = graph
+        .iter()
+        .filter_map(|(id, def)| {
+            let TypeKind::Struct(object) = &def.kind else {
+                return None;
+            };
+            let has_apply_hint = object
+                .fields
+                .iter()
+                .any(|field| field.xml.name.is_some() || field.xml.attribute);
+            let dedicated = xml_reachable.contains(&id) && !non_xml_reachable.contains(&id);
+            (has_apply_hint && !dedicated).then_some(id)
+        })
+        .collect();
+
+    for id in to_suppress {
+        let Some(def) = graph.get_mut(id) else {
+            continue;
+        };
+        let provenance = def.provenance.clone();
+        if let TypeKind::Struct(object) = &mut def.kind {
+            for field in &mut object.fields {
+                field.xml = XmlField::default();
+            }
+        }
+        Diagnostic::warning(Code::XmlHintIgnored, provenance)
+            .message(
+                "`xml.name`/`xml.attribute` not applied: this schema is used as a non-XML (e.g. \
+                 JSON) body — or is not used as an XML body — where the format-agnostic serde rename \
+                 would corrupt the wire format; the field keeps its normal wire name",
+            )
+            .remedy(
+                "use a schema dedicated to the XML body if the rename is required, or accept the \
+                 property's normal wire name",
+            )
+            .emit(diags);
+    }
+}
+
+/// The set of type ids transitively reachable from `roots` through the type graph's structural
+/// edges (struct fields and typed `additionalProperties`, array/tuple elements, union variants).
+/// A visited set makes recursive (`$ref`-cycle) types terminate.
+fn reachable_types(graph: &TypeGraph, roots: &[TypeId]) -> HashSet<TypeId> {
+    let mut visited = HashSet::new();
+    let mut stack = roots.to_vec();
+    while let Some(id) = stack.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        let Some(def) = graph.get(id) else {
+            continue;
+        };
+        match &def.kind {
+            TypeKind::Struct(object) => {
+                for field in &object.fields {
+                    stack.push(field.ty.id);
+                }
+                if let AdditionalProps::Typed(ty) = &object.additional {
+                    stack.push(ty.id);
+                }
+            }
+            TypeKind::Array(ty) => stack.push(ty.id),
+            TypeKind::Tuple(items) => stack.extend(items.iter().map(|ty| ty.id)),
+            TypeKind::Union(union) => {
+                stack.extend(union.variants.iter().map(|variant| variant.ty.id))
+            }
+            TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes | TypeKind::Any => {}
+        }
+    }
+    visited
+}
+
 fn lower_media_type(
     media: &str,
     provenance: &crate::diag::Provenance,
@@ -1624,6 +1819,7 @@ fn lower_media_type(
 ) -> Option<MediaType> {
     Some(match media.split(';').next().unwrap_or(media).trim() {
         "application/json" => MediaType::Json,
+        "application/xml" | "text/xml" => MediaType::Xml,
         "application/x-www-form-urlencoded" => MediaType::FormUrlEncoded,
         "application/octet-stream" => MediaType::OctetStream,
         "text/plain" => MediaType::TextPlain,
@@ -1649,7 +1845,11 @@ fn choose_media<'a, T>(
     }
     for preferred in [
         "application/json",
-        // Multipart ranks after JSON — a JSON alternative still wins when both are offered — but
+        // XML ranks after JSON — a JSON alternative still wins when both are offered — but before the
+        // remaining media so a documented XML body is generated (through the quick-xml codec).
+        "application/xml",
+        "text/xml",
+        // Multipart ranks after JSON/XML — a JSON alternative still wins when both are offered — but
         // before the remaining single-value media so a documented file-upload body is generated.
         "multipart/form-data",
         "application/x-www-form-urlencoded",

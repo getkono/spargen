@@ -60,6 +60,9 @@ pub struct FeatureSet {
     /// field (a `format: binary` / `contentEncoding: base64` property), so its derived
     /// `Serialize`/`Deserialize` compiles.
     pub bytes_serde: bool,
+    /// Pull in `quick-xml` — set when any operation has an `application/xml` / `text/xml` request or
+    /// response body, whose serialize/decode goes through the embedded XML runtime helpers.
+    pub xml: bool,
 }
 
 impl Default for FeatureSet {
@@ -69,6 +72,7 @@ impl Default for FeatureSet {
             time: true,
             multipart: false,
             bytes_serde: false,
+            xml: false,
         }
     }
 }

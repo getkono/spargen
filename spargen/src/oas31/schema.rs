@@ -46,6 +46,9 @@ pub struct Schema {
     pub format: Option<String>,
     /// `contentEncoding` (e.g. `base64` → bytes).
     pub content_encoding: Option<String>,
+    /// The OpenAPI `xml` object, if present — XML representation hints consumed only when the schema
+    /// is used as an XML body.
+    pub xml: Option<XmlHints>,
     /// Retained validation-only keywords (W-class).
     pub validation: ValidationKeywords,
     /// `deprecated`.
@@ -60,6 +63,23 @@ pub struct Schema {
     pub description: Option<String>,
     /// Where the schema came from.
     pub provenance: Provenance,
+}
+
+/// The OpenAPI `xml` object on a schema. `name`/`attribute` drive XML field renaming; the remaining
+/// hints (`namespace`/`prefix`/`wrapped`) are retained only so lowering can warn (`W006`) that they
+/// are ignored — quick-xml serde has no faithful representation for them.
+#[derive(Debug, Clone, Default)]
+pub struct XmlHints {
+    /// `xml.name`: overrides the element/attribute wire name.
+    pub name: Option<String>,
+    /// `xml.attribute`: serialize as an XML attribute rather than a child element.
+    pub attribute: bool,
+    /// `xml.namespace`: an XML namespace URI (unsupported → `W006`).
+    pub namespace: Option<String>,
+    /// `xml.prefix`: a namespace prefix (unsupported → `W006`).
+    pub prefix: Option<String>,
+    /// `xml.wrapped`: wrap an array in an outer element (unsupported → `W006`).
+    pub wrapped: bool,
 }
 
 /// A schema position that may be a boolean schema (`true`/`false`) or a full [`Schema`]. `{}` and

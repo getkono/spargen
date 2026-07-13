@@ -525,6 +525,8 @@ components:
 
 #[test]
 fn e009_unsupported_media_type() {
+    // A genuinely unsupported media (`application/pdf`) still rejects with E009 — the narrowing only
+    // added JSON-adjacent/XML/streaming media, not arbitrary binary content types.
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -534,14 +536,268 @@ paths:
     post:
       requestBody:
         content:
-          application/xml:
-            schema: { type: object }
+          application/pdf:
+            schema: { type: string, format: binary }
       responses:
         "204": { description: No Content }
 "##,
     );
     assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedMediaType));
+}
+
+#[test]
+fn xml_request_body_generates() {
+    // Issue #13: an `application/xml` request body lowers to a typed struct and generates (no E009);
+    // it is serialized through the runtime's quick-xml codec. check/generate stay in parity.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/xml:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        !has_code(&checked, Code::UnsupportedMediaType),
+        "{checked:#?}"
+    );
+}
+
+#[test]
+fn xml_response_body_generates() {
+    // Issue #13: a `text/xml` response body lowers to a typed struct and generates (no E009); it is
+    // decoded through the runtime's quick-xml codec rather than serde_json.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            text/xml:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: string }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn json_alternative_wins_over_xml_on_same_body() {
+    // When a body offers both JSON and XML, media selection deterministically prefers JSON, so the
+    // API does not use XML at all — generation succeeds with no E009.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/xml:
+            schema: { type: object }
+          application/json:
+            schema: { type: object, required: [id], properties: { id: { type: string } } }
+      responses:
+        "204": { description: No Content }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn w006_unsupported_xml_hint_warns_but_generates() {
+    // Issue #13: an unsupported `xml` hint (namespace/prefix/wrapped) is acknowledged with W006 and
+    // generation still succeeds — never silently honored or dropped. The `xml.name`/`xml.attribute`
+    // hints on sibling fields are honored (no warning).
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/xml:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+                  xml: { attribute: true, name: "Id" }
+                tags:
+                  type: array
+                  items: { type: string }
+                  xml: { wrapped: true, namespace: "urn:example" }
+      responses:
+        "204": { description: No Content }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    let checked = check(spec);
+    assert!(has_code(&checked, Code::XmlHintIgnored), "{checked:#?}");
+}
+
+#[test]
+fn json_only_schema_with_xml_hints_suppresses_rename_and_warns_w006() {
+    // Issue #13 regression guard: a schema carrying `xml.name`/`xml.attribute` but reachable only
+    // from a JSON body must NOT have the format-agnostic serde rename applied (it would corrupt
+    // JSON). The suppression is acknowledged with W006 (never silent), and generation still succeeds.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, sku]
+              properties:
+                id: { type: integer, xml: { attribute: true } }
+                sku: { type: string, xml: { name: "ProductSku" } }
+      responses:
+        "204": { description: No Content }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    let checked = check(spec);
+    assert!(has_code(&checked, Code::XmlHintIgnored), "{checked:#?}");
+}
+
+#[test]
+fn xml_dedicated_schema_applies_hints_without_w006() {
+    // A schema used *exclusively* as an XML body is XML-dedicated, so `xml.name`/`xml.attribute` are
+    // honored — no suppression, and with no unsupported (namespace/prefix/wrapped) hint present, no
+    // W006 fires at all.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/xml:
+            schema:
+              type: object
+              required: [id, sku]
+              properties:
+                id: { type: integer, xml: { attribute: true } }
+                sku: { type: string, xml: { name: "ProductSku" } }
+      responses:
+        "204": { description: No Content }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+}
+
+#[test]
+fn schema_shared_by_json_and_xml_ops_suppresses_rename_and_warns_w006() {
+    // A component referenced by BOTH a JSON operation and an XML operation is non-dedicated (it is
+    // non-XML-reachable), so the rename is suppressed to keep JSON correct, with W006.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /json:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Shared" }
+      responses:
+        "204": { description: No Content }
+  /xml:
+    post:
+      requestBody:
+        content:
+          application/xml:
+            schema: { $ref: "#/components/schemas/Shared" }
+      responses:
+        "204": { description: No Content }
+components:
+  schemas:
+    Shared:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer, xml: { attribute: true } }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+}
+
+#[test]
+fn xml_body_in_multi_status_enum_is_rejected() {
+    // Issue #13: XML decode is scoped to single-body success/error. An XML body that would land in a
+    // multi-status success enum (two bodied success statuses) is rejected cleanly with narrowed E009
+    // rather than silently decoded as JSON.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/xml:
+              schema: { type: object, required: [a], properties: { a: { type: string } } }
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { type: object, required: [b], properties: { b: { type: string } } }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    // check/generate parity: the same rejection is reached without emitting.
+    let checked = check(spec);
+    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]

@@ -8,6 +8,11 @@ pub enum MediaType {
     Json,
     /// `application/x-www-form-urlencoded`.
     FormUrlEncoded,
+    /// `application/xml` / `text/xml`: a body serialized/deserialized as XML via the runtime's
+    /// feature-gated `quick-xml` codec. Lowers to the same struct type `T` as JSON; JSON still wins
+    /// when both are offered. Scoped to single-body request/response bodies (see
+    /// [`Responses::xml_in_multi_status`]).
+    Xml,
     /// `application/octet-stream` (bytes in; bytes or stream out).
     OctetStream,
     /// `text/plain`.
@@ -78,6 +83,9 @@ impl StatusSpec {
 pub struct Response {
     /// The response body type, if any.
     pub body: Option<Ty>,
+    /// The chosen body media type, or `None` for a bodyless response. Codegen routes the decode by
+    /// this (e.g. an XML body decodes through the `quick-xml` runtime helpers rather than serde_json).
+    pub media: Option<MediaType>,
     /// For a streaming response (chosen media `text/event-stream` or `application/x-ndjson`), the
     /// framing of the streamed items; `None` for a whole-body response. The `body` is the item
     /// type `T` when this is `Some`.
@@ -146,6 +154,62 @@ impl Responses {
             }
             _ => None,
         }
+    }
+
+    /// The media type of the operation's single bodied success response, when exactly one success
+    /// response carries a body (i.e. [`Self::success`] is [`SuccessShape::Plain`]). Codegen uses this
+    /// to route the success decode (JSON vs XML). `None` when there is no single bodied success.
+    pub fn single_success_media(&self) -> Option<MediaType> {
+        let mut bodied = self
+            .success_responses()
+            .into_iter()
+            .filter(|response| response.body.is_some());
+        match (bodied.next(), bodied.next()) {
+            (Some(response), None) => response.media,
+            _ => None,
+        }
+    }
+
+    /// The media type of the operation's single bodied error response, when exactly one error
+    /// response carries a body (i.e. [`Self::error`] is [`ErrorShape::Single`]). Codegen uses this to
+    /// route the error-body classification (JSON vs XML). `None` when there is no single bodied error.
+    pub fn single_error_media(&self) -> Option<MediaType> {
+        let mut bodied = self
+            .error_responses()
+            .into_iter()
+            .filter(|response| response.body.is_some());
+        match (bodied.next(), bodied.next()) {
+            (Some(response), None) => response.media,
+            _ => None,
+        }
+    }
+
+    /// Whether an XML body appears in a response position that lowers to a *multi-status* enum
+    /// (two or more bodied success or error statuses). XML decode is scoped to the single-body
+    /// success/error paths, so this exotic combination is rejected cleanly during lowering (narrowed
+    /// `E009`) rather than silently mis-decoding an XML body as JSON.
+    pub fn xml_in_multi_status(&self) -> bool {
+        let is_xml = |response: &&Response| response.media == Some(MediaType::Xml);
+        let success_multi = matches!(self.success(), SuccessShape::Enum(_))
+            && self.success_responses().iter().any(is_xml);
+        let error_multi = matches!(self.error(), ErrorShape::Enum(_))
+            && self.error_responses().iter().any(is_xml);
+        success_multi || error_multi
+    }
+
+    /// The operation's error responses: every non-success explicit status plus the `default`
+    /// response (which matches any status). Mirrors the entry set built by [`Self::error`].
+    fn error_responses(&self) -> Vec<&Response> {
+        let mut responses: Vec<&Response> = self
+            .by_status
+            .iter()
+            .filter(|(status, _)| !is_success_status(*status))
+            .map(|(_, response)| response)
+            .collect();
+        if let Some(default) = &self.default {
+            responses.push(default);
+        }
+        responses
     }
 
     /// The operation's success responses in document order: the `default` response alone when no
@@ -266,6 +330,7 @@ mod tests {
 
     fn resp(body: Option<u32>) -> Response {
         Response {
+            media: body.map(|_| super::MediaType::Json),
             body: body.map(ty),
             stream: None,
         }

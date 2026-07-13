@@ -25,7 +25,7 @@ pub use operation::{
 pub use types::{
     AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Prim,
     PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef, TypeGraph, TypeId,
-    TypeKind, Union, UnionStrategy, UnionVariant,
+    TypeKind, Union, UnionStrategy, UnionVariant, XmlField,
 };
 
 /// The whole lowered API: the single artifact frontends produce and backends consume.
@@ -41,6 +41,28 @@ pub struct Api {
     pub types: TypeGraph,
     /// Named security schemes (`components.securitySchemes`).
     pub security_schemes: IndexMap<SchemeId, SecurityScheme>,
+}
+
+impl Api {
+    /// Whether any operation uses an `application/xml` / `text/xml` request or response body. Drives
+    /// the feature-gated `quick-xml` dependency in the synthesized manifest and the conditional
+    /// embedding of the XML runtime helpers — both deterministic functions of the API.
+    pub fn uses_xml(&self) -> bool {
+        self.operations.iter().any(|operation| {
+            let request_xml = operation
+                .request_body
+                .as_ref()
+                .is_some_and(|body| body.media == MediaType::Xml);
+            let response_xml = operation
+                .responses
+                .by_status
+                .iter()
+                .map(|(_, response)| response)
+                .chain(operation.responses.default.as_ref())
+                .any(|response| response.media == Some(MediaType::Xml));
+            request_xml || response_xml
+        })
+    }
 }
 
 /// API identity, lowered from `info`.

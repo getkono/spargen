@@ -27,4 +27,6 @@ pub use document::{
 pub use lower::lower;
 pub use metaschema::MetaSchemaValidator;
 pub use resolve::Resolver;
-pub use schema::{Discriminator, JsonType, Schema, SchemaOr, TypeSet, ValidationKeywords};
+pub use schema::{
+    Discriminator, JsonType, Schema, SchemaOr, TypeSet, ValidationKeywords, XmlHints,
+};

@@ -269,6 +269,15 @@ pub(crate) fn emit_operation(
         } else {
             match media {
                 MediaType::Json => quote! { request = request.json(body); },
+                // XML: serialize the typed body to an XML string via the runtime's quick-xml helper
+                // and set it as the body with the XML content-type. `to_xml` yields
+                // `Error<Infallible>`, widened to the operation's error type.
+                MediaType::Xml => quote! {
+                    let body = support::to_xml(body).map_err(support::Error::widen)?;
+                    request = request
+                        .header(reqwest::header::CONTENT_TYPE, "application/xml")
+                        .body(body);
+                },
                 MediaType::FormUrlEncoded => quote! { request = request.form(body); },
                 MediaType::TextPlain => quote! { request = request.body(body.to_string()); },
                 MediaType::OctetStream => quote! { request = request.body(body.clone()); },
@@ -343,9 +352,16 @@ pub(crate) fn emit_operation(
             {
                 documented.push(quote! { support::StatusSpec::Any });
             }
+            // An XML error body classifies through the quick-xml runtime helper
+            // (`classify_error_xml`); every other media classifies as JSON.
+            let classify = if operation.responses.single_error_media() == Some(MediaType::Xml) {
+                quote! { support::classify_error_xml }
+            } else {
+                quote! { support::classify_error }
+            };
             quote! {
                 Err(
-                    support::classify_error::<#error_ty>(
+                    #classify::<#error_ty>(
                         &self.core,
                         response,
                         &[#(#documented),*],
@@ -412,6 +428,17 @@ pub(crate) fn emit_operation(
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         },
+        // A single success body: decode into the aliased `T`. An XML body routes through the
+        // quick-xml runtime helper (`decode_success_xml`); every other media decodes as JSON.
+        SuccessShape::Plain(_)
+            if operation.responses.single_success_media() == Some(MediaType::Xml) =>
+        {
+            quote! {
+                support::decode_success_xml::<#success_ty>(&self.core, response)
+                    .await
+                    .map_err(support::Error::widen)
+            }
+        }
         SuccessShape::Plain(_) => quote! {
             support::decode_success::<#success_ty>(&self.core, response)
                 .await
@@ -831,9 +858,11 @@ pub(crate) fn emit_error_enum(
 }
 
 /// Emit the private `support` module by embedding the freestanding runtime source verbatim, under
-/// `#![forbid(unsafe_code)]`.
-pub(crate) fn emit_support() -> TokenStream {
-    let modules = crate::support::runtime_files().iter().map(|file| {
+/// `#![forbid(unsafe_code)]`. When `uses_xml` is set (the API has an `application/xml` / `text/xml`
+/// body), the feature-gated XML codec module is embedded and its helpers re-exported; otherwise it
+/// is omitted entirely, so a non-XML output carries no `quick-xml` reference.
+pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
+    let embed = |file: &crate::support::SupportFile| {
         let stem = file.name.trim_end_matches(".rs");
         let ident = format_ident!("{}", stem);
         // Each runtime file keeps its `#[cfg(test)]` module last; strip it at embed time — the
@@ -853,6 +882,13 @@ pub(crate) fn emit_support() -> TokenStream {
                 #tokens
             }
         }
+    };
+    let modules = crate::support::runtime_files().iter().map(embed);
+    // The XML codec module is embedded only when the API uses an XML body; the generated manifest
+    // then carries the `quick-xml` dependency it needs. A non-XML output never references quick-xml.
+    let xml_module = uses_xml.then(|| embed(&crate::support::xml_runtime_file()));
+    let xml_reexport = uses_xml.then(|| {
+        quote! { pub use xml::{classify_error_xml, decode_success_xml, to_xml}; }
     });
     quote! {
         /// The freestanding runtime embedded verbatim into this output; no spargen crate exists
@@ -861,6 +897,7 @@ pub(crate) fn emit_support() -> TokenStream {
         #[allow(dead_code, unused_imports, clippy::result_large_err)]
         mod support {
             #(#modules)*
+            #xml_module
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
@@ -868,6 +905,7 @@ pub(crate) fn emit_support() -> TokenStream {
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use response::ResponseValue;
             pub use stream::{EventStream, Framing};
+            #xml_reexport
         }
     }
 }
@@ -1153,7 +1191,14 @@ fn emit_field(
         .fields
         .get(&(id, field.name.wire.clone()))
         .expect("field name allocated");
-    let wire = &field.name.wire;
+    // An `xml.name`/`xml.attribute` hint overrides the serde wire name for XML bodies (an attribute
+    // uses quick-xml's `@name` convention); otherwise the plain property wire name is used. The Rust
+    // identifier and the names-table key stay keyed off the original property name, so only the wire
+    // string changes.
+    let wire = field
+        .xml
+        .wire_override(&field.name.wire)
+        .unwrap_or_else(|| field.name.wire.clone());
     // `ty_tokens` already wraps a nullable type in `Option` (`"null"` in the type array), so only an
     // *optional* non-nullable field needs the extra `Option` here — wrapping a nullable field again
     // would yield `Option<Option<T>>`. A required nullable field stays a single `Option<T>` (present
