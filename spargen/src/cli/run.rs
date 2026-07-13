@@ -20,6 +20,7 @@ pub fn run(cli: Cli) -> ExitCode {
                 uuid: args.no_uuid.then_some(false),
                 time: args.no_time.then_some(false),
                 as_crate: args.as_crate.then_some(true),
+                carve: args.carve.then_some(true),
             };
             let flags = OmitFlags {
                 paths: args.omit_path,
@@ -60,15 +61,15 @@ pub fn run(cli: Cli) -> ExitCode {
                 components: args.omit_component,
                 pointers: args.omit_pointer,
             };
-            let settings = match config::resolve(
-                &args.spec,
-                args.config.as_deref(),
-                &CliOverrides::default(),
-                &flags,
-            ) {
-                Ok(settings) => settings,
-                Err(error) => return config_error(error),
+            let overrides = CliOverrides {
+                carve: args.carve.then_some(true),
+                ..CliOverrides::default()
             };
+            let settings =
+                match config::resolve(&args.spec, args.config.as_deref(), &overrides, &flags) {
+                    Ok(settings) => settings,
+                    Err(error) => return config_error(error),
+                };
             let mut config =
                 Config::new(args.spec, OutputTarget::Module("__spargen_check.rs".into()));
             apply_settings(&mut config, settings);
@@ -160,6 +161,7 @@ fn apply_settings(config: &mut Config, settings: Settings) {
     config.error_body_cap = settings.error_body_cap;
     config.batch_cap = settings.batch_cap;
     config.omit = settings.omit;
+    config.carve = settings.carve;
 }
 
 /// Render a config/flag error to stderr and exit with a usage status — never a panic.

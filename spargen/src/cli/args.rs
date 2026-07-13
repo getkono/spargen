@@ -41,6 +41,10 @@ pub struct GenerateArgs {
     /// Emit a standalone publishable crate rather than a module.
     #[arg(long)]
     pub as_crate: bool,
+    /// Auto-carve: instead of failing on rejections, omit the minimal set of unsupported constructs
+    /// (each reported via W009) and generate the rest. Un-carvable rejections are still reported.
+    #[arg(long)]
+    pub carve: bool,
     /// Disable the `format: uuid` mapping (fall back to `String`).
     #[arg(long)]
     pub no_uuid: bool,
@@ -75,6 +79,10 @@ pub struct CheckArgs {
     /// Path to a `spargen.toml` config file. Defaults to `spargen.toml` beside the spec, if present.
     #[arg(long)]
     pub config: Option<Utf8PathBuf>,
+    /// Auto-carve: omit the minimal set of unsupported constructs (each reported via W009) so the
+    /// rest audits clean. Un-carvable rejections are still reported.
+    #[arg(long)]
+    pub carve: bool,
     /// Omit a path item and every operation under it (repeatable), e.g. `--omit-path /pets/{id}`.
     #[arg(long = "omit-path", value_name = "PATH")]
     pub omit_path: Vec<String>,

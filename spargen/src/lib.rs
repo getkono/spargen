@@ -104,6 +104,10 @@ pub struct Config {
     pub batch_cap: usize,
     /// Audit and check drift only; do not write output (`--check`).
     pub check_only: bool,
+    /// Auto-carve: instead of failing on rejections, iteratively omit the minimal enclosing
+    /// omittable construct for each rejection and generate the rest (`--carve`). Every carved
+    /// construct is reported via `W009`; residual, un-carvable rejections are reported honestly.
+    pub carve: bool,
 }
 
 impl Config {
@@ -118,6 +122,7 @@ impl Config {
             error_body_cap: 64 * 1024,
             batch_cap: 100,
             check_only: false,
+            carve: false,
         }
     }
 }
@@ -157,13 +162,21 @@ pub struct Report {
 /// println!("cargo:warning=spargen outcome: {:?}", report.outcome);
 /// ```
 pub fn generate(config: &Config) -> Report {
-    run_pipeline(config, PipelineMode::Generate)
+    if config.carve {
+        run_carve(config, PipelineMode::Generate)
+    } else {
+        run_pipeline(config, PipelineMode::Generate)
+    }
 }
 
 /// Run the support-audit only, without codegen (`spargen check`) — a CI contract gate between spec
 /// producers and client consumers.
 pub fn check(config: &Config) -> Report {
-    run_pipeline(config, PipelineMode::Check)
+    if config.carve {
+        run_carve(config, PipelineMode::Check)
+    } else {
+        run_pipeline(config, PipelineMode::Check)
+    }
 }
 
 /// Extended documentation for a stable diagnostic code, backing `spargen explain E###` and the
@@ -340,6 +353,62 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
             }
         }
     }
+}
+
+/// Auto-carve driver: iterate the frontend to a fixpoint, omitting the smallest enclosing
+/// omittable construct for each rejection, then run `mode` for real with the carved omit set.
+///
+/// Each round runs the frontend (in `Check` mode — no output is written while carving) with the
+/// current omit set. If it is not rejected, the carve converged and we run `mode` once with that
+/// omit set (which re-applies every omit rule, emitting a `W009` for each carved construct — carving
+/// is never silent). If it is rejected, we map the error pointers to omittable constructs
+/// ([`compat::carve_rules`]) and add any *new* rules; when a round adds no new rule (an un-carvable
+/// residual — a root/unmodelled rejection, or a rule that did not clear its error), we return that
+/// round's report as-is: it already carries the `W009`s for what *was* carved plus the residual
+/// error diagnostics, with `Outcome::Rejected`. Omitting a construct can dangle a `$ref` and surface
+/// a fresh `E004`/`E020`; that new error is itself carved on the next round (its enclosing operation
+/// is omitted) or, if un-carvable, reported honestly — the document is never emitted broken. The
+/// round cap ([`compat::MAX_CARVE_ROUNDS`]) guarantees termination.
+fn run_carve(config: &Config, mode: PipelineMode) -> Report {
+    let mut omit = config.omit.clone();
+    let mut last_rejection: Option<Report> = None;
+
+    for _ in 0..compat::MAX_CARVE_ROUNDS {
+        let probe = Config {
+            omit: omit.clone(),
+            carve: false,
+            check_only: false,
+            // The carve mapper must see *every* error diagnostic to carve correctly, so the probe
+            // runs with an unbounded batch (a spec has finitely many constructs). The user's
+            // `batch_cap` still governs the final, user-facing report below.
+            batch_cap: usize::MAX,
+            ..config.clone()
+        };
+        let report = run_pipeline(&probe, PipelineMode::Check);
+        if report.outcome != Outcome::Rejected {
+            // Converged: generate (or check) for real with the carved omit set.
+            let resolved = Config {
+                omit,
+                carve: false,
+                ..config.clone()
+            };
+            return run_pipeline(&resolved, mode);
+        }
+
+        let new_rules: Vec<compat::OmitRule> = compat::carve_rules(&report.diagnostics)
+            .into_iter()
+            .filter(|rule| !omit.rules.contains(rule))
+            .collect();
+        if new_rules.is_empty() {
+            // No progress possible — report the residual rejections (and any carved W009s) honestly.
+            return report;
+        }
+        omit.rules.extend(new_rules);
+        last_rejection = Some(report);
+    }
+
+    // Exhausted the round cap while still rejecting: return the last honest rejection report.
+    last_rejection.unwrap_or_else(|| run_pipeline(config, PipelineMode::Check))
 }
 
 fn emit_drift(diags: &mut diag::Diagnostics, paths: &[camino::Utf8PathBuf], what: &str) {

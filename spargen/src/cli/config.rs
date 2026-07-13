@@ -14,10 +14,15 @@
 //! error_body_cap = 65536 # optional; bytes of an error body retained (default 65536)
 //! batch_cap = 100        # optional; max diagnostics collected (default 100)
 //! as_crate = false       # optional; generate a standalone crate instead of a module
+//! carve = false          # optional; auto-carve unsupported constructs (same as `--carve`)
 //!
-//! # Zero or more omit rules. The rule KIND is discriminated by field presence:
+//! # Zero or more omit rules. The rule KIND is discriminated by field presence. A path/name (or
+//! # pointer) value that contains a glob metacharacter (`*`, `**`, `?`) is matched as a glob and
+//! # removes EVERY matching construct (bulk); a value with no metacharacter is an exact rule.
 //! [[omit]]
-//! path = "/pets/{id}"                    # → OmitRule::Path
+//! path = "/pets/{id}"                    # → OmitRule::Path (exact)
+//! [[omit]]
+//! path = "/admin/**"                     # → OmitRule::Path (glob: every path under /admin)
 //! [[omit]]
 //! method = "get"                         # `method` + `path` → OmitRule::Operation
 //! path = "/pets"
@@ -78,6 +83,8 @@ pub struct CliOverrides {
     pub time: Option<bool>,
     /// `--as-crate` present ⇒ `Some(true)`.
     pub as_crate: Option<bool>,
+    /// `--carve` present ⇒ `Some(true)`.
+    pub carve: Option<bool>,
 }
 
 /// The fully resolved settings after merging defaults, config file, and CLI flags.
@@ -89,6 +96,8 @@ pub struct Settings {
     pub time: bool,
     /// Emit a standalone crate rather than a module.
     pub as_crate: bool,
+    /// Auto-carve unsupported constructs instead of failing on rejection.
+    pub carve: bool,
     /// Max bytes of an error response body retained.
     pub error_body_cap: usize,
     /// Max diagnostics collected before batching stops.
@@ -116,6 +125,7 @@ pub fn resolve(
     let mut uuid = true;
     let mut time = true;
     let mut as_crate = false;
+    let mut carve = false;
     let mut error_body_cap = 64 * 1024;
     let mut batch_cap = 100;
     let mut rules = Vec::new();
@@ -130,6 +140,9 @@ pub fn resolve(
             }
             if let Some(value) = features.as_crate {
                 as_crate = value;
+            }
+            if let Some(value) = features.carve {
+                carve = value;
             }
             if let Some(value) = features.error_body_cap {
                 error_body_cap = value;
@@ -155,6 +168,9 @@ pub fn resolve(
     if let Some(value) = overrides.as_crate {
         as_crate = value;
     }
+    if let Some(value) = overrides.carve {
+        carve = value;
+    }
 
     // CLI omit flags are unioned with the config-file rules.
     for path in &flags.paths {
@@ -176,6 +192,7 @@ pub fn resolve(
         uuid,
         time,
         as_crate,
+        carve,
         error_body_cap,
         batch_cap,
         omit: Omit { rules },
@@ -332,6 +349,7 @@ struct FeaturesToml {
     error_body_cap: Option<usize>,
     batch_cap: Option<usize>,
     as_crate: Option<bool>,
+    carve: Option<bool>,
 }
 
 /// An `[[omit]]` entry. The rule kind is discriminated by which fields are present (TOML has no
