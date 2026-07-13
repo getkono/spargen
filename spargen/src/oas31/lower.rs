@@ -18,6 +18,16 @@ use super::{
     Schema, SchemaOr, SecurityRequirement,
 };
 
+/// Maximum schema-lowering recursion depth. Each nested object property, array item,
+/// `allOf`/`oneOf`/`anyOf` member, and resolved `$ref` target descends one level through
+/// [`LowerCtx::lower_schema`]. Inline nesting is already bounded by the parser's own depth cap, but
+/// a chain of components (or remote refs) that each `$ref` the next is parsed shallowly and would
+/// otherwise recurse without bound — a long enough chain overflows the stack. This cap stops that
+/// descent and rejects with `E014` (`SchemaNestingTooDeep`) instead of crashing. It is far above any
+/// real API's nesting depth; the whole frontend runs on a dedicated large-stack thread (see the
+/// facade) so lowering this many levels deep is comfortably safe.
+const MAX_SCHEMA_DEPTH: u32 = 128;
+
 /// Lower the typed 3.1.1 [`Document`] into the version-agnostic [`Api`] IR.
 pub fn lower(
     document: &Document,
@@ -35,6 +45,7 @@ pub fn lower(
         remote_components: HashMap::new(),
         remote_in_progress: HashMap::new(),
         remote_alias_stack: HashSet::new(),
+        depth: 0,
     };
 
     for (name, schema) in &document.components.schemas {
@@ -193,6 +204,10 @@ struct LowerCtx<'a, 'doc> {
     /// Guards a chain of bare-`$ref` (alias) remote documents so an alias cycle terminates instead
     /// of recursing forever; a real (object/enum/…) remote schema uses the reserve/box machinery.
     remote_alias_stack: HashSet<String>,
+    /// Current schema-lowering recursion depth, incremented on entry to [`Self::lower_schema`] and
+    /// decremented on exit. A `$ref`/allOf/array/object chain that pushes this past
+    /// [`MAX_SCHEMA_DEPTH`] is rejected (`E014`) rather than allowed to overflow the stack.
+    depth: u32,
 }
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -343,7 +358,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
+    /// Depth-guarded entry to schema lowering. Bounds the `$ref`/allOf/array/object recursion to
+    /// [`MAX_SCHEMA_DEPTH`] so a pathologically deep composition rejects with `E014` instead of
+    /// exhausting the stack; the counter is decremented on every exit so sibling members (breadth)
+    /// never accumulate against the cap.
     fn lower_schema(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        if self.depth >= MAX_SCHEMA_DEPTH {
+            Diagnostic::error(Code::SchemaNestingTooDeep, schema.provenance.clone())
+                .message(format!(
+                    "schema nesting exceeds the maximum lowering depth of {MAX_SCHEMA_DEPTH} \
+                     (a very long `$ref` chain or a pathologically nested schema)"
+                ))
+                .remedy(
+                    "flatten the offending schema chain, or omit this API segment with \
+                     spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        self.depth += 1;
+        let result = self.lower_schema_inner(schema, hint);
+        self.depth -= 1;
+        result
+    }
+
+    fn lower_schema_inner(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         if let Some(reference) = &schema.reference {
             if let Some(name) = reference.strip_prefix("#/components/schemas/") {
                 return self.ensure_component(name);

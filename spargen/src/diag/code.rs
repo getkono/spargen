@@ -75,6 +75,10 @@ pub enum Code {
     /// An OpenAPI 3.2-only construct (`$self`, `additionalOperations`, `in: querystring`) was
     /// acknowledged but not lowered into generated code (matrix: Version → W).
     Oas32ConstructIgnored,
+    /// Schema composition nests deeper than spargen will lower (a very long `$ref` chain or a
+    /// pathologically nested inline schema), so lowering is stopped before it could exhaust the
+    /// stack. Rejected rather than risk a crash on adversarial or machine-generated input.
+    SchemaNestingTooDeep,
 }
 
 impl Code {
@@ -105,6 +109,7 @@ impl Code {
             Code::SchemaDefaultNotApplied => "W005",
             Code::XmlHintIgnored => "W006",
             Code::Oas32ConstructIgnored => "W010",
+            Code::SchemaNestingTooDeep => "E014",
         }
     }
 
@@ -144,6 +149,7 @@ impl Code {
             Code::SchemaDefaultNotApplied => "schema default not applied",
             Code::XmlHintIgnored => "unsupported XML hint ignored",
             Code::Oas32ConstructIgnored => "OpenAPI 3.2 construct ignored",
+            Code::SchemaNestingTooDeep => "schema nesting is too deep to lower",
         }
     }
 
@@ -219,6 +225,9 @@ impl Code {
             Code::Oas32ConstructIgnored => {
                 "OpenAPI 3.2 is accepted through the 3.1 frontend, but a handful of 3.2-only constructs describe behavior spargen does not generate a client for, and are acknowledged with this warning rather than silently dropped. `$self` sets the document's base URI for reference resolution and does not change locally-generated code. `additionalOperations` declares custom/extension HTTP methods on a path item, for which no client method is emitted. An `in: querystring` parameter treats the entire URL query string as a single value; that parameter is skipped and the rest of the operation still generates. The new fixed `QUERY` method is fully supported and does NOT trigger this warning."
             }
+            Code::SchemaNestingTooDeep => {
+                "Lowering a schema into a Rust type is recursive: each nested object property, array item, `allOf`/`oneOf`/`anyOf` member, and `$ref` target descends one level. Spargen caps that descent so a pathologically deep composition — a very long chain of components that each `$ref` the next, or a deeply nested inline schema — is rejected with this error instead of being allowed to exhaust the call stack and abort the process. A genuine API surface never approaches the limit; hitting it almost always means the spec was machine-generated or adversarial. Flatten the offending chain, or omit that API segment with `spargen::omit!`."
+            }
             Code::XmlHintIgnored => {
                 "XML request/response bodies honor the `xml.name` (element/attribute rename) and `xml.attribute` (serialize as an XML attribute via quick-xml's `@name` convention) hints on a field, but only for a schema used *exclusively* as an XML body. A serde `rename` is format-agnostic — it would also rewrite the JSON wire names — so `xml.name`/`xml.attribute` are NOT applied to a schema that is also reachable from a JSON/form/multipart/text body, a response, or a parameter (or that is not used as an XML body at all); the field keeps its normal wire name and this warning fires, so JSON is never corrupted. The `xml.namespace`, `xml.prefix`, and `xml.wrapped` (wrapped arrays) hints are never represented — quick-xml serde has no faithful mapping for them — so they are always ignored with this warning rather than silently honored or rejected."
             }
@@ -262,6 +271,7 @@ impl Code {
             Code::SchemaDefaultNotApplied,
             Code::XmlHintIgnored,
             Code::Oas32ConstructIgnored,
+            Code::SchemaNestingTooDeep,
         ];
         ALL
     }

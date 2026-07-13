@@ -7,6 +7,11 @@
 resolver = "2"
 members = ["spargen", "support-runtime"]
 # members = ["spargen", "support-runtime", "xtask"]  # reserved
+# The `fuzz/` cargo-fuzz crate is a deliberately-excluded, opt-in workspace member: it depends on
+# libfuzzer-sys and needs a nightly libFuzzer sysroot, neither of which should touch the normal
+# `cargo build --workspace` / `check` / `lint` / `test` / `deny` paths. Building it is manual —
+# `cargo +nightly fuzz run frontend` (see `fuzz/README.md`).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"

@@ -2228,3 +2228,58 @@ components:
         "bodyless 204 must emit a unit variant"
     );
 }
+
+/// Build an OpenAPI document whose components form a chain `S0 -> S1 -> ... -> S{depth}`, where each
+/// `S{i}` composes the next via `allOf: [{ $ref: S{i+1} }]` and `S{depth}` is a plain string. Every
+/// component is parsed shallowly, so this defeats the parser's own nesting cap and forces lowering
+/// to recurse the full chain — the shape that used to overflow the stack (issue #32).
+fn deep_component_chain(depth: usize) -> String {
+    let mut schemas = String::new();
+    for i in 0..depth {
+        schemas.push_str(&format!(
+            "\"S{i}\":{{\"allOf\":[{{\"$ref\":\"#/components/schemas/S{}\"}}]}},",
+            i + 1
+        ));
+    }
+    schemas.push_str(&format!("\"S{depth}\":{{\"type\":\"string\"}}"));
+    format!(
+        "{{\"openapi\":\"3.1.0\",\"info\":{{\"title\":\"T\",\"version\":\"1.0.0\"}},\
+         \"paths\":{{}},\"components\":{{\"schemas\":{{{schemas}}}}}}}"
+    )
+}
+
+#[test]
+fn e014_deep_ref_chain_is_rejected_not_overflowed() {
+    // Regression for issue #32: a `$ref` chain far deeper than the lowering depth cap must be
+    // rejected with a diagnostic (E014) rather than recursing until the stack overflows and the
+    // process aborts. `deep_component_chain` builds a chain whose lowering depth exceeds
+    // `MAX_SCHEMA_DEPTH` (128); the pre-fix generator crashed on it.
+    let spec = deep_component_chain(400);
+    let report = generate(&spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::SchemaNestingTooDeep),
+        "expected E014 SchemaNestingTooDeep; got {report:#?}"
+    );
+
+    // check/generate parity: the depth guard lives in lowering, which `check` runs identically.
+    let checked = check(&spec);
+    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        has_code(&checked, Code::SchemaNestingTooDeep),
+        "{checked:#?}"
+    );
+}
+
+#[test]
+fn moderate_ref_chain_below_the_cap_still_lowers() {
+    // The guard must not reject legitimately-nested specs: a chain well under `MAX_SCHEMA_DEPTH`
+    // lowers cleanly. This pins the cap as a safety backstop, not a routine rejection.
+    let spec = deep_component_chain(32);
+    let report = generate(&spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::SchemaNestingTooDeep),
+        "a 32-deep chain must lower without E014: {report:#?}"
+    );
+}

@@ -18,6 +18,7 @@ the library API.
 | `E011` | Error | invalid input document |
 | `E012` | Error | unknown security scheme |
 | `E013` | Error | irreconcilable `allOf` composition |
+| `E014` | Error | schema nesting is too deep to lower |
 | `E019` | Error | invalid omit rule |
 | `E020` | Error | omit profile created an invalid document |
 | `E021` | Error | vendored remote `$ref` drifted from lock |

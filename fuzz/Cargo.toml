@@ -1,0 +1,34 @@
+[package]
+name = "spargen-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# This crate is intentionally EXCLUDED from the root workspace (see the root `Cargo.toml`
+# `[workspace] exclude`). It builds only under `cargo +nightly fuzz`, which supplies the libFuzzer
+# sysroot; it never participates in `cargo build --workspace`, `mise run check/lint/test`, or
+# `mise run deny`, so a contributor without cargo-fuzz installed is completely unaffected by it.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "3"
+camino = "1"
+# The generator under test, with default features so the whole frontend (and CLI-gated remote-fetch)
+# is present. Only `check`/`generate` — the no-network entry points — are driven.
+spargen = { path = "../spargen" }
+
+[[bin]]
+name = "frontend"
+path = "fuzz_targets/frontend.rs"
+test = false
+doc = false
+bench = false
+
+# libFuzzer targets are built in release with debug assertions kept on, so overflow/index panics the
+# fuzzer is meant to catch still fire.
+[profile.release]
+debug = 1
+debug-assertions = true
+overflow-checks = true

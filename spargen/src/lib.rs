@@ -164,21 +164,56 @@ pub struct Report {
 /// println!("cargo:warning=spargen outcome: {:?}", report.outcome);
 /// ```
 pub fn generate(config: &Config) -> Report {
-    if config.carve {
-        run_carve(config, PipelineMode::Generate)
-    } else {
-        run_pipeline(config, PipelineMode::Generate)
-    }
+    run_on_frontend_stack(|| {
+        if config.carve {
+            run_carve(config, PipelineMode::Generate)
+        } else {
+            run_pipeline(config, PipelineMode::Generate)
+        }
+    })
 }
 
 /// Run the support-audit only, without codegen (`spargen check`) — a CI contract gate between spec
 /// producers and client consumers.
 pub fn check(config: &Config) -> Report {
-    if config.carve {
-        run_carve(config, PipelineMode::Check)
-    } else {
-        run_pipeline(config, PipelineMode::Check)
-    }
+    run_on_frontend_stack(|| {
+        if config.carve {
+            run_carve(config, PipelineMode::Check)
+        } else {
+            run_pipeline(config, PipelineMode::Check)
+        }
+    })
+}
+
+/// The stack size for the dedicated frontend worker thread. Parsing, deserialization, meta-schema
+/// validation, and lowering are all recursive over the (possibly deeply nested) document. Lowering
+/// caps its own recursion at a fixed depth (`oas31::MAX_SCHEMA_DEPTH`) and the parser bounds nesting
+/// too, so the peak stack is bounded — but only *this* thread guarantees it has room for that bound,
+/// no matter how small the caller's own stack is. A build.rs, a CLI, a proptest worker, or a
+/// libFuzzer target all inherit the same guarantee: no spec — however deep or adversarial — can
+/// overflow the stack, because the recursive work always runs here.
+const FRONTEND_STACK: usize = 64 * 1024 * 1024;
+
+/// Run `f` (the whole recursive frontend/pipeline) on a dedicated thread with a large, fixed stack,
+/// decoupling spargen's recursion budget from the caller's stack size. This is the mechanism behind
+/// the no-overflow invariant: combined with the lowering depth cap, it makes stack exhaustion on any
+/// input impossible for every entry point. A panic inside the worker is propagated to the caller
+/// unchanged (so genuine bugs still surface). Thread creation is not input-driven; the only way it
+/// fails is OS resource exhaustion, which is outside the "no input crashes the generator" contract.
+fn run_on_frontend_stack<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("spargen-frontend".to_owned())
+            .stack_size(FRONTEND_STACK)
+            .spawn_scoped(scope, f)
+            .expect("spawn spargen frontend worker thread")
+            .join()
+            .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+    })
 }
 
 /// The result of a [`diff`] run: the semver-impact report when both specs lowered, plus each
@@ -206,6 +241,10 @@ pub struct DiffOutcome {
 /// and reports every difference with its impact. A pure analysis step — it never writes output nor
 /// touches the runtime. Deterministic: the same pair of specs yields a byte-identical report.
 pub fn diff(old: &Config, new: &Config) -> DiffOutcome {
+    run_on_frontend_stack(|| diff_inner(old, new))
+}
+
+fn diff_inner(old: &Config, new: &Config) -> DiffOutcome {
     let mut old_diags = diag::Diagnostics::new(old.batch_cap);
     let mut new_diags = diag::Diagnostics::new(new.batch_cap);
     let old_lowered = lower_frontend(old, &mut old_diags);
