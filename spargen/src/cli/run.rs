@@ -2,6 +2,7 @@ use std::process::ExitCode;
 
 use crate::{check, explain, generate, Config, Outcome, OutputTarget};
 
+use super::config::{self, CliOverrides, ConfigError, OmitFlags, Settings};
 use super::{Cli, Command, ExitStatus, Format};
 
 /// Execute a parsed CLI invocation and return the process exit code.
@@ -13,7 +14,26 @@ use super::{Cli, Command, ExitStatus, Format};
 pub fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Generate(args) => {
-            let output = if args.as_crate {
+            let overrides = CliOverrides {
+                // `--no-uuid`/`--no-time`/`--as-crate` are presence flags: set only when given, so
+                // they override the config file, and stay `None` (config/default wins) otherwise.
+                uuid: args.no_uuid.then_some(false),
+                time: args.no_time.then_some(false),
+                as_crate: args.as_crate.then_some(true),
+            };
+            let flags = OmitFlags {
+                paths: args.omit_path,
+                operations: args.omit_operation,
+                components: args.omit_component,
+                pointers: args.omit_pointer,
+            };
+            let settings =
+                match config::resolve(&args.spec, args.config.as_deref(), &overrides, &flags) {
+                    Ok(settings) => settings,
+                    Err(error) => return config_error(error),
+                };
+
+            let output = if settings.as_crate {
                 let name = args
                     .out
                     .file_name()
@@ -27,15 +47,31 @@ pub fn run(cli: Cli) -> ExitCode {
                 OutputTarget::Module(args.out.clone())
             };
             let mut config = Config::new(args.spec, output);
-            config.features.uuid = !args.no_uuid;
-            config.features.time = !args.no_time;
+            apply_settings(&mut config, settings);
             config.check_only = args.check;
             let report = generate(&config);
             render_report(&report, args.format);
             status_for_report(&report).into()
         }
         Command::Check(args) => {
-            let config = Config::new(args.spec, OutputTarget::Module("__spargen_check.rs".into()));
+            let flags = OmitFlags {
+                paths: args.omit_path,
+                operations: args.omit_operation,
+                components: args.omit_component,
+                pointers: args.omit_pointer,
+            };
+            let settings = match config::resolve(
+                &args.spec,
+                args.config.as_deref(),
+                &CliOverrides::default(),
+                &flags,
+            ) {
+                Ok(settings) => settings,
+                Err(error) => return config_error(error),
+            };
+            let mut config =
+                Config::new(args.spec, OutputTarget::Module("__spargen_check.rs".into()));
+            apply_settings(&mut config, settings);
             let report = check(&config);
             render_report(&report, args.format);
             status_for_report(&report).into()
@@ -114,6 +150,22 @@ pub fn run(cli: Cli) -> ExitCode {
             }
         },
     }
+}
+
+/// Fold resolved [`Settings`] into the library [`Config`]. The `Config` API itself is unchanged;
+/// this is the CLI's config-file + omit-flag plumbing.
+fn apply_settings(config: &mut Config, settings: Settings) {
+    config.features.uuid = settings.uuid;
+    config.features.time = settings.time;
+    config.error_body_cap = settings.error_body_cap;
+    config.batch_cap = settings.batch_cap;
+    config.omit = settings.omit;
+}
+
+/// Render a config/flag error to stderr and exit with a usage status — never a panic.
+fn config_error(error: ConfigError) -> ExitCode {
+    eprintln!("error: {error}");
+    ExitStatus::Usage.into()
 }
 
 fn status_for_report(report: &crate::Report) -> ExitStatus {

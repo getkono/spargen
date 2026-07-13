@@ -47,6 +47,21 @@ pub struct GenerateArgs {
     /// Disable the `format: date-time`/`date` mappings (fall back to `String`).
     #[arg(long)]
     pub no_time: bool,
+    /// Path to a `spargen.toml` config file. Defaults to `spargen.toml` beside the spec, if present.
+    #[arg(long)]
+    pub config: Option<Utf8PathBuf>,
+    /// Omit a path item and every operation under it (repeatable), e.g. `--omit-path /pets/{id}`.
+    #[arg(long = "omit-path", value_name = "PATH")]
+    pub omit_path: Vec<String>,
+    /// Omit one operation (repeatable), e.g. `--omit-operation "get /pets"`.
+    #[arg(long = "omit-operation", value_name = "METHOD /path")]
+    pub omit_operation: Vec<String>,
+    /// Omit a named component (repeatable), e.g. `--omit-component "schema:LegacyPet"`.
+    #[arg(long = "omit-component", value_name = "kind:name")]
+    pub omit_component: Vec<String>,
+    /// Omit an RFC 6901 pointer (repeatable), e.g. `--omit-pointer "[file#]/pointer"`.
+    #[arg(long = "omit-pointer", value_name = "[file#]/pointer")]
+    pub omit_pointer: Vec<String>,
     /// Output format for diagnostics.
     #[arg(long, value_enum, default_value_t = Format::Human)]
     pub format: Format,
@@ -57,6 +72,21 @@ pub struct GenerateArgs {
 pub struct CheckArgs {
     /// Path to the root OpenAPI document.
     pub spec: Utf8PathBuf,
+    /// Path to a `spargen.toml` config file. Defaults to `spargen.toml` beside the spec, if present.
+    #[arg(long)]
+    pub config: Option<Utf8PathBuf>,
+    /// Omit a path item and every operation under it (repeatable), e.g. `--omit-path /pets/{id}`.
+    #[arg(long = "omit-path", value_name = "PATH")]
+    pub omit_path: Vec<String>,
+    /// Omit one operation (repeatable), e.g. `--omit-operation "get /pets"`.
+    #[arg(long = "omit-operation", value_name = "METHOD /path")]
+    pub omit_operation: Vec<String>,
+    /// Omit a named component (repeatable), e.g. `--omit-component "schema:LegacyPet"`.
+    #[arg(long = "omit-component", value_name = "kind:name")]
+    pub omit_component: Vec<String>,
+    /// Omit an RFC 6901 pointer (repeatable), e.g. `--omit-pointer "[file#]/pointer"`.
+    #[arg(long = "omit-pointer", value_name = "[file#]/pointer")]
+    pub omit_pointer: Vec<String>,
     /// Output format for the audit.
     #[arg(long, value_enum, default_value_t = Format::Human)]
     pub format: Format,
