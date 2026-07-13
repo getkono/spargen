@@ -28,6 +28,7 @@ mod error;
 mod paginate;
 mod response;
 mod stream;
+mod transport;
 // The XML codec pulls in the optional `quick-xml` dependency, so it is compiled only under the
 // `xml` feature; the default runtime dependency set (reqwest/serde/serde_json/bytes/secrecy) stays
 // unchanged. A generated client embeds this module only when its spec uses an XML body.
@@ -47,5 +48,6 @@ pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, 
 pub use paginate::{next_link, LinkPaginator};
 pub use response::ResponseValue;
 pub use stream::{EventStream, Framing};
+pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
 #[cfg(feature = "xml")]
 pub use xml::{classify_error_xml, decode_success_xml, to_xml};

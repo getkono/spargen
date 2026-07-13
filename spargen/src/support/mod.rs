@@ -53,6 +53,10 @@ pub fn runtime_files() -> &'static [SupportFile] {
             name: "stream.rs",
             contents: include_str!("runtime/stream.rs"),
         },
+        SupportFile {
+            name: "transport.rs",
+            contents: include_str!("runtime/transport.rs"),
+        },
     ];
     FILES
 }

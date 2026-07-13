@@ -137,13 +137,16 @@ fn credential_mismatch(scheme: &str, kind: &str) -> Error<Infallible> {
     ))
 }
 
-/// Send a prepared request, mapping transport/timeout/protocol/redirect failures into the taxonomy.
-/// Non-generic.
+/// Send a prepared request through the core's transport [`crate::HttpBackend`], mapping
+/// transport/timeout/protocol/redirect failures into the taxonomy. The backend reports failures as
+/// a [`crate::TransportError`] wrapping the originating `reqwest::Error`; that error is run back
+/// through [`Error::from_reqwest`] here, so classification is identical to executing directly on the
+/// reqwest client. Non-generic.
 pub async fn send(core: &ClientCore, request: Request) -> Result<Response, Error<Infallible>> {
-    core.http()
+    core.backend()
         .execute(request)
         .await
-        .map_err(Error::from_reqwest)
+        .map_err(|error| Error::from_reqwest(error.into_source()))
 }
 
 /// Decode a success response body into `T`, wrapping it with status and headers. Monomorphized once

@@ -337,6 +337,39 @@ fn generated_support_module_exposes_link_paginator() {
         "https://api.example.com/items?page=2"
     );
 }
+
+#[test]
+fn custom_http_backend_plugs_into_non_generic_client() {
+    // Issue #11: the transport seam is re-exported at the crate root
+    // (`basic_client::HttpBackend` / `ExecuteFuture` / `ReqwestBackend`), so a consumer can
+    // implement their own transport and plug it via `Client::with_backend` WITHOUT `Client`
+    // becoming generic. A trivial backend compiles (under clippy -D warnings) and constructs a
+    // client. This test only exercises construction, so the transport is never polled — the runtime
+    // crate's own tests prove that dispatch actually routes through the installed backend.
+    #[derive(Debug)]
+    struct TestBackend;
+    impl basic_client::HttpBackend for TestBackend {
+        fn execute(&self, _request: reqwest::Request) -> basic_client::ExecuteFuture<'_> {
+            Box::pin(async { unreachable!("transport is never exercised in this construction test") })
+        }
+    }
+
+    let backend: std::sync::Arc<dyn basic_client::HttpBackend> = std::sync::Arc::new(TestBackend);
+    let _client = basic_client::Client::with_backend(backend, "https://api.example.com").unwrap();
+
+    // Back-compat: the pre-existing `new` / `with_client` constructors still work and install the
+    // default reqwest-backed transport.
+    let _default = basic_client::Client::new("https://api.example.com").unwrap();
+    let _byo = basic_client::Client::with_client(
+        reqwest::Client::new(),
+        "https://api.example.com",
+    )
+    .unwrap();
+
+    // The default backend type is nameable and usable as an `HttpBackend` too.
+    let _reqwest_backend: std::sync::Arc<dyn basic_client::HttpBackend> =
+        std::sync::Arc::new(basic_client::ReqwestBackend::new(reqwest::Client::new()));
+}
 "##,
     )
     .unwrap();

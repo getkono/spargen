@@ -193,6 +193,22 @@ pub struct TransportError {
     source: reqwest::Error,
 }
 
+impl TransportError {
+    /// Wrap a `reqwest::Error` as a transport failure. [`crate::HttpBackend`] implementations, whose
+    /// currency is reqwest's own types, report failures through this so [`crate::send`] can
+    /// reclassify them via [`Error::from_reqwest`] — keeping timeout/redirect/protocol
+    /// classification identical to executing directly on a `reqwest::Client`.
+    pub fn new(source: reqwest::Error) -> Self {
+        Self { source }
+    }
+
+    /// Consume the transport error, yielding the underlying `reqwest::Error` so [`crate::send`] can
+    /// run it back through the full taxonomy classifier.
+    pub(crate) fn into_source(self) -> reqwest::Error {
+        self.source
+    }
+}
+
 /// Which timeout elapsed (taxonomy #3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeoutKind {

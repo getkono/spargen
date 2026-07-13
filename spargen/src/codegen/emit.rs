@@ -79,6 +79,18 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
                 Ok(Self { core })
             }
 
+            /// Build a client over a caller-supplied transport backend — the injection point for
+            /// retry, middleware, or a non-reqwest transport. Requests are still built on a default
+            /// `reqwest::Client`; only the execute step goes through the backend.
+            pub fn with_backend(
+                backend: std::sync::Arc<dyn support::HttpBackend>,
+                base_url: &str,
+            ) -> Result<Self, support::Error<std::convert::Infallible>> {
+                let mut core = support::ClientCore::with_backend(backend, base_url)?;
+                core.config_mut().max_error_body = #error_body_cap;
+                Ok(Self { core })
+            }
+
             pub fn core(&self) -> &support::ClientCore {
                 &self.core
             }
@@ -947,6 +959,7 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;
             pub use stream::{EventStream, Framing};
+            pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
             #xml_reexport
         }
     }
