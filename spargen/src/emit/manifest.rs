@@ -3,9 +3,13 @@ use super::{FeatureSet, PackageMeta};
 /// Synthesize the `Cargo.toml` for a standalone generated crate.
 ///
 /// Runtime dependencies are exactly the near-universal set — `reqwest` (no default features),
-/// `serde`, `serde_json`, `bytes` — plus the feature-gated `uuid`/`time` mappings. No spargen crate
-/// ever appears, so the freestanding-output gate holds. The eventual
+/// `serde`, `serde_json`, `bytes`, `secrecy` — plus the feature-gated `uuid`/`time` mappings. No
+/// spargen crate ever appears, so the freestanding-output gate holds. The eventual
 /// implementation builds this with `toml_edit` for stable formatting.
+///
+/// The `blocking` feature is always DECLARED (it is user-opt-in, not spec-driven) and wires up an
+/// OPTIONAL `tokio` (`rt` only) that is pulled in solely when the consumer enables the feature — so
+/// a default build carries no tokio direct dependency and no `BlockingClient`.
 pub fn synth_cargo_toml(package: &PackageMeta, features: &FeatureSet) -> String {
     let default_features = match (features.uuid, features.time) {
         (true, true) => r#""uuid", "time""#,
@@ -44,6 +48,7 @@ license = "MIT OR Apache-2.0"
 default = [{default_features}]
 uuid = ["dep:uuid"]
 time = ["dep:time"]
+blocking = ["dep:tokio"]
 
 [dependencies]
 {bytes_dep}
@@ -51,6 +56,7 @@ reqwest = {{ version = "0.12", default-features = false, features = [{reqwest_fe
 secrecy = "0.10"
 serde = {{ version = "1", features = ["derive"] }}
 serde_json = "1"{xml_dep}
+tokio = {{ version = "1", features = ["rt"], optional = true }}
 uuid = {{ version = "1", features = ["serde"], optional = true }}
 time = {{ version = "0.3", features = ["serde", "formatting", "parsing"], optional = true }}
 "#,

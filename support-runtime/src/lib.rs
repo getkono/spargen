@@ -22,6 +22,13 @@
 // large and is passed by value rather than boxed.
 #![allow(clippy::result_large_err)]
 mod auth;
+// The blocking facade owns a current-thread tokio runtime, so it pulls in the optional `tokio`
+// dependency and is compiled only under the `blocking` feature. The default runtime dependency set
+// (reqwest/serde/serde_json/bytes/secrecy) stays unchanged; a generated client embeds this module
+// unconditionally but gates it on the same `blocking` feature, so nothing tokio-related is
+// referenced unless the consumer opts in.
+#[cfg(feature = "blocking")]
+mod blocking;
 mod client;
 mod dispatch;
 mod error;
@@ -41,6 +48,8 @@ pub use auth::{
     AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture,
     TokenProvider,
 };
+#[cfg(feature = "blocking")]
+pub use blocking::BlockingRuntime;
 pub use client::{ClientConfig, ClientCore};
 pub use dispatch::{
     attach_auth, build_url, classify_error, decode_success, read_error_body, read_success_body,

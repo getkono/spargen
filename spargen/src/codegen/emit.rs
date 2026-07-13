@@ -125,10 +125,6 @@ pub(crate) fn emit_operation(
         .operations
         .get(&operation.id)
         .expect("operation name allocated");
-    let params_ident = names
-        .params_structs
-        .get(&operation.id)
-        .expect("params name allocated");
     let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
     let reqwest_method = reqwest_method(operation.method);
     let success_ty = success_type(operation, names, options);
@@ -136,37 +132,12 @@ pub(crate) fn emit_operation(
     let docs = doc_tokens(&operation.docs);
     // Required parameters are positional method arguments with no attribute slot of their own, so a
     // required parameter's `default` is surfaced in the method rustdoc instead.
-    let param_default_docs = operation
-        .params
-        .iter()
-        .filter(|param| param.required)
-        .filter_map(|param| {
-            param.default_display.as_ref().map(|default| {
-                let note = format!("Parameter `{}` default: `{default}`.", param.name);
-                quote! { #[doc = #note] }
-            })
-        })
-        .collect::<Vec<_>>();
+    let param_default_docs = param_default_docs_tokens(operation);
     let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
 
-    let required_params = operation
-        .params
-        .iter()
-        .filter(|param| param.required)
-        .map(|param| {
-            let ident = param_ident(param, crate::name::IdentRole::Param);
-            let ty = ty_tokens(param.ty, names, options, true);
-            quote! { #ident: #ty }
-        })
-        .collect::<Vec<_>>();
-    let has_optional = operation.params.iter().any(|param| !param.required);
-    let params_arg = has_optional.then(|| quote! { params: Option<#params_ident> });
-    let body_arg = operation.request_body.as_ref().and_then(|body| {
-        body.ty.map(|ty| {
-            let ty = ty_tokens(ty, names, options, true);
-            quote! { body: &#ty }
-        })
-    });
+    // The typed argument list (required params, the optional-params struct, the body) is shared
+    // verbatim with the blocking shim so the two signatures can never drift.
+    let (args, _arg_names) = operation_args(operation, names, options);
 
     let path_init = operation.path.raw.clone();
     let path_replacements = operation
@@ -520,28 +491,19 @@ pub(crate) fn emit_operation(
         .responses
         .stream_success()
         .map(|(framing, _)| framing);
-    let (return_ok_ty, success_decode) = match stream_framing {
+    let success_decode = match stream_framing {
         Some(framing) => {
             let framing_tokens = match framing {
                 crate::ir::Framing::Sse => quote! { support::Framing::Sse },
                 crate::ir::Framing::Ndjson => quote! { support::Framing::Ndjson },
             };
-            (
-                quote! { support::EventStream<#success_ty> },
-                quote! { Ok(support::EventStream::new(response, #framing_tokens)) },
-            )
+            quote! { Ok(support::EventStream::new(response, #framing_tokens)) }
         }
-        None => (
-            quote! { support::ResponseValue<#success_ty> },
-            success_decode,
-        ),
+        None => success_decode,
     };
+    // The return type is shared with the blocking shim so both surfaces stay identical.
+    let (return_ok_ty, _) = operation_return_ty(operation, names, options);
 
-    let args = required_params
-        .into_iter()
-        .chain(params_arg)
-        .chain(body_arg)
-        .collect::<Vec<_>>();
     quote! {
         #docs
         #(#param_default_docs)*
@@ -576,6 +538,204 @@ pub(crate) fn emit_operation(
             } else {
                 #error_branch
             }
+        }
+    }
+}
+
+/// The typed method arguments and their bare forwarding names for an operation. Shared by
+/// [`emit_operation`] (the async method) and [`emit_blocking_operation`] (its synchronous shim) so
+/// the two signatures are constructed from one source and can never drift. The first vector holds
+/// `name: Type` argument declarations; the second holds just the `name`s, in the same order, for the
+/// shim's `self.inner.<op>(<names>)` forwarding call. Body args are already `&T`, so the forwarding
+/// name (`body`) passes the reference straight through.
+fn operation_args(
+    operation: &Operation,
+    names: &Names,
+    options: &CodegenOptions,
+) -> (Vec<TokenStream>, Vec<TokenStream>) {
+    let params_ident = names
+        .params_structs
+        .get(&operation.id)
+        .expect("params name allocated");
+    let mut args = Vec::new();
+    let mut forwards = Vec::new();
+    for param in operation.params.iter().filter(|param| param.required) {
+        let ident = param_ident(param, crate::name::IdentRole::Param);
+        let ty = ty_tokens(param.ty, names, options, true);
+        args.push(quote! { #ident: #ty });
+        forwards.push(quote! { #ident });
+    }
+    if operation.params.iter().any(|param| !param.required) {
+        args.push(quote! { params: Option<#params_ident> });
+        forwards.push(quote! { params });
+    }
+    if let Some(ty) = operation
+        .request_body
+        .as_ref()
+        .and_then(|body| body.ty.map(|ty| ty_tokens(ty, names, options, true)))
+    {
+        args.push(quote! { body: &#ty });
+        forwards.push(quote! { body });
+    }
+    (args, forwards)
+}
+
+/// The `Ok`/`Err` types of an operation's `Result` return: `(return_ok_ty, error_ty)`. A streaming
+/// success yields `EventStream<T>`, every other success `ResponseValue<T>`. Shared with the blocking
+/// shim so the async and sync return types stay identical.
+fn operation_return_ty(
+    operation: &Operation,
+    names: &Names,
+    options: &CodegenOptions,
+) -> (TokenStream, TokenStream) {
+    let method_ident = names
+        .operations
+        .get(&operation.id)
+        .expect("operation name allocated");
+    let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
+    let success_ty = success_type(operation, names, options);
+    let return_ok_ty = match operation.responses.stream_success() {
+        Some(_) => quote! { support::EventStream<#success_ty> },
+        None => quote! { support::ResponseValue<#success_ty> },
+    };
+    (return_ok_ty, quote! { #error_ident })
+}
+
+/// The rustdoc `#[doc = …]` notes carrying required parameters' spec `default`s. Required params are
+/// positional arguments with no attribute slot of their own, so their defaults are documented on the
+/// method. Shared verbatim between the async method and its blocking shim.
+fn param_default_docs_tokens(operation: &Operation) -> Vec<TokenStream> {
+    operation
+        .params
+        .iter()
+        .filter(|param| param.required)
+        .filter_map(|param| {
+            param.default_display.as_ref().map(|default| {
+                let note = format!("Parameter `{}` default: `{default}`.", param.name);
+                quote! { #[doc = #note] }
+            })
+        })
+        .collect()
+}
+
+/// Emit the `BlockingClient`: a synchronous facade, gated on the generated crate's `blocking`
+/// feature, that owns the async [`Client`] plus a current-thread tokio runtime and drives each async
+/// operation to completion with `block_on`. It reuses the whole async dispatch — every method is a
+/// thin shim — so there is zero logic duplication. Constructors mirror the async client's.
+///
+/// A `BlockingClient` must not be built or used from inside another async runtime (tokio's
+/// `block_on` panics when nested); the constructor building its own current-thread runtime is the
+/// standard shape for a non-async caller.
+pub(crate) fn emit_blocking_client(
+    api: &Api,
+    names: &Names,
+    options: &CodegenOptions,
+) -> TokenStream {
+    let methods = api
+        .operations
+        .iter()
+        .map(|operation| emit_blocking_operation(operation, names, options));
+    let doc = "A synchronous client: owns the async `Client` plus a current-thread tokio runtime \
+        and `block_on`s each operation. Enable the crate's `blocking` feature to use it.\n\n\
+        Must NOT be constructed or called from inside another async runtime — tokio's `block_on` \
+        panics when nested. Build one on a plain thread (e.g. `std::thread` or \
+        `tokio::task::spawn_blocking`).";
+    quote! {
+        #[cfg(feature = "blocking")]
+        #[doc = #doc]
+        #[allow(dead_code)]
+        pub struct BlockingClient {
+            inner: Client,
+            runtime: support::BlockingRuntime,
+        }
+
+        #[cfg(feature = "blocking")]
+        #[forbid(unsafe_code)]
+        #[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
+        impl BlockingClient {
+            /// Build a blocking client over a fresh default `reqwest::Client`.
+            pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
+                let inner = Client::new(base_url)?;
+                let runtime = support::BlockingRuntime::new()
+                    .map_err(support::Error::request_construction)?;
+                Ok(Self { inner, runtime })
+            }
+
+            /// Build a blocking client over a caller-supplied `reqwest::Client`.
+            pub fn with_client(
+                client: reqwest::Client,
+                base_url: &str,
+            ) -> Result<Self, support::Error<std::convert::Infallible>> {
+                let inner = Client::with_client(client, base_url)?;
+                let runtime = support::BlockingRuntime::new()
+                    .map_err(support::Error::request_construction)?;
+                Ok(Self { inner, runtime })
+            }
+
+            /// Build a blocking client over a caller-supplied transport backend.
+            pub fn with_backend(
+                backend: std::sync::Arc<dyn support::HttpBackend>,
+                base_url: &str,
+            ) -> Result<Self, support::Error<std::convert::Infallible>> {
+                let inner = Client::with_backend(backend, base_url)?;
+                let runtime = support::BlockingRuntime::new()
+                    .map_err(support::Error::request_construction)?;
+                Ok(Self { inner, runtime })
+            }
+
+            /// Borrow the wrapped async client.
+            pub fn inner(&self) -> &Client {
+                &self.inner
+            }
+
+            /// Borrow the client's shared core (base URL, credentials, transport).
+            pub fn core(&self) -> &support::ClientCore {
+                self.inner.core()
+            }
+
+            /// Register a credential for a named security scheme (mirrors the async client).
+            #[must_use]
+            pub fn with_credential(
+                mut self,
+                scheme: &str,
+                credential: support::Credential,
+            ) -> Self {
+                self.inner = self.inner.with_credential(scheme, credential);
+                self
+            }
+
+            #(#methods)*
+        }
+    }
+}
+
+/// Emit one blocking operation method: the async method's signature minus `async`, whose body drives
+/// the async method to completion on the owned runtime. Same docs, deprecation, argument list, and
+/// return types as the async method (all built from the shared signature helpers).
+fn emit_blocking_operation(
+    operation: &Operation,
+    names: &Names,
+    options: &CodegenOptions,
+) -> TokenStream {
+    let method_ident = names
+        .operations
+        .get(&operation.id)
+        .expect("operation name allocated");
+    let docs = doc_tokens(&operation.docs);
+    let param_default_docs = param_default_docs_tokens(operation);
+    let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
+    let (args, forwards) = operation_args(operation, names, options);
+    let (return_ok_ty, error_ty) = operation_return_ty(operation, names, options);
+    quote! {
+        #docs
+        #(#param_default_docs)*
+        #deprecated
+        #[inline]
+        pub fn #method_ident(
+            &self,
+            #(#args),*
+        ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
+            self.runtime.block_on(self.inner.#method_ident(#(#forwards),*))
         }
     }
 }
@@ -943,6 +1103,19 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
     let xml_reexport = uses_xml.then(|| {
         quote! { pub use xml::{classify_error_xml, decode_success_xml, to_xml}; }
     });
+    // The blocking facade (`BlockingRuntime`) is embedded unconditionally but gated on the
+    // `blocking` feature at the module level: the tokio-dependent code compiles only when a consumer
+    // opts in, so a default build carries no tokio reference. The generated manifest always declares
+    // the (user-facing) `blocking` feature wired to an optional tokio dependency.
+    let blocking_inner = embed(&crate::support::blocking_runtime_file());
+    let blocking_module = quote! {
+        #[cfg(feature = "blocking")]
+        #blocking_inner
+    };
+    let blocking_reexport = quote! {
+        #[cfg(feature = "blocking")]
+        pub use blocking::BlockingRuntime;
+    };
     quote! {
         /// The freestanding runtime embedded verbatim into this output; no spargen crate exists
         /// at runtime.
@@ -951,6 +1124,7 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
         mod support {
             #(#modules)*
             #xml_module
+            #blocking_module
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
@@ -963,6 +1137,7 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
             pub use stream::{EventStream, Framing};
             pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
             #xml_reexport
+            #blocking_reexport
         }
     }
 }

@@ -73,6 +73,9 @@ pub fn generate(
     let support = emit::emit_support(api.uses_xml());
     let models = emit::emit_models(api, names, options);
     let client = emit::emit_client(api, names, options);
+    // The synchronous facade is always emitted, gated on the user-opt-in `blocking` feature; a
+    // default build compiles it out entirely (no tokio reference, no `BlockingClient`).
+    let blocking = emit::emit_blocking_client(api, names, options);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
     // output unusable via `include!` from OUT_DIR, the build.rs consumption path.
     let tokens = quote! {
@@ -87,6 +90,7 @@ pub fn generate(
         #support
         #models
         #client
+        #blocking
     };
     let contents = format_tokens(tokens).unwrap_or_else(|error| {
         format!(

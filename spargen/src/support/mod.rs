@@ -79,3 +79,15 @@ pub fn xml_runtime_file() -> SupportFile {
         contents: include_str!("runtime/xml.rs"),
     }
 }
+
+/// The blocking-facade runtime source (`BlockingRuntime`), embedded into every crate output but
+/// gated behind the `blocking` feature at the module level, so the tokio-dependent code is compiled
+/// only when a consumer opts in. Kept out of [`runtime_files`] (which is embedded unconditionally
+/// with no cfg) because it must carry the `#[cfg(feature = "blocking")]` gate; its bytes ship inside
+/// the published crate through the `runtime/blocking.rs` symlink.
+pub fn blocking_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "blocking.rs",
+        contents: include_str!("runtime/blocking.rs"),
+    }
+}

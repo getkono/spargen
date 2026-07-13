@@ -38,6 +38,85 @@ fn generates_standalone_crate_for_basic_oas31_api() {
         .unwrap();
     assert!(status.success());
 
+    // Issue #19: the synchronous `BlockingClient` is USER-opt-in, so the generated manifest always
+    // DECLARES a `blocking` feature wired to an OPTIONAL tokio (`rt` only) — but the default feature
+    // set must not enable it, keeping the default dependency set unchanged (no tokio direct dep).
+    let manifest = std::fs::read_to_string(out.join("Cargo.toml")).unwrap();
+    assert!(
+        manifest.contains(r#"blocking = ["dep:tokio"]"#),
+        "manifest must declare the blocking feature: {manifest}"
+    );
+    assert!(
+        manifest.contains(r#"tokio = { version = "1", features = ["rt"], optional = true }"#),
+        "tokio must be an optional dependency: {manifest}"
+    );
+    assert!(
+        !manifest.contains(r#"default = ["uuid", "time", "blocking"]"#)
+            && manifest.contains(r#"default = ["uuid", "time"]"#),
+        "blocking must NOT be in the default feature set: {manifest}"
+    );
+    // The `BlockingClient` and every blocking method are emitted behind `#[cfg(feature = "blocking")]`
+    // so a default build compiles them out entirely — there is no `BlockingClient` without the opt-in.
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("pub struct BlockingClient"),
+        "BlockingClient must be emitted"
+    );
+    assert!(
+        generated.contains("#[cfg(feature = \"blocking\")]"),
+        "BlockingClient must be feature-gated"
+    );
+
+    // A real round-trip driven by a blocking method against a std-thread mock server (the generated
+    // crate is not inside an async runtime, so building a `BlockingClient` here is valid). Gated on
+    // the `blocking` feature so the default `cargo test` compiles it to nothing.
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/blocking.rs"),
+        r##"#![cfg(feature = "blocking")]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+// Prove the BlockingClient performs an actual HTTP round-trip: a blocking method drives the async
+// dispatch to completion on the owned current-thread runtime and returns the decoded, typed body.
+#[test]
+fn blocking_method_round_trips_against_a_mock() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 2048];
+        let _ = stream.read(&mut buf);
+        let body = r#"{"ok":"yes"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    });
+
+    let base = format!("http://{addr}");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    let response = client.get_multi().expect("blocking get_multi round-trips");
+    assert_eq!(response.status(), 200);
+    match response.into_inner() {
+        basic_client::GetMultiResponse::Status200(ok) => assert_eq!(ok.ok, "yes"),
+        other => panic!("expected Status200, got {other:?}"),
+    }
+
+    // The constructors mirror the async client and the inner client is reachable.
+    let _ = client.inner();
+    let _ = client.core();
+
+    server.join().unwrap();
+}
+"##,
+    )
+    .unwrap();
+
     // Prove the wired serde defaults actually deserialize: an absent optional field with a
     // representable scalar default fills in the default instead of `None`, while a required field
     // (default rustdoc-only) still comes from the payload.
@@ -468,6 +547,40 @@ fn middleware_backend_wraps_an_inner_backend() {
         .status()
         .unwrap();
     assert!(status.success());
+
+    // Issue #19: the same generated crate must also build and lint clean WITH the `blocking` feature,
+    // proving the `BlockingClient` type and its blocking methods compile under clippy -D warnings.
+    let status = Command::new("cargo")
+        .args(["build", "--features", "blocking"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "generated crate must build with --features blocking"
+    );
+
+    let status = Command::new("cargo")
+        .args(["clippy", "--features", "blocking", "--", "-D", "warnings"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "generated crate must pass clippy -D warnings with --features blocking"
+    );
+
+    // Drive the blocking round-trip test under the feature (it is `#![cfg(feature = "blocking")]`, so
+    // it only exists here). This exercises a real HTTP round-trip through a blocking method.
+    let status = Command::new("cargo")
+        .args(["test", "--features", "blocking", "--test", "blocking"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the BlockingClient round-trip must pass with --features blocking"
+    );
 }
 
 #[test]
