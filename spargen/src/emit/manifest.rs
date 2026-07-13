@@ -43,7 +43,7 @@ pub fn synth_cargo_toml(package: &PackageMeta, features: &FeatureSet) -> String 
     // `quick-xml` is pulled in only when an XML body is emitted — the embedded `support::xml` module
     // (serialize/decode) is conditional on the same flag, so a non-XML client carries no quick-xml.
     let xml_dep = if features.xml {
-        "\nquick-xml = { version = \"0.37\", features = [\"serialize\"] }"
+        "\nquick-xml = { version = \"0.41\", features = [\"serialize\"] }"
     } else {
         ""
     };
