@@ -38,6 +38,7 @@ toml = "0.8"
 notify-debouncer-mini = "0.4"
 proptest = "1.11"
 tempfile = "3.10"
+insta = "1.43"
 
 [profile.release]
 strip = true

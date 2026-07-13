@@ -1,0 +1,8 @@
+---
+source: spargen/tests/snapshot.rs
+expression: api_surface(&source)
+---
+operations (0):
+types (2):
+  BlockingClient
+  Client
