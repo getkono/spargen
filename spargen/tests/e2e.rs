@@ -418,6 +418,47 @@ fn retry_backend_wraps_an_inner_backend() {
     let backend: std::sync::Arc<dyn basic_client::HttpBackend> = std::sync::Arc::new(retry);
     let _client = basic_client::Client::with_backend(backend, "https://api.example.com").unwrap();
 }
+
+#[test]
+fn middleware_backend_wraps_an_inner_backend() {
+    // Issue #20: the interceptor middleware is re-exported at the crate root
+    // (`basic_client::Middleware` / `Next` / `MiddlewareBackend`). A consumer implements a trivial
+    // header-injecting middleware, layers it onto a `MiddlewareBackend`, and installs the whole
+    // chain via `Client::with_backend` — all without `Client` becoming generic. This construction
+    // test compiles under clippy -D warnings; the runtime crate's own tests prove the chain
+    // actually observes/modifies/short-circuits and composes in order.
+    #[derive(Debug)]
+    struct TrivialBackend;
+    impl basic_client::HttpBackend for TrivialBackend {
+        fn execute(&self, _request: reqwest::Request) -> basic_client::ExecuteFuture<'_> {
+            Box::pin(async { unreachable!("transport is never exercised in this construction test") })
+        }
+    }
+
+    // A middleware that inserts a header on the way in, then proceeds to the rest of the chain via
+    // `Next::run`. Modifying the request before `run` and returning `run`'s future directly is the
+    // simplest shape; the trait's `'a` ties the borrow of `self`, the `Next`, and the boxed future.
+    #[derive(Debug)]
+    struct InjectHeader;
+    impl basic_client::Middleware for InjectHeader {
+        fn handle<'a>(
+            &'a self,
+            mut request: reqwest::Request,
+            next: basic_client::Next<'a>,
+        ) -> basic_client::ExecuteFuture<'a> {
+            request.headers_mut().insert(
+                reqwest::header::HeaderName::from_static("x-generated-mw"),
+                reqwest::header::HeaderValue::from_static("on"),
+            );
+            next.run(request)
+        }
+    }
+
+    let inner: std::sync::Arc<dyn basic_client::HttpBackend> = std::sync::Arc::new(TrivialBackend);
+    let middleware = basic_client::MiddlewareBackend::new(inner).layer(std::sync::Arc::new(InjectHeader));
+    let backend: std::sync::Arc<dyn basic_client::HttpBackend> = std::sync::Arc::new(middleware);
+    let _client = basic_client::Client::with_backend(backend, "https://api.example.com").unwrap();
+}
 "##,
     )
     .unwrap();

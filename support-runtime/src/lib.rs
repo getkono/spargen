@@ -25,6 +25,7 @@ mod auth;
 mod client;
 mod dispatch;
 mod error;
+mod middleware;
 mod paginate;
 mod response;
 mod retry;
@@ -46,6 +47,7 @@ pub use dispatch::{
     send, unexpected_status, StatusSpec,
 };
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
+pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use paginate::{next_link, LinkPaginator};
 pub use response::ResponseValue;
 pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy};

@@ -956,6 +956,7 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
             pub use client::{ClientConfig, ClientCore};
             pub use dispatch::{attach_auth, build_url, classify_error, decode_success, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
+            pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;
             pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy};
