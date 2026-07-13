@@ -106,6 +106,19 @@ jobs:
           workspaces: examples/petstore
       - run: cargo run --manifest-path examples/petstore/Cargo.toml
 
+  docs:
+    name: Docs site (mdBook)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mdBook
+        run: cargo install mdbook --locked
+      # Fails the job on broken includes/links so doc-site breakage is caught. The built HTML
+      # (docs/book/book/) is git-ignored; only the book source is committed.
+      - run: mdbook build docs/book
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest

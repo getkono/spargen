@@ -101,6 +101,23 @@ exercise unsupported constructs and are expected to reject; the pinned [corpus](
 tracks exactly which, and the [compatibility omit mode](docs/compatibility.md) can carve
 unsupported segments out of a vendored spec without editing it.
 
+## Documentation
+
+The full documentation site is an [mdBook](https://rust-lang.github.io/mdBook/) under
+[`docs/book/`](docs/book) — an Introduction, Getting Started, and CLI/Runtime reference, wired
+together with the [support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
+[compatibility](docs/compatibility.md), [recipes](docs/recipes.md), [corpus](docs/corpus.md),
+[benchmarks](docs/benchmarks.md), and [testing](docs/testing.md) docs (included, not duplicated).
+Build it locally:
+
+```bash
+cargo install mdbook        # one-time
+mise run docs               # or: mdbook build docs/book
+```
+
+The rendered HTML lands in the git-ignored `docs/book/book/`; open `index.html` from there. CI
+builds the book on every push so doc-site breakage is caught.
+
 ## Prerequisites
 
 - [Rust](https://rustup.rs) (toolchain pinned by `rust-toolchain.toml`)
