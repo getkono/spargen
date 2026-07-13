@@ -708,7 +708,9 @@ fn client_doc_tokens(api: &Api) -> TokenStream {
     quote! { #[doc = #text] }
 }
 
-/// Emit an operation's optional-parameters `…Params` struct, deriving `Default`.
+/// Emit an operation's optional-parameters `…Params` struct (deriving `Default`, public fields)
+/// plus an `impl` of fluent `#[must_use]` consuming setters — one per optional param, named after
+/// its field — so callers can write `…Params::default().foo(x).bar(y)` instead of a struct literal.
 pub(crate) fn emit_params_struct(
     operation: &Operation,
     names: &Names,
@@ -718,48 +720,87 @@ pub(crate) fn emit_params_struct(
         .params_structs
         .get(&operation.id)
         .expect("params name allocated");
-    let fields = operation
+    let optional: Vec<&crate::ir::Parameter> = operation
         .params
         .iter()
         .filter(|param| !param.required)
-        .map(|param| {
-            let ident = format_ident!(
-                "{}",
-                crate::name::escape(&param.name, crate::name::IdentRole::Field)
-                    .as_str()
-                    .trim_start_matches("r#")
-            );
-            let wire = &param.name;
-            // Every struct param is optional, so the field is always an `Option`. `ty_tokens`
-            // already wraps a nullable param (`"null"` in its type array) in `Option`, so only wrap
-            // again when it did not — otherwise a nullable optional param becomes `Option<Option<T>>`
-            // and the query/header `value.to_string()` serialization would not compile
-            // (`Option<T>: !Display`). Absent and `null` both collapse to `None`.
-            let ty = if param.ty.nullable {
-                ty_tokens(param.ty, names, options, true)
-            } else {
-                let inner = ty_tokens(param.ty, names, options, true);
-                quote! { Option<#inner> }
-            };
-            let mut notes: Vec<String> = Vec::new();
-            if param.deprecated {
-                notes.push("Deprecated per the spec.".to_owned());
+        .collect();
+    // The setter method reuses the field ident verbatim (same escaping/keyword handling), so
+    // build it once per param.
+    let field_ident = |param: &crate::ir::Parameter| {
+        format_ident!(
+            "{}",
+            crate::name::escape(&param.name, crate::name::IdentRole::Field)
+                .as_str()
+                .trim_start_matches("r#")
+        )
+    };
+    let fields = optional.iter().map(|param| {
+        let ident = field_ident(param);
+        let wire = &param.name;
+        // Every struct param is optional, so the field is always an `Option`. `ty_tokens`
+        // already wraps a nullable param (`"null"` in its type array) in `Option`, so only wrap
+        // again when it did not — otherwise a nullable optional param becomes `Option<Option<T>>`
+        // and the query/header `value.to_string()` serialization would not compile
+        // (`Option<T>: !Display`). Absent and `null` both collapse to `None`.
+        let ty = if param.ty.nullable {
+            ty_tokens(param.ty, names, options, true)
+        } else {
+            let inner = ty_tokens(param.ty, names, options, true);
+            quote! { Option<#inner> }
+        };
+        let mut notes: Vec<String> = Vec::new();
+        if param.deprecated {
+            notes.push("Deprecated per the spec.".to_owned());
+        }
+        if let Some(default) = &param.default_display {
+            notes.push(format!("Default: `{default}`."));
+        }
+        let notes = notes.iter().map(|note| quote! { #[doc = #note] });
+        quote! {
+            #(#notes)*
+            #[serde(rename = #wire, skip_serializing_if = "Option::is_none")]
+            pub #ident: #ty,
+        }
+    });
+    // Fluent consuming setters, one per optional param, in field order. Each takes the field's
+    // inner `T` by value (never the `Option` wrapper) and stores `Some(T)`: a nullable optional
+    // param's field is `Option<T>` for the same reason an ordinary optional param's is, so both
+    // accept `T`. `T`-by-value (not `impl Into<T>`) keeps inference/coherence trivial for every
+    // generated field type.
+    let setters = optional.iter().map(|param| {
+        let ident = field_ident(param);
+        let inner = ty_tokens(
+            Ty {
+                nullable: false,
+                ..param.ty
+            },
+            names,
+            options,
+            true,
+        );
+        let doc = format!("Set the `{}` parameter.", param.name);
+        quote! {
+            #[doc = #doc]
+            #[must_use]
+            pub fn #ident(mut self, value: #inner) -> Self {
+                self.#ident = Some(value);
+                self
             }
-            if let Some(default) = &param.default_display {
-                notes.push(format!("Default: `{default}`."));
-            }
-            let notes = notes.iter().map(|note| quote! { #[doc = #note] });
-            quote! {
-                #(#notes)*
-                #[serde(rename = #wire, skip_serializing_if = "Option::is_none")]
-                pub #ident: #ty,
-            }
-        });
+        }
+    });
     quote! {
         #[allow(dead_code)]
         #[derive(Debug, Clone, Default, serde::Serialize)]
         pub struct #ident {
             #(#fields)*
+        }
+
+        // Setters named after fields can trip `wrong_self_convention` when a param is named
+        // `is_*`/`to_*`/etc.; a consuming builder setter is the intended shape, so allow it here.
+        #[allow(dead_code, clippy::wrong_self_convention)]
+        impl #ident {
+            #(#setters)*
         }
     }
 }

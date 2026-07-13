@@ -28,13 +28,14 @@ async fn main() {
         .unwrap()
         .with_credential("bearerAuth", Credential::Bearer(SecretString::from(TOKEN)));
 
-    // List with query + header parameters.
+    // List with query + header parameters, built via the fluent optional-param setters.
     let pets = client
-        .list_pets(Some(petstore::ListPetsParams {
-            limit: Some(10),
-            status: Some(types::Status::Available),
-            x_request_id: Some("example-1".to_owned()),
-        }))
+        .list_pets(Some(
+            petstore::ListPetsParams::default()
+                .limit(10)
+                .status(types::Status::Available)
+                .x_request_id("example-1".to_owned()),
+        ))
         .await
         .expect("list_pets");
     assert_eq!(pets.status(), 200);

@@ -288,6 +288,28 @@ fn json_only_schema_with_xml_metadata_keeps_original_json_names() {
     assert!(!back.contains("@id"), "{back}");
     assert!(!back.contains("ProductSku"), "{back}");
 }
+
+#[test]
+fn optional_params_construct_via_fluent_setters() {
+    // Issue #18: each optional param on a `…Params` struct gets a `#[must_use]` consuming setter
+    // named after its field, taking the field's inner `T` (never `Option<T>`) and storing `Some`.
+    // `getUser` has an ordinary optional query param (`page` → `Option<i64>`) and a NULLABLE optional
+    // one (`filter`, `type: [integer, "null"]` → `Option<i64>`); the setter for the nullable param
+    // must still take the bare `i64`. Building via `default().setter(x)` must compile and set fields.
+    let params = basic_client::GetUserParams::default()
+        .page(2)
+        .filter(7);
+    assert_eq!(params.page, Some(2));
+    assert_eq!(params.filter, Some(7));
+
+    // Back-compat: the struct still derives `Default` and keeps public fields, so the pre-existing
+    // struct-literal form is unchanged.
+    let literal = basic_client::GetUserParams {
+        page: Some(2),
+        ..Default::default()
+    };
+    assert_eq!(literal.filter, None);
+}
 "##,
     )
     .unwrap();
