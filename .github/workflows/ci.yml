@@ -82,6 +82,18 @@ jobs:
       # ollama now generates (union lowering, #9): check must succeed with no rejection.
       - run: cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json
       - run: cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
+      # Stripe (3.0.0), Twilio (3.0.1), Kubernetes API-group (3.0.0): rejected at the version gate.
+      - run: cargo run -q -p spargen -- check corpus/stripe/spec3.json --format json > /tmp/spargen-stripe.json || test $? -eq 1
+      - run: grep -q E001 /tmp/spargen-stripe.json
+      - run: cargo run -q -p spargen -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json > /tmp/spargen-twilio.json || test $? -eq 1
+      - run: grep -q E001 /tmp/spargen-twilio.json
+      - run: cargo run -q -p spargen -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json > /tmp/spargen-k8s.json || test $? -eq 1
+      - run: grep -q E001 /tmp/spargen-k8s.json
+      # meilisearch is 3.1.0: clears the gate, rejects with E007 in the pipeline. Raise batch_cap
+      # so the E007 error is not truncated behind the W001 warnings before we grep for it.
+      - run: printf '[features]\nbatch_cap = 100000\n' > /tmp/spargen-cap.toml
+      - run: cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json --config /tmp/spargen-cap.toml > /tmp/spargen-meili.json || test $? -eq 1
+      - run: grep -q E007 /tmp/spargen-meili.json
 
   example:
     name: Petstore example
