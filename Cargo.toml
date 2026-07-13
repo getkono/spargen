@@ -44,6 +44,11 @@ notify-debouncer-mini = "0.4"
 proptest = "1.11"
 tempfile = "3.10"
 insta = "1.43"
+# Statistics-driven benchmark harness for `spargen/benches/` (run via `cargo bench`). Dev-only —
+# never in a library/build.rs graph nor the generated-output runtime. Default features off to skip
+# the `plotters`/`rayon` report stack (unused here); `cargo_bench_support` keeps it usable under
+# `cargo bench`.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [profile.release]
 strip = true

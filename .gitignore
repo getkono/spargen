@@ -17,6 +17,10 @@ target
 .mise.local.toml
 mise.local.toml
 
+# Dropped in the CWD by `openapi-generator-cli` when `scripts/compare-generators.sh` invokes it
+# (see docs/benchmarks.md). A machine-local launcher config, not a project artifact.
+openapitools.json
+
 # === macOS ===
 .DS_Store
 __MACOSX/

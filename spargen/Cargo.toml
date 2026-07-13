@@ -62,7 +62,15 @@ tempfile = { workspace = true }
 # Snapshot testing for the corpus content-regression guard (`tests/snapshot.rs`). Dev-only: it
 # never enters a library/build.rs graph nor the generated-output runtime.
 insta = { workspace = true }
+# Benchmark harness (`benches/generate.rs`, run via `cargo bench`). Dev-only.
+criterion = { workspace = true }
 
 [[bin]]
 name = "spargen"
 required-features = ["cli"]
+
+# End-to-end generation-pipeline benchmarks. `harness = false` hands argument parsing and
+# statistics to criterion instead of libtest. Not part of the normal `cargo test` gate.
+[[bench]]
+name = "generate"
+harness = false
