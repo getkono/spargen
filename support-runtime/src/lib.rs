@@ -25,6 +25,7 @@ mod auth;
 mod client;
 mod dispatch;
 mod error;
+mod paginate;
 mod response;
 mod stream;
 // The XML codec pulls in the optional `quick-xml` dependency, so it is compiled only under the
@@ -43,6 +44,7 @@ pub use dispatch::{
     send, unexpected_status, StatusSpec,
 };
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
+pub use paginate::{next_link, LinkPaginator};
 pub use response::ResponseValue;
 pub use stream::{EventStream, Framing};
 #[cfg(feature = "xml")]

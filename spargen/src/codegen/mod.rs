@@ -78,8 +78,8 @@ pub fn generate(
     let tokens = quote! {
         #[allow(unused_imports)]
         pub use support::{
-            AuthError, Credential, Error, ExposeSecret, ResponseValue, SecretString, TokenFuture,
-            TokenProvider,
+            AuthError, Credential, Error, ExposeSecret, LinkPaginator, ResponseValue, SecretString,
+            TokenFuture, TokenProvider, next_link,
         };
 
         #support

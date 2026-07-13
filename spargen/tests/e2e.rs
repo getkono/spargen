@@ -310,6 +310,33 @@ fn optional_params_construct_via_fluent_setters() {
     };
     assert_eq!(literal.filter, None);
 }
+
+#[test]
+fn generated_support_module_exposes_link_paginator() {
+    // Issue #27: the generic Link-header paginator is a runtime helper re-exported at the crate root
+    // (`basic_client::LinkPaginator` / `basic_client::next_link`), so a generated client can drive
+    // Link/RFC-8288 pagination with no per-operation codegen. Constructing one via
+    // `client.core().paginate_links::<T>(url)` compiles under clippy -D warnings, proving the
+    // embedded `support::paginate` module is present and wired.
+    let client = basic_client::Client::new("https://api.example.com").unwrap();
+    let first = reqwest::Url::parse("https://api.example.com/items?page=1").unwrap();
+    let pages: basic_client::LinkPaginator<Vec<i64>> = client.core().paginate_links(first);
+    assert!(pages.has_next());
+
+    // The pure `rel="next"` header helper is exposed too: no `Link` header → no next page.
+    let mut headers = reqwest::header::HeaderMap::new();
+    assert!(basic_client::next_link(&headers).is_none());
+    headers.insert(
+        reqwest::header::LINK,
+        r#"<https://api.example.com/items?page=2>; rel="next""#
+            .parse()
+            .unwrap(),
+    );
+    assert_eq!(
+        basic_client::next_link(&headers).unwrap().as_str(),
+        "https://api.example.com/items?page=2"
+    );
+}
 "##,
     )
     .unwrap();
