@@ -62,9 +62,12 @@ fn generates_standalone_crate_for_basic_oas31_api() {
         generated.contains("pub struct BlockingClient"),
         "BlockingClient must be emitted"
     );
+    // Issue #21: the `BlockingClient` is gated on the `blocking` feature AND `not(wasm32)` — its
+    // current-thread tokio runtime cannot run on the single-threaded browser, so a wasm build never
+    // compiles it (and never pulls tokio) even with the feature enabled.
     assert!(
-        generated.contains("#[cfg(feature = \"blocking\")]"),
-        "BlockingClient must be feature-gated"
+        generated.contains("#[cfg(all(feature = \"blocking\", not(target_arch = \"wasm32\")))]"),
+        "BlockingClient must be gated on the blocking feature and off wasm"
     );
 
     // A real round-trip driven by a blocking method against a std-thread mock server (the generated
@@ -1269,3 +1272,80 @@ components:
         seq: { type: integer }
         payload: { type: string }
 "##;
+
+/// Whether the `wasm32-unknown-unknown` target's std is installed, so the wasm gate can run. When
+/// `rustup` reports the installed targets and it is absent, the gate self-skips rather than failing
+/// on a toolchain gap; without `rustup` we assume the target is present (CI installs it).
+fn wasm32_target_installed() -> bool {
+    match Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+    {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.trim() == "wasm32-unknown-unknown"),
+        _ => true,
+    }
+}
+
+/// Issue #21 — THE gate: a generated client must compile for `wasm32-unknown-unknown` (the browser,
+/// via reqwest's `fetch` backend), where reqwest's client/request/response and fetch futures are
+/// `!Send`. The `BASIC_SPEC` exercises the wasm-sensitive surface — the transport seam, the auth
+/// token provider, and a streaming `EventStream` operation — so `cargo check --target
+/// wasm32-unknown-unknown` succeeding proves the conditional `MaybeSend`/`MaybeSync` bounds, the
+/// `cfg`-gated boxed-future aliases, the wasm `EventStream` buffer path, and the target-gated
+/// manifest (native-only tokio, wasm-gated `BlockingClient`) all hold together.
+#[test]
+fn generated_crate_compiles_for_wasm32_browser_target() {
+    if !wasm32_target_installed() {
+        eprintln!(
+            "skipping wasm32 gate: target `wasm32-unknown-unknown` is not installed (rustup target add wasm32-unknown-unknown)"
+        );
+        return;
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let out = temp.path().join("wasm_client");
+
+    let report = spargen::generate(&Config::new(
+        Utf8PathBuf::from_path_buf(spec).unwrap(),
+        OutputTarget::Crate {
+            dir: Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
+            name: "wasm_client".to_owned(),
+        },
+    ));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    // Default features: the client, transport seam, middleware/retry helpers, auth token provider,
+    // and streaming `EventStream` must all compile against reqwest's `!Send` wasm `fetch` backend.
+    let status = Command::new("cargo")
+        .args(["check", "--target", "wasm32-unknown-unknown"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "generated crate must `cargo check --target wasm32-unknown-unknown`"
+    );
+
+    // With the opt-in `blocking` feature enabled, a wasm build must STILL compile: the tokio-backed
+    // `BlockingClient` and the tokio dependency are both gated off wasm, so the browser build never
+    // pulls a runtime it cannot run.
+    let status = Command::new("cargo")
+        .args([
+            "check",
+            "--target",
+            "wasm32-unknown-unknown",
+            "--features",
+            "blocking",
+        ])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "wasm build must compile even with the `blocking` feature enabled (no tokio pulled)"
+    );
+}

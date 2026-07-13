@@ -8,6 +8,11 @@
 //! *not* implement `futures::Stream` — that would pull in `futures_core`, outside the runtime's
 //! fixed dependency set. Callers drive it with a plain `while let Some(item) = stream.next().await`.
 //!
+//! On `wasm32` (reqwest's browser `fetch` backend), `chunk()` is unavailable, so the buffer is
+//! filled by reading the whole body once with [`reqwest::Response::bytes`] and framing it from
+//! memory (the browser buffers the full response regardless). The `EventStream` API and yielded
+//! items are identical; only the delivery is non-incremental there.
+//!
 //! Framing is a pure function ([`next_frame`]) over an owned byte buffer, so the framing/decoding
 //! logic is unit-testable without any network IO or async runtime — [`EventStream::next`] is a thin
 //! await-chunk loop around it.
@@ -101,25 +106,54 @@ impl<T: DeserializeOwned> EventStream<T> {
                         self.done = true;
                         return None;
                     }
-                    // Present by construction: `at_eof` is false, so `response` is `Some`.
-                    let response = self
-                        .response
-                        .as_mut()
-                        .expect("response present when not at eof");
-                    match response.chunk().await {
-                        Ok(Some(chunk)) => self.buffer.extend_from_slice(&chunk),
-                        // Clean EOF: drop the response so the next loop reframes with `at_eof`,
-                        // flushing any trailing complete frame.
-                        Ok(None) => self.response = None,
-                        Err(error) => {
-                            self.done = true;
-                            self.response = None;
-                            return Some(Err(Error::from_reqwest(error)));
-                        }
+                    // Pull more bytes into the buffer (or reach EOF). A transport failure mid-stream
+                    // surfaces as `Some(Err(..))` and terminates the stream.
+                    if let Err(error) = self.pull().await {
+                        self.done = true;
+                        self.response = None;
+                        return Some(Err(error));
                     }
                 }
             }
         }
+    }
+
+    /// Read more bytes into `self.buffer`, or drop `self.response` at end of body so the next frame
+    /// pass runs with `at_eof`. On native the reqwest backend streams incrementally via
+    /// [`reqwest::Response::chunk`]. `chunk` is not available on reqwest's `wasm32` `fetch` backend,
+    /// which has no incremental read; see the wasm variant below.
+    #[cfg(not(target_arch = "wasm32"))]
+    async fn pull(&mut self) -> Result<(), Error<Infallible>> {
+        // Present by construction: `next` only calls `pull` when `self.response` is `Some`.
+        let response = self
+            .response
+            .as_mut()
+            .expect("response present when not at eof");
+        match response.chunk().await {
+            Ok(Some(chunk)) => self.buffer.extend_from_slice(&chunk),
+            // Clean EOF: drop the response so the next loop reframes with `at_eof`, flushing any
+            // trailing complete frame.
+            Ok(None) => self.response = None,
+            Err(error) => return Err(Error::from_reqwest(error)),
+        }
+        Ok(())
+    }
+
+    /// The `wasm32` buffer fill: reqwest's browser `fetch` backend exposes no incremental `chunk()`,
+    /// so read the whole body once with [`reqwest::Response::bytes`] and frame it from memory. The
+    /// browser buffers the full response regardless, so the same items are yielded — just not
+    /// incrementally (a documented wasm limitation). Dropping the response signals EOF to the next
+    /// frame pass, which then flushes every buffered item.
+    #[cfg(target_arch = "wasm32")]
+    async fn pull(&mut self) -> Result<(), Error<Infallible>> {
+        // Present by construction: `next` only calls `pull` when `self.response` is `Some`.
+        let response = self
+            .response
+            .take()
+            .expect("response present when not at eof");
+        let bytes = response.bytes().await.map_err(Error::from_reqwest)?;
+        self.buffer.extend_from_slice(&bytes);
+        Ok(())
     }
 }
 

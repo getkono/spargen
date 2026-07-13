@@ -22,8 +22,10 @@
 //! chain never clones or reallocates; it just narrows the slice. [`MiddlewareBackend::execute`]
 //! returns [`ExecuteFuture<'_>`], whose `'_` is exactly the borrow of `&self` the [`Next`] is built
 //! over, so the whole chain's future safely borrows the (Arc-held) middleware and backend for the
-//! duration of the call. `Arc<dyn Middleware>`/`Arc<dyn HttpBackend>` are `Send + Sync`, so
-//! references to them are `Send` and the boxed futures stay `Send`.
+//! duration of the call. On native targets `Arc<dyn Middleware>`/`Arc<dyn HttpBackend>` are
+//! `Send + Sync` (via the `MaybeSend`/`MaybeSync` supertraits, which collapse to `Send`/`Sync`
+//! off wasm), so references to them are `Send` and the boxed futures stay `Send`; on `wasm32`
+//! these bounds are relaxed to match reqwest's single-threaded `fetch` backend.
 //!
 //! ## Ordering
 //!
@@ -55,15 +57,17 @@ use std::sync::Arc;
 use reqwest::Request;
 
 use crate::transport::{ExecuteFuture, HttpBackend};
+use crate::{MaybeSend, MaybeSync};
 
 /// One link in the interceptor chain: it observes/modifies a request on the way in, calls
 /// [`Next::run`] to proceed (eventually reaching the transport), and observes/modifies the
 /// [`reqwest::Response`] on the way out — or returns early to short-circuit.
 ///
-/// Implementations must be `Send + Sync` (the `Client` is shared across tasks) and `Debug` (so
-/// [`MiddlewareBackend`] — and thus [`crate::ClientCore`] — stays `Debug`). The returned future is
-/// manually boxed so the trait is object-safe without an `async-trait` dependency.
-pub trait Middleware: Send + Sync + std::fmt::Debug {
+/// Implementations must be [`MaybeSend`] + [`MaybeSync`] — `Send + Sync` on native (the `Client` is
+/// shared across tasks), vacuous on `wasm32` — and `Debug` (so [`MiddlewareBackend`] — and thus
+/// [`crate::ClientCore`] — stays `Debug`). The returned future is manually boxed so the trait is
+/// object-safe without an `async-trait` dependency.
+pub trait Middleware: MaybeSend + MaybeSync + std::fmt::Debug {
     /// Handle a request. Call `next.run(request)` to proceed to the rest of the chain (eventually
     /// the transport), or return a response without calling it to short-circuit. May inspect/modify
     /// the request before and the [`reqwest::Response`] after.

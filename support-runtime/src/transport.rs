@@ -20,14 +20,23 @@ use std::pin::Pin;
 
 use reqwest::{Request, Response};
 
-use crate::TransportError;
+use crate::{MaybeSend, MaybeSync, TransportError};
 
-/// The boxed, `Send` future [`HttpBackend::execute`] returns: an executed [`Response`] or a
+/// The boxed future [`HttpBackend::execute`] returns: an executed [`Response`] or a
 /// [`TransportError`]. The `'a` lifetime ties the future to the borrow of `&self`, but a backend is
 /// free to return a `'static` future (as [`ReqwestBackend`] does) — a longer lifetime coerces to
 /// the shorter one the trait requires.
+///
+/// The future is `Send` on native (a backend is shared across tasks) but not on `wasm32`, where
+/// reqwest's `fetch`-backed futures are `!Send`. `Send` is an auto trait and so cannot be swapped
+/// for the non-auto [`MaybeSend`] as an extra trait-object bound; the alias is `cfg`-gated instead.
+#[cfg(not(target_arch = "wasm32"))]
 pub type ExecuteFuture<'a> =
     Pin<Box<dyn Future<Output = Result<Response, TransportError>> + Send + 'a>>;
+/// The boxed future [`HttpBackend::execute`] returns (the wasm variant: no `Send`, since reqwest's
+/// `fetch`-backed futures are `!Send` on the single-threaded browser target).
+#[cfg(target_arch = "wasm32")]
+pub type ExecuteFuture<'a> = Pin<Box<dyn Future<Output = Result<Response, TransportError>> + 'a>>;
 
 /// The swappable HTTP transport: it executes a prepared [`reqwest::Request`] into a
 /// [`reqwest::Response`].
@@ -37,10 +46,11 @@ pub type ExecuteFuture<'a> =
 /// pagination. The default [`ReqwestBackend`] simply runs the request on a wrapped
 /// [`reqwest::Client`].
 ///
-/// Implementations must be `Send + Sync` (the `Client` is shared across tasks) and `Debug` (so
-/// [`crate::ClientCore`] stays `Debug`). The returned future is manually boxed so the trait is
-/// object-safe without an `async-trait` dependency.
-pub trait HttpBackend: Send + Sync + std::fmt::Debug {
+/// Implementations must be [`MaybeSend`] + [`MaybeSync`] — `Send + Sync` on native (the `Client` is
+/// shared across tasks), vacuous on `wasm32` — and `Debug` (so [`crate::ClientCore`] stays `Debug`).
+/// The returned future is manually boxed so the trait is object-safe without an `async-trait`
+/// dependency.
+pub trait HttpBackend: MaybeSend + MaybeSync + std::fmt::Debug {
     /// Execute a prepared request, yielding the raw response or a transport failure. A backend that
     /// fails should wrap the originating `reqwest::Error` via [`TransportError::new`] so
     /// [`crate::send`] can reclassify timeouts/redirects/protocol errors into the taxonomy.
@@ -84,6 +94,19 @@ mod tests {
     use reqwest::{Method, Request};
 
     use crate::{send, ClientCore, HttpBackend, ReqwestBackend};
+
+    // Regression guard for the #21 conditional-Send refactor: on native, ClientCore and the seam
+    // trait objects/futures MUST stay Send + Sync so the client works under tokio::spawn / axum. A
+    // future change that turned a `+ Send` boxed future or a trait-object bound into a non-Send
+    // form would still compile in the single-threaded tests/example but break multi-threaded use;
+    // this catches it at compile time. (On wasm these are intentionally !Send, hence the cfg gate.)
+    #[cfg(not(target_arch = "wasm32"))]
+    const _: fn() = || {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<ClientCore>();
+        assert_send_sync::<Arc<dyn HttpBackend>>();
+        assert_send_sync::<ReqwestBackend>();
+    };
 
     use super::ExecuteFuture;
 

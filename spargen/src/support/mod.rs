@@ -65,6 +65,10 @@ pub fn runtime_files() -> &'static [SupportFile] {
             name: "transport.rs",
             contents: include_str!("runtime/transport.rs"),
         },
+        SupportFile {
+            name: "wasm.rs",
+            contents: include_str!("runtime/wasm.rs"),
+        },
     ];
     FILES
 }

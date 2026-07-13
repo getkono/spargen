@@ -56,7 +56,19 @@ use std::time::Duration;
 use reqwest::{Request, Response, StatusCode};
 
 use crate::transport::{ExecuteFuture, HttpBackend};
-use crate::TransportError;
+use crate::{MaybeSend, MaybeSync, TransportError};
+
+/// The boxed backoff future a [`RetryPolicy`] returns to request a retry after the wait completes.
+///
+/// `Send` on native (the retry loop's future is shared across tasks) but not on `wasm32`, where the
+/// single-threaded browser has no `Send` futures. As with [`crate::ExecuteFuture`], `Send` is an
+/// auto trait and cannot be swapped for the non-auto [`MaybeSend`] as an extra trait-object bound,
+/// so this alias is `cfg`-gated rather than expressed through `MaybeSend`.
+#[cfg(not(target_arch = "wasm32"))]
+pub type RetryWait<'a> = Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+/// The boxed backoff future a [`RetryPolicy`] returns (the wasm variant: no `Send`).
+#[cfg(target_arch = "wasm32")]
+pub type RetryWait<'a> = Pin<Box<dyn Future<Output = ()> + 'a>>;
 
 /// What one execution of a request produced, handed to [`RetryPolicy::retry`] so it can decide
 /// whether to retry. It is either the raw [`Response`] the inner backend returned (any status —
@@ -127,15 +139,12 @@ impl<'a> RetryOutcome<'a> {
 /// built with the caller's own async timer (e.g. `tokio::time::sleep`) — this is how timing stays
 /// caller-owned and the runtime avoids a `tokio` dependency. Returning `None` stops retrying and the
 /// last outcome is returned.
-pub trait RetryPolicy: Send + Sync {
+pub trait RetryPolicy: MaybeSend + MaybeSync {
     /// Called after attempt `attempt` (0-based) produced `outcome`. Return `Some(wait)` to retry
     /// after awaiting `wait` (which encapsulates the backoff delay using the caller's timer), or
-    /// `None` to stop and return the outcome.
-    fn retry<'a>(
-        &'a self,
-        attempt: u32,
-        outcome: &RetryOutcome<'_>,
-    ) -> Option<Pin<Box<dyn Future<Output = ()> + Send + 'a>>>;
+    /// `None` to stop and return the outcome. The wait is a [`RetryWait`] — a boxed future that is
+    /// `Send` on native and `!Send` on `wasm32`.
+    fn retry<'a>(&'a self, attempt: u32, outcome: &RetryOutcome<'_>) -> Option<RetryWait<'a>>;
 }
 
 /// An [`HttpBackend`] that retries requests through an inner backend per a [`RetryPolicy`].

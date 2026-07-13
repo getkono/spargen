@@ -641,7 +641,7 @@ pub(crate) fn emit_blocking_client(
         panics when nested. Build one on a plain thread (e.g. `std::thread` or \
         `tokio::task::spawn_blocking`).";
     quote! {
-        #[cfg(feature = "blocking")]
+        #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
         #[doc = #doc]
         #[allow(dead_code)]
         pub struct BlockingClient {
@@ -649,7 +649,7 @@ pub(crate) fn emit_blocking_client(
             runtime: support::BlockingRuntime,
         }
 
-        #[cfg(feature = "blocking")]
+        #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
         #[forbid(unsafe_code)]
         #[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
         impl BlockingClient {
@@ -1104,16 +1104,18 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
         quote! { pub use xml::{classify_error_xml, decode_success_xml, to_xml}; }
     });
     // The blocking facade (`BlockingRuntime`) is embedded unconditionally but gated on the
-    // `blocking` feature at the module level: the tokio-dependent code compiles only when a consumer
-    // opts in, so a default build carries no tokio reference. The generated manifest always declares
-    // the (user-facing) `blocking` feature wired to an optional tokio dependency.
+    // `blocking` feature AND `not(target_arch = "wasm32")` at the module level: the tokio-dependent
+    // code compiles only when a consumer opts in on a native target, so a default build carries no
+    // tokio reference and a wasm build never pulls tokio even with the feature on (tokio's blocking
+    // runtime cannot run on the single-threaded browser). The generated manifest always declares the
+    // (user-facing) `blocking` feature wired to an optional, non-wasm tokio dependency.
     let blocking_inner = embed(&crate::support::blocking_runtime_file());
     let blocking_module = quote! {
-        #[cfg(feature = "blocking")]
+        #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
         #blocking_inner
     };
     let blocking_reexport = quote! {
-        #[cfg(feature = "blocking")]
+        #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
         pub use blocking::BlockingRuntime;
     };
     quote! {
@@ -1133,9 +1135,10 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
             pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;
-            pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy};
+            pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
             pub use stream::{EventStream, Framing};
             pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
+            pub use wasm::{MaybeSend, MaybeSync};
             #xml_reexport
             #blocking_reexport
         }

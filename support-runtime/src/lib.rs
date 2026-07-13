@@ -38,6 +38,10 @@ mod response;
 mod retry;
 mod stream;
 mod transport;
+// The `MaybeSend`/`MaybeSync` conditional-bound abstraction. Compiled on every target (it is
+// `Send`/`Sync` on native and vacuous on `wasm32`), so the transport seam and its helpers carry one
+// set of bounds that builds both natively and on the browser `fetch` backend.
+mod wasm;
 // The XML codec pulls in the optional `quick-xml` dependency, so it is compiled only under the
 // `xml` feature; the default runtime dependency set (reqwest/serde/serde_json/bytes/secrecy) stays
 // unchanged. A generated client embeds this module only when its spec uses an XML body.
@@ -59,8 +63,9 @@ pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, 
 pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use paginate::{next_link, LinkPaginator};
 pub use response::ResponseValue;
-pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy};
+pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
 pub use stream::{EventStream, Framing};
 pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
+pub use wasm::{MaybeSend, MaybeSync};
 #[cfg(feature = "xml")]
 pub use xml::{classify_error_xml, decode_success_xml, to_xml};
