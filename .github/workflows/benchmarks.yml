@@ -1,0 +1,40 @@
+name: Benchmarks
+
+# Benchmarks are a RECORD, not a gate. They run on release tags and on demand, and upload their
+# results as a downloadable artifact — so anyone can read the numbers without setting up the harness
+# locally. Absolute numbers from a shared CI runner are noisy; the durable signal is the ratios and
+# the trend across releases (see docs/benchmarks.md for methodology).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: Generation benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The `ollama` benchmark input lives in the LFS-backed corpus.
+          lfs: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Bounded warm-up / measurement times keep the run practical on a shared runner while still
+      # giving criterion enough samples for stable-ish statistics. Full output is captured verbatim.
+      - name: Run generation benchmarks
+        run: |
+          cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3 \
+            | tee bench-results.txt
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmarks-${{ github.ref_name }}
+          # The captured summary plus criterion's full statistics/report tree.
+          path: |
+            bench-results.txt
+            target/criterion/**
+          if-no-files-found: error

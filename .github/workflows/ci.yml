@@ -46,6 +46,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
+      # Compile (do not run) the benchmarks so they cannot silently rot; the timed run and its
+      # artifact live in benchmarks.yml.
+      - run: cargo bench --no-run --workspace
 
   check:
     name: Check

@@ -27,9 +27,18 @@ Run it:
 
 ```bash
 cargo bench                       # full run (criterion picks sample sizes for stable statistics)
-cargo bench --no-run              # compile-only (what CI checks)
+mise run bench                    # the same, via the task runner
+cargo bench --no-run              # compile-only (CI runs this on every push, so benches can't rot)
 cargo bench --bench generate -- --warm-up-time 0.5 --measurement-time 1.5   # quick run
 ```
+
+### Downloadable results (no local setup)
+
+You do not need to run anything to see the numbers. The [`Benchmarks`](../.github/workflows/benchmarks.yml)
+workflow runs on every release tag (and on demand via *Run workflow*) and uploads a
+`benchmarks-<ref>` artifact containing `bench-results.txt` (the captured summary) and criterion's
+full report tree. Grab it from the workflow run's *Artifacts* section. CI-runner numbers are noisy
+in absolute terms — read them for ratios and cross-release trend, not stopwatch precision.
 
 Two benchmark groups, each over three inputs (a tiny inline spec, the 3.1 `petstore` example, and
 the real-world `ollama` corpus spec):

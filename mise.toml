@@ -22,6 +22,10 @@ run = "cargo check --workspace --all-features"
 description = "Supply-chain audit (licenses, advisories, bans)"
 run = "cargo deny check"
 
+[tasks.bench]
+description = "Run the generation benchmarks (criterion). CI uploads these as a release artifact."
+run = "cargo bench --bench generate"
+
 [tasks.test]
 description = "Run the full workspace test suite, including generated-code E2E checks"
 run = "cargo test --workspace --all-features"
