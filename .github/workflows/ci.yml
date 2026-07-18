@@ -70,6 +70,10 @@ jobs:
       # self-contained — the runtime sources reached via src/support/runtime/ symlinks must ship
       # inside the crate and compile standalone.
       - run: cargo publish --dry-run -p spargen
+      # The macro crate must package cleanly too. `--no-verify` skips the registry-build step (it
+      # depends on `spargen` by version, which need not be on crates.io yet mid-release); this still
+      # checks manifest validity and file inclusion.
+      - run: cargo package -p spargen-macro --no-verify
 
   corpus-smoke:
     name: Corpus smoke
