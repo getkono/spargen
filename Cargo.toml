@@ -1,11 +1,13 @@
 # Spargen — a compile-time-correct Rust client generator for OpenAPI 3.1.x.
 #
-# One published crate (`spargen`), plus a `publish = false` `support-runtime` member that
-# holds the freestanding runtime embedded verbatim into generated output.
+# Two published crates: `spargen` (the library + CLI) and `spargen-macro` (a thin proc-macro
+# shim exposing `generate_api!`). Neither ever enters a consumer's RUNTIME graph — a proc-macro
+# crate and everything it reaches are host/build-time only. Plus a `publish = false`
+# `support-runtime` member holding the freestanding runtime embedded verbatim into generated output.
 # The `xtask` member (layer lint, corpus tooling) is reserved for later.
 [workspace]
 resolver = "2"
-members = ["spargen", "support-runtime"]
+members = ["spargen", "spargen-macro", "support-runtime"]
 # members = ["spargen", "support-runtime", "xtask"]  # reserved
 # The `fuzz/` cargo-fuzz crate is a deliberately-excluded, opt-in workspace member: it depends on
 # libfuzzer-sys and needs a nightly libFuzzer sysroot, neither of which should touch the normal
