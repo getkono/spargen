@@ -42,9 +42,56 @@ pub fn runtime_files() -> &'static [SupportFile] {
             contents: include_str!("runtime/error.rs"),
         },
         SupportFile {
+            name: "middleware.rs",
+            contents: include_str!("runtime/middleware.rs"),
+        },
+        SupportFile {
+            name: "paginate.rs",
+            contents: include_str!("runtime/paginate.rs"),
+        },
+        SupportFile {
             name: "response.rs",
             contents: include_str!("runtime/response.rs"),
         },
+        SupportFile {
+            name: "retry.rs",
+            contents: include_str!("runtime/retry.rs"),
+        },
+        SupportFile {
+            name: "stream.rs",
+            contents: include_str!("runtime/stream.rs"),
+        },
+        SupportFile {
+            name: "transport.rs",
+            contents: include_str!("runtime/transport.rs"),
+        },
+        SupportFile {
+            name: "wasm.rs",
+            contents: include_str!("runtime/wasm.rs"),
+        },
     ];
     FILES
+}
+
+/// The XML codec runtime source, embedded only when an output uses an `application/xml` / `text/xml`
+/// body (see [`crate::ir::Api::uses_xml`]). Kept out of [`runtime_files`] so a non-XML output never
+/// carries the `quick-xml`-dependent module; its bytes still ship inside the published crate through
+/// the `runtime/xml.rs` symlink so any XML-using consumer gets self-contained output.
+pub fn xml_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "xml.rs",
+        contents: include_str!("runtime/xml.rs"),
+    }
+}
+
+/// The blocking-facade runtime source (`BlockingRuntime`), embedded into every crate output but
+/// gated behind the `blocking` feature at the module level, so the tokio-dependent code is compiled
+/// only when a consumer opts in. Kept out of [`runtime_files`] (which is embedded unconditionally
+/// with no cfg) because it must carry the `#[cfg(feature = "blocking")]` gate; its bytes ship inside
+/// the published crate through the `runtime/blocking.rs` symlink.
+pub fn blocking_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "blocking.rs",
+        contents: include_str!("runtime/blocking.rs"),
+    }
 }

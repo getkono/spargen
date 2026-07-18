@@ -30,11 +30,23 @@ impl std::fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
-/// The future returned by a [`TokenProvider`].
+/// The future returned by a [`TokenProvider`]. `Send` on native (it is awaited inside a client
+/// shared across tasks); on `wasm32` the browser is single-threaded and reqwest-adjacent futures are
+/// `!Send`, so the `Send` bound is dropped there. `Send` is an auto trait and cannot be swapped for
+/// the non-auto [`crate::MaybeSend`] as an extra trait-object bound, so the alias is `cfg`-gated.
+#[cfg(not(target_arch = "wasm32"))]
 pub type TokenFuture = Pin<Box<dyn Future<Output = Result<SecretString, AuthError>> + Send>>;
+/// The future returned by a [`TokenProvider`] (the wasm variant: no `Send`).
+#[cfg(target_arch = "wasm32")]
+pub type TokenFuture = Pin<Box<dyn Future<Output = Result<SecretString, AuthError>>>>;
 
-/// An async callback that yields a fresh credential, for rotating tokens.
+/// An async callback that yields a fresh credential, for rotating tokens. `Send + Sync` on native
+/// (the provider is shared across tasks); vacuous on `wasm32`, matching [`TokenFuture`].
+#[cfg(not(target_arch = "wasm32"))]
 pub type TokenProvider = Arc<dyn Fn() -> TokenFuture + Send + Sync>;
+/// An async callback that yields a fresh credential (the wasm variant: no `Send + Sync`).
+#[cfg(target_arch = "wasm32")]
+pub type TokenProvider = Arc<dyn Fn() -> TokenFuture>;
 
 /// A per-scheme credential supplied at client construction: a static secret or a token provider
 /// for rotation. Missing required credentials are a construction-time error, not a 401.

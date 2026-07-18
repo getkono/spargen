@@ -8,10 +8,11 @@ use super::{
     Components, Discriminator, Document, Info, JsonType, MediaTypeObject, OperationObject,
     ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject, ResponseObject,
     ResponsesObject, Schema, SchemaOr, SecurityRequirement, SecuritySchemeObject, Server, TypeSet,
-    ValidationKeywords,
+    ValidationKeywords, XmlHints,
 };
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
+const OAS32_DIALECT: &str = "https://spec.openapis.org/oas/3.2/dialect/base";
 
 /// Build the typed [`Document`] from a loaded [`InputBundle`], carrying spans through.
 pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<Document, Aborted> {
@@ -25,22 +26,38 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
     if !version_supported(openapi_text) {
         Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance(&root_pointer, openapi_value))
             .message(format!(
-                "unsupported OpenAPI version `{openapi_text}`; spargen currently implements 3.1.x"
+                "unsupported OpenAPI version `{openapi_text}`; spargen implements 3.1.x and 3.2.x"
             ))
-            .remedy("use an OpenAPI 3.1.x document; 3.0.x is rejected because it uses different schema semantics")
+            .remedy("use an OpenAPI 3.1.x or 3.2.x document; 3.0.x is rejected because it uses different schema semantics")
             .emit(diags);
         return Err(Aborted);
     }
 
+    // OpenAPI 3.2 is a compatible superset of 3.1: same JSON Schema 2020-12 dialect, additive
+    // Path/Operation fields. It lowers through this frontend unchanged; the 3.2-only constructs that
+    // are NOT lowered are acknowledged with `W010` (never silently dropped) as they are encountered.
+    if let Some(self_uri) = root.get("$self") {
+        Diagnostic::warning(
+            Code::Oas32ConstructIgnored,
+            provenance(&root_pointer.push("$self"), self_uri),
+        )
+        .message(
+            "`$self` (OpenAPI 3.2) sets the document's base URI for reference resolution; it does \
+             not change locally-generated client code",
+        )
+        .emit(diags);
+    }
+
     if let Some(dialect) = root.get("jsonSchemaDialect") {
-        if string(dialect) != Some(OAS31_DIALECT) {
+        let dialect_text = string(dialect);
+        if dialect_text != Some(OAS31_DIALECT) && dialect_text != Some(OAS32_DIALECT) {
             Diagnostic::error(
                 Code::UnsupportedDialect,
                 provenance(&root_pointer.push("jsonSchemaDialect"), dialect),
             )
-            .message("jsonSchemaDialect is not the OAS 3.1 base dialect")
+            .message("jsonSchemaDialect is not the OAS 3.1 or 3.2 base dialect")
             .remedy(format!(
-                "set jsonSchemaDialect to `{OAS31_DIALECT}` or omit it"
+                "set jsonSchemaDialect to `{OAS31_DIALECT}` or `{OAS32_DIALECT}`, or omit it"
             ))
             .emit(diags);
         }
@@ -101,7 +118,12 @@ fn version_supported(value: &str) -> bool {
     let (Some(major), Some(minor), Some(patch)) = (parts.next(), parts.next(), parts.next()) else {
         return false;
     };
-    parts.next().is_none() && major == "3" && minor == "1" && patch.parse::<u16>().is_ok()
+    // 3.1.x and 3.2.x share the same JSON Schema 2020-12 semantics and lower through one frontend;
+    // 3.0.x, sub-3.1, and any 3.3+/malformed version stay genuinely unsupported (`E001`).
+    parts.next().is_none()
+        && major == "3"
+        && (minor == "1" || minor == "2")
+        && patch.parse::<u16>().is_ok()
 }
 
 fn parse_info(
@@ -176,6 +198,20 @@ fn parse_path_item(
                 operations.insert(method, operation);
             }
         }
+    }
+    // OpenAPI 3.2's `additionalOperations` map declares custom/extension HTTP methods on the path.
+    // spargen does not generate client methods for arbitrary methods; acknowledge it with `W010`
+    // rather than silently dropping it. (The new fixed `QUERY` method IS lowered, via `parse_method`.)
+    if let Some(additional) = value.get("additionalOperations") {
+        Diagnostic::warning(
+            Code::Oas32ConstructIgnored,
+            provenance(&pointer.push("additionalOperations"), additional),
+        )
+        .message(
+            "`additionalOperations` (OpenAPI 3.2) declares custom HTTP methods on this path; \
+             spargen generates no client method for them",
+        )
+        .emit(diags);
     }
     let parameters = value
         .get("parameters")
@@ -263,7 +299,7 @@ fn parse_parameter(
         style: value.get("style").and_then(string).map(str::to_owned),
         schema: value
             .get("schema")
-            .and_then(|value| parse_ref_or(value, &pointer.push("schema"), diags, parse_schema)),
+            .and_then(|value| parse_schema_ref_or(value, &pointer.push("schema"), diags)),
         content: value
             .get("content")
             .map(|value| parse_media_map(value, &pointer.push("content"), diags))
@@ -342,11 +378,20 @@ fn parse_media_map(
                         key.name.clone(),
                         MediaTypeObject {
                             schema: value.get("schema").and_then(|schema| {
-                                parse_ref_or(
+                                parse_schema_ref_or(
                                     schema,
                                     &pointer.push(&key.name).push("schema"),
                                     diags,
-                                    parse_schema,
+                                )
+                            }),
+                            // OpenAPI 3.2 `itemSchema`: the per-item type for sequential/streaming
+                            // media. Parsed here so streaming responses can type their `EventStream`
+                            // item and so a stray `itemSchema` is never silently dropped downstream.
+                            item_schema: value.get("itemSchema").and_then(|schema| {
+                                parse_schema_ref_or(
+                                    schema,
+                                    &pointer.push(&key.name).push("itemSchema"),
+                                    diags,
                                 )
                             }),
                         },
@@ -366,12 +411,22 @@ fn parse_components(
     let Some(map) = object(value, pointer, diags) else {
         return components;
     };
-    components.schemas = parse_component_map(
-        map.get("schemas"),
-        &pointer.push("schemas"),
-        diags,
-        parse_schema,
-    );
+    // Schema components use `parse_schema_ref_or` (not the generic `parse_component_map`) so a
+    // component-root `$ref`+`default` is acknowledged with `W005` rather than silently dropped.
+    components.schemas = map
+        .get("schemas")
+        .and_then(SpannedValue::as_object)
+        .map(|schemas| {
+            let schemas_pointer = pointer.push("schemas");
+            schemas
+                .iter()
+                .filter_map(|(key, value)| {
+                    parse_schema_ref_or(value, &schemas_pointer.push(&key.name), diags)
+                        .map(|item| (key.name.clone(), item))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     components.responses = parse_component_map(
         map.get("responses"),
         &pointer.push("responses"),
@@ -436,7 +491,37 @@ fn parse_security_scheme(
     })
 }
 
-fn parse_schema(
+/// Parse a schema position that may be a `$ref` or an inline [`Schema`]. Unlike the generic
+/// [`parse_ref_or`], a `default` declared *alongside* a `$ref` here is a schema `default` that the
+/// reference-resolution drops on the floor; acknowledge it as `W005` so it is never silently lost.
+/// Property-position `$ref`+`default` is handled elsewhere (via `SchemaOr`) and does not reach here.
+fn parse_schema_ref_or(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<RefOr<Schema>> {
+    if let Some(reference) = value.get("$ref").and_then(string) {
+        if let Some(default) = value.get("default") {
+            Diagnostic::warning(
+                Code::SchemaDefaultNotApplied,
+                provenance(&pointer.push("default"), default),
+            )
+            .message(
+                "a schema `default` declared alongside `$ref` is dropped when the reference \
+                 resolves and is not applied",
+            )
+            .remedy("move the default onto the referenced schema, or set the value explicitly")
+            .emit(diags);
+        }
+        Some(RefOr::Ref(Reference {
+            reference: reference.to_owned(),
+        }))
+    } else {
+        parse_schema(value, pointer, diags).map(RefOr::Item)
+    }
+}
+
+pub(super) fn parse_schema(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -460,17 +545,6 @@ fn parse_schema_or(
     }
     let map = object(value, pointer, diags)?;
 
-    if map.get("patternProperties").is_some() {
-        Diagnostic::error(
-            Code::PatternPropertiesRejected,
-            provenance(
-                &pointer.push("patternProperties"),
-                map.get("patternProperties").unwrap(),
-            ),
-        )
-        .message("patternProperties is not represented in generated Rust types")
-        .emit(diags);
-    }
     if map.get("$dynamicRef").is_some() || map.get("$dynamicAnchor").is_some() {
         Diagnostic::error(Code::DynamicRefRejected, provenance(pointer, value))
             .message("$dynamicRef and $dynamicAnchor require dynamic schema scope evaluation")
@@ -504,6 +578,23 @@ fn parse_schema_or(
         additional_properties: map.get("additionalProperties").and_then(|value| {
             parse_schema_or(value, &pointer.push("additionalProperties"), diags).map(Box::new)
         }),
+        pattern_properties: map
+            .get("patternProperties")
+            .and_then(SpannedValue::as_object)
+            .map(|patterns| {
+                patterns
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        parse_schema_or(
+                            value,
+                            &pointer.push("patternProperties").push(&key.name),
+                            diags,
+                        )
+                        .map(|schema| (key.name.clone(), schema))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         items: map
             .get("items")
             .and_then(|value| parse_schema_or(value, &pointer.push("items"), diags).map(Box::new)),
@@ -535,11 +626,13 @@ fn parse_schema_or(
             .and_then(array)
             .map(<[SpannedValue]>::to_vec),
         const_value: map.get("const").cloned(),
+        default: map.get("default").cloned(),
         format: map.get("format").and_then(string).map(str::to_owned),
         content_encoding: map
             .get("contentEncoding")
             .and_then(string)
             .map(str::to_owned),
+        xml: map.get("xml").and_then(parse_xml),
         validation: parse_validation(map),
         deprecated: map
             .get("deprecated")
@@ -597,6 +690,26 @@ fn parse_discriminator(
                     .collect()
             })
             .unwrap_or_default(),
+    })
+}
+
+/// Parse the OpenAPI `xml` object. Malformed shapes (a non-object `xml`) yield `None`; individual
+/// missing keys default. Lowering later warns (`W006`) on the unsupported namespace/prefix/wrapped
+/// hints, so they are captured here rather than dropped at parse time.
+fn parse_xml(value: &SpannedValue) -> Option<XmlHints> {
+    let _ = value.as_object()?;
+    Some(XmlHints {
+        name: value.get("name").and_then(string).map(str::to_owned),
+        attribute: value
+            .get("attribute")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
+        namespace: value.get("namespace").and_then(string).map(str::to_owned),
+        prefix: value.get("prefix").and_then(string).map(str::to_owned),
+        wrapped: value
+            .get("wrapped")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
     })
 }
 
@@ -719,6 +832,8 @@ fn parse_method(value: &str) -> Option<Method> {
         "head" => Method::Head,
         "patch" => Method::Patch,
         "trace" => Method::Trace,
+        // The `QUERY` method is a fixed path-item field added by OpenAPI 3.2.
+        "query" => Method::Query,
         _ => return None,
     })
 }

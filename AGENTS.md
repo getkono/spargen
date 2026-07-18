@@ -7,10 +7,15 @@ changes.
 
 ## Workspace
 
-- `spargen/` — the one published crate (library + `cli`-gated binary). Internally partitioned
+- `spargen/` — the primary published crate (library + `cli`-gated binary). Internally partitioned
   into subsystems with a declared dependency DAG: `diag`, `source`, `ir`, `oas31`, `name`,
   `support`, `codegen`, `emit`, `compat`, `cli`, and the `lib.rs` facade. Every subsystem
   `mod.rs` declares its allowed dependencies in a `//! layer-deps:` header — keep those honest.
+- `spargen-macro/` — the second published crate: a thin `proc-macro` shim exposing
+  `generate_api!`, a shim over `spargen::preview`. It depends on `spargen` (host-only); `spargen`
+  must **never** depend back on it (that would cycle). A proc-macro crate and everything it reaches
+  are host/build-time only, so neither crate enters a consumer's runtime graph — the invariant
+  below is unchanged. `examples/petstore-macro` is its end-to-end guard.
 - `support-runtime/` — the freestanding runtime embedded verbatim into generated output.
   `publish = false`; its dependencies are exactly `reqwest` / `serde` / `serde_json` / `bytes` /
   `secrecy`. No spargen crate may ever appear in a consumer's runtime graph. Each source file
@@ -57,7 +62,7 @@ Tests live closest to what they pin; when you touch a subsystem, extend its suit
 | `name` | in-module proptests | Determinism, injectivity in scope, valid identifiers, keyword escaping. |
 | `compat` | in-module + `e2e.rs` | Omit rules match/apply, fingerprint stability, `W009`/`E019`/`E020`. |
 | `support-runtime` | in-file `#[cfg(test)]` mods | URL building, auth attachment (all schemes + alternatives + failure modes), status classification, error taxonomy semantics. No async runtime: poll-once with `Waker::noop`. |
-| whole tool | `examples/petstore` (`mise run example`) | The generated client driven over real HTTP against a local mock server: params, bodies, auth, typed errors, undocumented statuses. |
+| whole tool | `examples/petstore` + `examples/petstore-macro` (`mise run example`) | The generated client driven over real HTTP against a local mock server (params, bodies, auth, typed errors, undocumented statuses), via both the `build.rs` and macro paths; the macro run also asserts spargen stays out of the runtime graph (`cargo tree -e no-proc-macro`). |
 | corpus | `mise run corpus-smoke` / `corpus/manifest.toml` | Pinned real-world specs with expected outcomes (`expect = "generate"` / `"reject:E###"`); update expectations only with a reviewed reason. |
 
 Bug-fix discipline: every bug becomes a fixture (usually in `frontend.rs` or the runtime test
@@ -82,3 +87,8 @@ create the crate, then a Trusted Publisher (`getkono/spargen`, workflow `release
 configured in the crate settings. The published crate must stay self-contained — the runtime
 sources are reached through `spargen/src/support/runtime/` symlinks so they ship inside the
 `.crate`; the CI `package` job (`cargo publish --dry-run`) enforces this.
+
+`spargen-macro` is a second published crate (it depends on `spargen`, so release-plz publishes
+`spargen` first). It needs its own one-time bootstrap — a manual `0.1.0` publish plus a Trusted
+Publisher entry in *its* crate settings — before release-plz can publish it via OIDC; until then it
+is CI-verified (`cargo package -p spargen-macro`) but not auto-published. See the tracking issue.

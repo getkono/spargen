@@ -1,0 +1,26 @@
+# The macro consumption path: the client is generated INLINE by `spargen_macro::generate_api!` —
+# no build.rs, no CLI step. Contrast with `examples/petstore`, which uses the build.rs API.
+#
+# Standalone on purpose (the empty [workspace] opts out of the repo workspace): a consumer's crate
+# looks exactly like this. Note there are NO [build-dependencies] — `spargen-macro` is a normal
+# dependency (a proc-macro crate), and neither it nor `spargen` is linked into the binary. See the
+# `cargo tree -e no-proc-macro` guard in README.md / the CI `example` job.
+[package]
+name = "petstore-macro-example"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+# The generator, as a proc-macro. Host/build-time only — never in the runtime graph.
+spargen-macro = { path = "../../spargen-macro" }
+
+# The runtime dependencies of generated output: the near-universal set, no spargen crate.
+bytes = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+secrecy = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

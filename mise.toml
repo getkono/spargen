@@ -22,6 +22,10 @@ run = "cargo check --workspace --all-features"
 description = "Supply-chain audit (licenses, advisories, bans)"
 run = "cargo deny check"
 
+[tasks.bench]
+description = "Run the generation benchmarks (criterion). CI uploads these as a release artifact."
+run = "cargo bench --bench generate"
+
 [tasks.test]
 description = "Run the full workspace test suite, including generated-code E2E checks"
 run = "cargo test --workspace --all-features"
@@ -30,13 +34,32 @@ run = "cargo test --workspace --all-features"
 description = "Run fast corpus smoke checks"
 run = [
   "sh -c 'cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json >/tmp/spargen-github-30.json || test $? -eq 1; grep -q E001 /tmp/spargen-github-30.json'",
-  "sh -c 'cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json >/tmp/spargen-ollama.json || test $? -eq 1; grep -q E007 /tmp/spargen-ollama.json'",
+  "cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json",
   "cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
+  # 3.0.x/3.0.1/3.0.0 real-world APIs: rejected at the version gate (E001).
+  "sh -c 'cargo run -q -p spargen -- check corpus/stripe/spec3.json --format json >/tmp/spargen-stripe.json || test $? -eq 1; grep -q E001 /tmp/spargen-stripe.json'",
+  "sh -c 'cargo run -q -p spargen -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json >/tmp/spargen-twilio.json || test $? -eq 1; grep -q E001 /tmp/spargen-twilio.json'",
+  "sh -c 'cargo run -q -p spargen -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json >/tmp/spargen-k8s.json || test $? -eq 1; grep -q E001 /tmp/spargen-k8s.json'",
+  # meilisearch is 3.1.0: clears the gate, rejects with E007 in the pipeline. Raise batch_cap so
+  # the E007 error is not truncated behind the W001 warnings before we grep for it.
+  "sh -c 'printf \"[features]\\nbatch_cap = 100000\\n\" >/tmp/spargen-cap.toml; cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json --config /tmp/spargen-cap.toml >/tmp/spargen-meili.json || test $? -eq 1; grep -q E007 /tmp/spargen-meili.json'",
 ]
 
 [tasks.example]
-description = "Run the end-to-end petstore example against its local mock server"
-run = "cargo run --manifest-path examples/petstore/Cargo.toml"
+description = "Run the end-to-end petstore examples (build.rs + macro) against a local mock server"
+run = [
+  "cargo run --manifest-path examples/petstore/Cargo.toml",
+  "cargo run --manifest-path examples/petstore-macro/Cargo.toml",
+  # The macro path must keep spargen out of the consumer's RUNTIME graph — a proc-macro crate and
+  # everything it reaches are host-only. `-i spargen` under `-e no-proc-macro` prints nothing to
+  # stdout when spargen is absent from the pruned graph; a non-empty print means it leaked in.
+  "sh -c 'leak=$(cargo tree -e no-proc-macro -i spargen --manifest-path examples/petstore-macro/Cargo.toml 2>/dev/null); if [ -n \"$leak\" ]; then echo \"spargen leaked into the runtime graph:\"; echo \"$leak\"; exit 1; fi; echo \"macro runtime graph is spargen-free\"'",
+]
+
+[tasks.docs]
+description = "Build the mdBook documentation site into docs/book/book (git-ignored)"
+# Requires mdBook (`cargo install mdbook`). Fails on broken includes/links.
+run = "mdbook build docs/book"
 
 [tasks.hooks]
 description = "Install git hooks through mise"

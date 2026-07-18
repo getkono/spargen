@@ -12,6 +12,7 @@ pub fn synth_operation_id(method: Method, path: &PathTemplate) -> String {
         Method::Head => "head",
         Method::Patch => "patch",
         Method::Trace => "trace",
+        Method::Query => "query",
     };
 
     let mut parts = vec![method.to_owned()];

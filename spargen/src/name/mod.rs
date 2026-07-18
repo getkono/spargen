@@ -15,7 +15,7 @@ mod synth;
 use std::collections::HashMap;
 
 use crate::diag::Diagnostics;
-use crate::ir::{Api, OperationId, ScalarValue, TypeId, TypeKind};
+use crate::ir::{AdditionalProps, Api, OperationId, ScalarValue, TypeId, TypeKind};
 
 pub use casing::{to_pascal_case, to_snake_case};
 pub use ident::Ident;
@@ -36,6 +36,11 @@ pub struct Names {
     pub types: HashMap<TypeId, Ident>,
     /// Field name per `(type, wire property name)`.
     pub fields: HashMap<(TypeId, String), Ident>,
+    /// The synthetic `#[serde(flatten)]` overflow-map field ident per struct that has a typed
+    /// `additionalProperties`/`patternProperties` map. Allocated in the struct's field scope
+    /// (reserved after the declared fields) so it can never collide with a declared property named
+    /// `additional`.
+    pub struct_overflow: HashMap<TypeId, Ident>,
     /// Variant name per `(type, wire variant value)`.
     pub variants: HashMap<(TypeId, String), Ident>,
 }
@@ -85,6 +90,15 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                         scope.alloc(&field.name.wire, IdentRole::Field, &def.provenance.pointer),
                     );
                 }
+                // The flatten overflow field shares the struct's field scope, so it is disambiguated
+                // against any declared property (e.g. one named `additional`) instead of emitting a
+                // second literal `additional` field that would fail to compile.
+                if matches!(object.additional, AdditionalProps::Typed(_)) {
+                    names.struct_overflow.insert(
+                        id,
+                        scope.alloc("additional", IdentRole::Field, &def.provenance.pointer),
+                    );
+                }
             }
             TypeKind::Enum(enumeration) => {
                 let mut scope = Scope::default();
@@ -97,6 +111,22 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                     names.variants.insert(
                         (id, value.clone()),
                         scope.alloc(&value, IdentRole::Variant, &def.provenance.pointer),
+                    );
+                }
+            }
+            TypeKind::Union(union) => {
+                // Union variants share the scalar-enum `variants` table, keyed by `(TypeId, hint)`.
+                // A type id is either an enum or a union, so the two never collide; hints are made
+                // unique per union at lowering time, keeping this allocation injective in scope.
+                let mut scope = Scope::default();
+                for variant in &union.variants {
+                    names.variants.insert(
+                        (id, variant.name_hint.clone()),
+                        scope.alloc(
+                            &variant.name_hint,
+                            IdentRole::Variant,
+                            &def.provenance.pointer,
+                        ),
                     );
                 }
             }

@@ -93,11 +93,31 @@ fn audit_schema(schema: &Schema, pointer: JsonPointer, diags: &mut Diagnostics) 
             .emit(diags);
     }
 
+    // A `patternProperties` key regex is a validation-only constraint: the generated typed overflow
+    // map captures every non-declared property regardless of the pattern, so the key regex is not
+    // enforced. Acknowledge it as `W001` (never silent) — the value schemas still lower.
+    if !schema.pattern_properties.is_empty() {
+        Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+            .message(
+                "`patternProperties` key patterns are not enforced: the generated typed map \
+                 captures all non-declared properties, not only pattern-matching keys",
+            )
+            .remedy("keep producer-side validation for the key pattern")
+            .emit(diags);
+    }
+
     for (name, child) in &schema.properties {
         audit_schema_or(child, pointer.push("properties").push(name), diags);
     }
     if let Some(child) = &schema.additional_properties {
         audit_schema_or(child, pointer.push("additionalProperties"), diags);
+    }
+    for (pattern, child) in &schema.pattern_properties {
+        audit_schema_or(
+            child,
+            pointer.push("patternProperties").push(pattern),
+            diags,
+        );
     }
     if let Some(child) = &schema.items {
         audit_schema_or(child, pointer.push("items"), diags);

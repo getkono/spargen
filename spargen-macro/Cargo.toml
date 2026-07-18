@@ -1,0 +1,35 @@
+# The proc-macro front-end for spargen. A thin shim: `generate_api!` resolves the spec path,
+# calls `spargen::preview` (the same in-memory renderer behind `spargen generate --out -`), and
+# expands to the rendered client — no filesystem, no CLI.
+#
+# This is a SECOND published crate alongside `spargen`, and the ONLY way to keep the strict
+# invariant intact: a `proc-macro = true` crate can only export macros, so it cannot also be the
+# library. Crucially, a proc-macro crate (and everything it reaches, i.e. `spargen`) is compiled
+# for the HOST and never linked into the consumer's binary — so neither `spargen` nor
+# `spargen-macro` ever appears in the consumer's RUNTIME graph. The consumer depends on this crate
+# directly (`spargen_macro::generate_api!`); `spargen` does NOT depend back on it, so there is no
+# dependency cycle.
+[package]
+name = "spargen-macro"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Proc-macro front-end for spargen: generate a typed OpenAPI 3.1.x client inline with generate_api!."
+keywords = ["openapi", "codegen", "client", "macro"]
+categories = ["development-tools", "api-bindings"]
+readme = "README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+# The generator. `default-features = false` drops the CLI stack (clap/toml/notify/reqwest); the
+# generation pipeline itself is always compiled. `uuid`/`time` output mappings are controlled at
+# call time via `Config.features`, not these cargo features, so none are needed here.
+spargen = { path = "../spargen", version = "0.1.0", default-features = false }
+syn = { workspace = true }
+quote = { workspace = true }
+proc-macro2 = { workspace = true }

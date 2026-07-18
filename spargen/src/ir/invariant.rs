@@ -78,6 +78,17 @@ pub fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                     check_ty(api, *ty, diags, &def.name_hint, def.provenance.clone());
                 }
             }
+            TypeKind::Union(union) => {
+                for variant in &union.variants {
+                    check_ty(
+                        api,
+                        variant.ty,
+                        diags,
+                        &def.name_hint,
+                        def.provenance.clone(),
+                    );
+                }
+            }
             TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes | TypeKind::Any => {}
         }
     }

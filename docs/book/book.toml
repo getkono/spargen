@@ -1,0 +1,16 @@
+[book]
+title = "spargen"
+authors = ["Justin Chung"]
+description = "A compile-time-correct Rust client generator for OpenAPI 3.1.x."
+src = "src"
+language = "en"
+
+[build]
+# HTML is generated here and git-ignored; only book.toml + src/ are committed.
+build-dir = "book"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/getkono/spargen"
+edit-url-template = "https://github.com/getkono/spargen/edit/master/docs/book/{path}"

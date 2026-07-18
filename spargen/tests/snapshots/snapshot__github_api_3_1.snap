@@ -1,0 +1,12 @@
+---
+source: spargen/tests/snapshot.rs
+expression: summary(&report)
+---
+outcome: Rejected
+diagnostics (code: count):
+  E007: 73
+  E009: 4
+  E013: 39
+  W001: 66
+  W002: 1
+  W005: 5

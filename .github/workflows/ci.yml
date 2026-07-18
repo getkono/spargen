@@ -46,6 +46,9 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --all-features
+      # Compile (do not run) the benchmarks so they cannot silently rot; the timed run and its
+      # artifact live in benchmarks.yml.
+      - run: cargo bench --no-run --workspace
 
   check:
     name: Check
@@ -67,6 +70,10 @@ jobs:
       # self-contained — the runtime sources reached via src/support/runtime/ symlinks must ship
       # inside the crate and compile standalone.
       - run: cargo publish --dry-run -p spargen
+      # The macro crate must package cleanly too. `--no-verify` skips the registry-build step (it
+      # depends on `spargen` by version, which need not be on crates.io yet mid-release); this still
+      # checks manifest validity and file inclusion.
+      - run: cargo package -p spargen-macro --no-verify
 
   corpus-smoke:
     name: Corpus smoke
@@ -79,9 +86,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json > /tmp/spargen-github-30.json || test $? -eq 1
       - run: grep -q E001 /tmp/spargen-github-30.json
-      - run: cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json > /tmp/spargen-ollama.json || test $? -eq 1
-      - run: grep -q E007 /tmp/spargen-ollama.json
+      # ollama now generates (union lowering, #9): check must succeed with no rejection.
+      - run: cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json
       - run: cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
+      # Stripe (3.0.0), Twilio (3.0.1), Kubernetes API-group (3.0.0): rejected at the version gate.
+      - run: cargo run -q -p spargen -- check corpus/stripe/spec3.json --format json > /tmp/spargen-stripe.json || test $? -eq 1
+      - run: grep -q E001 /tmp/spargen-stripe.json
+      - run: cargo run -q -p spargen -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json > /tmp/spargen-twilio.json || test $? -eq 1
+      - run: grep -q E001 /tmp/spargen-twilio.json
+      - run: cargo run -q -p spargen -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json > /tmp/spargen-k8s.json || test $? -eq 1
+      - run: grep -q E001 /tmp/spargen-k8s.json
+      # meilisearch is 3.1.0: clears the gate, rejects with E007 in the pipeline. Raise batch_cap
+      # so the E007 error is not truncated behind the W001 warnings before we grep for it.
+      - run: printf '[features]\nbatch_cap = 100000\n' > /tmp/spargen-cap.toml
+      - run: cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json --config /tmp/spargen-cap.toml > /tmp/spargen-meili.json || test $? -eq 1
+      - run: grep -q E007 /tmp/spargen-meili.json
 
   example:
     name: Petstore example
@@ -91,8 +110,35 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: examples/petstore
+          workspaces: |
+            examples/petstore
+            examples/petstore-macro
+      # build.rs path
       - run: cargo run --manifest-path examples/petstore/Cargo.toml
+      # macro path (spargen_macro::generate_api!)
+      - run: cargo run --manifest-path examples/petstore-macro/Cargo.toml
+      # Guard the invariant: a proc-macro crate is host-only, so no spargen crate may appear in the
+      # macro consumer's RUNTIME graph. `-i spargen` prints nothing when it is absent from the graph.
+      - name: Assert macro runtime graph is spargen-free
+        run: |
+          leak=$(cargo tree -e no-proc-macro -i spargen --manifest-path examples/petstore-macro/Cargo.toml)
+          if [ -n "$leak" ]; then
+            echo "spargen leaked into the runtime graph:"; echo "$leak"; exit 1
+          fi
+          echo "macro runtime graph is spargen-free"
+
+  docs:
+    name: Docs site (mdBook)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install mdBook
+        run: cargo install mdbook --locked
+      # Fails the job on broken includes/links so doc-site breakage is caught. The built HTML
+      # (docs/book/book/) is git-ignored; only the book source is committed.
+      - run: mdbook build docs/book
 
   deny:
     name: cargo-deny

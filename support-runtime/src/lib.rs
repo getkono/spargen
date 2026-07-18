@@ -22,18 +22,50 @@
 // large and is passed by value rather than boxed.
 #![allow(clippy::result_large_err)]
 mod auth;
+// The blocking facade owns a current-thread tokio runtime, so it pulls in the optional `tokio`
+// dependency and is compiled only under the `blocking` feature. The default runtime dependency set
+// (reqwest/serde/serde_json/bytes/secrecy) stays unchanged; a generated client embeds this module
+// unconditionally but gates it on the same `blocking` feature, so nothing tokio-related is
+// referenced unless the consumer opts in.
+#[cfg(feature = "blocking")]
+mod blocking;
 mod client;
 mod dispatch;
 mod error;
+mod middleware;
+mod paginate;
 mod response;
+mod retry;
+mod stream;
+mod transport;
+// The `MaybeSend`/`MaybeSync` conditional-bound abstraction. Compiled on every target (it is
+// `Send`/`Sync` on native and vacuous on `wasm32`), so the transport seam and its helpers carry one
+// set of bounds that builds both natively and on the browser `fetch` backend.
+mod wasm;
+// The XML codec pulls in the optional `quick-xml` dependency, so it is compiled only under the
+// `xml` feature; the default runtime dependency set (reqwest/serde/serde_json/bytes/secrecy) stays
+// unchanged. A generated client embeds this module only when its spec uses an XML body.
+#[cfg(feature = "xml")]
+mod xml;
 
 pub use auth::{
     AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture,
     TokenProvider,
 };
+#[cfg(feature = "blocking")]
+pub use blocking::BlockingRuntime;
 pub use client::{ClientConfig, ClientCore};
 pub use dispatch::{
-    attach_auth, build_url, classify_error, decode_success, send, unexpected_status, StatusSpec,
+    attach_auth, build_url, classify_error, decode_success, read_error_body, read_success_body,
+    send, unexpected_status, StatusSpec,
 };
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
+pub use middleware::{Middleware, MiddlewareBackend, Next};
+pub use paginate::{next_link, LinkPaginator};
 pub use response::ResponseValue;
+pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
+pub use stream::{EventStream, Framing};
+pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
+pub use wasm::{MaybeSend, MaybeSync};
+#[cfg(feature = "xml")]
+pub use xml::{classify_error_xml, decode_success_xml, to_xml};

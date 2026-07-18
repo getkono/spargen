@@ -28,23 +28,43 @@ converted.
 Spargen consumes an OpenAPI 3.1.x document (JSON or YAML, plus local relative-file `$ref`s) at
 generation time and produces idiomatic, deterministic Rust: typed models, a `Client`, one method
 per operation, and typed errors. Generated code compiles or generation fails — with a diagnostic
-that names the exact spec construct, its JSON Pointer, and a remedy. Two ways to run it:
+that names the exact spec construct, its JSON Pointer, and a remedy. Three ways to run it — all
+produce byte-identical output, so they are interchangeable:
 
-1. **CLI, checked-in output (recommended):** `spargen generate spec.yaml --out src/api.rs`.
-   Spargen appears nowhere in your `Cargo.toml`; `spargen generate --check` fails CI when
-   checked-in code drifts from the spec (`W004`).
-2. **`build.rs`:** `spargen` as a `[build-dependencies]` entry, generating into `OUT_DIR` and
-   consumed with `include!`. See [`examples/petstore`](examples/petstore) for the complete,
-   runnable loop — it drives every generated feature against a local mock server.
+| Mode | How | Generated code | No CLI? |
+| --- | --- | --- | --- |
+| **CLI, checked-in** (recommended) | `spargen generate spec.yaml --out src/api.rs` | committed & reviewable | — |
+| **`build.rs`** | `spargen` in `[build-dependencies]`, `include!` from `OUT_DIR` | in `OUT_DIR` | ✓ |
+| **Macro** | [`spargen-macro`](spargen-macro): `generate_api!("spec.yaml")` | inline (use `--out -` to inspect) | ✓ |
+
+The CLI keeps spargen out of your `Cargo.toml` entirely and `spargen generate --check` fails CI on
+drift (`W004`). The `build.rs` and macro modes are zero-CLI; in both, spargen is host/build-time
+only and **never enters your runtime dependency tree**.
 
 ```rust
-// build.rs
+// build.rs — spargen appears only in [build-dependencies].
 let report = spargen::generate(&spargen::Config::new(
     "api/openapi.yaml",
     spargen::OutputTarget::Module(format!("{out_dir}/api.rs").into()),
 ));
 assert_eq!(report.outcome, spargen::Outcome::Generated);
 ```
+
+```rust
+// Or generate inline, no build.rs — see examples/petstore-macro.
+mod api {
+    spargen_macro::generate_api!("openapi.yaml");
+}
+```
+
+See [`examples/petstore`](examples/petstore) (build.rs) and
+[`examples/petstore-macro`](examples/petstore-macro) (macro) for complete, runnable loops that drive
+every generated feature against a local mock server. Preview any spec without writing a file:
+`spargen generate spec.yaml --out -` streams the module to stdout (pipe it to `rustfmt`).
+
+Generating a client from a spec that a Rust server framework emits (utoipa, aide, poem-openapi)?
+The [framework round-trip recipes](docs/recipes.md) cover how each exports its OpenAPI document,
+the version it emits, and the idioms spargen handles.
 
 ### Generated surface
 
@@ -83,17 +103,36 @@ assert_eq!(report.outcome, spargen::Outcome::Generated);
 
 Implemented and verified today: the full pipeline for a substantial 3.1 subset — objects,
 arrays, tuples, maps, scalar primitives and `format` mappings, homogeneous scalar enums,
-`$ref`s, path/query/header/cookie parameters, JSON / form-urlencoded / octet-stream / text
-bodies, per-status responses, auth attachment, and the complete diagnostics surface
-(`check` / `generate` / `explain`, `--format json`, stable codes, batch reporting).
+`$ref`s (including self- and mutually-recursive schemas, whose cycle-closing references are
+boxed), `allOf` merging, `oneOf`/`anyOf` unions, path/query/header/cookie parameters, JSON /
+form-urlencoded / octet-stream / text bodies, per-status responses (including multi-status
+success/error bodies lowered to typed per-operation response enums), auth attachment, and the
+complete diagnostics surface (`check` / `generate` / `explain`, `--format json`, stable codes,
+batch reporting).
 
-Not yet implemented — all rejected or warned loudly, never silent: `allOf` merging (`E013`),
-`oneOf`/`anyOf` unions (`E007`), recursive `$ref` cycles (`E014`), `multipart`/XML bodies
-(`E009`), multi-status response enums (degrade to `serde_json::Value` with `W003`). Diagnostics
+Not yet implemented — all rejected or warned loudly, never silent: `multipart`/XML bodies
+(`E009`). Diagnostics
 carry file-level rather than line-precise spans for now. Large real-world specs (e.g. GitHub's)
 exercise unsupported constructs and are expected to reject; the pinned [corpus](docs/corpus.md)
 tracks exactly which, and the [compatibility omit mode](docs/compatibility.md) can carve
 unsupported segments out of a vendored spec without editing it.
+
+## Documentation
+
+The full documentation site is an [mdBook](https://rust-lang.github.io/mdBook/) under
+[`docs/book/`](docs/book) — an Introduction, Getting Started, and CLI/Runtime reference, wired
+together with the [support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
+[compatibility](docs/compatibility.md), [recipes](docs/recipes.md), [corpus](docs/corpus.md),
+[benchmarks](docs/benchmarks.md), and [testing](docs/testing.md) docs (included, not duplicated).
+Build it locally:
+
+```bash
+cargo install mdbook        # one-time
+mise run docs               # or: mdbook build docs/book
+```
+
+The rendered HTML lands in the git-ignored `docs/book/book/`; open `index.html` from there. CI
+builds the book on every push so doc-site breakage is caught.
 
 ## Prerequisites
 

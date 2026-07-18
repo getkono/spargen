@@ -43,13 +43,26 @@ pub struct PackageMeta {
     pub version: String,
 }
 
-/// The generated crate's feature set (default `uuid`+`time` on).
+/// The generated crate's feature set (default `uuid`+`time` on). `multipart`/`bytes_serde` are not
+/// user options — they are derived from the API (a `multipart/form-data` body, a `bytes::Bytes`
+/// struct field) so the synthesized manifest carries exactly the reqwest/bytes features the emitted
+/// code needs, deterministically.
 #[derive(Debug, Clone)]
 pub struct FeatureSet {
     /// Enable the `uuid` mapping feature.
     pub uuid: bool,
     /// Enable the `time` mapping feature.
     pub time: bool,
+    /// Enable reqwest's `multipart` feature — set when any operation has a `multipart/form-data`
+    /// request body, which the emitted code builds as a `reqwest::multipart::Form`.
+    pub multipart: bool,
+    /// Enable the `bytes` crate's `serde` feature — set when a generated struct has a `bytes::Bytes`
+    /// field (a `format: binary` / `contentEncoding: base64` property), so its derived
+    /// `Serialize`/`Deserialize` compiles.
+    pub bytes_serde: bool,
+    /// Pull in `quick-xml` — set when any operation has an `application/xml` / `text/xml` request or
+    /// response body, whose serialize/decode goes through the embedded XML runtime helpers.
+    pub xml: bool,
 }
 
 impl Default for FeatureSet {
@@ -57,6 +70,9 @@ impl Default for FeatureSet {
         Self {
             uuid: true,
             time: true,
+            multipart: false,
+            bytes_serde: false,
+            xml: false,
         }
     }
 }

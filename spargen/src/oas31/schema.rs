@@ -19,6 +19,9 @@ pub struct Schema {
     pub required: Vec<String>,
     /// `additionalProperties`.
     pub additional_properties: Option<Box<SchemaOr>>,
+    /// `patternProperties`: key-regex → value schema. Lowering composes the value schemas into the
+    /// object's typed overflow map (the key regex itself is validation-only and surfaced as `W001`).
+    pub pattern_properties: IndexMap<String, SchemaOr>,
     /// `items`.
     pub items: Option<Box<SchemaOr>>,
     /// `prefixItems`.
@@ -37,10 +40,15 @@ pub struct Schema {
     pub enum_values: Option<Vec<SpannedValue>>,
     /// `const` value.
     pub const_value: Option<SpannedValue>,
+    /// `default` value (spanned, so a non-representable default can be diagnosed by pointer).
+    pub default: Option<SpannedValue>,
     /// `format` (annotation vocabulary; drives feature-gated type mappings).
     pub format: Option<String>,
     /// `contentEncoding` (e.g. `base64` → bytes).
     pub content_encoding: Option<String>,
+    /// The OpenAPI `xml` object, if present — XML representation hints consumed only when the schema
+    /// is used as an XML body.
+    pub xml: Option<XmlHints>,
     /// Retained validation-only keywords (W-class).
     pub validation: ValidationKeywords,
     /// `deprecated`.
@@ -55,6 +63,23 @@ pub struct Schema {
     pub description: Option<String>,
     /// Where the schema came from.
     pub provenance: Provenance,
+}
+
+/// The OpenAPI `xml` object on a schema. `name`/`attribute` drive XML field renaming; the remaining
+/// hints (`namespace`/`prefix`/`wrapped`) are retained only so lowering can warn (`W006`) that they
+/// are ignored — quick-xml serde has no faithful representation for them.
+#[derive(Debug, Clone, Default)]
+pub struct XmlHints {
+    /// `xml.name`: overrides the element/attribute wire name.
+    pub name: Option<String>,
+    /// `xml.attribute`: serialize as an XML attribute rather than a child element.
+    pub attribute: bool,
+    /// `xml.namespace`: an XML namespace URI (unsupported → `W006`).
+    pub namespace: Option<String>,
+    /// `xml.prefix`: a namespace prefix (unsupported → `W006`).
+    pub prefix: Option<String>,
+    /// `xml.wrapped`: wrap an array in an outer element (unsupported → `W006`).
+    pub wrapped: bool,
 }
 
 /// A schema position that may be a boolean schema (`true`/`false`) or a full [`Schema`]. `{}` and
@@ -86,10 +111,10 @@ pub enum JsonType {
     String,
 }
 
-/// An OAS `discriminator` object. Lowering currently only tests for its presence; the fields are
-/// retained for the discriminated-union lowering that will consume them.
+/// An OAS `discriminator` object, consumed by discriminated-union lowering to build an
+/// internally-tagged enum: `property_name` is the serde tag field and `mapping` supplies each
+/// variant's tag value (falling back to the variant's `$ref` component name).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Discriminator {
     /// `propertyName`.
     pub property_name: String,

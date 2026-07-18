@@ -1,0 +1,7 @@
+---
+source: spargen/tests/snapshot.rs
+expression: summary(&report)
+---
+outcome: Generated
+diagnostics (code: count):
+  (none)
