@@ -171,6 +171,7 @@ pub fn generate(config: &Config) -> Report {
             run_pipeline(config, PipelineMode::Generate)
         }
     })
+    .report
 }
 
 /// Run the support-audit only, without codegen (`spargen check`) — a CI contract gate between spec
@@ -183,6 +184,75 @@ pub fn check(config: &Config) -> Report {
             run_pipeline(config, PipelineMode::Check)
         }
     })
+    .report
+}
+
+/// The rendered output of a generation run, produced **in memory without touching the filesystem**.
+///
+/// Backs `spargen generate --out -` (CLI preview) and the `generate_api!` proc-macro
+/// (`spargen-macro`): both need the exact bytes [`generate`] would write, without a file. The
+/// contents are byte-identical to [`generate`]'s on-disk output for the same [`Config`], and every
+/// bit as deterministic.
+#[derive(Debug, Clone)]
+pub struct Preview {
+    /// The pipeline report (diagnostics + outcome), identical to what [`generate`] returns.
+    pub report: Report,
+    /// The rendered files — each path (relative to the output target) with its final on-disk
+    /// contents, in deterministic order. Empty unless `report.outcome` is [`Outcome::Generated`].
+    pub files: Vec<PreviewFile>,
+}
+
+/// One rendered file from a [`preview`] run.
+#[derive(Debug, Clone)]
+pub struct PreviewFile {
+    /// The path relative to the output target — `lib.rs` for a module, or `src/lib.rs` +
+    /// `Cargo.toml` for a crate layout.
+    pub path: Utf8PathBuf,
+    /// The final file contents, provenance header stamped — exactly what [`generate`] would write.
+    pub contents: String,
+}
+
+/// Render a client **in memory** and return its files, writing nothing to disk.
+///
+/// The same pipeline as [`generate`] right up to output — frontend → codegen → emit planning —
+/// minus the filesystem write. Use it to preview generated code (pipe it to `rustfmt`, show it in
+/// a UI) or to drive generation from a proc-macro. Carve (`config.carve`) is honored exactly as
+/// [`generate`] honors it; `config.check_only` is not meaningful for a preview and is ignored.
+///
+/// ```no_run
+/// let config = spargen::Config::new(
+///     "api/openapi.yaml",
+///     spargen::OutputTarget::Module("api.rs".into()),
+/// );
+/// let preview = spargen::preview(&config);
+/// if preview.report.outcome == spargen::Outcome::Generated {
+///     print!("{}", preview.files[0].contents); // the rendered module
+/// }
+/// ```
+pub fn preview(config: &Config) -> Preview {
+    let result = run_on_frontend_stack(|| {
+        if config.carve {
+            run_carve(config, PipelineMode::Preview)
+        } else {
+            run_pipeline(config, PipelineMode::Preview)
+        }
+    });
+    let files = result
+        .plan
+        .map(|plan| {
+            plan.files
+                .into_iter()
+                .map(|file| PreviewFile {
+                    path: file.path,
+                    contents: file.contents,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Preview {
+        report: result.report,
+        files,
+    }
 }
 
 /// The stack size for the dedicated frontend worker thread. Parsing, deserialization, meta-schema
@@ -331,8 +401,27 @@ pub fn vendor(config: &Config) -> VendorOutcome {
 
 #[derive(Debug, Clone, Copy)]
 enum PipelineMode {
+    /// Render and write to disk (`spargen::generate`).
     Generate,
+    /// Frontend audit only, no codegen (`spargen::check`).
     Check,
+    /// Render in memory and return the plan, no write (`spargen::preview`).
+    Preview,
+}
+
+/// The result of a pipeline run: the user-facing [`Report`] plus, when the run rendered code in
+/// [`PipelineMode::Preview`], the in-memory [`emit::EmitPlan`]. `plan` is `None` for `check`,
+/// `--check` drift runs, `generate`'s on-disk write, and every rejection — only a preview keeps it.
+struct PipelineResult {
+    report: Report,
+    plan: Option<emit::EmitPlan>,
+}
+
+impl PipelineResult {
+    /// A report-only result (no retained plan) — the shape of every non-preview terminal.
+    fn bare(report: Report) -> Self {
+        Self { report, plan: None }
+    }
 }
 
 /// Run the whole frontend — `source` → `oas31` (validate/parse/audit/lower) → IR invariants →
@@ -380,27 +469,24 @@ fn lower_frontend(
     Ok((api, names))
 }
 
-fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
-    let mut diags = diag::Diagnostics::new(config.batch_cap);
-
-    let (api, names) = match lower_frontend(config, &mut diags) {
-        Ok(pair) => pair,
-        Err(()) => return report(diags, Outcome::Rejected),
-    };
-
-    if matches!(mode, PipelineMode::Check) {
-        return report(diags, Outcome::Clean);
-    }
-
+/// Codegen + emit-planning for an already-lowered API: the shared tail of `generate` and
+/// `preview`. Returns the fully-rendered [`emit::EmitPlan`] (contents stamped, `Cargo.toml`
+/// synthesized), or `Err(())` with the layout error already pushed onto `diags`.
+fn build_emit_plan(
+    config: &Config,
+    api: &ir::Api,
+    names: &name::Names,
+    diags: &mut diag::Diagnostics,
+) -> Result<emit::EmitPlan, ()> {
     let code = codegen::generate(
-        &api,
-        &names,
+        api,
+        names,
         &codegen::CodegenOptions {
             feature_uuid: config.features.uuid,
             feature_time: config.features.time,
             error_body_cap: config.error_body_cap,
         },
-        &mut diags,
+        diags,
     );
 
     let emit_options = emit::EmitOptions {
@@ -445,36 +531,64 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
             spargen_version: env!("CARGO_PKG_VERSION").to_owned(),
         },
     };
-    let plan = match emit::plan(&code, &emit_options) {
-        Ok(plan) => plan,
-        Err(error) => {
-            emit_pipeline_error(&mut diags, error.to_string());
-            return report(diags, Outcome::Rejected);
-        }
+
+    emit::plan(&code, &emit_options).map_err(|error| {
+        emit_pipeline_error(diags, error.to_string());
+    })
+}
+
+fn run_pipeline(config: &Config, mode: PipelineMode) -> PipelineResult {
+    let mut diags = diag::Diagnostics::new(config.batch_cap);
+
+    let (api, names) = match lower_frontend(config, &mut diags) {
+        Ok(pair) => pair,
+        Err(()) => return PipelineResult::bare(report(diags, Outcome::Rejected)),
     };
 
-    if config.check_only {
-        match emit::check_drift(&plan, camino::Utf8Path::new("")) {
-            Ok(emit::DriftReport::Clean) => report(diags, Outcome::Clean),
-            Ok(emit::DriftReport::Drifted(paths)) => {
-                emit_drift(&mut diags, &paths, "drifted from the spec");
-                report(diags, Outcome::Drifted)
-            }
-            Ok(emit::DriftReport::Missing(paths)) => {
-                emit_drift(&mut diags, &paths, "missing on disk");
-                report(diags, Outcome::Drifted)
-            }
-            Err(error) => {
-                emit_pipeline_error(&mut diags, error.to_string());
-                report(diags, Outcome::Rejected)
-            }
-        }
-    } else {
-        match emit::write(&plan) {
-            Ok(()) => report(diags, Outcome::Generated),
-            Err(error) => {
-                emit_pipeline_error(&mut diags, error.to_string());
-                report(diags, Outcome::Rejected)
+    if matches!(mode, PipelineMode::Check) {
+        return PipelineResult::bare(report(diags, Outcome::Clean));
+    }
+
+    let plan = match build_emit_plan(config, &api, &names, &mut diags) {
+        Ok(plan) => plan,
+        Err(()) => return PipelineResult::bare(report(diags, Outcome::Rejected)),
+    };
+
+    match mode {
+        // Handled above; `plan` was never built for it.
+        PipelineMode::Check => unreachable!("check returns before codegen"),
+        // Preview keeps the rendered plan and writes nothing (`--check` is not meaningful here).
+        PipelineMode::Preview => PipelineResult {
+            report: report(diags, Outcome::Generated),
+            plan: Some(plan),
+        },
+        PipelineMode::Generate => {
+            if config.check_only {
+                let outcome = match emit::check_drift(&plan, camino::Utf8Path::new("")) {
+                    Ok(emit::DriftReport::Clean) => report(diags, Outcome::Clean),
+                    Ok(emit::DriftReport::Drifted(paths)) => {
+                        emit_drift(&mut diags, &paths, "drifted from the spec");
+                        report(diags, Outcome::Drifted)
+                    }
+                    Ok(emit::DriftReport::Missing(paths)) => {
+                        emit_drift(&mut diags, &paths, "missing on disk");
+                        report(diags, Outcome::Drifted)
+                    }
+                    Err(error) => {
+                        emit_pipeline_error(&mut diags, error.to_string());
+                        report(diags, Outcome::Rejected)
+                    }
+                };
+                PipelineResult::bare(outcome)
+            } else {
+                let outcome = match emit::write(&plan) {
+                    Ok(()) => report(diags, Outcome::Generated),
+                    Err(error) => {
+                        emit_pipeline_error(&mut diags, error.to_string());
+                        report(diags, Outcome::Rejected)
+                    }
+                };
+                PipelineResult::bare(outcome)
             }
         }
     }
@@ -494,7 +608,7 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> Report {
 /// a fresh `E004`/`E020`; that new error is itself carved on the next round (its enclosing operation
 /// is omitted) or, if un-carvable, reported honestly — the document is never emitted broken. The
 /// round cap ([`compat::MAX_CARVE_ROUNDS`]) guarantees termination.
-fn run_carve(config: &Config, mode: PipelineMode) -> Report {
+fn run_carve(config: &Config, mode: PipelineMode) -> PipelineResult {
     let mut omit = config.omit.clone();
     let mut last_rejection: Option<Report> = None;
 
@@ -509,9 +623,10 @@ fn run_carve(config: &Config, mode: PipelineMode) -> Report {
             batch_cap: usize::MAX,
             ..config.clone()
         };
-        let report = run_pipeline(&probe, PipelineMode::Check);
+        // The probe is always a `Check` run, so it never retains a plan.
+        let report = run_pipeline(&probe, PipelineMode::Check).report;
         if report.outcome != Outcome::Rejected {
-            // Converged: generate (or check) for real with the carved omit set.
+            // Converged: generate/preview/check for real with the carved omit set.
             let resolved = Config {
                 omit,
                 carve: false,
@@ -526,14 +641,17 @@ fn run_carve(config: &Config, mode: PipelineMode) -> Report {
             .collect();
         if new_rules.is_empty() {
             // No progress possible — report the residual rejections (and any carved W009s) honestly.
-            return report;
+            return PipelineResult::bare(report);
         }
         omit.rules.extend(new_rules);
         last_rejection = Some(report);
     }
 
     // Exhausted the round cap while still rejecting: return the last honest rejection report.
-    last_rejection.unwrap_or_else(|| run_pipeline(config, PipelineMode::Check))
+    match last_rejection {
+        Some(report) => PipelineResult::bare(report),
+        None => run_pipeline(config, PipelineMode::Check),
+    }
 }
 
 fn emit_drift(diags: &mut diag::Diagnostics, paths: &[camino::Utf8PathBuf], what: &str) {

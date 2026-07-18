@@ -1637,3 +1637,72 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
         "wasm build must compile even with the `blocking` feature enabled (no tokio pulled)"
     );
 }
+
+/// `preview()` renders the same bytes `generate()` writes — without touching the filesystem — and
+/// does so deterministically. This is the shared engine behind `spargen generate --out -` and the
+/// `generate_api!` proc-macro, so byte-parity with the on-disk path is the contract both rely on.
+#[test]
+fn preview_matches_generated_output_and_is_deterministic() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let out = Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap();
+
+    // Generate to disk, then preview the same config in memory.
+    let config = Config::new(spec, OutputTarget::Module(out.clone()));
+    let written = spargen::generate(&config);
+    assert_eq!(written.outcome, Outcome::Generated, "{written:#?}");
+    let on_disk = std::fs::read_to_string(&out).unwrap();
+
+    let preview = spargen::preview(&config);
+    assert_eq!(
+        preview.report.outcome,
+        Outcome::Generated,
+        "{:#?}",
+        preview.report
+    );
+    // A module layout renders exactly one file, whose contents are byte-identical to the write.
+    assert_eq!(
+        preview.files.len(),
+        1,
+        "module layout renders a single file"
+    );
+    assert_eq!(
+        preview.files[0].contents, on_disk,
+        "preview contents must equal the bytes generate() writes"
+    );
+
+    // Deterministic: a second preview yields identical bytes, and nothing was written to disk.
+    let again = spargen::preview(&config);
+    assert_eq!(again.files[0].contents, preview.files[0].contents);
+}
+
+/// A preview of a spec that uses an unsupported construct rejects loudly (matching `generate`) and
+/// retains no files — the proc-macro relies on this to raise a `compile_error!` instead of emitting
+/// half-generated code.
+#[test]
+fn preview_of_rejected_spec_has_no_files() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+    // OpenAPI 3.0.x is rejected at the version gate (E001) — a reliable rejection with no codegen.
+    std::fs::write(
+        &spec,
+        BASIC_SPEC.replace("openapi: 3.1.0", "openapi: 3.0.3"),
+    )
+    .unwrap();
+
+    let preview = spargen::preview(&Config::new(
+        spec,
+        OutputTarget::Module(Utf8PathBuf::from("unused.rs")),
+    ));
+    assert_eq!(preview.report.outcome, Outcome::Rejected);
+    assert!(
+        preview.files.is_empty(),
+        "a rejected preview retains no files"
+    );
+    assert!(preview
+        .report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == Code::UnsupportedOpenApiVersion));
+}
