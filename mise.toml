@@ -42,8 +42,15 @@ run = [
 ]
 
 [tasks.example]
-description = "Run the end-to-end petstore example against its local mock server"
-run = "cargo run --manifest-path examples/petstore/Cargo.toml"
+description = "Run the end-to-end petstore examples (build.rs + macro) against a local mock server"
+run = [
+  "cargo run --manifest-path examples/petstore/Cargo.toml",
+  "cargo run --manifest-path examples/petstore-macro/Cargo.toml",
+  # The macro path must keep spargen out of the consumer's RUNTIME graph — a proc-macro crate and
+  # everything it reaches are host-only. `-i spargen` under `-e no-proc-macro` prints nothing to
+  # stdout when spargen is absent from the pruned graph; a non-empty print means it leaked in.
+  "sh -c 'leak=$(cargo tree -e no-proc-macro -i spargen --manifest-path examples/petstore-macro/Cargo.toml 2>/dev/null); if [ -n \"$leak\" ]; then echo \"spargen leaked into the runtime graph:\"; echo \"$leak\"; exit 1; fi; echo \"macro runtime graph is spargen-free\"'",
+]
 
 [tasks.docs]
 description = "Build the mdBook documentation site into docs/book/book (git-ignored)"

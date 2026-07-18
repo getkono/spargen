@@ -103,8 +103,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: examples/petstore
+          workspaces: |
+            examples/petstore
+            examples/petstore-macro
+      # build.rs path
       - run: cargo run --manifest-path examples/petstore/Cargo.toml
+      # macro path (spargen_macro::generate_api!)
+      - run: cargo run --manifest-path examples/petstore-macro/Cargo.toml
+      # Guard the invariant: a proc-macro crate is host-only, so no spargen crate may appear in the
+      # macro consumer's RUNTIME graph. `-i spargen` prints nothing when it is absent from the graph.
+      - name: Assert macro runtime graph is spargen-free
+        run: |
+          leak=$(cargo tree -e no-proc-macro -i spargen --manifest-path examples/petstore-macro/Cargo.toml)
+          if [ -n "$leak" ]; then
+            echo "spargen leaked into the runtime graph:"; echo "$leak"; exit 1
+          fi
+          echo "macro runtime graph is spargen-free"
 
   docs:
     name: Docs site (mdBook)
