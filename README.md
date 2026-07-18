@@ -28,23 +28,39 @@ converted.
 Spargen consumes an OpenAPI 3.1.x document (JSON or YAML, plus local relative-file `$ref`s) at
 generation time and produces idiomatic, deterministic Rust: typed models, a `Client`, one method
 per operation, and typed errors. Generated code compiles or generation fails — with a diagnostic
-that names the exact spec construct, its JSON Pointer, and a remedy. Two ways to run it:
+that names the exact spec construct, its JSON Pointer, and a remedy. Three ways to run it — all
+produce byte-identical output, so they are interchangeable:
 
-1. **CLI, checked-in output (recommended):** `spargen generate spec.yaml --out src/api.rs`.
-   Spargen appears nowhere in your `Cargo.toml`; `spargen generate --check` fails CI when
-   checked-in code drifts from the spec (`W004`).
-2. **`build.rs`:** `spargen` as a `[build-dependencies]` entry, generating into `OUT_DIR` and
-   consumed with `include!`. See [`examples/petstore`](examples/petstore) for the complete,
-   runnable loop — it drives every generated feature against a local mock server.
+| Mode | How | Generated code | No CLI? |
+| --- | --- | --- | --- |
+| **CLI, checked-in** (recommended) | `spargen generate spec.yaml --out src/api.rs` | committed & reviewable | — |
+| **`build.rs`** | `spargen` in `[build-dependencies]`, `include!` from `OUT_DIR` | in `OUT_DIR` | ✓ |
+| **Macro** | [`spargen-macro`](spargen-macro): `generate_api!("spec.yaml")` | inline (use `--out -` to inspect) | ✓ |
+
+The CLI keeps spargen out of your `Cargo.toml` entirely and `spargen generate --check` fails CI on
+drift (`W004`). The `build.rs` and macro modes are zero-CLI; in both, spargen is host/build-time
+only and **never enters your runtime dependency tree**.
 
 ```rust
-// build.rs
+// build.rs — spargen appears only in [build-dependencies].
 let report = spargen::generate(&spargen::Config::new(
     "api/openapi.yaml",
     spargen::OutputTarget::Module(format!("{out_dir}/api.rs").into()),
 ));
 assert_eq!(report.outcome, spargen::Outcome::Generated);
 ```
+
+```rust
+// Or generate inline, no build.rs — see examples/petstore-macro.
+mod api {
+    spargen_macro::generate_api!("openapi.yaml");
+}
+```
+
+See [`examples/petstore`](examples/petstore) (build.rs) and
+[`examples/petstore-macro`](examples/petstore-macro) (macro) for complete, runnable loops that drive
+every generated feature against a local mock server. Preview any spec without writing a file:
+`spargen generate spec.yaml --out -` streams the module to stdout (pipe it to `rustfmt`).
 
 Generating a client from a spec that a Rust server framework emits (utoipa, aide, poem-openapi)?
 The [framework round-trip recipes](docs/recipes.md) cover how each exports its OpenAPI document,
