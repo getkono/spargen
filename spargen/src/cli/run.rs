@@ -34,6 +34,27 @@ pub fn run(cli: Cli) -> ExitCode {
                     Err(error) => return config_error(error),
                 };
 
+            // `--out -` streams the generated module to stdout (a preview) and writes nothing —
+            // the Unix dash convention, so `spargen generate api.yaml --out - | rustfmt` works.
+            // It is a single-module view, so it is incompatible with the multi-file / stateful
+            // modes below.
+            let preview_to_stdout = args.out.as_str() == "-";
+            if preview_to_stdout {
+                if settings.as_crate {
+                    return usage_error(
+                        "--out - previews a single module to stdout; it is not supported with \
+                         --as-crate (a crate is multiple files). Write the crate to a directory \
+                         instead.",
+                    );
+                }
+                if args.check {
+                    return usage_error("--out - (stdout preview) cannot be combined with --check");
+                }
+                if args.watch {
+                    return usage_error("--out - (stdout preview) cannot be combined with --watch");
+                }
+            }
+
             let output = if settings.as_crate {
                 let name = args
                     .out
@@ -50,6 +71,19 @@ pub fn run(cli: Cli) -> ExitCode {
             let mut config = Config::new(args.spec, output);
             apply_settings(&mut config, settings);
             config.check_only = args.check;
+
+            if preview_to_stdout {
+                // Render in memory; print the module to stdout and diagnostics to stderr, so the
+                // piped code stays pure. `--format` governs diagnostics only, which for a preview
+                // are advisory — keep them human-readable on stderr regardless.
+                let preview = crate::preview(&config);
+                render_diagnostics_human(&preview.report.diagnostics);
+                if let Some(file) = preview.files.first() {
+                    print!("{}", file.contents);
+                }
+                return status_for_report(&preview.report).into();
+            }
+
             if args.watch {
                 return super::watch::watch(&config, args.config.as_deref(), args.format);
             }
@@ -194,6 +228,12 @@ fn apply_settings(config: &mut Config, settings: Settings) {
 /// Render a config/flag error to stderr and exit with a usage status — never a panic.
 fn config_error(error: ConfigError) -> ExitCode {
     eprintln!("error: {error}");
+    ExitStatus::Usage.into()
+}
+
+/// Render a flag-combination error to stderr and exit with a usage status.
+fn usage_error(message: &str) -> ExitCode {
+    eprintln!("error: {message}");
     ExitStatus::Usage.into()
 }
 

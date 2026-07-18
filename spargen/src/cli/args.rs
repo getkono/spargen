@@ -34,7 +34,8 @@ pub enum Command {
 pub struct GenerateArgs {
     /// Path to the root OpenAPI document.
     pub spec: Utf8PathBuf,
-    /// Output module path, or crate directory with `--as-crate`.
+    /// Output module path, or crate directory with `--as-crate`. Use `-` to preview the generated
+    /// module on stdout without writing (pipe it to `rustfmt` or a pager).
     #[arg(short, long)]
     pub out: Utf8PathBuf,
     /// Fail if the checked-in output has drifted from the spec, instead of writing.
