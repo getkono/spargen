@@ -47,8 +47,8 @@ Warnings are not surfaced through the macro (stable proc-macro APIs can't emit t
 
 The generated code gates the synchronous `BlockingClient` behind a `blocking` feature (as it does
 in every mode). When the client is inlined by the macro, that gate resolves against *your* crate's
-features — so unless you declare one, the blocking client is simply compiled out (and rustc may
-note the unknown `feature = "blocking"` cfg). To opt in, declare it in your `Cargo.toml`:
+features. A crate that does not declare it compiles the blocking client out cleanly, including
+under `-D warnings`. To opt in, declare it in your `Cargo.toml`:
 
 ```toml
 [features]

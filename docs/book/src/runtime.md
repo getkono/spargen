@@ -86,6 +86,10 @@ reactor, so `BlockingRuntime` owns a real current-thread `tokio` runtime and dri
 async operation futures to completion on it — the blocking client reuses every line of the async
 dispatch. Enabled by the `blocking` cargo feature, which pulls in `tokio` with just the `rt`
 feature; a client built without it carries no blocking client and no direct tokio dependency.
+Standalone-crate output declares this feature automatically. For `include!`/build.rs and macro
+output, the feature resolves against the consumer crate: leaving it undeclared cleanly compiles the
+facade out, while opting in requires the consumer to declare `blocking` and its optional Tokio
+dependency.
 
 > A `BlockingRuntime` must not be constructed from inside another async runtime (tokio's
 > `block_on` panics within a runtime context). Drive one on a plain thread, or via
