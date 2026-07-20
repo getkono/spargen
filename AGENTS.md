@@ -89,6 +89,7 @@ sources are reached through `spargen/src/support/runtime/` symlinks so they ship
 `.crate`; the CI `package` job (`cargo publish --dry-run`) enforces this.
 
 `spargen-macro` is a second published crate (it depends on `spargen`, so release-plz publishes
-`spargen` first). It needs its own one-time bootstrap — a manual `0.1.0` publish plus a Trusted
-Publisher entry in *its* crate settings — before release-plz can publish it via OIDC; until then it
-is CI-verified (`cargo package -p spargen-macro`) but not auto-published. See the tracking issue.
+`spargen` first). Its one-time bootstrap is complete: `0.2.0` was published manually, and its
+crate settings trust `getkono/spargen`'s `release-plz.yml` workflow. CI fully verifies the macro
+artifact on ordinary changes; on release PRs, release-plz performs that verification after the new
+`spargen` dependency reaches the registry. Subsequent releases publish via OIDC.

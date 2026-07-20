@@ -163,7 +163,7 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ## Architecture
 
-One published crate, internally partitioned into subsystems with a declared dependency DAG —
+The primary published crate is internally partitioned into subsystems with a declared dependency DAG —
 `diag`, `source`, `ir`, `oas31`, `name`, `support`, `codegen`, `emit`, `compat`, `cli`, and the
 `lib.rs` facade. Everything that knows OpenAPI 3.1 syntax lives in the `oas31` frontend, which
 lowers into a version-agnostic IR; codegen never sees a spec document. A future spec version
@@ -180,9 +180,10 @@ that alter generated signatures, type shapes, or variant sets are major; output 
 to that API are minor; generator-internal fixes are patch.
 
 Publishing runs strictly in CI via crates.io [Trusted Publishing](https://crates.io/docs/trusted-publishing)
-(OIDC) — no `CARGO_REGISTRY_TOKEN` secret. Bootstrap is one-time: the `0.1.0` release was published
-manually to create the crate, after which a Trusted Publisher (`getkono/spargen`, workflow
-`release-plz.yml`) was configured in the crate settings; every release since is automated.
+(OIDC) — no `CARGO_REGISTRY_TOKEN` secret. Each crate was bootstrapped once: `spargen 0.1.0` and
+`spargen-macro 0.2.0` were published manually to create their crates.io entries. Both now trust
+`getkono/spargen`'s `release-plz.yml` workflow, which publishes `spargen` before its dependent
+`spargen-macro`.
 
 ## License
 
