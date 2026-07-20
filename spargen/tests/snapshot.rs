@@ -77,7 +77,16 @@ fn api_surface(source: &str) -> String {
                     continue;
                 }
                 if let Some((_, items)) = &module.content {
-                    collect_module_types(items, &module.ident.to_string(), &mut types);
+                    // The private lint-scope wrapper re-exports BlockingClient at the generated
+                    // root, so treat its public definitions as root surface rather than exposing
+                    // an implementation-detail module path in the snapshot.
+                    let module_name = module.ident.to_string();
+                    let prefix = if module.ident == "__spargen_blocking" {
+                        ""
+                    } else {
+                        module_name.as_str()
+                    };
+                    collect_module_types(items, prefix, &mut types);
                 }
             }
             // Crate-root impls are the `Client`/`BlockingClient` inherent impls: their `pub async
@@ -125,26 +134,37 @@ fn api_surface(source: &str) -> String {
 /// Recursively collect public type definitions from a module's items, qualifying each name with the
 /// module path (e.g. `types::Foo`).
 fn collect_module_types(items: &[syn::Item], prefix: &str, types: &mut BTreeSet<String>) {
+    let qualified = |ident: &syn::Ident| {
+        if prefix.is_empty() {
+            ident.to_string()
+        } else {
+            format!("{prefix}::{ident}")
+        }
+    };
     for item in items {
         match item {
             syn::Item::Struct(item) if is_pub(&item.vis) => {
-                types.insert(format!("{prefix}::{}", item.ident));
+                types.insert(qualified(&item.ident));
             }
             syn::Item::Enum(item) if is_pub(&item.vis) => {
-                types.insert(format!("{prefix}::{}", item.ident));
+                types.insert(qualified(&item.ident));
             }
             syn::Item::Type(item) if is_pub(&item.vis) => {
-                types.insert(format!("{prefix}::{}", item.ident));
+                types.insert(qualified(&item.ident));
             }
             syn::Item::Trait(item) if is_pub(&item.vis) => {
-                types.insert(format!("{prefix}::{}", item.ident));
+                types.insert(qualified(&item.ident));
             }
             syn::Item::Union(item) if is_pub(&item.vis) => {
-                types.insert(format!("{prefix}::{}", item.ident));
+                types.insert(qualified(&item.ident));
             }
             syn::Item::Mod(module) if module.ident != "support" => {
                 if let Some((_, nested)) = &module.content {
-                    let nested_prefix = format!("{prefix}::{}", module.ident);
+                    let nested_prefix = if prefix.is_empty() {
+                        module.ident.to_string()
+                    } else {
+                        format!("{prefix}::{}", module.ident)
+                    };
                     collect_module_types(nested, &nested_prefix, types);
                 }
             }

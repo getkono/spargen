@@ -641,18 +641,25 @@ pub(crate) fn emit_blocking_client(
         panics when nested. Build one on a plain thread (e.g. `std::thread` or \
         `tokio::task::spawn_blocking`).";
     quote! {
-        #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
-        #[doc = #doc]
-        #[allow(dead_code)]
-        pub struct BlockingClient {
-            inner: Client,
-            runtime: support::BlockingRuntime,
-        }
+        // In module/include!/macro output, `feature = "blocking"` resolves against the consumer
+        // crate. Keep the cfgs inside an ungated lexical lint scope so crates that do not declare
+        // that optional feature stay warning-free under `unexpected_cfgs` (including `-D warnings`).
+        #[allow(unexpected_cfgs, unused_imports)]
+        mod __spargen_blocking {
+            use super::*;
 
-        #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
-        #[forbid(unsafe_code)]
-        #[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
-        impl BlockingClient {
+            #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+            #[doc = #doc]
+            #[allow(dead_code)]
+            pub struct BlockingClient {
+                inner: Client,
+                runtime: support::BlockingRuntime,
+            }
+
+            #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
+            #[forbid(unsafe_code)]
+            #[allow(dead_code, unused_mut, unused_variables, clippy::result_large_err)]
+            impl BlockingClient {
             /// Build a blocking client over a fresh default `reqwest::Client`.
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
                 let inner = Client::new(base_url)?;
@@ -704,8 +711,12 @@ pub(crate) fn emit_blocking_client(
                 self
             }
 
-            #(#methods)*
+                #(#methods)*
+            }
         }
+
+        #[allow(unused_imports)]
+        pub use __spargen_blocking::*;
     }
 }
 
@@ -1125,7 +1136,7 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
         /// The freestanding runtime embedded verbatim into this output; no spargen crate exists
         /// at runtime.
         #[forbid(unsafe_code)]
-        #[allow(dead_code, unused_imports, clippy::result_large_err)]
+        #[allow(dead_code, unexpected_cfgs, unused_imports, clippy::result_large_err)]
         mod support {
             #(#modules)*
             #xml_module
