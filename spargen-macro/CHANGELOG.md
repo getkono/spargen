@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.2.1](https://github.com/getkono/spargen/compare/spargen-macro-v0.2.0...spargen-macro-v0.2.1) - 2026-07-20
+## [0.2.1](https://github.com/getkono/spargen/compare/spargen-v0.2.0...spargen-macro-v0.2.1) - 2026-07-20
 
 ### Fixed
 
