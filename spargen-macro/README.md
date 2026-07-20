@@ -20,7 +20,7 @@ spargen_macro::generate_api!(spec = "openapi.yaml", no_uuid, no_time, carve);
 
 ```toml
 [dependencies]
-spargen-macro = "0.1"
+spargen-macro = "0.2"
 # ...plus the crates the generated client uses at runtime (reqwest, serde, serde_json, bytes,
 # secrecy, and any optional uuid/time). No spargen crate appears at runtime.
 ```

@@ -70,10 +70,15 @@ jobs:
       # self-contained — the runtime sources reached via src/support/runtime/ symlinks must ship
       # inside the crate and compile standalone.
       - run: cargo publish --dry-run -p spargen
-      # The macro crate must package cleanly too. `--no-verify` skips the registry-build step (it
-      # depends on `spargen` by version, which need not be on crates.io yet mid-release); this still
-      # checks manifest validity and file inclusion.
-      - run: cargo package -p spargen-macro --no-verify
+      # Always pin the macro's package contents. On ordinary changes, also run Cargo's full
+      # isolated verification against the published `spargen` dependency. A release-plz PR points
+      # at the new `spargen` version before it exists in the registry, so dependency-first release
+      # publishing performs that full verification after uploading `spargen`.
+      - run: cargo package --list -p spargen-macro > /dev/null
+      - if: >-
+          (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')) ||
+          (github.event_name == 'push' && !contains(github.event.head_commit.message, 'release-plz-'))
+        run: cargo publish --dry-run -p spargen-macro
 
   corpus-smoke:
     name: Corpus smoke
