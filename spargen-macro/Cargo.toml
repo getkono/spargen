@@ -29,7 +29,7 @@ proc-macro = true
 # The generator. `default-features = false` drops the CLI stack (clap/toml/notify/reqwest); the
 # generation pipeline itself is always compiled. `uuid`/`time` output mappings are controlled at
 # call time via `Config.features`, not these cargo features, so none are needed here.
-spargen = { path = "../spargen", version = "0.2.0", default-features = false }
+spargen = { path = "../spargen", version = "0.2.1", default-features = false }
 syn = { workspace = true }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
