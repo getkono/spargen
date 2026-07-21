@@ -1,5 +1,7 @@
 # spargen
 
+> Status (Alpha): If it compiles, it should work. Currently being adopted by a few projects by author. Issues will be reviewed promptly.
+
 A compile-time-correct Rust client generator for OpenAPI 3.1.x. Nothing else.
 
 The name: a *spar* is the single load-bearing beam of an aircraft wing — sized on the drawing
