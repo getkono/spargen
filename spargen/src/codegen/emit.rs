@@ -997,7 +997,80 @@ fn doc_tokens(docs: &crate::ir::Docs) -> TokenStream {
 /// ambiguous in rustdoc and trip Clippy's `tabs_in_doc_comments`; four spaces preserve table/code
 /// alignment without altering the API's semantic documentation.
 fn normalize_rustdoc(text: &str) -> String {
-    text.replace('\t', "    ")
+    #[derive(Clone, Copy)]
+    enum Continuation {
+        None,
+        List(usize),
+        Quote,
+    }
+
+    fn list_indent(line: &str) -> Option<usize> {
+        let leading = line.len() - line.trim_start_matches(' ').len();
+        let text = &line[leading..];
+        if matches!(text.as_bytes().first(), Some(b'-' | b'*' | b'+')) {
+            let spacing = text.as_bytes()[1..]
+                .iter()
+                .take_while(|byte| **byte == b' ')
+                .count();
+            return (spacing > 0).then_some(leading + 1 + spacing);
+        }
+        let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+        let marker = *text.as_bytes().get(digits)?;
+        if digits == 0 || !matches!(marker, b'.' | b')') {
+            return None;
+        }
+        let spacing = text.as_bytes()[digits + 1..]
+            .iter()
+            .take_while(|byte| **byte == b' ')
+            .count();
+        (spacing > 0).then_some(leading + digits + 1 + spacing)
+    }
+
+    let text = text.replace('\t', "    ");
+    let mut continuation = Continuation::None;
+    let mut fence: Option<char> = None;
+    let mut output = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start_matches(' ');
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let marker = trimmed.chars().next().expect("non-empty fence");
+            fence = match fence {
+                Some(active) if active == marker => None,
+                None => Some(marker),
+                active => active,
+            };
+            continuation = Continuation::None;
+            output.push(line.to_owned());
+            continue;
+        }
+        if fence.is_some() {
+            output.push(line.to_owned());
+            continue;
+        }
+        if trimmed.is_empty() {
+            continuation = Continuation::None;
+            output.push(String::new());
+        } else if trimmed.starts_with('>') {
+            continuation = Continuation::Quote;
+            output.push(line.to_owned());
+        } else if let Some(indent) = list_indent(line) {
+            continuation = Continuation::List(indent);
+            output.push(line.to_owned());
+        } else {
+            match continuation {
+                Continuation::None => output.push(line.to_owned()),
+                Continuation::Quote => output.push(format!("> {line}")),
+                Continuation::List(indent) => {
+                    let leading = line.len() - trimmed.len();
+                    output.push(format!(
+                        "{}{line}",
+                        " ".repeat(indent.saturating_sub(leading))
+                    ));
+                }
+            }
+        }
+    }
+    output.join("\n")
 }
 
 /// Document the generated `Client` with the API identity and its declared servers.

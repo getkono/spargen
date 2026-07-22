@@ -1532,6 +1532,14 @@ components:
     BlankDocs:
       description: ""
       type: string
+    MarkdownDocs:
+      description: |-
+        *   A list item
+        continuation text
+
+        > A quoted warning
+        continuation text
+      type: string
     WorkflowId:
       description: "Workflow identifier\taccepted as a numeric id or file name."
       oneOf:
