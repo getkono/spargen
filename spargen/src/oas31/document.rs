@@ -95,6 +95,8 @@ pub struct ParameterObject {
     pub required: bool,
     pub deprecated: bool,
     pub style: Option<String>,
+    pub explode: Option<bool>,
+    pub allow_reserved: bool,
     /// A schema-typed parameter …
     pub schema: Option<RefOr<Schema>>,
     /// … or a `content`-typed one (media type → schema).

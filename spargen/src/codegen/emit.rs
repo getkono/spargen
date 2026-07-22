@@ -147,8 +147,9 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let placeholder = format!("{{{}}}", param.name);
             let ident = param_ident(param, crate::name::IdentRole::Param);
+            let value = param_value_tokens(param, quote! { &#ident });
             quote! {
-                path = path.replace(#placeholder, &#ident.to_string());
+                path = path.replace(#placeholder, &#value);
             }
         });
     let required_query = operation
@@ -158,8 +159,7 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Param);
-            let value = param_value_tokens(param, api, options, quote! { #ident });
-            quote! { query.push((#name, #value)); }
+            query_param_tokens(param, &name, quote! { &#ident })
         });
     let optional_query = operation
         .params
@@ -168,10 +168,10 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Field);
-            let value = param_value_tokens(param, api, options, quote! { value });
+            let serialize = query_param_tokens(param, &name, quote! { value });
             quote! {
                 if let Some(value) = params.as_ref().and_then(|params| params.#ident.as_ref()) {
-                    query.push((#name, #value));
+                    #serialize
                 }
             }
         });
@@ -182,7 +182,7 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Param);
-            let value = param_value_tokens(param, api, options, quote! { #ident });
+            let value = param_value_tokens(param, quote! { &#ident });
             quote! { request = request.header(#name, #value); }
         });
     let optional_headers = operation
@@ -192,7 +192,7 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Field);
-            let value = param_value_tokens(param, api, options, quote! { value });
+            let value = param_value_tokens(param, quote! { value });
             quote! {
                 if let Some(value) = params.as_ref().and_then(|params| params.#ident.as_ref()) {
                     request = request.header(#name, #value);
@@ -211,8 +211,7 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Param);
-            let value = param_value_tokens(param, api, options, quote! { #ident });
-            quote! { cookies.push(format!("{}={}", #name, #value)); }
+            cookie_param_tokens(param, &name, quote! { &#ident })
         });
     let optional_cookies = operation
         .params
@@ -221,10 +220,10 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Field);
-            let value = param_value_tokens(param, api, options, quote! { value });
+            let serialize = cookie_param_tokens(param, &name, quote! { value });
             quote! {
                 if let Some(value) = params.as_ref().and_then(|params| params.#ident.as_ref()) {
-                    cookies.push(format!("{}={}", #name, #value));
+                    #serialize
                 }
             }
         });
@@ -515,7 +514,7 @@ pub(crate) fn emit_operation(
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
             let mut path = #path_init.to_owned();
             #(#path_replacements)*
-            let mut query: Vec<(&str, String)> = Vec::new();
+            let mut query: Vec<(String, String)> = Vec::new();
             #(#required_query)*
             #(#optional_query)*
             let url = support::build_url(&self.core, &path, &query)
@@ -828,30 +827,69 @@ fn escaped_token(name: &str, role: crate::name::IdentRole) -> proc_macro2::Ident
     }
 }
 
-/// Render a parameter value expression to its wire string: JSON for `content`-typed parameters,
-/// RFC 3339 for `time` types, `Display` otherwise.
-fn param_value_tokens(
-    param: &crate::ir::Parameter,
-    api: &Api,
-    options: &CodegenOptions,
-    value: TokenStream,
-) -> TokenStream {
+/// Render a path/header parameter value from a borrowed expression. Schema-typed parameters use
+/// OpenAPI `simple` serialization; `content`-typed parameters retain their media codec.
+fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStream) -> TokenStream {
     if let crate::ir::ParamStyle::Content(media) = &param.style {
         return match media {
             MediaType::Json => quote! {
-                serde_json::to_string(&#value).map_err(support::Error::request_construction)?
+                serde_json::to_string(#value).map_err(support::Error::request_construction)?
             },
-            _ => quote! { #value.to_string() },
+            _ => quote! {
+                support::serialize_simple(#value, false)
+                    .map_err(support::Error::request_construction)?
+            },
         };
     }
-    let kind = api.types.get(param.ty.id).map(|def| &def.kind);
-    match kind {
-        Some(TypeKind::Primitive(Prim::DateTime | Prim::Date)) if options.feature_time => quote! {
-            #value
-                .format(&time::format_description::well_known::Rfc3339)
-                .map_err(support::Error::request_construction)?
-        },
-        _ => quote! { #value.to_string() },
+    let explode = param.explode;
+    quote! {
+        support::serialize_simple(#value, #explode)
+            .map_err(support::Error::request_construction)?
+    }
+}
+
+/// Emit serialization of one query parameter into the operation's `query` pair vector.
+fn query_param_tokens(param: &crate::ir::Parameter, name: &str, value: TokenStream) -> TokenStream {
+    match &param.style {
+        crate::ir::ParamStyle::Form => {
+            let explode = param.explode;
+            quote! {
+                query.extend(
+                    support::serialize_form(#name, #value, #explode)
+                        .map_err(support::Error::request_construction)?,
+                );
+            }
+        }
+        crate::ir::ParamStyle::Content(_) => {
+            let value = param_value_tokens(param, value);
+            quote! { query.push((#name.to_owned(), #value)); }
+        }
+        crate::ir::ParamStyle::Simple => quote! {},
+    }
+}
+
+/// Emit serialization of one cookie parameter into the operation's cookie fragments.
+fn cookie_param_tokens(
+    param: &crate::ir::Parameter,
+    name: &str,
+    value: TokenStream,
+) -> TokenStream {
+    match &param.style {
+        crate::ir::ParamStyle::Form => {
+            let explode = param.explode;
+            quote! {
+                for (name, value) in support::serialize_form(#name, #value, #explode)
+                    .map_err(support::Error::request_construction)?
+                {
+                    cookies.push(format!("{name}={value}"));
+                }
+            }
+        }
+        crate::ir::ParamStyle::Content(_) => {
+            let value = param_value_tokens(param, value);
+            quote! { cookies.push(format!("{}={}", #name, #value)); }
+        }
+        crate::ir::ParamStyle::Simple => quote! {},
     }
 }
 
@@ -1147,6 +1185,7 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
             pub use dispatch::{attach_auth, build_url, classify_error, decode_success, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
+            pub use parameter::{serialize_form, serialize_simple, ParameterError};
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;
             pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};

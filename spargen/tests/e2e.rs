@@ -123,6 +123,51 @@ fn blocking_method_round_trips_against_a_mock() {
 
     server.join().unwrap();
 }
+
+#[test]
+fn typed_parameters_follow_openapi_wire_rules() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+
+        let request_line = request.lines().next().unwrap();
+        assert!(request_line.starts_with("GET /params/1,2?"), "{request}");
+        assert!(request_line.contains("workflow_id=build.yml"), "{request}");
+        assert!(request_line.contains("labels=bug&labels=api"), "{request}");
+        assert!(request_line.contains("compact=one%2Ctwo"), "{request}");
+        assert!(request.contains("x-flags: fast,safe\r\n"), "{request}");
+        assert!(request.contains("cookie: session=a; session=b\r\n"), "{request}");
+
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let workflow_id: basic_client::types::WorkflowId =
+        serde_json::from_str(r#""build.yml""#).unwrap();
+    let params = basic_client::SerializeParamsParams::default()
+        .labels(vec!["bug".to_owned(), "api".to_owned()])
+        .compact(vec!["one".to_owned(), "two".to_owned()])
+        .session(vec!["a".to_owned(), "b".to_owned()]);
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client
+        .serialize_params(
+            vec![1, 2],
+            workflow_id,
+            vec!["fast".to_owned(), "safe".to_owned()],
+            Some(params),
+        )
+        .unwrap();
+
+    server.join().unwrap();
+}
 "##,
     )
     .unwrap();
@@ -995,6 +1040,49 @@ info:
 servers:
   - url: https://example.com/api
 paths:
+  /params/{ids}:
+    get:
+      operationId: serializeParams
+      parameters:
+        - name: ids
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: array
+            items: { type: integer }
+        - name: workflow_id
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/WorkflowId"
+        - name: X-Flags
+          in: header
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: labels
+          in: query
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: compact
+          in: query
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: session
+          in: cookie
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+      responses:
+        "204": { description: No Content }
   /users/{id}:
     get:
       operationId: getUser
@@ -1200,6 +1288,10 @@ components:
       in: header
       name: X-Api-Key
   schemas:
+    WorkflowId:
+      oneOf:
+        - type: integer
+        - type: string
     User:
       type: object
       required: [id, name]

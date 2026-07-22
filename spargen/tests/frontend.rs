@@ -1591,6 +1591,75 @@ paths:
 }
 
 #[test]
+fn e010_allow_reserved_parameter_encoding() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: expression
+          in: query
+          allowReserved: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+
+    let checked = check(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: expression
+          in: query
+          allowReserved: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::UnsupportedParameterStyle));
+}
+
+#[test]
+fn e010_nested_parameter_value() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: matrix
+          in: query
+          schema:
+            type: array
+            items:
+              type: array
+              items: { type: integer }
+      responses:
+        "204": { description: No Content }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+
+    let checked = check(spec);
+    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::UnsupportedParameterStyle));
+}
+
+#[test]
 fn e012_unknown_security_scheme() {
     let report = generate(
         r##"

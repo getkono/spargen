@@ -34,6 +34,7 @@ mod dispatch;
 mod error;
 mod middleware;
 mod paginate;
+mod parameter;
 mod response;
 mod retry;
 mod stream;
@@ -62,6 +63,7 @@ pub use dispatch::{
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
 pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use paginate::{next_link, LinkPaginator};
+pub use parameter::{serialize_form, serialize_simple, ParameterError};
 pub use response::ResponseValue;
 pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
 pub use stream::{EventStream, Framing};

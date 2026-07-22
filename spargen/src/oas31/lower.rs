@@ -1542,19 +1542,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ParamLoc::Path | ParamLoc::Header => "simple",
             ParamLoc::Query | ParamLoc::Cookie => "form",
         });
-        let style = match style_name {
-            "simple" => ParamStyle::Simple,
-            "form" => ParamStyle::Form,
+        let style = match (location, style_name) {
+            (ParamLoc::Path | ParamLoc::Header, "simple") => ParamStyle::Simple,
+            (ParamLoc::Query | ParamLoc::Cookie, "form") => ParamStyle::Form,
             _ => {
                 Diagnostic::error(
                     Code::UnsupportedParameterStyle,
                     parameter.provenance.clone(),
                 )
-                .message(format!("parameter style `{style_name}` is not supported"))
+                .message(format!(
+                    "parameter style `{style_name}` is not supported for `{}` parameters",
+                    parameter.location
+                ))
                 .emit(self.diags);
                 return None;
             }
         };
+        if parameter.allow_reserved {
+            Diagnostic::error(
+                Code::UnsupportedParameterStyle,
+                parameter.provenance.clone(),
+            )
+            .message("`allowReserved: true` parameter encoding is not supported")
+            .emit(self.diags);
+            return None;
+        }
+        let explode = parameter
+            .explode
+            .unwrap_or(matches!(style, ParamStyle::Form));
         let ty = if let Some(schema) = &parameter.schema {
             let ty = self.lower_schema_ref(schema, &parameter.name)?;
             self.remap_binary_param(ty, &parameter.name)
@@ -1572,6 +1587,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ty,
                 required: parameter.required || location == ParamLoc::Path,
                 style: ParamStyle::Content(media),
+                explode: false,
                 deprecated: parameter.deprecated,
                 default_display,
             });
@@ -1583,6 +1599,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(parameter.provenance.clone()),
             )
         };
+        if !parameter_shape_supported(&self.graph, ty) {
+            Diagnostic::error(
+                Code::UnsupportedParameterStyle,
+                parameter.provenance.clone(),
+            )
+            .message(
+                "simple/form parameter serialization does not support nested arrays or objects",
+            )
+            .emit(self.diags);
+            return None;
+        }
         let default_display = self.param_default_display(parameter.schema.as_ref(), ty);
         Some(Parameter {
             name: parameter.name.clone(),
@@ -1590,6 +1617,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ty,
             required: parameter.required || location == ParamLoc::Path,
             style,
+            explode,
             deprecated: parameter.deprecated,
             default_display,
         })
@@ -1823,6 +1851,52 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             boxed: false,
         }
     }
+}
+
+fn parameter_shape_supported(graph: &TypeGraph, ty: Ty) -> bool {
+    parameter_shape_supported_inner(graph, ty, false, &mut HashSet::new())
+}
+
+fn parameter_shape_supported_inner(
+    graph: &TypeGraph,
+    ty: Ty,
+    scalar_only: bool,
+    visiting: &mut HashSet<TypeId>,
+) -> bool {
+    if !visiting.insert(ty.id) {
+        return false;
+    }
+    let Some(definition) = graph.get(ty.id) else {
+        visiting.remove(&ty.id);
+        return false;
+    };
+    let supported = match &definition.kind {
+        TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes => true,
+        TypeKind::Array(item) if !scalar_only => {
+            parameter_shape_supported_inner(graph, **item, true, visiting)
+        }
+        TypeKind::Tuple(items) if !scalar_only => items
+            .iter()
+            .all(|item| parameter_shape_supported_inner(graph, *item, true, visiting)),
+        TypeKind::Struct(object) if !scalar_only => {
+            object
+                .fields
+                .iter()
+                .all(|field| parameter_shape_supported_inner(graph, field.ty, true, visiting))
+                && match &object.additional {
+                    AdditionalProps::Deny | AdditionalProps::Allow => true,
+                    AdditionalProps::Typed(value) => {
+                        parameter_shape_supported_inner(graph, **value, true, visiting)
+                    }
+                }
+        }
+        TypeKind::Union(union) => union.variants.iter().all(|variant| {
+            parameter_shape_supported_inner(graph, variant.ty, scalar_only, visiting)
+        }),
+        TypeKind::Struct(_) | TypeKind::Array(_) | TypeKind::Tuple(_) | TypeKind::Any => false,
+    };
+    visiting.remove(&ty.id);
+    supported
 }
 
 fn lower_security_requirement(requirement: &SecurityRequirement) -> crate::ir::SecurityRequirement {

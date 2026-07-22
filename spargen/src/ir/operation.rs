@@ -97,6 +97,8 @@ pub struct Parameter {
     pub required: bool,
     /// The serialization style.
     pub style: ParamStyle,
+    /// Whether array/object values use the style's exploded representation.
+    pub explode: bool,
     /// `deprecated` → `#[deprecated]`.
     pub deprecated: bool,
     /// The rendered `default` value, if the parameter schema declared one. Documented in rustdoc

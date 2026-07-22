@@ -20,7 +20,7 @@ use crate::{AuthKind, AuthScheme, ClientCore, Credential, Error, ResponseValue};
 pub fn build_url(
     core: &ClientCore,
     path: &str,
-    query: &[(&str, String)],
+    query: &[(String, String)],
 ) -> Result<Url, Error<Infallible>> {
     let mut url = core.base_url().clone();
     let base_path = url.path().trim_end_matches('/');
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn build_url_appends_and_percent_encodes_query_pairs() {
         let core = core_at("https://example.com");
-        let url = build_url(&core, "/search", &[("q", "a b&c".to_owned())]).unwrap();
+        let url = build_url(&core, "/search", &[("q".to_owned(), "a b&c".to_owned())]).unwrap();
         // The space and ampersand are form-encoded, so the pair round-trips unambiguously.
         assert_eq!(url.query(), Some("q=a+b%26c"));
         let pairs: Vec<(String, String)> = url
