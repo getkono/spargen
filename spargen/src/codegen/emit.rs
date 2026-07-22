@@ -965,16 +965,24 @@ fn cookie_param_tokens(
 /// Turn lowered documentation into `#[doc = …]` attributes so IDE hover shows the API docs.
 fn doc_tokens(docs: &crate::ir::Docs) -> TokenStream {
     let mut paragraphs: Vec<&str> = Vec::new();
-    if let Some(summary) = &docs.summary {
+    let summary = docs
+        .summary
+        .as_deref()
+        .filter(|text| !text.trim().is_empty());
+    if let Some(summary) = summary {
         paragraphs.push(summary);
     }
-    if let Some(description) = &docs.description {
-        if docs.summary.as_deref() != Some(description.as_str()) {
+    if let Some(description) = docs
+        .description
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        if summary != Some(description) {
             paragraphs.push(description);
         }
     }
     if paragraphs.is_empty() {
-        if let Some(title) = &docs.title {
+        if let Some(title) = docs.title.as_deref().filter(|text| !text.trim().is_empty()) {
             paragraphs.push(title);
         }
     }
@@ -995,7 +1003,12 @@ fn normalize_rustdoc(text: &str) -> String {
 /// Document the generated `Client` with the API identity and its declared servers.
 fn client_doc_tokens(api: &Api) -> TokenStream {
     let mut text = format!("Client for {} v{}.", api.info.title, api.info.version);
-    if let Some(description) = &api.info.description {
+    if let Some(description) = api
+        .info
+        .description
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
         text.push_str("\n\n");
         text.push_str(description);
     }
@@ -1005,7 +1018,11 @@ fn client_doc_tokens(api: &Api) -> TokenStream {
             text.push_str("\n- `");
             text.push_str(&server.url);
             text.push('`');
-            if let Some(description) = &server.description {
+            if let Some(description) = server
+                .description
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+            {
                 text.push_str(" — ");
                 text.push_str(description);
             }

@@ -1527,6 +1527,9 @@ components:
       in: header
       name: X-Api-Key
   schemas:
+    BlankDocs:
+      description: ""
+      type: string
     WorkflowId:
       description: "Workflow identifier\taccepted as a numeric id or file name."
       oneOf:
