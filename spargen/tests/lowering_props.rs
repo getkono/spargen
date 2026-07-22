@@ -1,13 +1,11 @@
 //! Issue #34 (layer B) — LOWERING-INVARIANT property tests over the union/allOf lowering, driven
-//! end-to-end through `check`/`generate` on synthesized inline specs (the disjointness and merge
+//! end-to-end through `check`/`generate` on synthesized inline specs (the strategy and merge
 //! decisions are methods on the private lowering state, so they are exercised via the public
-//! frontend rather than called in isolation). Each property re-derives the expected verdict with
-//! independent set logic in the test and asserts the pipeline agrees:
+//! frontend rather than called in isolation):
 //!
-//! * union JSON-type-category disjointness is SOUND — a "disjoint" verdict is never a false positive
-//!   (and `integer`/`number` share the numeric category, so they never separate);
-//! * union required-key disjointness is SOUND — a closed-object union only generates when each
-//!   variant carries a required key absent from every other variant;
+//! * JSON-category unions always lower to a typed enum, including overlapping numeric variants;
+//! * closed-object unions always lower to a typed enum, whether required keys prove a fast-path
+//!   dispatch or overlapping shapes require typed trial matching;
 //! * `allOf` merge reconciles exactly — a property declared with two different types is `E013`, and
 //!   an otherwise-consistent merge keeps the union of every member's fields (no field loss) with the
 //!   union of every member's `required`.
@@ -73,17 +71,6 @@ impl Category {
             Category::Array => "        - { type: array, items: { type: string } }",
         }
     }
-
-    /// The collapsed wire category: `integer` and `number` collapse together (they overlap on the
-    /// wire), everything else is its own category.
-    fn collapsed(self) -> u8 {
-        match self {
-            Category::String => 0,
-            Category::Integer | Category::Number => 1,
-            Category::Boolean => 2,
-            Category::Array => 3,
-        }
-    }
 }
 
 fn category_strategy() -> impl Strategy<Value = Category> {
@@ -134,20 +121,6 @@ fn closed_object_union_spec(variants: &[BTreeSet<usize>]) -> String {
         }
     }
     spec
-}
-
-/// The lowering's required-key proof succeeds iff every variant carries at least one required key
-/// that appears in no other variant.
-fn required_key_disjoint(variants: &[BTreeSet<usize>]) -> bool {
-    variants.iter().enumerate().all(|(i, keys)| {
-        let others: BTreeSet<usize> = variants
-            .iter()
-            .enumerate()
-            .filter(|(j, _)| *j != i)
-            .flat_map(|(_, k)| k.iter().copied())
-            .collect();
-        keys.iter().any(|k| !others.contains(k))
-    })
 }
 
 // ---------------------------------------------------------------------------
@@ -225,42 +198,28 @@ fn has_type_conflict(members: &[Member]) -> bool {
 proptest! {
     #![proptest_config(ProptestConfig { cases: 96, ..ProptestConfig::default() })]
 
-    /// SOUNDNESS: a JSON-type-category union generates without `E007` iff its variants occupy
-    /// pairwise-distinct collapsed categories — the "disjoint" verdict is never a false positive, and
-    /// `integer`/`number` never separate.
+    /// Every JSON-category combination lowers to a typed enum. Pairwise-disjoint variants can use a
+    /// direct dispatch fast path; repeated categories and `integer | number` use typed trial matching.
     #[test]
-    fn json_category_disjointness_is_sound(
+    fn json_category_unions_generate_typed(
         variants in proptest::collection::vec(category_strategy(), 2..=5)
     ) {
-        let collapsed: Vec<u8> = variants.iter().map(|c| c.collapsed()).collect();
-        let distinct: BTreeSet<u8> = collapsed.iter().copied().collect();
-        let expected_disjoint = distinct.len() == collapsed.len();
-
-        let report = check(&category_union_spec(&variants));
-        if expected_disjoint {
-            prop_assert_ne!(report.outcome, Outcome::Rejected, "{:#?}", report);
-            prop_assert!(!has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
-        } else {
-            prop_assert_eq!(report.outcome, Outcome::Rejected, "{:#?}", report);
-            prop_assert!(has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
-        }
+        let (report, source) = generate_module(&category_union_spec(&variants));
+        prop_assert_ne!(report.outcome, Outcome::Rejected, "{:#?}", report);
+        prop_assert!(!has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
+        prop_assert!(source.contains("pub enum U"), "union was not emitted as a typed enum:\n{source}");
     }
 
-    /// SOUNDNESS: a closed-object union generates without `E007` iff every variant carries a required
-    /// key absent from every other variant.
+    /// Every closed-object combination lowers to a typed enum. Unique required keys select a direct
+    /// dispatch fast path; overlapping required-key sets use typed trial matching.
     #[test]
-    fn required_key_disjointness_is_sound(
+    fn closed_object_unions_generate_typed(
         variants in proptest::collection::vec(key_set_strategy(), 2..=4)
     ) {
-        let expected_disjoint = required_key_disjoint(&variants);
-        let report = check(&closed_object_union_spec(&variants));
-        if expected_disjoint {
-            prop_assert_ne!(report.outcome, Outcome::Rejected, "{:#?}", report);
-            prop_assert!(!has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
-        } else {
-            prop_assert_eq!(report.outcome, Outcome::Rejected, "{:#?}", report);
-            prop_assert!(has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
-        }
+        let (report, source) = generate_module(&closed_object_union_spec(&variants));
+        prop_assert_ne!(report.outcome, Outcome::Rejected, "{:#?}", report);
+        prop_assert!(!has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
+        prop_assert!(source.contains("pub enum U"), "union was not emitted as a typed enum:\n{source}");
     }
 
     /// A conflicting property type across members is `E013`; otherwise the merge succeeds keeping the
