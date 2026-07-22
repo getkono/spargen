@@ -32,7 +32,14 @@ fn generates_standalone_crate_for_basic_oas31_api() {
     assert!(status.success());
 
     let status = Command::new("cargo")
-        .args(["clippy", "--", "-D", "warnings"])
+        .args([
+            "clippy",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
         .current_dir(&out)
         .status()
         .unwrap();

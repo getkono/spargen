@@ -206,10 +206,8 @@ fn next_link_target(headers: &HeaderMap) -> Option<String> {
             continue;
         };
         for entry in split_link_entries(field) {
-            if let Some((uri, is_next)) = parse_link_entry(entry) {
-                if is_next {
-                    return Some(uri);
-                }
+            if let Some((uri, true)) = parse_link_entry(entry) {
+                return Some(uri);
             }
         }
     }
