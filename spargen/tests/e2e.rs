@@ -229,7 +229,9 @@ fn multi_status_dispatch_uses_each_status_media_codec() {
     let (base, server) = serve_once("text/plain", "200 OK", b"plain success");
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_raw_multi().unwrap().into_inner() {
-        basic_client::GetRawMultiResponse::Status200(body) => assert_eq!(body, "plain success"),
+        basic_client::GetRawMultiResponse::Status200(body) => {
+            assert_eq!(body.as_str(), "plain success")
+        }
         other => panic!("expected text success variant, got {other:?}"),
     }
     server.join().unwrap();
@@ -238,7 +240,7 @@ fn multi_status_dispatch_uses_each_status_media_codec() {
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_raw_multi().unwrap().into_inner() {
         basic_client::GetRawMultiResponse::Status201(body) => {
-            assert_eq!(body.as_ref(), b"raw success")
+            assert_eq!(&body[..], b"raw success")
         }
         other => panic!("expected binary success variant, got {other:?}"),
     }
@@ -249,7 +251,7 @@ fn multi_status_dispatch_uses_each_status_media_codec() {
     match client.get_raw_multi().unwrap_err() {
         basic_client::Error::Api(response) => match response.into_inner() {
             basic_client::GetRawMultiError::Status409(body) => {
-                assert_eq!(body.as_ref(), b"raw failure")
+                assert_eq!(&body[..], b"raw failure")
             }
             other => panic!("expected binary error variant, got {other:?}"),
         },
@@ -493,13 +495,13 @@ fn multi_status_response_enums_carry_typed_variants() {
     // runs after selecting by HTTP status), proving the types are real and payload-carrying — not
     // `serde_json::Value`.
     let ok: basic_client::types::MultiOk = serde_json::from_str(r#"{"ok":"yes"}"#).unwrap();
-    match basic_client::GetMultiResponse::Status200(ok) {
+    match basic_client::GetMultiResponse::Status200(Box::new(ok)) {
         basic_client::GetMultiResponse::Status200(body) => assert_eq!(body.ok, "yes"),
         other => panic!("expected Status200, got {other:?}"),
     }
     let created: basic_client::types::MultiCreated =
         serde_json::from_str(r#"{"id":7}"#).unwrap();
-    match basic_client::GetMultiResponse::Status201(created) {
+    match basic_client::GetMultiResponse::Status201(Box::new(created)) {
         basic_client::GetMultiResponse::Status201(body) => assert_eq!(body.id, 7),
         other => panic!("expected Status201, got {other:?}"),
     }
@@ -511,13 +513,13 @@ fn multi_status_response_enums_carry_typed_variants() {
 
     let not_found: basic_client::types::NotFoundError =
         serde_json::from_str(r#"{"reason":"gone"}"#).unwrap();
-    match basic_client::GetMultiError::Status404(not_found) {
+    match basic_client::GetMultiError::Status404(Box::new(not_found)) {
         basic_client::GetMultiError::Status404(body) => assert_eq!(body.reason, "gone"),
         other => panic!("expected Status404, got {other:?}"),
     }
     let conflict: basic_client::types::ConflictError =
         serde_json::from_str(r#"{"detail":"dup"}"#).unwrap();
-    match basic_client::GetMultiError::Status409(conflict) {
+    match basic_client::GetMultiError::Status409(Box::new(conflict)) {
         basic_client::GetMultiError::Status409(body) => assert_eq!(body.detail, "dup"),
         other => panic!("expected Status409, got {other:?}"),
     }

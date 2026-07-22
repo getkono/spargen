@@ -400,9 +400,9 @@ pub(crate) fn emit_operation(
                     // Bodied status: decode into the variant's type → `Api`, or `Decode` on failure.
                     Some(ty) => {
                         let body_ty = *ty;
-                        let ty = ty_tokens(body_ty, names, options, true);
+                        let ty = response_payload_ty_tokens(body_ty, names, options, true);
                         let decode = if is_bytes_ty(api, body_ty) {
-                            quote! { Ok::<#ty, String>(body.clone()) }
+                            quote! { Ok::<#ty, String>(Box::new(body.clone())) }
                         } else if response_media_for_spec(&operation.responses, *spec)
                             == Some(MediaType::Text)
                         {
@@ -494,9 +494,9 @@ pub(crate) fn emit_operation(
                     // Bodied status: parse the read body into the variant's type.
                     Some(ty) => {
                         let body_ty = *ty;
-                        let ty = ty_tokens(body_ty, names, options, true);
+                        let ty = response_payload_ty_tokens(body_ty, names, options, true);
                         let decode = if is_bytes_ty(api, body_ty) {
-                            quote! { Ok::<#ty, String>(body.clone()) }
+                            quote! { Ok::<#ty, String>(Box::new(body.clone())) }
                         } else if response_media_for_spec(&operation.responses, *spec)
                             == Some(MediaType::Text)
                         {
@@ -1168,7 +1168,7 @@ fn response_variant_def(
     let variant_ident = status_variant_ident(spec);
     match ty {
         Some(ty) => {
-            let ty = ty_tokens(ty, names, options, true);
+            let ty = response_payload_ty_tokens(ty, names, options, true);
             quote! { #variant_ident(#ty), }
         }
         None => quote! { #variant_ident, },
@@ -1929,6 +1929,17 @@ fn ty_tokens(ty: Ty, names: &Names, _options: &CodegenOptions, qualified: bool) 
 /// boolean representation flag, so setting it again never produces `Box<Box<T>>`.
 fn union_variant_ty_tokens(ty: Ty, names: &Names, options: &CodegenOptions) -> TokenStream {
     ty_tokens(Ty { boxed: true, ..ty }, names, options, false)
+}
+
+/// Multi-status response payloads are uniformly indirect for the same bounded-enum-size reason as
+/// schema unions. Single-body response aliases remain allocation-free.
+fn response_payload_ty_tokens(
+    ty: Ty,
+    names: &Names,
+    options: &CodegenOptions,
+    qualified: bool,
+) -> TokenStream {
+    ty_tokens(Ty { boxed: true, ..ty }, names, options, qualified)
 }
 
 fn prim_tokens(prim: Prim, options: &CodegenOptions) -> TokenStream {
