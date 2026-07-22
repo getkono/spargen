@@ -168,6 +168,93 @@ fn typed_parameters_follow_openapi_wire_rules() {
 
     server.join().unwrap();
 }
+
+fn serve_once(content_type: &str, status: &str, body: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let content_type = content_type.to_owned();
+    let status = status.to_owned();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 2048];
+        let _ = stream.read(&mut request).unwrap();
+        let headers = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+        stream.flush().unwrap();
+    });
+    (format!("http://{addr}"), server)
+}
+
+#[test]
+fn textual_vendor_and_binary_responses_use_raw_wire_codecs() {
+    let (base, server) = serve_once("text/html", "200 OK", b"<p>Hello</p>");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    assert_eq!(client.render_html().unwrap().into_inner(), "<p>Hello</p>");
+    server.join().unwrap();
+
+    let (base, server) = serve_once(
+        "application/octocat-stream",
+        "200 OK",
+        b" /\\_/\\\n( o.o )",
+    );
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    assert_eq!(client.get_octocat().unwrap().into_inner(), " /\\_/\\\n( o.o )");
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/octet-stream", "200 OK", b"\0raw\xff");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    assert_eq!(client.download_raw().unwrap().into_inner().as_ref(), b"\0raw\xff");
+    server.join().unwrap();
+}
+
+#[test]
+fn textual_documented_errors_decode_without_json_quotes() {
+    let (base, server) = serve_once("text/plain", "400 Bad Request", b"plain failure");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_text_error().unwrap_err() {
+        basic_client::Error::Api(response) => assert_eq!(response.into_inner(), "plain failure"),
+        other => panic!("expected typed textual API error, got {other:?}"),
+    }
+    server.join().unwrap();
+}
+
+#[test]
+fn multi_status_dispatch_uses_each_status_media_codec() {
+    let (base, server) = serve_once("text/plain", "200 OK", b"plain success");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_raw_multi().unwrap().into_inner() {
+        basic_client::GetRawMultiResponse::Status200(body) => assert_eq!(body, "plain success"),
+        other => panic!("expected text success variant, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/octet-stream", "201 Created", b"raw success");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_raw_multi().unwrap().into_inner() {
+        basic_client::GetRawMultiResponse::Status201(body) => {
+            assert_eq!(body.as_ref(), b"raw success")
+        }
+        other => panic!("expected binary success variant, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/octet-stream", "409 Conflict", b"raw failure");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_raw_multi().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetRawMultiError::Status409(body) => {
+                assert_eq!(body.as_ref(), b"raw failure")
+            }
+            other => panic!("expected binary error variant, got {other:?}"),
+        },
+        other => panic!("expected typed API error, got {other:?}"),
+    }
+    server.join().unwrap();
+}
 "##,
     )
     .unwrap();
@@ -1302,6 +1389,70 @@ paths:
       responses:
         "204":
           description: No Content
+  # Raw textual/vendor and binary response codecs: these bodies are not JSON documents. The
+  # generated dispatch must decode UTF-8 text through a JSON string value (preserving typed string
+  # schemas) and return binary bodies as bytes without attempting serde_json parsing.
+  /render:
+    get:
+      operationId: renderHtml
+      responses:
+        "200":
+          description: rendered HTML
+          content:
+            text/html:
+              schema: { type: string }
+  /octocat:
+    get:
+      operationId: getOctocat
+      responses:
+        "200":
+          description: octocat art
+          content:
+            application/octocat-stream:
+              schema: { type: string }
+  /download:
+    get:
+      operationId: downloadRaw
+      responses:
+        "200":
+          description: raw bytes
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+  /text-error:
+    get:
+      operationId: getTextError
+      responses:
+        "204": { description: success }
+        "400":
+          description: textual failure
+          content:
+            text/plain:
+              schema: { type: string }
+  /raw-multi:
+    get:
+      operationId: getRawMulti
+      responses:
+        "200":
+          description: text success
+          content:
+            text/plain:
+              schema: { type: string }
+        "201":
+          description: binary success
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400":
+          description: text error
+          content:
+            text/plain:
+              schema: { type: string }
+        "409":
+          description: binary error
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
   # XML request + response bodies (Issue #13): both lower to typed structs and are
   # serialized/decoded through the embedded quick-xml codec — compile-verifies that the synthesized
   # Cargo.toml enabled quick-xml (the `xml` feature) and that the embedded `support::xml` helpers

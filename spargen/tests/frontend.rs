@@ -1137,6 +1137,89 @@ paths:
 }
 
 #[test]
+fn textual_vendor_and_structured_json_media_generate() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /html:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            text/html:
+              schema: { type: string }
+  /octocat:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octocat-stream:
+              schema: { type: string }
+  /problem:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/problem+json:
+              schema:
+                type: object
+                properties: { detail: { type: string } }
+"##;
+    let generated = generate(spec);
+    assert_ne!(generated.outcome, Outcome::Rejected, "{generated:#?}");
+    assert!(!has_code(&generated, Code::UnsupportedMediaType));
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(!has_code(&checked, Code::UnsupportedMediaType));
+}
+
+#[test]
+fn e009_raw_media_requires_a_compatible_schema() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: not representable as raw text
+          content:
+            text/html:
+              schema: { type: object, properties: { value: { type: string } } }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType));
+}
+
+#[test]
+fn e009_request_only_media_is_rejected_in_responses() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: unsupported response codec
+          content:
+            application/x-www-form-urlencoded:
+              schema: { type: object }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType));
+}
+
+#[test]
 fn xml_request_body_generates() {
     // Issue #13: an `application/xml` request body lowers to a typed struct and generates (no E009);
     // it is serialized through the runtime's quick-xml codec. check/generate stay in parity.

@@ -2043,7 +2043,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
             }
         }
-        Some(RequestBody { media, ty })
+        if let Some(ty) = ty {
+            let compatible = match media {
+                MediaType::Text => raw_text_type_supported(&self.graph, ty),
+                MediaType::OctetStream => matches!(
+                    self.graph.get(ty.id).map(|definition| &definition.kind),
+                    Some(TypeKind::Bytes)
+                ),
+                _ => true,
+            };
+            if !compatible {
+                Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                    .message(format!(
+                        "media type `{media_name}` requires a string-like or binary schema that can be sent as a raw body"
+                    ))
+                    .remedy("use a string/binary schema, choose a structured media type, or omit this API segment with spargen::omit!")
+                    .emit(self.diags);
+                return None;
+            }
+        }
+        Some(RequestBody {
+            media,
+            content_type: media_essence(media_name).to_owned(),
+            ty,
+        })
     }
 
     fn lower_responses(&mut self, responses: &super::ResponsesObject) -> Responses {
@@ -2095,6 +2118,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     schema_source.and_then(|schema| self.lower_schema_ref(schema, "ResponseBody"));
                 if let Some(schema) = schema_source {
                     self.warn_structural_default_ref(schema, "a response body schema");
+                }
+                if matches!(media, MediaType::FormUrlEncoded | MediaType::Multipart) {
+                    Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
+                        .message(format!(
+                            "media type `{media_name}` is supported for request bodies, not response bodies"
+                        ))
+                        .remedy("document a JSON, XML, textual, binary, or streaming response, or omit this API segment with spargen::omit!")
+                        .emit(self.diags);
+                    return None;
+                }
+                if let Some(ty) = ty {
+                    let compatible = match media {
+                        MediaType::Text => raw_text_type_supported(&self.graph, ty),
+                        MediaType::OctetStream => matches!(
+                            self.graph.get(ty.id).map(|definition| &definition.kind),
+                            Some(TypeKind::Bytes)
+                        ),
+                        _ => true,
+                    };
+                    if !compatible {
+                        Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
+                            .message(format!(
+                                "media type `{media_name}` requires a string-like or binary response schema"
+                            ))
+                            .remedy("use a string/binary schema, choose a structured media type, or omit this API segment with spargen::omit!")
+                            .emit(self.diags);
+                        return None;
+                    }
                 }
                 Some((media, ty))
             },
@@ -2487,22 +2538,16 @@ fn lower_media_type(
     provenance: &crate::diag::Provenance,
     diags: &mut Diagnostics,
 ) -> Option<MediaType> {
-    Some(match media.split(';').next().unwrap_or(media).trim() {
-        "application/json" => MediaType::Json,
-        "application/xml" | "text/xml" => MediaType::Xml,
-        "application/x-www-form-urlencoded" => MediaType::FormUrlEncoded,
-        "application/octet-stream" => MediaType::OctetStream,
-        "text/plain" => MediaType::TextPlain,
-        "multipart/form-data" => MediaType::Multipart,
-        "text/event-stream" => MediaType::EventStream,
-        "application/x-ndjson" => MediaType::Ndjson,
-        other => {
+    let essence = media_essence(media);
+    match classify_media(essence) {
+        Some((media, _)) => Some(media),
+        None => {
             Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
-                .message(format!("media type `{other}` is not supported"))
+                .message(format!("media type `{essence}` is not supported"))
                 .emit(diags);
-            return None;
+            None
         }
-    })
+    }
 }
 
 fn choose_media<'a, T>(
@@ -2513,33 +2558,76 @@ fn choose_media<'a, T>(
     if content.is_empty() {
         return None;
     }
-    for preferred in [
-        "application/json",
-        // XML ranks after JSON — a JSON alternative still wins when both are offered — but before the
-        // remaining media so a documented XML body is generated (through the quick-xml codec).
-        "application/xml",
-        "text/xml",
-        // Multipart ranks after JSON/XML — a JSON alternative still wins when both are offered — but
-        // before the remaining single-value media so a documented file-upload body is generated.
-        "multipart/form-data",
-        "application/x-www-form-urlencoded",
-        "application/octet-stream",
-        "text/plain",
-        // Streaming response media rank last — a JSON (or any whole-body) alternative on the same
-        // response still wins — but a streaming-only response selects its stream media rather than
-        // falling through to the `E009` rejection below.
-        "text/event-stream",
-        "application/x-ndjson",
-    ] {
-        if let Some(value) = content.get(preferred) {
-            return Some((preferred, value));
+    let mut selected: Option<(u8, usize, &str, &T)> = None;
+    for (source_index, (media, value)) in content.iter().enumerate() {
+        let Some((_, rank)) = classify_media(media_essence(media)) else {
+            continue;
+        };
+        let candidate = (rank, source_index, media.as_str(), value);
+        if selected
+            .as_ref()
+            .is_none_or(|current| (rank, source_index) < (current.0, current.1))
+        {
+            selected = Some(candidate);
         }
+    }
+    if let Some((_, _, media, value)) = selected {
+        return Some((media, value));
     }
     let (media, _) = content.first()?;
     Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
         .message(format!("media type `{media}` is not supported"))
         .emit(diags);
     None
+}
+
+fn media_essence(media: &str) -> &str {
+    media.split(';').next().unwrap_or(media).trim()
+}
+
+/// Classify a content type into its wire codec and deterministic preference rank. Structured JSON
+/// suffixes use the JSON codec; textual types use raw UTF-8 except for the two streaming framings.
+/// GitHub's documented octocat representation is a textual vendor media type.
+fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
+    let classified = match essence {
+        "application/json" => (MediaType::Json, 0),
+        media if media.starts_with("application/") && media.ends_with("+json") => {
+            (MediaType::Json, 0)
+        }
+        "application/xml" | "text/xml" => (MediaType::Xml, 1),
+        "multipart/form-data" => (MediaType::Multipart, 2),
+        "application/x-www-form-urlencoded" => (MediaType::FormUrlEncoded, 3),
+        "application/octet-stream" => (MediaType::OctetStream, 4),
+        "text/event-stream" => (MediaType::EventStream, 6),
+        "application/x-ndjson" => (MediaType::Ndjson, 6),
+        "application/octocat-stream" => (MediaType::Text, 5),
+        media if media.starts_with("text/") => (MediaType::Text, 5),
+        _ => return None,
+    };
+    Some(classified)
+}
+
+fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {
+    fn visit(graph: &TypeGraph, ty: Ty, seen: &mut HashSet<TypeId>) -> bool {
+        if !seen.insert(ty.id) {
+            return true;
+        }
+        let supported = match graph.get(ty.id).map(|definition| &definition.kind) {
+            Some(TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date))
+            | Some(TypeKind::Bytes)
+            | Some(TypeKind::Any) => true,
+            Some(TypeKind::Enum(enumeration)) => enumeration.repr == ScalarRepr::String,
+            Some(TypeKind::Union(union)) => union
+                .variants
+                .iter()
+                .all(|variant| visit(graph, variant.ty, seen)),
+            _ => false,
+        };
+        seen.remove(&ty.id);
+        supported
+    }
+
+    visit(graph, ty, &mut HashSet::new())
 }
 
 fn parse_status(status: &str) -> Option<StatusSpec> {

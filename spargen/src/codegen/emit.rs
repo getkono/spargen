@@ -239,6 +239,11 @@ pub(crate) fn emit_operation(
         .as_ref()
         .and_then(|body| body.ty.map(|ty| (ty, body.media)))
     {
+        let content_type = &operation
+            .request_body
+            .as_ref()
+            .expect("request body exists")
+            .content_type;
         // A raw byte body (`bytes::Bytes`, from `format: binary` / `contentEncoding: base64`) is sent
         // as-is regardless of the declared media — `Bytes` is not `Display`, so it can never go
         // through `.to_string()`. This must be checked before the media match so a `text/plain` (or
@@ -247,7 +252,11 @@ pub(crate) fn emit_operation(
             api.types.get(ty.id).map(|def| &def.kind),
             Some(TypeKind::Bytes)
         ) {
-            quote! { request = request.body(body.clone()); }
+            quote! {
+                request = request
+                    .header(reqwest::header::CONTENT_TYPE, #content_type)
+                    .body(body.clone());
+            }
         } else {
             match media {
                 MediaType::Json => quote! { request = request.json(body); },
@@ -261,7 +270,11 @@ pub(crate) fn emit_operation(
                         .body(body);
                 },
                 MediaType::FormUrlEncoded => quote! { request = request.form(body); },
-                MediaType::TextPlain => quote! { request = request.body(body.to_string()); },
+                MediaType::Text => quote! {
+                    request = request
+                        .header(reqwest::header::CONTENT_TYPE, #content_type)
+                        .body(body.to_string());
+                },
                 MediaType::OctetStream => quote! { request = request.body(body.clone()); },
                 MediaType::Multipart => emit_multipart_body(ty, api, names),
                 // Streaming media are response-only; a streaming request body is rejected during
@@ -311,7 +324,7 @@ pub(crate) fn emit_operation(
         },
         // A single documented error body: classify against the documented status table into the
         // aliased `E` (or `Error::UnexpectedStatus` for an undocumented status).
-        ErrorShape::Single(_) => {
+        ErrorShape::Single(body_ty) => {
             let mut documented = operation
                 .responses
                 .by_status
@@ -334,22 +347,45 @@ pub(crate) fn emit_operation(
             {
                 documented.push(quote! { support::StatusSpec::Any });
             }
-            // An XML error body classifies through the quick-xml runtime helper
-            // (`classify_error_xml`); every other media classifies as JSON.
-            let classify = if operation.responses.single_error_media() == Some(MediaType::Xml) {
-                quote! { support::classify_error_xml }
-            } else {
-                quote! { support::classify_error }
-            };
-            quote! {
-                Err(
-                    #classify::<#error_ty>(
+            let classify = if is_bytes_ty(api, *body_ty) {
+                quote! {
+                    support::classify_error_bytes(
                         &self.core,
                         response,
                         &[#(#documented),*],
                     )
-                    .await,
-                )
+                    .await
+                }
+            } else {
+                match operation.responses.single_error_media() {
+                    Some(MediaType::Xml) => quote! {
+                        support::classify_error_xml::<#error_ty>(
+                            &self.core,
+                            response,
+                            &[#(#documented),*],
+                        )
+                        .await
+                    },
+                    Some(MediaType::Text) => quote! {
+                        support::classify_error_text::<#error_ty>(
+                            &self.core,
+                            response,
+                            &[#(#documented),*],
+                        )
+                        .await
+                    },
+                    _ => quote! {
+                        support::classify_error::<#error_ty>(
+                            &self.core,
+                            response,
+                            &[#(#documented),*],
+                        )
+                        .await
+                    },
+                }
+            };
+            quote! {
+                Err(#classify)
             }
         }
         // Multiple documented error bodies: read the capped body once, then dispatch by status in
@@ -363,17 +399,30 @@ pub(crate) fn emit_operation(
                 match ty {
                     // Bodied status: decode into the variant's type → `Api`, or `Decode` on failure.
                     Some(ty) => {
-                        let ty = ty_tokens(*ty, names, options, true);
+                        let body_ty = *ty;
+                        let ty = ty_tokens(body_ty, names, options, true);
+                        let decode = if is_bytes_ty(api, body_ty) {
+                            quote! { Ok::<#ty, String>(body.clone()) }
+                        } else if response_media_for_spec(&operation.responses, *spec)
+                            == Some(MediaType::Text)
+                        {
+                            quote! { support::decode_text_body::<#ty>(&body) }
+                        } else {
+                            quote! {
+                                serde_json::from_slice::<#ty>(&body)
+                                    .map_err(|error| error.to_string())
+                            }
+                        };
                         quote! {
                             if #spec_tokens.matches(status) {
-                                return Err(match serde_json::from_slice::<#ty>(&body) {
+                                return Err(match #decode {
                                     Ok(value) => support::Error::Api(support::ResponseValue::new(
                                         status,
                                         headers,
                                         #error_ident::#variant_ident(value),
                                     )),
-                                    Err(error) => support::Error::Decode {
-                                        path: error.to_string(),
+                                    Err(path) => support::Error::Decode {
+                                        path,
                                         body,
                                         truncated,
                                     },
@@ -410,22 +459,25 @@ pub(crate) fn emit_operation(
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         },
-        // A single success body: decode into the aliased `T`. An XML body routes through the
-        // quick-xml runtime helper (`decode_success_xml`); every other media decodes as JSON.
-        SuccessShape::Plain(_)
-            if operation.responses.single_success_media() == Some(MediaType::Xml) =>
-        {
+        // A single success body: decode into the aliased `T` through its selected wire codec.
+        SuccessShape::Plain(body_ty) => {
+            let decode = if is_bytes_ty(api, body_ty) {
+                quote! { support::decode_success_bytes(&self.core, response) }
+            } else {
+                match operation.responses.single_success_media() {
+                    Some(MediaType::Xml) => {
+                        quote! { support::decode_success_xml::<#success_ty>(&self.core, response) }
+                    }
+                    Some(MediaType::Text) => {
+                        quote! { support::decode_success_text::<#success_ty>(&self.core, response) }
+                    }
+                    _ => quote! { support::decode_success::<#success_ty>(&self.core, response) },
+                }
+            };
             quote! {
-                support::decode_success_xml::<#success_ty>(&self.core, response)
-                    .await
-                    .map_err(support::Error::widen)
+                #decode.await.map_err(support::Error::widen)
             }
         }
-        SuccessShape::Plain(_) => quote! {
-            support::decode_success::<#success_ty>(&self.core, response)
-                .await
-                .map_err(support::Error::widen)
-        },
         // Multi-status success: read the body once, then dispatch by status in precedence order
         // (exact before range before default) into the matching variant. A success status matching
         // no documented variant is an unexpected-status error — there is no untyped fallback.
@@ -441,12 +493,25 @@ pub(crate) fn emit_operation(
                 match ty {
                     // Bodied status: parse the read body into the variant's type.
                     Some(ty) => {
-                        let ty = ty_tokens(*ty, names, options, true);
+                        let body_ty = *ty;
+                        let ty = ty_tokens(body_ty, names, options, true);
+                        let decode = if is_bytes_ty(api, body_ty) {
+                            quote! { Ok::<#ty, String>(body.clone()) }
+                        } else if response_media_for_spec(&operation.responses, *spec)
+                            == Some(MediaType::Text)
+                        {
+                            quote! { support::decode_text_body::<#ty>(&body) }
+                        } else {
+                            quote! {
+                                serde_json::from_slice::<#ty>(&body)
+                                    .map_err(|error| error.to_string())
+                            }
+                        };
                         quote! {
                             if #spec_tokens.matches(status) {
-                                let value = serde_json::from_slice::<#ty>(&body)
-                                    .map_err(|error| support::Error::<#error_ty>::Decode {
-                                        path: error.to_string(),
+                                let value = #decode
+                                    .map_err(|path| support::Error::<#error_ty>::Decode {
+                                        path,
                                         body: body.clone(),
                                         truncated: false,
                                     })?;
@@ -1182,7 +1247,7 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
-            pub use dispatch::{attach_auth, build_url, classify_error, decode_success, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
+            pub use dispatch::{attach_auth, build_url, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use parameter::{serialize_form, serialize_simple, ParameterError};
@@ -1883,6 +1948,30 @@ fn runtime_status_spec(spec: crate::ir::StatusSpec) -> TokenStream {
         crate::ir::StatusSpec::Range(0) => quote! { support::StatusSpec::Any },
         crate::ir::StatusSpec::Range(prefix) => quote! { support::StatusSpec::Range(#prefix) },
     }
+}
+
+fn response_media_for_spec(
+    responses: &crate::ir::Responses,
+    spec: crate::ir::StatusSpec,
+) -> Option<MediaType> {
+    if spec == crate::ir::StatusSpec::Range(0) {
+        return responses
+            .default
+            .as_ref()
+            .and_then(|response| response.media);
+    }
+    responses
+        .by_status
+        .iter()
+        .find(|(candidate, _)| *candidate == spec)
+        .and_then(|(_, response)| response.media)
+}
+
+fn is_bytes_ty(api: &Api, ty: Ty) -> bool {
+    matches!(
+        api.types.get(ty.id).map(|definition| &definition.kind),
+        Some(TypeKind::Bytes)
+    )
 }
 
 fn reqwest_method(method: crate::ir::Method) -> TokenStream {
