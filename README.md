@@ -112,12 +112,11 @@ success/error bodies lowered to typed per-operation response enums), auth attach
 complete diagnostics surface (`check` / `generate` / `explain`, `--format json`, stable codes,
 batch reporting).
 
-Not yet implemented — all rejected or warned loudly, never silent: `multipart`/XML bodies
-(`E009`). Diagnostics
-carry file-level rather than line-precise spans for now. Large real-world specs (e.g. GitHub's)
-exercise unsupported constructs and are expected to reject; the pinned [corpus](docs/corpus.md)
-tracks exactly which, and the [compatibility omit mode](docs/compatibility.md) can carve
-unsupported segments out of a vendored spec without editing it.
+Anything outside the documented surface is rejected or warned loudly, never silent; see the
+[support matrix](docs/support-matrix.md) for the exact boundary. Diagnostics carry file-level
+rather than line-precise spans for now. The pinned GitHub OpenAPI 3.1 description generates and its
+full emitted crate is compile-checked in CI; the remaining [corpus](docs/corpus.md) pins both
+generating and intentionally rejecting real-world cases.
 
 ## Documentation
 
@@ -156,6 +155,7 @@ mise run hooks        # install git hooks
 | `mise run lint` | Clippy with warnings denied |
 | `mise run test` | Full suite: unit, property, frontend-fixture, determinism, drift, and generated-code E2E tests |
 | `mise run corpus-smoke` | Fast checks against pinned real-world specs |
+| `mise run github-api` | Generate and compile the full pinned GitHub API client (native strict Clippy + wasm) |
 | `mise run example` | Run the end-to-end petstore example |
 | `mise run deny` | Supply-chain audit (licenses, advisories, bans) |
 

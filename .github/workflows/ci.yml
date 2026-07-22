@@ -91,6 +91,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json > /tmp/spargen-github-30.json || test $? -eq 1
       - run: grep -q E001 /tmp/spargen-github-30.json
+      # The current exact GitHub 3.1 pin must clear the strict frontend without carve/omits.
+      - run: cargo run -q -p spargen -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml > /tmp/spargen-github-31.json
       # ollama now generates (union lowering, #9): check must succeed with no rejection.
       - run: cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json
       - run: cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
@@ -101,11 +103,26 @@ jobs:
       - run: grep -q E001 /tmp/spargen-twilio.json
       - run: cargo run -q -p spargen -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json > /tmp/spargen-k8s.json || test $? -eq 1
       - run: grep -q E001 /tmp/spargen-k8s.json
-      # meilisearch is 3.1.0: clears the gate, rejects with E007 in the pipeline. Raise batch_cap
-      # so the E007 error is not truncated behind the W001 warnings before we grep for it.
+      # meilisearch is 3.1.0: clears the gate, rejects with E013 in the pipeline. Raise batch_cap
+      # so the E013 error is not truncated behind the W001 warnings before we grep for it.
       - run: printf '[features]\nbatch_cap = 100000\n' > /tmp/spargen-cap.toml
       - run: cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json --config /tmp/spargen-cap.toml > /tmp/spargen-meili.json || test $? -eq 1
-      - run: grep -q E007 /tmp/spargen-meili.json
+      - run: grep -q E013 /tmp/spargen-meili.json
+
+  github-api:
+    name: GitHub API generated client
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: scripts/check-github-api.sh
 
   example:
     name: Petstore example

@@ -2,7 +2,7 @@
 //!
 //! For every corpus case this snapshots a STABLE, REVIEWABLE summary of what spargen produces:
 //! the pipeline OUTCOME plus a diagnostic-code HISTOGRAM (`code: count`, sorted), pinning exactly
-//! which diagnostics each real-world spec fires. For the two GENERATING cases it additionally
+//! which diagnostics each real-world spec fires. For the smaller GENERATING cases it additionally
 //! snapshots the generated consumer API SURFACE — the sorted operation method names and the sorted
 //! public type names — derived by parsing the emitted module with `syn`. The full multi-hundred-KB
 //! generated source (dominated by the embedded runtime) is deliberately NOT snapshotted: the
@@ -200,10 +200,12 @@ fn github_api_3_0_rejects() {
 }
 
 #[test]
-fn github_api_3_1_rejects() {
-    // Manifest expectation: `reject` — a real 3.1 document that uses R-class constructs.
-    let (report, _) = generate_corpus("github-api-3-1/api.github.com.json", false);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+fn github_api_3_1_generates() {
+    // Manifest expectation: `generate`. Keep the large surface out of the snapshot; the dedicated
+    // corpus gate compile-checks every emitted item, while this pins the complete diagnostic set.
+    let (report, source) = generate_corpus("github-api-3-1/api.github.com.json", false);
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(source.is_some(), "GitHub generation must emit a module");
     insta::assert_snapshot!("github_api_3_1", summary(&report));
 }
 
@@ -236,17 +238,4 @@ fn openapi_boilerplate_generates() {
     insta::assert_snapshot!("openapi_boilerplate", summary(&report));
     let source = source.expect("openapi-boilerplate generates a module");
     insta::assert_snapshot!("openapi_boilerplate_surface", api_surface(&source));
-}
-
-// --- Carve escape hatch: a rejecting spec generates once its unsupported constructs are carved ---
-
-#[test]
-fn github_api_3_1_carve() {
-    // `--carve` turns the rejecting 3.1 document into a generated client by omitting the minimal set
-    // of unsupported constructs (each reported via W009). Snapshotting the outcome + histogram pins
-    // the escape hatch: the W009 count is exactly how many constructs were carved, and it is
-    // deterministic (a fixpoint over the deterministic frontend on a sha256-pinned spec).
-    let (report, _) = generate_corpus("github-api-3-1/api.github.com.json", true);
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
-    insta::assert_snapshot!("github_api_3_1_carve", summary(&report));
 }

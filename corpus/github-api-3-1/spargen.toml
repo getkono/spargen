@@ -1,0 +1,4 @@
+[features]
+# The full pinned schema intentionally reports every validation-only/default warning. Keep the
+# batch uncapped enough that a new terminal diagnostic can never hide behind the warning volume.
+batch_cap = 100000

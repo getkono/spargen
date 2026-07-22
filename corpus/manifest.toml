@@ -1,12 +1,12 @@
 [[case]]
-id = "github-api-3-1-strict"
+id = "github-api-3-1"
 path = "github-api-3-1/api.github.com.json"
 upstream = "github/rest-api-description"
-revision = "v2.1.0"
+revision = "03ca9c1cac754ec9b8369dc75de8a8c753c6e087"
 upstream_path = "descriptions-next/api.github.com/api.github.com.json"
-sha256 = "212c0264968bf20b4415575509172800d041694f4a8c2d0120da502f678c377d"
+sha256 = "d88008d8198becda210d59fbe64a6554bcc4c979be2348e2e356638b369eee47"
 license = "MIT"
-expect = "reject"
+expect = "generate"
 
 [[case]]
 id = "github-api-3-0"
@@ -95,6 +95,6 @@ upstream_path = "open-api.json"
 sha256 = "83cbd10cea1ca75590dc31f1d2e40ef2b636297d47b39c9aefd813e41454cfd1"
 license = "MIT"
 # Emits OpenAPI 3.1.0, so it clears the version gate and exercises the real pipeline: schema
-# loading, validation-only keyword handling (W001) and W005, then rejection on non-disjoint
-# `integer | number` unions (E007). This is the real-3.1 pipeline case, not just the gate.
-expect = "reject:E007"
+# loading and validation/default warnings, then rejection on incompatible typed intersections
+# (E013; unsupported media also remains). This is a real-3.1 pipeline case, not just the gate.
+expect = "reject:E013"
