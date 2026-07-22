@@ -218,9 +218,8 @@ recipe test asserts it rejects with `E001`.
 ## Carving unsupported idioms
 
 Real framework output occasionally contains a construct spargen cannot faithfully represent — for
-example a utoipa `#[serde(untagged)]` enum whose variants overlap by JSON type
-(`oneOf: [integer, number]`), which rejects with [`E007`](errors.md) (non-disjoint union). By
-default one such island rejects the **whole** document.
+example a JSON Schema `$dynamicRef`, which rejects with [`E006`](errors.md). By default one such
+island rejects the **whole** document.
 
 `--carve` is the escape hatch: it drops only the unrepresentable constructs (each reported once with
 `W009`), then generates everything else. It reaches a fixpoint (cascading through any components that
@@ -229,7 +228,7 @@ referenced a carved schema) and stays deterministic.
 ```bash
 # Rejects whole: one bad operation sinks the document.
 spargen generate openapi.json --out src/api.rs
-# => Rejected (E007)
+# => Rejected (E006)
 
 # Generates the rest; the offending operation is dropped and reported as W009.
 spargen generate openapi.json --out src/api.rs --carve
@@ -240,7 +239,9 @@ spargen generate openapi.json --out src/api.rs --carve
 paths/operations/components by name (an exact or glob rule) instead of letting carve decide, use the
 [compatibility omit mode](compatibility.md). The vendored
 [`corpus/recipes/utoipa-untagged-overlap.json`](../corpus/recipes/utoipa-untagged-overlap.json)
-demonstrates the reject-then-carve flow, asserted by the recipe test.
+demonstrates that overlapping `integer | number` unions no longer need this escape hatch: they
+generate as typed trial-matching enums. The carve integration suite separately pins the
+reject-then-carve flow for genuinely unsupported constructs.
 
 ---
 

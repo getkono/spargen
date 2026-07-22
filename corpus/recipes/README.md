@@ -15,7 +15,7 @@ below. The test reads only these local files; it never hits the network.
 | `utoipa.json` | [`juhaku/utoipa`](https://github.com/juhaku/utoipa) 5.x | OpenAPI `3.1.0` | generate (clean) | `OpenApiVersion::Version31` (`#[serde(rename = "3.1.0")]`, `#[default]`) in `utoipa/src/openapi.rs`; exported via `ApiDoc::openapi().to_pretty_json()` |
 | `aide.json` | [`tamasfe/aide`](https://github.com/tamasfe/aide) | OpenAPI `3.1.0` | generate (only `W001`) | `serde_version` serializes `"3.1.0"` in `crates/aide/src/openapi/openapi.rs`; component schemas come from `schemars` (JSON Schema 2020-12) |
 | `poem-openapi.json` | [`poem-web/poem`](https://github.com/poem-web/poem) (`poem-openapi`) | OpenAPI `3.0.0` | reject `E001` | `const OPENAPI_VERSION: &str = "3.0.0"` in `poem-openapi/src/registry/ser.rs`; exported via `OpenApiService::spec()` |
-| `utoipa-untagged-overlap.json` | `juhaku/utoipa` 5.x | OpenAPI `3.1.0` | reject `E007`, carves | as `utoipa.json`; adds one `#[serde(untagged)]` numeric enum → non-disjoint `oneOf` |
+| `utoipa-untagged-overlap.json` | `juhaku/utoipa` 5.x | OpenAPI `3.1.0` | generate (clean) | as `utoipa.json`; adds one `#[serde(untagged)]` numeric enum → typed trial-matching `oneOf` |
 
 ## Idioms exercised
 
@@ -32,8 +32,8 @@ below. The test reads only these local files; it never hits the network.
 - **`poem-openapi.json`** — a 3.0.0 document (with 3.0-style `nullable: true`); rejected on the
   version alone.
 - **`utoipa-untagged-overlap.json`** — one clean operation plus one operation whose response is an
-  overlapping untagged union (`integer | number`); rejected whole without `--carve`, generated
-  minus the offending operation with it.
+  overlapping untagged union (`integer | number`); both operations generate, and the overlap is
+  represented by a typed enum with exact-one trial matching.
 
 ## Reproducing / refreshing
 
