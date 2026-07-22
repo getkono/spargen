@@ -806,6 +806,9 @@ fn emit_blocking_operation(
         #docs
         #(#param_default_docs)*
         #deprecated
+        // A deprecated blocking wrapper intentionally forwards to its deprecated async twin. This
+        // suppresses only that internal call; `#deprecated` still warns consumers of this method.
+        #[allow(deprecated)]
         #[inline]
         pub fn #method_ident(
             &self,

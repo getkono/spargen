@@ -34,6 +34,7 @@ fn generates_standalone_crate_for_basic_oas31_api() {
     let status = Command::new("cargo")
         .args([
             "clippy",
+            "--all-features",
             "--",
             "-D",
             "warnings",
@@ -212,6 +213,7 @@ fn textual_vendor_and_binary_responses_use_raw_wire_codecs() {
 }
 
 #[test]
+#[allow(deprecated)]
 fn textual_documented_errors_decode_without_json_quotes() {
     let (base, server) = serve_once("text/plain", "400 Bad Request", b"plain failure");
     let client = basic_client::BlockingClient::new(&base).unwrap();
@@ -1422,6 +1424,7 @@ paths:
   /text-error:
     get:
       operationId: getTextError
+      deprecated: true
       responses:
         "204": { description: success }
         "400":
