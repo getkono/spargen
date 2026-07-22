@@ -1519,6 +1519,7 @@ components:
       name: X-Api-Key
   schemas:
     WorkflowId:
+      description: "Workflow identifier\taccepted as a numeric id or file name."
       oneOf:
         - type: integer
         - type: string

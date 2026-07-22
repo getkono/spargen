@@ -675,7 +675,8 @@ fn param_default_docs_tokens(operation: &Operation) -> Vec<TokenStream> {
         .filter(|param| param.required)
         .filter_map(|param| {
             param.default_display.as_ref().map(|default| {
-                let note = format!("Parameter `{}` default: `{default}`.", param.name);
+                let note =
+                    normalize_rustdoc(&format!("Parameter `{}` default: `{default}`.", param.name));
                 quote! { #[doc = #note] }
             })
         })
@@ -977,8 +978,15 @@ fn doc_tokens(docs: &crate::ir::Docs) -> TokenStream {
     if paragraphs.is_empty() {
         return quote! {};
     }
-    let text = paragraphs.join("\n\n");
+    let text = normalize_rustdoc(&paragraphs.join("\n\n"));
     quote! { #[doc = #text] }
+}
+
+/// Normalize spec-authored prose for Rust's documentation lint surface. Tabs are visually
+/// ambiguous in rustdoc and trip Clippy's `tabs_in_doc_comments`; four spaces preserve table/code
+/// alignment without altering the API's semantic documentation.
+fn normalize_rustdoc(text: &str) -> String {
+    text.replace('\t', "    ")
 }
 
 /// Document the generated `Client` with the API identity and its declared servers.
@@ -1000,6 +1008,7 @@ fn client_doc_tokens(api: &Api) -> TokenStream {
             }
         }
     }
+    let text = normalize_rustdoc(&text);
     quote! { #[doc = #text] }
 }
 
@@ -1045,7 +1054,10 @@ pub(crate) fn emit_params_struct(
         if let Some(default) = &param.default_display {
             notes.push(format!("Default: `{default}`."));
         }
-        let notes = notes.iter().map(|note| quote! { #[doc = #note] });
+        let notes = notes
+            .iter()
+            .map(|note| normalize_rustdoc(note))
+            .map(|note| quote! { #[doc = #note] });
         quote! {
             #(#notes)*
             #[serde(rename = #wire, skip_serializing_if = "Option::is_none")]
@@ -1777,7 +1789,10 @@ fn emit_field(
     if let Some(default) = &field.default {
         notes.push(default.doc_note.clone());
     }
-    let notes = notes.iter().map(|note| quote! { #[doc = #note] });
+    let notes = notes
+        .iter()
+        .map(|note| normalize_rustdoc(note))
+        .map(|note| quote! { #[doc = #note] });
     quote! {
         #(#notes)*
         #[serde(rename = #wire, #serde_default)]
