@@ -14,8 +14,8 @@
 //!   union, a by-JSON-type disjoint union, and an `allOf` flatten.
 //! * `poem-openapi` (emits OpenAPI 3.0.0) — REJECTED with `E001`, proving the 3.1.x requirement and
 //!   motivating the "upgrade to 3.1" step of its recipe.
-//! * the `--carve` escape hatch — a utoipa document carrying one unrepresentable untagged union
-//!   (`E007`) is rejected whole without carve, and generates the rest (reporting `W009`) with it.
+//! * a utoipa `#[serde(untagged)]` numeric union with overlapping `integer | number` branches —
+//!   generates as a typed trial-matching enum instead of requiring a compatibility carve.
 //!
 //! Everything is deterministic and offline: the specs are vendored into the repo and the test only
 //! reads local files (no network).
@@ -158,42 +158,27 @@ fn poem_openapi_document_is_rejected_e001() {
     );
 }
 
-// --- --carve escape hatch on a framework idiom spargen cannot represent -------------------------
+// --- overlapping untagged framework union -------------------------------------------------------
 
 #[test]
-fn utoipa_untagged_overlap_is_rejected_but_carves() {
-    // Without carve the single unrepresentable untagged union (E007) rejects the WHOLE document.
-    let (plain, _) = generate("utoipa-untagged-overlap.json", false);
-    assert_eq!(plain.outcome, Outcome::Rejected);
+fn utoipa_untagged_overlap_generates_a_typed_union() {
+    let (report, text) = generate("utoipa-untagged-overlap.json", false);
+    assert_eq!(report.outcome, Outcome::Generated);
     assert!(
-        has_code(&plain, Code::NonDisjointUnion),
-        "E007 expected: {:?}",
-        plain.diagnostics
+        !has_code(&report, Code::NonDisjointUnion),
+        "overlapping numeric branches are supported: {:?}",
+        report.diagnostics
     );
 
-    // With `--carve` spargen drops only the offending operation (reported W009) and generates the
-    // rest — the escape hatch the recipe documents.
-    let (carved, text) = generate("utoipa-untagged-overlap.json", true);
-    assert_eq!(
-        carved.outcome,
-        Outcome::Generated,
-        "{:?}",
-        carved.diagnostics
+    let text = text.expect("untagged-union generation wrote a module");
+    assert!(text.contains("fn ping"), "the sibling operation is emitted");
+    assert!(
+        text.contains("fn measure"),
+        "the union operation is emitted"
     );
     assert!(
-        has_code(&carved, Code::OmittedConstruct),
-        "W009 expected: {:?}",
-        carved.diagnostics
-    );
-    assert!(
-        !has_code(&carved, Code::NonDisjointUnion),
-        "the union was carved, not left as an error: {:?}",
-        carved.diagnostics
-    );
-    let text = text.expect("carve generation wrote a module");
-    assert!(text.contains("fn ping"), "the clean op survives carve");
-    assert!(
-        !text.contains("fn measure"),
-        "the carved op is absent from the output"
+        text.contains("ResponseBodyVariant0(Box<ResponseBodyVariant0>)")
+            && text.contains("ResponseBodyVariant1(Box<ResponseBodyVariant1>)"),
+        "the overlapping response remains a typed, boxed enum: {text}"
     );
 }

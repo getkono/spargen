@@ -297,6 +297,11 @@ fn parse_parameter(
             .and_then(SpannedValue::as_bool)
             .unwrap_or(false),
         style: value.get("style").and_then(string).map(str::to_owned),
+        explode: value.get("explode").and_then(SpannedValue::as_bool),
+        allow_reserved: value
+            .get("allowReserved")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
         schema: value
             .get("schema")
             .and_then(|value| parse_schema_ref_or(value, &pointer.push("schema"), diags)),

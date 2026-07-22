@@ -46,6 +46,10 @@ pub fn runtime_files() -> &'static [SupportFile] {
             contents: include_str!("runtime/middleware.rs"),
         },
         SupportFile {
+            name: "parameter.rs",
+            contents: include_str!("runtime/parameter.rs"),
+        },
+        SupportFile {
             name: "paginate.rs",
             contents: include_str!("runtime/paginate.rs"),
         },

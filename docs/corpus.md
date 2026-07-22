@@ -6,9 +6,10 @@ are stored through Git LFS. The machine-readable pin list is
 
 Current cases:
 
-- `github-api-3-1-strict`: `github/rest-api-description@v2.1.0`,
+- `github-api-3-1`: `github/rest-api-description@03ca9c1cac754ec9b8369dc75de8a8c753c6e087`,
   `descriptions-next/api.github.com/api.github.com.json`, SHA-256
-  `212c0264968bf20b4415575509172800d041694f4a8c2d0120da502f678c377d`.
+  `d88008d8198becda210d59fbe64a6554bcc4c979be2348e2e356638b369eee47` (generates; this exact pin
+  is also compiled natively and for `wasm32-unknown-unknown` in CI).
 - `github-api-3-0`: `github/rest-api-description@v2.1.0`,
   `descriptions/api.github.com/api.github.com.json`, SHA-256
   `b138e9cdcf4ac29a23fea1f6579d2840668a5f3d41fe7f160b263bec590d2e3f`.
@@ -40,8 +41,8 @@ Current cases:
 - `meilisearch`: `meilisearch/open-api@a2bd2133ac9f9b85fca8fb8b1aa69063c8f1002c`,
   `open-api.json`, SHA-256
   `83cbd10cea1ca75590dc31f1d2e40ef2b636297d47b39c9aefd813e41454cfd1` (OpenAPI 3.1.0; clears the
-  version gate and exercises the pipeline, rejecting on non-disjoint `integer | number` unions →
-  `E007`).
+  version gate and exercises the pipeline, rejecting on incompatible typed intersections → `E013`;
+  unsupported media also remains).
 
 Excluded by decision: HoneyHive, IOTA gas-station, and Redocly.
 
@@ -49,15 +50,16 @@ Fast corpus smoke checks:
 
 ```bash
 cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json  # reject:E001
+cargo run -q -p spargen -- check corpus/github-api-3-1/api.github.com.json --format json --config <(printf '[features]\nbatch_cap = 100000\n')  # generate
 cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json  # expected: generates (W001 only)
 cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
 cargo run -q -p spargen -- check corpus/stripe/spec3.json --format json  # reject:E001 (3.0.0)
 cargo run -q -p spargen -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json  # reject:E001 (3.0.1)
 cargo run -q -p spargen -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json  # reject:E001 (3.0.0)
-# meilisearch is 3.1.0: it clears the version gate and rejects with E007 deep in the pipeline.
-# The default batch_cap (100) fills with W001, so raise it to surface the E007 error:
-cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json --config <(printf '[features]\nbatch_cap = 100000\n')  # reject:E007 (3.1.0)
+# meilisearch is 3.1.0: it clears the version gate and rejects with E013 deep in the pipeline.
+# The default batch_cap (100) fills with W001, so raise it to surface the E013 error:
+cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json --config <(printf '[features]\nbatch_cap = 100000\n')  # reject:E013 (3.1.0)
 ```
 
-The full GitHub 3.1 strict/compat split remains the large-corpus release gate: strict mode should
-fail loudly today, and a reviewed omit profile will define the generated subset.
+The full GitHub 3.1 pin is the large-corpus generation gate: strict generation must succeed, and
+the emitted standalone crate must pass native strict Clippy plus a wasm check.

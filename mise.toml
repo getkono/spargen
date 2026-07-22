@@ -34,16 +34,21 @@ run = "cargo test --workspace --all-features"
 description = "Run fast corpus smoke checks"
 run = [
   "sh -c 'cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json >/tmp/spargen-github-30.json || test $? -eq 1; grep -q E001 /tmp/spargen-github-30.json'",
+  "cargo run -q -p spargen -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml >/tmp/spargen-github-31.json",
   "cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json",
   "cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
   # 3.0.x/3.0.1/3.0.0 real-world APIs: rejected at the version gate (E001).
   "sh -c 'cargo run -q -p spargen -- check corpus/stripe/spec3.json --format json >/tmp/spargen-stripe.json || test $? -eq 1; grep -q E001 /tmp/spargen-stripe.json'",
   "sh -c 'cargo run -q -p spargen -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json >/tmp/spargen-twilio.json || test $? -eq 1; grep -q E001 /tmp/spargen-twilio.json'",
   "sh -c 'cargo run -q -p spargen -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json >/tmp/spargen-k8s.json || test $? -eq 1; grep -q E001 /tmp/spargen-k8s.json'",
-  # meilisearch is 3.1.0: clears the gate, rejects with E007 in the pipeline. Raise batch_cap so
-  # the E007 error is not truncated behind the W001 warnings before we grep for it.
-  "sh -c 'printf \"[features]\\nbatch_cap = 100000\\n\" >/tmp/spargen-cap.toml; cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json --config /tmp/spargen-cap.toml >/tmp/spargen-meili.json || test $? -eq 1; grep -q E007 /tmp/spargen-meili.json'",
+  # meilisearch is 3.1.0: clears the gate, rejects with E013 in the pipeline. Raise batch_cap so
+  # the E013 error is not truncated behind the W001 warnings before we grep for it.
+  "sh -c 'printf \"[features]\\nbatch_cap = 100000\\n\" >/tmp/spargen-cap.toml; cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json --config /tmp/spargen-cap.toml >/tmp/spargen-meili.json || test $? -eq 1; grep -q E013 /tmp/spargen-meili.json'",
 ]
+
+[tasks.github-api]
+description = "Generate and compile the full pinned GitHub API client natively and for wasm"
+run = "scripts/check-github-api.sh"
 
 [tasks.example]
 description = "Run the end-to-end petstore examples (build.rs + macro) against a local mock server"

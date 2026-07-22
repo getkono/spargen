@@ -8,7 +8,7 @@ use crate::ir::{
     HttpScheme, Info, JsonCategory, MediaType, Operation, OperationId, ParamLoc, ParamStyle,
     Parameter, PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response, Responses,
     ScalarEnum, ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty,
-    TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionStrategy, UnionVariant, XmlField,
+    TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
 };
 use crate::name::synth_operation_id;
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
@@ -491,7 +491,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 self.lower_object(schema, hint)?
             }
             Some(JsonType::Object) => self.lower_object(schema, hint)?,
-            Some(JsonType::Null) | None => self.insert_schema_type(schema, hint, TypeKind::Any),
+            Some(JsonType::Null) => self.insert_schema_type(schema, hint, TypeKind::Null),
+            None if schema.types.types.contains(&JsonType::Null) => {
+                self.insert_schema_type(schema, hint, TypeKind::Null)
+            }
+            None => self.insert_schema_type(schema, hint, TypeKind::Any),
         };
         ty.nullable = nullable;
         Some(ty)
@@ -511,19 +515,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// member is null collapses to `Option<TheOtherType>` with no enum. The remaining variants are
     /// represented WITHOUT `serde(untagged)` and without degrading to `serde_json::Value`:
     ///
-    /// * with a `discriminator` → an internally-tagged enum ([`UnionStrategy::Internal`]); each
-    ///   variant must lower to an object (serde internal tagging requires struct-like variants),
-    ///   otherwise the discriminator is not representable → `E007`.
-    /// * without one → an enum with a custom content-inspecting `Deserialize`/`Serialize`
-    ///   ([`UnionStrategy::Disjoint`]), but only when the variants are *provably* disjoint by JSON
-    ///   type category or by a unique required key; otherwise → `E007` (narrowed).
+    /// * a `discriminator` dispatches object variants by tag and uniquely categorized non-object
+    ///   variants by JSON category;
+    /// * statically disjoint variants dispatch by JSON category or unique required key;
+    /// * overlapping variants use typed trial matching with exact-one (`oneOf`) or deterministic
+    ///   most-specific (`anyOf`) semantics, including serialization revalidation.
     ///
     /// Every variant type inserts before the union def, so the [`TypeKind::Union`] is the final
     /// graph insert — preserving the [`Self::ensure_component`] last-insert invariant when the union
     /// is a component body.
     fn lower_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
-        // Gather the member schemas in deterministic order (oneOf, then anyOf).
-        let members: Vec<&SchemaOr> = schema.one_of.iter().chain(schema.any_of.iter()).collect();
+        let (members, mode): (Vec<&SchemaOr>, UnionMode) =
+            match (schema.one_of.is_empty(), schema.any_of.is_empty()) {
+                (false, true) => (schema.one_of.iter().collect(), UnionMode::OneOf),
+                (true, false) => (schema.any_of.iter().collect(), UnionMode::AnyOf),
+                (false, false) => {
+                    return self.reject_union(
+                    schema,
+                    "a single schema node declares both `oneOf` and `anyOf`; their intersected \
+                     applicator semantics are not representable as one generated union",
+                );
+                }
+                (true, true) => unreachable!("lower_union is called only for a union schema"),
+            };
+        let sibling = self.lower_union_sibling(schema, hint)?;
 
         // A `"null"` in the enclosing type array, or a null-only member, makes the union nullable.
         let mut nullable = schema.types.types.contains(&JsonType::Null);
@@ -536,11 +551,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
 
-        // Only null members remained: a faithful nullable untyped value.
+        // Only null members remained: the exact JSON null type.
         if real_members.is_empty() {
-            let mut ty = self.insert_schema_type(schema, hint, TypeKind::Any);
-            ty.nullable = true;
-            return Some(ty);
+            return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
         }
 
         // A single real member (the rest were null): `Option<ThatType>`, no enum needed. Re-emit the
@@ -549,7 +562,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // when the union is a component body (a bare `$ref` member would otherwise return an existing
         // id and leave the popped root mismatched).
         if real_members.len() == 1 {
-            let inner = self.lower_schema_or(real_members[0], hint)?;
+            let mut inner = self.lower_schema_or(real_members[0], hint)?;
+            if let Some(sibling) = sibling {
+                inner = self.intersect_types(inner, sibling, &format!("{hint}Constrained"))?;
+            }
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = inner.nullable || nullable;
@@ -565,6 +581,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
+            if let Some(sibling) = sibling {
+                let Some(intersection) =
+                    self.intersect_types(ty, sibling, &format!("{hint}Variant{index}Constrained"))
+                else {
+                    // The sibling constraints make this branch impossible; JSON Schema simply
+                    // removes it from the union's accepted set.
+                    continue;
+                };
+                ty = intersection;
+            }
             // Hoist a variant's own nullability up to the union: a `null` payload then resolves at the
             // outer `Option<Union>` (→ `None`), and the discriminated/disjoint dispatch below only
             // ever inspects non-null content — otherwise a variant like `{type: [string, null]}`
@@ -586,16 +612,58 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ref_names.push(ref_name);
         }
 
+        if variants.is_empty() {
+            return self.reject_union(
+                schema,
+                "union sibling constraints make every variant impossible",
+            );
+        }
+        if variants.len() == 1 {
+            let inner = variants[0].ty;
+            let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
+            let mut ty = self.insert_schema_type(schema, hint, kind);
+            ty.nullable = inner.nullable || nullable;
+            ty.boxed = inner.boxed;
+            return Some(ty);
+        }
+
         let strategy = if let Some(discriminator) = &schema.discriminator {
-            self.discriminated_strategy(schema, &variants, &ref_names, discriminator)?
+            self.discriminated_strategy(&variants, &ref_names, discriminator)
+                .or_else(|| self.disjoint_strategy(&variants))
+                .unwrap_or_else(|| self.trial_strategy(&variants, mode))
         } else {
-            self.disjoint_strategy(schema, &variants)?
+            self.disjoint_strategy(&variants)
+                .unwrap_or_else(|| self.trial_strategy(&variants, mode))
         };
 
         let mut ty =
             self.insert_schema_type(schema, hint, TypeKind::Union(Union { variants, strategy }));
         ty.nullable = nullable;
         Some(ty)
+    }
+
+    /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` so every branch is intersected with
+    /// them. A multi-non-null `type` array is already expressed by the union members and is removed
+    /// here (its `null` member is handled by the union's outer nullability).
+    fn lower_union_sibling(&mut self, schema: &Schema, hint: &str) -> Option<Option<Ty>> {
+        let mut sibling = schema.clone();
+        sibling.one_of.clear();
+        sibling.any_of.clear();
+        sibling.discriminator = None;
+        let non_null_types = sibling
+            .types
+            .types
+            .iter()
+            .filter(|kind| **kind != JsonType::Null)
+            .count();
+        if non_null_types > 1 {
+            sibling.types.types.clear();
+        }
+        if !schema_has_shape_constraint(&sibling) {
+            return Some(None);
+        }
+        self.lower_schema(&sibling, &format!("{hint}Constraint"))
+            .map(Some)
     }
 
     /// Lower one union member, returning its type and — when the member is a `$ref` to a component —
@@ -617,29 +685,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some((ty, None))
     }
 
-    /// Build the discriminated strategy for a discriminated union. Each variant must lower to an
-    /// object (the tag is read/written on an object), otherwise `E007` (narrowed). The tag value
-    /// comes from `discriminator.mapping` (matched by `$ref`) when present, otherwise from the
-    /// variant's own `$ref` component name (implicit mapping).
+    /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its
+    /// unique JSON category. The tag value comes from `discriminator.mapping` (matched by `$ref`)
+    /// when present, otherwise from the variant's own `$ref` component name.
     fn discriminated_strategy(
-        &mut self,
-        schema: &Schema,
+        &self,
         variants: &[UnionVariant],
         ref_names: &[Option<String>],
         discriminator: &super::Discriminator,
     ) -> Option<UnionStrategy> {
         let mut tags = Vec::new();
+        let mut categories = Vec::new();
         for (variant, ref_name) in variants.iter().zip(ref_names) {
             if !matches!(
                 self.graph.get(variant.ty.id).map(|def| &def.kind),
                 Some(TypeKind::Struct(_))
             ) {
-                return self.reject_union(
-                    schema,
-                    "a discriminated union variant is not an object type; the discriminator tag is \
-                     read from an object, so every variant must be a struct (a `$ref` to an object \
-                     component or an inline object)",
-                );
+                let category = self.json_category(variant.ty)?;
+                if category == JsonCategory::Object || categories.contains(&Some(category)) {
+                    return None;
+                }
+                tags.push(None);
+                categories.push(Some(category));
+                continue;
             }
             // Prefer an explicit mapping entry that points at this variant's component; fall back to
             // the component name (implicit mapping). A mapping value may be a bare name or a full
@@ -658,16 +726,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .or_else(|| Some(name.clone()))
                 })
                 .unwrap_or_else(|| variant.name_hint.clone());
-            tags.push(tag);
+            tags.push(Some(tag));
+            categories.push(None);
         }
         Some(UnionStrategy::Discriminated {
             tag_field: discriminator.property_name.clone(),
             tags,
+            categories,
         })
     }
 
-    /// Build the disjoint strategy for an undiscriminated union, or reject with narrowed `E007` when
-    /// the variants are not provably disjoint. Two proofs are attempted in order:
+    /// Build the disjoint fast path for an undiscriminated union. Two proofs are attempted:
     ///
     /// 1. **JSON-type-disjoint**: every variant occupies a distinct JSON primitive category
     ///    (`number` and `integer` share one category, so they never separate).
@@ -675,11 +744,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///    false`) with at least one required property whose name appears in no other variant. Closed
     ///    is essential — an open object could carry another variant's unique key as an extra field
     ///    and be misrouted, so open-object required-key unions are never provably disjoint.
-    fn disjoint_strategy(
-        &mut self,
-        schema: &Schema,
-        variants: &[UnionVariant],
-    ) -> Option<UnionStrategy> {
+    fn disjoint_strategy(&self, variants: &[UnionVariant]) -> Option<UnionStrategy> {
         // Proof 1: pairwise-distinct JSON type categories.
         let categories: Option<Vec<JsonCategory>> =
             variants.iter().map(|v| self.json_category(v.ty)).collect();
@@ -707,13 +772,51 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         }
 
-        self.reject_union(
-            schema,
-            "oneOf/anyOf variants are not provably disjoint: they neither occupy distinct JSON \
-             type categories (integer and number overlap) nor are all closed objects \
-             (additionalProperties: false) with a unique required key per variant, so a payload \
-             cannot be routed to one variant unambiguously",
-        )
+        None
+    }
+
+    fn trial_strategy(&self, variants: &[UnionVariant], mode: UnionMode) -> UnionStrategy {
+        UnionStrategy::Trial {
+            mode,
+            priorities: variants
+                .iter()
+                .map(|variant| self.type_specificity(variant.ty, &mut HashSet::new()))
+                .collect(),
+        }
+    }
+
+    fn type_specificity(&self, ty: Ty, visiting: &mut HashSet<TypeId>) -> u32 {
+        if !visiting.insert(ty.id) {
+            return 0;
+        }
+        let priority = match self.graph.get(ty.id).map(|definition| &definition.kind) {
+            Some(TypeKind::Enum(enumeration)) => {
+                2_000_u32.saturating_sub(enumeration.variants.len() as u32)
+            }
+            Some(TypeKind::Null) => 3_000,
+            Some(TypeKind::Never) => 4_000,
+            Some(TypeKind::Struct(object)) => {
+                let required = object.fields.iter().filter(|field| field.required).count() as u32;
+                1_000 + required * 20 + object.fields.len() as u32
+            }
+            Some(TypeKind::Tuple(items)) => 900 + items.len() as u32,
+            Some(TypeKind::Array(item)) => 800 + self.type_specificity(**item, visiting) / 10,
+            Some(TypeKind::Primitive(Prim::I32)) => 700,
+            Some(TypeKind::Primitive(Prim::I64)) => 650,
+            Some(TypeKind::Primitive(Prim::Uuid | Prim::DateTime | Prim::Date)) => 600,
+            Some(TypeKind::Primitive(Prim::F64 | Prim::String | Prim::Bool) | TypeKind::Bytes) => {
+                500
+            }
+            Some(TypeKind::Union(union)) => union
+                .variants
+                .iter()
+                .map(|variant| self.type_specificity(variant.ty, visiting))
+                .min()
+                .unwrap_or(0),
+            Some(TypeKind::Any) | None => 0,
+        };
+        visiting.remove(&ty.id);
+        priority
     }
 
     /// The JSON primitive category a lowered variant type serializes as, or `None` when it cannot be
@@ -732,7 +835,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ScalarRepr::Int => JsonCategory::Number,
                 ScalarRepr::Bool => JsonCategory::Boolean,
             },
-            TypeKind::Bytes | TypeKind::Any | TypeKind::Union(_) => return None,
+            TypeKind::Bytes
+            | TypeKind::Null
+            | TypeKind::Never
+            | TypeKind::Any
+            | TypeKind::Union(_) => return None,
         })
     }
 
@@ -880,13 +987,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `allOf`. The gathered members are then combined:
     ///
     /// * **all object members** → one flattened [`Struct`]: the union of properties in first-seen
-    ///   order (a property in two members with the same lowered type deduplicates; with *different*
-    ///   lowered types it is irreconcilable → `E013`), the union of `required` (a property required by
-    ///   any member is required), and a conservatively merged `additionalProperties` (a member that
-    ///   denies unknown keys wins over `allow`/`typed`; two different typed value schemas → `E013`);
-    /// * **all scalar members** that lower to the same primitive → collapse to that primitive (a
-    ///   validation-only refinement like `{type: string, minLength: 5}` is a scalar member); distinct
-    ///   scalars → `E013`;
+    ///   order, recursive typed intersections for properties declared by several members, the union
+    ///   of `required`, and a conservatively intersected `additionalProperties` policy;
+    /// * **all scalar members** → their typed intersection, including numeric narrowing, enum
+    ///   narrowing, arrays/objects/unions, and exact nullability; an empty intersection → `E013`;
     /// * an **object/scalar mix** → `E013`.
     ///
     /// Every path inserts its result type as the *final* graph insert (all member/property/component
@@ -915,11 +1019,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             );
         }
 
-        // All-scalar allOf: every member must lower to the same emitted type; collapse to it rather
-        // than synthesizing a struct. `same_map_value_type` is the same bounded structural
-        // equivalence used for typed overflow maps (equal leaf shapes, equal `$ref` ids).
+        // All-scalar allOf: recursively intersect compatible members (for example integer with
+        // number, an enum with its underlying scalar, or arrays whose item constraints narrow).
         if !has_object {
-            let Some(first) = scalars.first().copied() else {
+            let Some(mut intersection) = scalars.first().copied() else {
                 // Only no-constraint members (`true`/`{}`) remained: a faithful open object.
                 let ty = self.insert_schema_type(
                     schema,
@@ -931,21 +1034,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
                 return Some(self.with_all_of_nullability(schema, ty));
             };
-            if scalars
-                .iter()
-                .any(|ty| !self.same_map_value_type(first, *ty))
-            {
-                return self.reject_all_of(
-                    schema,
-                    "`allOf` scalar members lower to different types and cannot be reconciled",
-                );
+            for (index, member) in scalars.iter().copied().enumerate().skip(1) {
+                let Some(merged) = self.intersect_types(
+                    intersection,
+                    member,
+                    &format!("{hint}Intersection{index}"),
+                ) else {
+                    return self.reject_all_of(
+                        schema,
+                        "`allOf` scalar members have an empty or unrepresentable intersection",
+                    );
+                };
+                intersection = merged;
             }
-            // Re-emit the shared scalar as the final graph insert so the invariant holds even when
+            // Re-emit the intersection as the final graph insert so the invariant holds even when
             // the allOf is a component body (the per-member scalar inserts above are left dead —
             // `#[allow(dead_code)]` on the models module — rather than threading a reserved id).
-            let kind = self.graph.get(first.id).map(|def| def.kind.clone())?;
+            let kind = self
+                .graph
+                .get(intersection.id)
+                .map(|def| def.kind.clone())?;
             let mut ty = self.insert_schema_type(schema, hint, kind);
-            ty.nullable = first.nullable;
+            ty.nullable = intersection.nullable;
             return Some(self.with_all_of_nullability(schema, ty));
         }
 
@@ -967,7 +1077,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     required.push(name.clone());
                 }
             }
-            match self.merge_additional(&additional, member_additional) {
+            match self.merge_additional(
+                &additional,
+                member_additional,
+                &format!("{hint}Additional"),
+            ) {
                 Some(merged) => additional = merged,
                 None => {
                     return self.reject_all_of(
@@ -979,15 +1093,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             for field in member_fields {
                 match fields.get_mut(&field.name.wire) {
                     Some(existing) => {
-                        // Same property in two members: identical lowered types deduplicate; a type
-                        // mismatch is irreconcilable (never silently drop or pick one).
-                        if !self.same_map_value_type(existing.ty, field.ty) {
-                            return self.reject_all_of(
-                                schema,
-                                "a property appears in multiple `allOf` members with conflicting \
-                                 types",
+                        // A repeated property is an intersection, not an equality assertion: retain
+                        // the narrower compatible type and reject only an empty/unrepresentable
+                        // intersection.
+                        let Some(intersection) = self.intersect_types(
+                            existing.ty,
+                            field.ty,
+                            &format!("{hint}{}Intersection", field.name.wire),
+                        ) else {
+                            let message = format!(
+                                "property `{}` appears in multiple `allOf` members with \
+                                 conflicting types",
+                                field.name.wire
                             );
-                        }
+                            return self.reject_all_of(schema, &message);
+                        };
+                        existing.ty = intersection;
                         existing.required = existing.required || field.required;
                     }
                     None => {
@@ -1155,18 +1276,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// value must satisfy every member, so any member denying unknown keys forbids them outright);
     /// two typed value schemas must lower to the same type. Returns `None` when irreconcilable.
     fn merge_additional(
-        &self,
+        &mut self,
         acc: &AdditionalProps,
         next: &AdditionalProps,
+        hint: &str,
     ) -> Option<AdditionalProps> {
         Some(match (acc, next) {
             (AdditionalProps::Deny, _) | (_, AdditionalProps::Deny) => AdditionalProps::Deny,
             (AdditionalProps::Typed(x), AdditionalProps::Typed(y)) => {
-                if self.same_map_value_type(**x, **y) {
-                    AdditionalProps::Typed(x.clone())
-                } else {
-                    return None;
-                }
+                let intersection = self.intersect_types(**x, **y, hint)?;
+                AdditionalProps::Typed(Box::new(intersection))
             }
             (AdditionalProps::Typed(x), AdditionalProps::Allow)
             | (AdditionalProps::Allow, AdditionalProps::Typed(x)) => {
@@ -1283,6 +1402,248 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(AdditionalProps::Typed(Box::new(ty)))
     }
 
+    /// Compute a typed intersection for two already-lowered schemas. Nullability is intersected
+    /// independently from the non-null shape; an intersection containing only JSON `null` becomes
+    /// [`TypeKind::Null`]. Derived arrays, objects, enums, and narrowed unions are inserted into the
+    /// graph so codegen still sees an ordinary, fully typed IR node.
+    fn intersect_types(&mut self, a: Ty, b: Ty, hint: &str) -> Option<Ty> {
+        let a_kind = self.graph.get(a.id)?.kind.clone();
+        let b_kind = self.graph.get(b.id)?.kind.clone();
+        let accepts_null = type_accepts_null(a, &a_kind) && type_accepts_null(b, &b_kind);
+
+        let non_null = if matches!(a_kind, TypeKind::Null) || matches!(b_kind, TypeKind::Null) {
+            None
+        } else {
+            self.intersect_non_null(a, &a_kind, b, &b_kind, hint)
+        };
+
+        match non_null {
+            Some(mut ty) => {
+                ty.nullable = accepts_null;
+                Some(ty)
+            }
+            None if accepts_null => {
+                Some(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+            }
+            None => None,
+        }
+    }
+
+    fn intersect_non_null(
+        &mut self,
+        a: Ty,
+        a_kind: &TypeKind,
+        b: Ty,
+        b_kind: &TypeKind,
+        hint: &str,
+    ) -> Option<Ty> {
+        if a.id == b.id {
+            let mut ty = a;
+            ty.nullable = false;
+            ty.boxed = a.boxed || b.boxed;
+            return Some(ty);
+        }
+
+        match (a_kind, b_kind) {
+            (TypeKind::Any, _) => Some(non_nullable(b)),
+            (_, TypeKind::Any) => Some(non_nullable(a)),
+            (TypeKind::Primitive(left), TypeKind::Primitive(right)) => {
+                let primitive = intersect_primitives(*left, *right)?;
+                if primitive == *left {
+                    Some(non_nullable(a))
+                } else if primitive == *right {
+                    Some(non_nullable(b))
+                } else {
+                    Some(self.insert_type(
+                        hint,
+                        TypeKind::Primitive(primitive),
+                        Docs::default(),
+                        None,
+                    ))
+                }
+            }
+            (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
+                let variants: Vec<ScalarValue> = left
+                    .variants
+                    .iter()
+                    .filter(|value| right.variants.contains(value))
+                    .cloned()
+                    .collect();
+                if variants.is_empty() {
+                    None
+                } else if variants == left.variants {
+                    Some(non_nullable(a))
+                } else if variants == right.variants {
+                    Some(non_nullable(b))
+                } else {
+                    Some(self.insert_type(
+                        hint,
+                        TypeKind::Enum(ScalarEnum {
+                            repr: left.repr,
+                            variants,
+                        }),
+                        Docs::default(),
+                        None,
+                    ))
+                }
+            }
+            (TypeKind::Enum(enumeration), TypeKind::Primitive(primitive))
+                if enum_matches_primitive(enumeration.repr, *primitive) =>
+            {
+                Some(non_nullable(a))
+            }
+            (TypeKind::Primitive(primitive), TypeKind::Enum(enumeration))
+                if enum_matches_primitive(enumeration.repr, *primitive) =>
+            {
+                Some(non_nullable(b))
+            }
+            (TypeKind::Array(left), TypeKind::Array(right)) => {
+                let item_hint = format!("{hint}Item");
+                let item = self
+                    .intersect_types(**left, **right, &item_hint)
+                    .unwrap_or_else(|| {
+                        self.insert_type(&item_hint, TypeKind::Never, Docs::default(), None)
+                    });
+                if same_ty(item, **left) {
+                    Some(non_nullable(a))
+                } else if same_ty(item, **right) {
+                    Some(non_nullable(b))
+                } else {
+                    Some(self.insert_type(
+                        hint,
+                        TypeKind::Array(Box::new(item)),
+                        Docs::default(),
+                        None,
+                    ))
+                }
+            }
+            (TypeKind::Tuple(left), TypeKind::Tuple(right)) if left.len() == right.len() => {
+                let items = left
+                    .iter()
+                    .zip(right)
+                    .enumerate()
+                    .map(|(index, (left, right))| {
+                        self.intersect_types(*left, *right, &format!("{hint}Item{index}"))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
+            }
+            (TypeKind::Struct(left), TypeKind::Struct(right)) => {
+                self.intersect_structs(left, right, hint)
+            }
+            (TypeKind::Union(union), _) => self.intersect_union(a, union, b, hint),
+            (_, TypeKind::Union(union)) => self.intersect_union(b, union, a, hint),
+            (TypeKind::Bytes, TypeKind::Bytes) => Some(non_nullable(a)),
+            _ => None,
+        }
+    }
+
+    fn intersect_structs(&mut self, left: &Struct, right: &Struct, hint: &str) -> Option<Ty> {
+        let mut fields: IndexMap<String, Field> = left
+            .fields
+            .iter()
+            .cloned()
+            .map(|field| (field.name.wire.clone(), field))
+            .collect();
+        for field in &right.fields {
+            match fields.get_mut(&field.name.wire) {
+                Some(existing) => {
+                    existing.ty = self.intersect_types(
+                        existing.ty,
+                        field.ty,
+                        &format!("{hint}{}", field.name.wire),
+                    )?;
+                    existing.required = existing.required || field.required;
+                    if existing.required {
+                        if let Some(default) = &mut existing.default {
+                            default.applied = None;
+                        }
+                    }
+                }
+                None => {
+                    fields.insert(field.name.wire.clone(), field.clone());
+                }
+            }
+        }
+        let additional = self.merge_additional(
+            &left.additional,
+            &right.additional,
+            &format!("{hint}Additional"),
+        )?;
+        Some(self.insert_type(
+            hint,
+            TypeKind::Struct(Struct {
+                fields: fields.into_values().collect(),
+                additional,
+            }),
+            Docs::default(),
+            None,
+        ))
+    }
+
+    fn intersect_union(
+        &mut self,
+        union_ty: Ty,
+        union: &Union,
+        other: Ty,
+        hint: &str,
+    ) -> Option<Ty> {
+        let mut variants = Vec::new();
+        let mut retained = Vec::new();
+        for (index, variant) in union.variants.iter().enumerate() {
+            if let Some(ty) =
+                self.intersect_types(variant.ty, other, &format!("{hint}Variant{index}"))
+            {
+                variants.push(UnionVariant {
+                    name_hint: variant.name_hint.clone(),
+                    ty,
+                });
+                retained.push(index);
+            }
+        }
+        if variants.len() == 1 {
+            return variants.into_iter().next().map(|variant| variant.ty);
+        }
+        if variants.is_empty() {
+            return None;
+        }
+        if variants.len() == union.variants.len()
+            && variants
+                .iter()
+                .zip(&union.variants)
+                .all(|(left, right)| same_ty(left.ty, right.ty))
+        {
+            return Some(non_nullable(union_ty));
+        }
+        let strategy = match &union.strategy {
+            UnionStrategy::Discriminated {
+                tag_field,
+                tags,
+                categories,
+            } => UnionStrategy::Discriminated {
+                tag_field: tag_field.clone(),
+                tags: retained.iter().map(|index| tags[*index].clone()).collect(),
+                categories: retained.iter().map(|index| categories[*index]).collect(),
+            },
+            UnionStrategy::Disjoint { features } => UnionStrategy::Disjoint {
+                features: retained
+                    .iter()
+                    .map(|index| features[*index].clone())
+                    .collect(),
+            },
+            UnionStrategy::Trial { mode, priorities } => UnionStrategy::Trial {
+                mode: *mode,
+                priorities: retained.iter().map(|index| priorities[*index]).collect(),
+            },
+        };
+        Some(self.insert_type(
+            hint,
+            TypeKind::Union(Union { variants, strategy }),
+            Docs::default(),
+            None,
+        ))
+    }
+
     /// Whether two lowered value types would emit the *same* Rust type as a shared map value, so
     /// multiple `patternProperties`/`additionalProperties` values can collapse into one typed
     /// overflow map. A bounded structural equivalence:
@@ -1328,6 +1689,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (Some(a_def), Some(b_def)) => match (&a_def.kind, &b_def.kind) {
                 (TypeKind::Primitive(x), TypeKind::Primitive(y)) => x == y,
                 (TypeKind::Bytes, TypeKind::Bytes) => true,
+                (TypeKind::Null, TypeKind::Null) | (TypeKind::Never, TypeKind::Never) => true,
                 (TypeKind::Any, TypeKind::Any) => true,
                 (TypeKind::Array(x), TypeKind::Array(y)) => {
                     self.same_map_value_type_guarded(**x, **y, visiting)
@@ -1433,12 +1795,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .filter(|value| !matches!(value.node, Node::Null))
             .collect();
 
-        // Only `null` members remained (`enum: [null]` / `const: null`): no scalar variants to
-        // lower, so emit a faithful nullable `Any` rather than rejecting.
+        // Only `null` members remained (`enum: [null]` / `const: null`): emit the exact JSON null
+        // type (`()`), not a nullable unconstrained value that would also accept non-null content.
         if remainder.is_empty() {
-            let mut ty = self.insert_schema_type(schema, hint, TypeKind::Any);
-            ty.nullable = true;
-            return Some(ty);
+            return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
         }
 
         let mut variants = Vec::new();
@@ -1542,19 +1902,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ParamLoc::Path | ParamLoc::Header => "simple",
             ParamLoc::Query | ParamLoc::Cookie => "form",
         });
-        let style = match style_name {
-            "simple" => ParamStyle::Simple,
-            "form" => ParamStyle::Form,
+        let style = match (location, style_name) {
+            (ParamLoc::Path | ParamLoc::Header, "simple") => ParamStyle::Simple,
+            (ParamLoc::Query | ParamLoc::Cookie, "form") => ParamStyle::Form,
             _ => {
                 Diagnostic::error(
                     Code::UnsupportedParameterStyle,
                     parameter.provenance.clone(),
                 )
-                .message(format!("parameter style `{style_name}` is not supported"))
+                .message(format!(
+                    "parameter style `{style_name}` is not supported for `{}` parameters",
+                    parameter.location
+                ))
                 .emit(self.diags);
                 return None;
             }
         };
+        if parameter.allow_reserved {
+            Diagnostic::error(
+                Code::UnsupportedParameterStyle,
+                parameter.provenance.clone(),
+            )
+            .message("`allowReserved: true` parameter encoding is not supported")
+            .emit(self.diags);
+            return None;
+        }
+        let explode = parameter
+            .explode
+            .unwrap_or(matches!(style, ParamStyle::Form));
         let ty = if let Some(schema) = &parameter.schema {
             let ty = self.lower_schema_ref(schema, &parameter.name)?;
             self.remap_binary_param(ty, &parameter.name)
@@ -1572,6 +1947,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ty,
                 required: parameter.required || location == ParamLoc::Path,
                 style: ParamStyle::Content(media),
+                explode: false,
                 deprecated: parameter.deprecated,
                 default_display,
             });
@@ -1583,6 +1959,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(parameter.provenance.clone()),
             )
         };
+        if !parameter_shape_supported(&self.graph, ty) {
+            Diagnostic::error(
+                Code::UnsupportedParameterStyle,
+                parameter.provenance.clone(),
+            )
+            .message(
+                "simple/form parameter serialization does not support nested arrays or objects",
+            )
+            .emit(self.diags);
+            return None;
+        }
         let default_display = self.param_default_display(parameter.schema.as_ref(), ty);
         Some(Parameter {
             name: parameter.name.clone(),
@@ -1590,6 +1977,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ty,
             required: parameter.required || location == ParamLoc::Path,
             style,
+            explode,
             deprecated: parameter.deprecated,
             default_display,
         })
@@ -1655,7 +2043,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
             }
         }
-        Some(RequestBody { media, ty })
+        if let Some(ty) = ty {
+            let compatible = match media {
+                MediaType::Text => raw_text_type_supported(&self.graph, ty),
+                MediaType::OctetStream => matches!(
+                    self.graph.get(ty.id).map(|definition| &definition.kind),
+                    Some(TypeKind::Bytes)
+                ),
+                _ => true,
+            };
+            if !compatible {
+                Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                    .message(format!(
+                        "media type `{media_name}` requires a string-like or binary schema that can be sent as a raw body"
+                    ))
+                    .remedy("use a string/binary schema, choose a structured media type, or omit this API segment with spargen::omit!")
+                    .emit(self.diags);
+                return None;
+            }
+        }
+        Some(RequestBody {
+            media,
+            content_type: media_essence(media_name).to_owned(),
+            ty,
+        })
     }
 
     fn lower_responses(&mut self, responses: &super::ResponsesObject) -> Responses {
@@ -1707,6 +2118,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     schema_source.and_then(|schema| self.lower_schema_ref(schema, "ResponseBody"));
                 if let Some(schema) = schema_source {
                     self.warn_structural_default_ref(schema, "a response body schema");
+                }
+                if matches!(media, MediaType::FormUrlEncoded | MediaType::Multipart) {
+                    Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
+                        .message(format!(
+                            "media type `{media_name}` is supported for request bodies, not response bodies"
+                        ))
+                        .remedy("document a JSON, XML, textual, binary, or streaming response, or omit this API segment with spargen::omit!")
+                        .emit(self.diags);
+                    return None;
+                }
+                if let Some(ty) = ty {
+                    let compatible = match media {
+                        MediaType::Text => raw_text_type_supported(&self.graph, ty),
+                        MediaType::OctetStream => matches!(
+                            self.graph.get(ty.id).map(|definition| &definition.kind),
+                            Some(TypeKind::Bytes)
+                        ),
+                        _ => true,
+                    };
+                    if !compatible {
+                        Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
+                            .message(format!(
+                                "media type `{media_name}` requires a string-like or binary response schema"
+                            ))
+                            .remedy("use a string/binary schema, choose a structured media type, or omit this API segment with spargen::omit!")
+                            .emit(self.diags);
+                        return None;
+                    }
                 }
                 Some((media, ty))
             },
@@ -1822,6 +2261,97 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             nullable: false,
             boxed: false,
         }
+    }
+}
+
+fn parameter_shape_supported(graph: &TypeGraph, ty: Ty) -> bool {
+    parameter_shape_supported_inner(graph, ty, false, &mut HashSet::new())
+}
+
+fn parameter_shape_supported_inner(
+    graph: &TypeGraph,
+    ty: Ty,
+    scalar_only: bool,
+    visiting: &mut HashSet<TypeId>,
+) -> bool {
+    if !visiting.insert(ty.id) {
+        return false;
+    }
+    let Some(definition) = graph.get(ty.id) else {
+        visiting.remove(&ty.id);
+        return false;
+    };
+    let supported = match &definition.kind {
+        TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes | TypeKind::Null => true,
+        TypeKind::Array(item) if !scalar_only => {
+            parameter_shape_supported_inner(graph, **item, true, visiting)
+        }
+        TypeKind::Tuple(items) if !scalar_only => items
+            .iter()
+            .all(|item| parameter_shape_supported_inner(graph, *item, true, visiting)),
+        TypeKind::Struct(object) if !scalar_only => {
+            object
+                .fields
+                .iter()
+                .all(|field| parameter_shape_supported_inner(graph, field.ty, true, visiting))
+                && match &object.additional {
+                    AdditionalProps::Deny | AdditionalProps::Allow => true,
+                    AdditionalProps::Typed(value) => {
+                        parameter_shape_supported_inner(graph, **value, true, visiting)
+                    }
+                }
+        }
+        TypeKind::Union(union) => union.variants.iter().all(|variant| {
+            parameter_shape_supported_inner(graph, variant.ty, scalar_only, visiting)
+        }),
+        TypeKind::Struct(_)
+        | TypeKind::Array(_)
+        | TypeKind::Tuple(_)
+        | TypeKind::Never
+        | TypeKind::Any => false,
+    };
+    visiting.remove(&ty.id);
+    supported
+}
+
+fn type_accepts_null(ty: Ty, kind: &TypeKind) -> bool {
+    ty.nullable || matches!(kind, TypeKind::Null | TypeKind::Any)
+}
+
+fn non_nullable(mut ty: Ty) -> Ty {
+    ty.nullable = false;
+    ty
+}
+
+fn same_ty(left: Ty, right: Ty) -> bool {
+    left.id == right.id && left.nullable == right.nullable && left.boxed == right.boxed
+}
+
+fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
+    use Prim::{Bool, Date, DateTime, String, Uuid, F64, I32, I64};
+    Some(match (left, right) {
+        (Bool, Bool) => Bool,
+        (I32, I32 | I64 | F64) | (I64 | F64, I32) => I32,
+        (I64, I64 | F64) | (F64, I64) => I64,
+        (F64, F64) => F64,
+        (String, String) => String,
+        (String, formatted @ (Uuid | DateTime | Date))
+        | (formatted @ (Uuid | DateTime | Date), String) => formatted,
+        (Uuid, Uuid) => Uuid,
+        (DateTime, DateTime) => DateTime,
+        (Date, Date) => Date,
+        _ => return None,
+    })
+}
+
+fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
+    match repr {
+        ScalarRepr::String => matches!(
+            primitive,
+            Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date
+        ),
+        ScalarRepr::Int => matches!(primitive, Prim::I32 | Prim::I64 | Prim::F64),
+        ScalarRepr::Bool => primitive == Prim::Bool,
     }
 }
 
@@ -1992,7 +2522,12 @@ fn reachable_types(graph: &TypeGraph, roots: &[TypeId]) -> HashSet<TypeId> {
             TypeKind::Union(union) => {
                 stack.extend(union.variants.iter().map(|variant| variant.ty.id))
             }
-            TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes | TypeKind::Any => {}
+            TypeKind::Primitive(_)
+            | TypeKind::Enum(_)
+            | TypeKind::Bytes
+            | TypeKind::Null
+            | TypeKind::Never
+            | TypeKind::Any => {}
         }
     }
     visited
@@ -2003,22 +2538,16 @@ fn lower_media_type(
     provenance: &crate::diag::Provenance,
     diags: &mut Diagnostics,
 ) -> Option<MediaType> {
-    Some(match media.split(';').next().unwrap_or(media).trim() {
-        "application/json" => MediaType::Json,
-        "application/xml" | "text/xml" => MediaType::Xml,
-        "application/x-www-form-urlencoded" => MediaType::FormUrlEncoded,
-        "application/octet-stream" => MediaType::OctetStream,
-        "text/plain" => MediaType::TextPlain,
-        "multipart/form-data" => MediaType::Multipart,
-        "text/event-stream" => MediaType::EventStream,
-        "application/x-ndjson" => MediaType::Ndjson,
-        other => {
+    let essence = media_essence(media);
+    match classify_media(essence) {
+        Some((media, _)) => Some(media),
+        None => {
             Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
-                .message(format!("media type `{other}` is not supported"))
+                .message(format!("media type `{essence}` is not supported"))
                 .emit(diags);
-            return None;
+            None
         }
-    })
+    }
 }
 
 fn choose_media<'a, T>(
@@ -2029,33 +2558,76 @@ fn choose_media<'a, T>(
     if content.is_empty() {
         return None;
     }
-    for preferred in [
-        "application/json",
-        // XML ranks after JSON — a JSON alternative still wins when both are offered — but before the
-        // remaining media so a documented XML body is generated (through the quick-xml codec).
-        "application/xml",
-        "text/xml",
-        // Multipart ranks after JSON/XML — a JSON alternative still wins when both are offered — but
-        // before the remaining single-value media so a documented file-upload body is generated.
-        "multipart/form-data",
-        "application/x-www-form-urlencoded",
-        "application/octet-stream",
-        "text/plain",
-        // Streaming response media rank last — a JSON (or any whole-body) alternative on the same
-        // response still wins — but a streaming-only response selects its stream media rather than
-        // falling through to the `E009` rejection below.
-        "text/event-stream",
-        "application/x-ndjson",
-    ] {
-        if let Some(value) = content.get(preferred) {
-            return Some((preferred, value));
+    let mut selected: Option<(u8, usize, &str, &T)> = None;
+    for (source_index, (media, value)) in content.iter().enumerate() {
+        let Some((_, rank)) = classify_media(media_essence(media)) else {
+            continue;
+        };
+        let candidate = (rank, source_index, media.as_str(), value);
+        if selected
+            .as_ref()
+            .is_none_or(|current| (rank, source_index) < (current.0, current.1))
+        {
+            selected = Some(candidate);
         }
+    }
+    if let Some((_, _, media, value)) = selected {
+        return Some((media, value));
     }
     let (media, _) = content.first()?;
     Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
         .message(format!("media type `{media}` is not supported"))
         .emit(diags);
     None
+}
+
+fn media_essence(media: &str) -> &str {
+    media.split(';').next().unwrap_or(media).trim()
+}
+
+/// Classify a content type into its wire codec and deterministic preference rank. Structured JSON
+/// suffixes use the JSON codec; textual types use raw UTF-8 except for the two streaming framings.
+/// GitHub's documented octocat representation is a textual vendor media type.
+fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
+    let classified = match essence {
+        "application/json" => (MediaType::Json, 0),
+        media if media.starts_with("application/") && media.ends_with("+json") => {
+            (MediaType::Json, 0)
+        }
+        "application/xml" | "text/xml" => (MediaType::Xml, 1),
+        "multipart/form-data" => (MediaType::Multipart, 2),
+        "application/x-www-form-urlencoded" => (MediaType::FormUrlEncoded, 3),
+        "application/octet-stream" => (MediaType::OctetStream, 4),
+        "text/event-stream" => (MediaType::EventStream, 6),
+        "application/x-ndjson" => (MediaType::Ndjson, 6),
+        "application/octocat-stream" => (MediaType::Text, 5),
+        media if media.starts_with("text/") => (MediaType::Text, 5),
+        _ => return None,
+    };
+    Some(classified)
+}
+
+fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {
+    fn visit(graph: &TypeGraph, ty: Ty, seen: &mut HashSet<TypeId>) -> bool {
+        if !seen.insert(ty.id) {
+            return true;
+        }
+        let supported = match graph.get(ty.id).map(|definition| &definition.kind) {
+            Some(TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date))
+            | Some(TypeKind::Bytes)
+            | Some(TypeKind::Any) => true,
+            Some(TypeKind::Enum(enumeration)) => enumeration.repr == ScalarRepr::String,
+            Some(TypeKind::Union(union)) => union
+                .variants
+                .iter()
+                .all(|variant| visit(graph, variant.ty, seen)),
+            _ => false,
+        };
+        seen.remove(&ty.id);
+        supported
+    }
+
+    visit(graph, ty, &mut HashSet::new())
 }
 
 fn parse_status(status: &str) -> Option<StatusSpec> {
@@ -2258,10 +2830,26 @@ fn schema_is_object_like(schema: &Schema) -> bool {
 /// an `enum`/`const`, or `contentEncoding`) — as opposed to a pure annotation member (`{}` /
 /// `{description: ...}`) that constrains nothing.
 fn schema_imposes_scalar(schema: &Schema) -> bool {
-    schema.types.types.iter().any(|ty| *ty != JsonType::Null)
+    !schema.types.types.is_empty()
         || schema.enum_values.is_some()
         || schema.const_value.is_some()
         || schema.content_encoding.is_some()
+        || schema.format.as_deref() == Some("binary")
+        || !schema.one_of.is_empty()
+        || !schema.any_of.is_empty()
+}
+
+fn schema_has_shape_constraint(schema: &Schema) -> bool {
+    !schema.types.types.is_empty()
+        || schema_is_object_like(schema)
+        || schema.items.is_some()
+        || !schema.prefix_items.is_empty()
+        || schema.enum_values.is_some()
+        || schema.const_value.is_some()
+        || schema.content_encoding.is_some()
+        || schema.format.as_deref() == Some("binary")
+        || schema.reference.is_some()
+        || !schema.all_of.is_empty()
 }
 
 /// The provenance of an `allOf` member for diagnostics — the schema's own provenance, or the

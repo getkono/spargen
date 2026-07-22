@@ -727,9 +727,9 @@ components:
 }
 
 #[test]
-fn e007_non_disjoint_union() {
-    // `integer | number` share the JSON numeric category (they overlap on the wire), so the union is
-    // NOT provably disjoint → E007 (narrowed). A payload `1` could match either variant.
+fn overlapping_numeric_one_of_generates_with_typed_trial_matching() {
+    // `integer | number` overlaps on integral payloads. The generated typed trial union enforces
+    // exact-one matching at runtime (`1` is ambiguous; `1.5` selects number).
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -742,18 +742,15 @@ components:
         - type: number
 "##;
     let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::NonDisjointUnion));
-    // check/generate parity.
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
-    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::NonDisjointUnion));
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
-fn e007_overlapping_required_keys_rejected() {
-    // Two object variants that share their only required key are not disjoint by key presence, and
-    // both are the Object JSON category → no proof holds → E007.
+fn overlapping_object_one_of_generates_with_typed_trial_matching() {
+    // Object variants that overlap structurally use typed trial matching and exact-one semantics.
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -771,8 +768,8 @@ components:
           properties: { kind: { type: string }, b: { type: string } }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::NonDisjointUnion));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 }
 
 #[test]
@@ -793,6 +790,28 @@ components:
     let report = generate(spec);
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn union_sibling_constraints_intersect_every_branch() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    StringOnly:
+      type: string
+      oneOf:
+        - type: string
+        - type: integer
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+
     let checked = check(spec);
     assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
 }
@@ -833,8 +852,8 @@ components:
 }
 
 #[test]
-fn e007_discriminated_non_object_variant_rejected() {
-    // A discriminated variant that is not an object (a primitive) cannot be internally tagged → E007.
+fn discriminated_union_with_unique_non_object_category_generates() {
+    // A non-object variant dispatches by JSON category while object variants dispatch by tag.
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -854,8 +873,8 @@ components:
         propertyName: petType
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::NonDisjointUnion));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 }
 
 #[test]
@@ -885,7 +904,7 @@ components:
 fn required_key_disjoint_objects_generate() {
     // Two CLOSED object variants (`additionalProperties: false`) each with a unique required key
     // (`a` / `b`) → provably disjoint by key presence → GENERATES with a content-inspecting custom
-    // Deserialize. Closed is required for soundness (see `e007_open_object_required_key_rejected`).
+    // Deserialize. Closed is required for this fast path; open variants use typed trial matching.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -915,9 +934,8 @@ components:
 }
 
 #[test]
-fn e007_open_object_required_key_rejected() {
-    // OPEN object variants (default `additionalProperties`) are NOT provably disjoint by required
-    // key: a payload for B could carry A's key `a` as an extra field and be misrouted → E007.
+fn open_object_union_generates_with_typed_trial_matching() {
+    // Open objects cannot use the required-key fast path, so they use typed trial matching.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -938,10 +956,35 @@ components:
         - $ref: "#/components/schemas/B"
 "##;
     let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn e007_combined_one_of_and_any_of_applicators_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    U:
+      oneOf:
+        - type: string
+        - type: integer
+      anyOf:
+        - type: string
+        - type: boolean
+"##;
+    let report = generate(spec);
     assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::NonDisjointUnion));
+
     let checked = check(spec);
     assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::NonDisjointUnion));
 }
 
 #[test]
@@ -1050,9 +1093,9 @@ components:
 }
 
 #[test]
-fn all_null_enum_generates_as_nullable() {
-    // A value set of only `null` has no scalar remainder: it lowers to a faithful nullable untyped
-    // value rather than being rejected.
+fn all_null_enum_generates_as_exact_null() {
+    // A value set of only `null` has no scalar remainder: it lowers to exact JSON null (`()`) rather
+    // than an unconstrained value or E008.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -1087,6 +1130,89 @@ paths:
             schema: { type: string, format: binary }
       responses:
         "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType));
+}
+
+#[test]
+fn textual_vendor_and_structured_json_media_generate() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /html:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            text/html:
+              schema: { type: string }
+  /octocat:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octocat-stream:
+              schema: { type: string }
+  /problem:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/problem+json:
+              schema:
+                type: object
+                properties: { detail: { type: string } }
+"##;
+    let generated = generate(spec);
+    assert_ne!(generated.outcome, Outcome::Rejected, "{generated:#?}");
+    assert!(!has_code(&generated, Code::UnsupportedMediaType));
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(!has_code(&checked, Code::UnsupportedMediaType));
+}
+
+#[test]
+fn e009_raw_media_requires_a_compatible_schema() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: not representable as raw text
+          content:
+            text/html:
+              schema: { type: object, properties: { value: { type: string } } }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType));
+}
+
+#[test]
+fn e009_request_only_media_is_rejected_in_responses() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: unsupported response codec
+          content:
+            application/x-www-form-urlencoded:
+              schema: { type: object }
 "##,
     );
     assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
@@ -1591,6 +1717,75 @@ paths:
 }
 
 #[test]
+fn e010_allow_reserved_parameter_encoding() {
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: expression
+          in: query
+          allowReserved: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+
+    let checked = check(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: expression
+          in: query
+          allowReserved: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::UnsupportedParameterStyle));
+}
+
+#[test]
+fn e010_nested_parameter_value() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: matrix
+          in: query
+          schema:
+            type: array
+            items:
+              type: array
+              items: { type: integer }
+      responses:
+        "204": { description: No Content }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+
+    let checked = check(spec);
+    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::UnsupportedParameterStyle));
+}
+
+#[test]
 fn e012_unknown_security_scheme() {
     let report = generate(
         r##"
@@ -1703,6 +1898,52 @@ components:
     let report = generate(spec);
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+}
+
+/// Repeated properties in an `allOf` are intersections. Compatible refinements retain the narrower
+/// typed shape recursively: integer within number, enum within string, non-null within nullable,
+/// exact null, and nested array/object item constraints.
+#[test]
+fn all_of_recursively_intersects_compatible_property_types() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Refined:
+      allOf:
+        - type: object
+          properties:
+            run_id: { type: number }
+            status: { type: string }
+            marker: { type: [string, "null"] }
+            items:
+              type: array
+              items: { type: [object, "null"] }
+        - type: object
+          properties:
+            run_id: { type: integer }
+            status: { type: string, enum: [queued, complete] }
+            marker: { type: "null" }
+            items:
+              type: array
+              items:
+                type: object
+                required: [name]
+                properties:
+                  name: { type: string }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        !has_code(&checked, Code::AllOfIrreconcilable),
+        "{checked:#?}"
+    );
 }
 
 /// A property declared with different lowered types in two `allOf` members is irreconcilable → E013.

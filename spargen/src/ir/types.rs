@@ -118,6 +118,11 @@ pub enum TypeKind {
     Tuple(Vec<Ty>),
     /// Raw bytes (`octet-stream` / `contentEncoding: base64`).
     Bytes,
+    /// The exact JSON `null` value (emitted as Rust's unit type, whose serde form is `null`).
+    Null,
+    /// An uninhabited schema used inside a container when an item intersection is empty. For
+    /// example, `array<string> & array<null>` is faithfully `Vec<Never>`: only `[]` is valid.
+    Never,
     /// A tagged or structurally-disjoint union (`oneOf`/`anyOf`).
     Union(Union),
     /// An untyped value (`{}` / `true` schema). Faithful representation of an untyped spec node.
@@ -125,8 +130,9 @@ pub enum TypeKind {
 }
 
 /// A `oneOf`/`anyOf` union lowered to a Rust enum. Never `serde(untagged)` and never degraded to
-/// `serde_json::Value`: it is emitted either as an internally-tagged enum (a `discriminator`) or as
-/// an enum with a content-inspecting custom `Deserialize`/`Serialize` proven statically disjoint.
+/// `serde_json::Value`: it is emitted with content-inspecting custom `Deserialize`/`Serialize`.
+/// Dispatch uses discriminator tags / unique JSON categories, statically disjoint features, or
+/// typed trial matching with the source applicator's exact semantics.
 #[derive(Debug, Clone)]
 pub struct Union {
     /// The variants, in spec (source) order.
@@ -151,12 +157,15 @@ pub enum UnionStrategy {
     /// A `discriminator` → a custom `Deserialize`/`Serialize` that reads/writes the tag field on a
     /// buffered `serde_json::Value` (NOT serde's `#[serde(tag = ...)]`, which would consume the tag
     /// out of the buffer and break variants that declare the discriminator as a required property).
-    /// Each variant carries the tag value that selects it.
+    /// Object variants carry the tag value that selects them. A non-object variant may coexist
+    /// when its JSON category is unique (for example an array beside tagged objects).
     Discriminated {
         /// The discriminator `propertyName` — the tag field read from / written into the object.
         tag_field: String,
-        /// The tag value per variant, parallel to [`Union::variants`].
-        tags: Vec<String>,
+        /// The object tag value per variant, parallel to [`Union::variants`].
+        tags: Vec<Option<String>>,
+        /// The JSON category per non-object variant, parallel to [`Union::variants`].
+        categories: Vec<Option<JsonCategory>>,
     },
     /// No discriminator, but the variants were proven statically disjoint → a custom
     /// content-inspecting `Deserialize`/`Serialize`. Each variant carries the feature that
@@ -165,6 +174,24 @@ pub enum UnionStrategy {
         /// The discriminating feature per variant, parallel to [`Union::variants`].
         features: Vec<DisjointFeature>,
     },
+    /// Variants overlap structurally, so generated serde implementations try each typed payload
+    /// against one buffered JSON value. `oneOf` requires exactly one match; `anyOf` selects the
+    /// highest-specificity match, with source order breaking ties.
+    Trial {
+        /// Whether the source applicator was `oneOf` or `anyOf`.
+        mode: UnionMode,
+        /// Static specificity per variant, parallel to [`Union::variants`].
+        priorities: Vec<u32>,
+    },
+}
+
+/// Runtime matching semantics for an overlapping typed union.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnionMode {
+    /// Exactly one variant must deserialize successfully.
+    OneOf,
+    /// One or more variants may match; the most specific typed match is selected.
+    AnyOf,
 }
 
 /// The statically-proven feature that selects a [`UnionStrategy::Disjoint`] variant when inspecting

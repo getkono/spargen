@@ -120,8 +120,8 @@ fn exact_omit_path_still_removes_exactly_one() {
 
 // --- (b) Carve generates the rest ---------------------------------------------------------------
 
-/// `/good` is representable; `/bad` returns a non-disjoint `oneOf: [integer, number]` (an `E007`).
-const ONE_BAD_OP: &str = r#"
+/// `/good` is representable; `/bad` returns a dynamic reference (an `E006`).
+const ONE_BAD_OP: &str = r##"
 openapi: 3.1.0
 info: { title: Carve, version: 1.0.0 }
 servers: [ { url: https://example.com } ]
@@ -143,13 +143,13 @@ paths:
           description: OK
           content:
             application/json:
-              schema: { oneOf: [ { type: integer }, { type: number } ] }
+              schema: { $dynamicRef: "#meta" }
 components: {}
-"#;
+"##;
 
 #[test]
 fn without_carve_a_rejecting_spec_fails() {
-    // Baseline: the same spec REJECTS (E007) without `--carve`, so carve is what changes the outcome.
+    // Baseline: the same spec REJECTS (E006) without `--carve`, so carve is what changes the outcome.
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", ONE_BAD_OP);
     let out = temp.path().join("client.rs");
@@ -157,7 +157,7 @@ fn without_carve_a_rejecting_spec_fails() {
     assert!(!output.status.success(), "rejects without carve");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"outcome\":\"Rejected\""), "{stdout}");
-    assert!(stdout.contains("E007"), "{stdout}");
+    assert!(stdout.contains("E006"), "{stdout}");
 }
 
 #[test]
@@ -184,7 +184,7 @@ fn carve_generates_the_rest_and_reports_the_carved_operation() {
     );
     // No un-carvable residual errors leaked as errors.
     assert!(
-        !stdout.contains("E007"),
+        !stdout.contains("E006"),
         "the rejection was carved, not left as an error: {stdout}"
     );
 
@@ -222,8 +222,9 @@ fn carve_output_is_deterministic() {
 // --- (c) Fixpoint / termination, including a component cascade -----------------------------------
 
 /// Mixes THREE kinds of rejection so carve must remove constructs of different kinds and iterate to
-/// a fixpoint: a component union (`Bad`), an operation that returns a `$dynamicRef` (`E006`), and a
-/// healthy operation. Omitting the component `Bad` cascades to the operation that referenced it.
+/// a fixpoint: an incompatible component intersection (`Bad`, `E013`), an operation that returns a
+/// `$dynamicRef` (`E006`), and a healthy operation. Omitting the component `Bad` cascades to the
+/// operation that referenced it.
 const MIXED_REJECTIONS: &str = r##"
 openapi: 3.1.0
 info: { title: Mixed, version: 1.0.0 }
@@ -259,9 +260,9 @@ paths:
 components:
   schemas:
     Bad:
-      oneOf:
+      allOf:
+        - { type: string }
         - { type: integer }
-        - { type: number }
 "##;
 
 #[test]
@@ -296,8 +297,8 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
         "the dynamic-ref rejection was carved: {stdout}"
     );
     assert!(
-        !stdout.contains("E007"),
-        "the union rejection was carved: {stdout}"
+        !stdout.contains("E013"),
+        "the intersection rejection was carved: {stdout}"
     );
 
     let generated = std::fs::read_to_string(&out).unwrap();

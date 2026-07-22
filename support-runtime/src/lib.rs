@@ -34,6 +34,7 @@ mod dispatch;
 mod error;
 mod middleware;
 mod paginate;
+mod parameter;
 mod response;
 mod retry;
 mod stream;
@@ -56,12 +57,14 @@ pub use auth::{
 pub use blocking::BlockingRuntime;
 pub use client::{ClientConfig, ClientCore};
 pub use dispatch::{
-    attach_auth, build_url, classify_error, decode_success, read_error_body, read_success_body,
-    send, unexpected_status, StatusSpec,
+    attach_auth, build_url, classify_error, classify_error_bytes, classify_error_text,
+    decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body,
+    read_success_body, send, unexpected_status, StatusSpec,
 };
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
 pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use paginate::{next_link, LinkPaginator};
+pub use parameter::{serialize_form, serialize_simple, ParameterError};
 pub use response::ResponseValue;
 pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
 pub use stream::{EventStream, Framing};

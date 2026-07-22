@@ -7,7 +7,7 @@ use quote::{format_ident, quote};
 use crate::ir::{
     AdditionalProps, Api, ApiKeyLoc, DisjointFeature, ErrorShape, Field, HttpScheme, JsonCategory,
     MediaType, Operation, ParamLoc, Prim, ScalarRepr, ScalarValue, SecurityScheme, SuccessShape,
-    Ty, TypeDef, TypeKind, UnionStrategy,
+    Ty, TypeDef, TypeKind, UnionMode, UnionStrategy,
 };
 use crate::name::Names;
 
@@ -147,8 +147,9 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let placeholder = format!("{{{}}}", param.name);
             let ident = param_ident(param, crate::name::IdentRole::Param);
+            let value = param_value_tokens(param, quote! { &#ident });
             quote! {
-                path = path.replace(#placeholder, &#ident.to_string());
+                path = path.replace(#placeholder, &#value);
             }
         });
     let required_query = operation
@@ -158,8 +159,7 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Param);
-            let value = param_value_tokens(param, api, options, quote! { #ident });
-            quote! { query.push((#name, #value)); }
+            query_param_tokens(param, &name, quote! { &#ident })
         });
     let optional_query = operation
         .params
@@ -168,10 +168,10 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Field);
-            let value = param_value_tokens(param, api, options, quote! { value });
+            let serialize = query_param_tokens(param, &name, quote! { value });
             quote! {
                 if let Some(value) = params.as_ref().and_then(|params| params.#ident.as_ref()) {
-                    query.push((#name, #value));
+                    #serialize
                 }
             }
         });
@@ -182,7 +182,7 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Param);
-            let value = param_value_tokens(param, api, options, quote! { #ident });
+            let value = param_value_tokens(param, quote! { &#ident });
             quote! { request = request.header(#name, #value); }
         });
     let optional_headers = operation
@@ -192,7 +192,7 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Field);
-            let value = param_value_tokens(param, api, options, quote! { value });
+            let value = param_value_tokens(param, quote! { value });
             quote! {
                 if let Some(value) = params.as_ref().and_then(|params| params.#ident.as_ref()) {
                     request = request.header(#name, #value);
@@ -211,8 +211,7 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Param);
-            let value = param_value_tokens(param, api, options, quote! { #ident });
-            quote! { cookies.push(format!("{}={}", #name, #value)); }
+            cookie_param_tokens(param, &name, quote! { &#ident })
         });
     let optional_cookies = operation
         .params
@@ -221,10 +220,10 @@ pub(crate) fn emit_operation(
         .map(|param| {
             let name = param.name.clone();
             let ident = param_ident(param, crate::name::IdentRole::Field);
-            let value = param_value_tokens(param, api, options, quote! { value });
+            let serialize = cookie_param_tokens(param, &name, quote! { value });
             quote! {
                 if let Some(value) = params.as_ref().and_then(|params| params.#ident.as_ref()) {
-                    cookies.push(format!("{}={}", #name, #value));
+                    #serialize
                 }
             }
         });
@@ -240,6 +239,11 @@ pub(crate) fn emit_operation(
         .as_ref()
         .and_then(|body| body.ty.map(|ty| (ty, body.media)))
     {
+        let content_type = &operation
+            .request_body
+            .as_ref()
+            .expect("request body exists")
+            .content_type;
         // A raw byte body (`bytes::Bytes`, from `format: binary` / `contentEncoding: base64`) is sent
         // as-is regardless of the declared media — `Bytes` is not `Display`, so it can never go
         // through `.to_string()`. This must be checked before the media match so a `text/plain` (or
@@ -248,7 +252,11 @@ pub(crate) fn emit_operation(
             api.types.get(ty.id).map(|def| &def.kind),
             Some(TypeKind::Bytes)
         ) {
-            quote! { request = request.body(body.clone()); }
+            quote! {
+                request = request
+                    .header(reqwest::header::CONTENT_TYPE, #content_type)
+                    .body(body.clone());
+            }
         } else {
             match media {
                 MediaType::Json => quote! { request = request.json(body); },
@@ -262,7 +270,11 @@ pub(crate) fn emit_operation(
                         .body(body);
                 },
                 MediaType::FormUrlEncoded => quote! { request = request.form(body); },
-                MediaType::TextPlain => quote! { request = request.body(body.to_string()); },
+                MediaType::Text => quote! {
+                    request = request
+                        .header(reqwest::header::CONTENT_TYPE, #content_type)
+                        .body(body.to_string());
+                },
                 MediaType::OctetStream => quote! { request = request.body(body.clone()); },
                 MediaType::Multipart => emit_multipart_body(ty, api, names),
                 // Streaming media are response-only; a streaming request body is rejected during
@@ -312,7 +324,7 @@ pub(crate) fn emit_operation(
         },
         // A single documented error body: classify against the documented status table into the
         // aliased `E` (or `Error::UnexpectedStatus` for an undocumented status).
-        ErrorShape::Single(_) => {
+        ErrorShape::Single(body_ty) => {
             let mut documented = operation
                 .responses
                 .by_status
@@ -335,22 +347,45 @@ pub(crate) fn emit_operation(
             {
                 documented.push(quote! { support::StatusSpec::Any });
             }
-            // An XML error body classifies through the quick-xml runtime helper
-            // (`classify_error_xml`); every other media classifies as JSON.
-            let classify = if operation.responses.single_error_media() == Some(MediaType::Xml) {
-                quote! { support::classify_error_xml }
-            } else {
-                quote! { support::classify_error }
-            };
-            quote! {
-                Err(
-                    #classify::<#error_ty>(
+            let classify = if is_bytes_ty(api, *body_ty) {
+                quote! {
+                    support::classify_error_bytes(
                         &self.core,
                         response,
                         &[#(#documented),*],
                     )
-                    .await,
-                )
+                    .await
+                }
+            } else {
+                match operation.responses.single_error_media() {
+                    Some(MediaType::Xml) => quote! {
+                        support::classify_error_xml::<#error_ty>(
+                            &self.core,
+                            response,
+                            &[#(#documented),*],
+                        )
+                        .await
+                    },
+                    Some(MediaType::Text) => quote! {
+                        support::classify_error_text::<#error_ty>(
+                            &self.core,
+                            response,
+                            &[#(#documented),*],
+                        )
+                        .await
+                    },
+                    _ => quote! {
+                        support::classify_error::<#error_ty>(
+                            &self.core,
+                            response,
+                            &[#(#documented),*],
+                        )
+                        .await
+                    },
+                }
+            };
+            quote! {
+                Err(#classify)
             }
         }
         // Multiple documented error bodies: read the capped body once, then dispatch by status in
@@ -364,17 +399,30 @@ pub(crate) fn emit_operation(
                 match ty {
                     // Bodied status: decode into the variant's type → `Api`, or `Decode` on failure.
                     Some(ty) => {
-                        let ty = ty_tokens(*ty, names, options, true);
+                        let body_ty = *ty;
+                        let ty = response_payload_ty_tokens(body_ty, names, options, true);
+                        let decode = if is_bytes_ty(api, body_ty) {
+                            quote! { Ok::<#ty, String>(Box::new(body.clone())) }
+                        } else if response_media_for_spec(&operation.responses, *spec)
+                            == Some(MediaType::Text)
+                        {
+                            quote! { support::decode_text_body::<#ty>(&body) }
+                        } else {
+                            quote! {
+                                serde_json::from_slice::<#ty>(&body)
+                                    .map_err(|error| error.to_string())
+                            }
+                        };
                         quote! {
                             if #spec_tokens.matches(status) {
-                                return Err(match serde_json::from_slice::<#ty>(&body) {
+                                return Err(match #decode {
                                     Ok(value) => support::Error::Api(support::ResponseValue::new(
                                         status,
                                         headers,
                                         #error_ident::#variant_ident(value),
                                     )),
-                                    Err(error) => support::Error::Decode {
-                                        path: error.to_string(),
+                                    Err(path) => support::Error::Decode {
+                                        path,
                                         body,
                                         truncated,
                                     },
@@ -411,22 +459,25 @@ pub(crate) fn emit_operation(
             let headers = response.headers().clone();
             Ok(support::ResponseValue::new(status, headers, ()))
         },
-        // A single success body: decode into the aliased `T`. An XML body routes through the
-        // quick-xml runtime helper (`decode_success_xml`); every other media decodes as JSON.
-        SuccessShape::Plain(_)
-            if operation.responses.single_success_media() == Some(MediaType::Xml) =>
-        {
+        // A single success body: decode into the aliased `T` through its selected wire codec.
+        SuccessShape::Plain(body_ty) => {
+            let decode = if is_bytes_ty(api, body_ty) {
+                quote! { support::decode_success_bytes(&self.core, response) }
+            } else {
+                match operation.responses.single_success_media() {
+                    Some(MediaType::Xml) => {
+                        quote! { support::decode_success_xml::<#success_ty>(&self.core, response) }
+                    }
+                    Some(MediaType::Text) => {
+                        quote! { support::decode_success_text::<#success_ty>(&self.core, response) }
+                    }
+                    _ => quote! { support::decode_success::<#success_ty>(&self.core, response) },
+                }
+            };
             quote! {
-                support::decode_success_xml::<#success_ty>(&self.core, response)
-                    .await
-                    .map_err(support::Error::widen)
+                #decode.await.map_err(support::Error::widen)
             }
         }
-        SuccessShape::Plain(_) => quote! {
-            support::decode_success::<#success_ty>(&self.core, response)
-                .await
-                .map_err(support::Error::widen)
-        },
         // Multi-status success: read the body once, then dispatch by status in precedence order
         // (exact before range before default) into the matching variant. A success status matching
         // no documented variant is an unexpected-status error — there is no untyped fallback.
@@ -442,12 +493,25 @@ pub(crate) fn emit_operation(
                 match ty {
                     // Bodied status: parse the read body into the variant's type.
                     Some(ty) => {
-                        let ty = ty_tokens(*ty, names, options, true);
+                        let body_ty = *ty;
+                        let ty = response_payload_ty_tokens(body_ty, names, options, true);
+                        let decode = if is_bytes_ty(api, body_ty) {
+                            quote! { Ok::<#ty, String>(Box::new(body.clone())) }
+                        } else if response_media_for_spec(&operation.responses, *spec)
+                            == Some(MediaType::Text)
+                        {
+                            quote! { support::decode_text_body::<#ty>(&body) }
+                        } else {
+                            quote! {
+                                serde_json::from_slice::<#ty>(&body)
+                                    .map_err(|error| error.to_string())
+                            }
+                        };
                         quote! {
                             if #spec_tokens.matches(status) {
-                                let value = serde_json::from_slice::<#ty>(&body)
-                                    .map_err(|error| support::Error::<#error_ty>::Decode {
-                                        path: error.to_string(),
+                                let value = #decode
+                                    .map_err(|path| support::Error::<#error_ty>::Decode {
+                                        path,
                                         body: body.clone(),
                                         truncated: false,
                                     })?;
@@ -515,7 +579,7 @@ pub(crate) fn emit_operation(
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
             let mut path = #path_init.to_owned();
             #(#path_replacements)*
-            let mut query: Vec<(&str, String)> = Vec::new();
+            let mut query: Vec<(String, String)> = Vec::new();
             #(#required_query)*
             #(#optional_query)*
             let url = support::build_url(&self.core, &path, &query)
@@ -611,7 +675,8 @@ fn param_default_docs_tokens(operation: &Operation) -> Vec<TokenStream> {
         .filter(|param| param.required)
         .filter_map(|param| {
             param.default_display.as_ref().map(|default| {
-                let note = format!("Parameter `{}` default: `{default}`.", param.name);
+                let note =
+                    normalize_rustdoc(&format!("Parameter `{}` default: `{default}`.", param.name));
                 quote! { #[doc = #note] }
             })
         })
@@ -741,6 +806,9 @@ fn emit_blocking_operation(
         #docs
         #(#param_default_docs)*
         #deprecated
+        // A deprecated blocking wrapper intentionally forwards to its deprecated async twin. This
+        // suppresses only that internal call; `#deprecated` still warns consumers of this method.
+        #[allow(deprecated)]
         #[inline]
         pub fn #method_ident(
             &self,
@@ -828,60 +896,192 @@ fn escaped_token(name: &str, role: crate::name::IdentRole) -> proc_macro2::Ident
     }
 }
 
-/// Render a parameter value expression to its wire string: JSON for `content`-typed parameters,
-/// RFC 3339 for `time` types, `Display` otherwise.
-fn param_value_tokens(
-    param: &crate::ir::Parameter,
-    api: &Api,
-    options: &CodegenOptions,
-    value: TokenStream,
-) -> TokenStream {
+/// Render a path/header parameter value from a borrowed expression. Schema-typed parameters use
+/// OpenAPI `simple` serialization; `content`-typed parameters retain their media codec.
+fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStream) -> TokenStream {
     if let crate::ir::ParamStyle::Content(media) = &param.style {
         return match media {
             MediaType::Json => quote! {
-                serde_json::to_string(&#value).map_err(support::Error::request_construction)?
+                serde_json::to_string(#value).map_err(support::Error::request_construction)?
             },
-            _ => quote! { #value.to_string() },
+            _ => quote! {
+                support::serialize_simple(#value, false)
+                    .map_err(support::Error::request_construction)?
+            },
         };
     }
-    let kind = api.types.get(param.ty.id).map(|def| &def.kind);
-    match kind {
-        Some(TypeKind::Primitive(Prim::DateTime | Prim::Date)) if options.feature_time => quote! {
-            #value
-                .format(&time::format_description::well_known::Rfc3339)
-                .map_err(support::Error::request_construction)?
-        },
-        _ => quote! { #value.to_string() },
+    let explode = param.explode;
+    quote! {
+        support::serialize_simple(#value, #explode)
+            .map_err(support::Error::request_construction)?
+    }
+}
+
+/// Emit serialization of one query parameter into the operation's `query` pair vector.
+fn query_param_tokens(param: &crate::ir::Parameter, name: &str, value: TokenStream) -> TokenStream {
+    match &param.style {
+        crate::ir::ParamStyle::Form => {
+            let explode = param.explode;
+            quote! {
+                query.extend(
+                    support::serialize_form(#name, #value, #explode)
+                        .map_err(support::Error::request_construction)?,
+                );
+            }
+        }
+        crate::ir::ParamStyle::Content(_) => {
+            let value = param_value_tokens(param, value);
+            quote! { query.push((#name.to_owned(), #value)); }
+        }
+        crate::ir::ParamStyle::Simple => quote! {},
+    }
+}
+
+/// Emit serialization of one cookie parameter into the operation's cookie fragments.
+fn cookie_param_tokens(
+    param: &crate::ir::Parameter,
+    name: &str,
+    value: TokenStream,
+) -> TokenStream {
+    match &param.style {
+        crate::ir::ParamStyle::Form => {
+            let explode = param.explode;
+            quote! {
+                for (name, value) in support::serialize_form(#name, #value, #explode)
+                    .map_err(support::Error::request_construction)?
+                {
+                    cookies.push(format!("{name}={value}"));
+                }
+            }
+        }
+        crate::ir::ParamStyle::Content(_) => {
+            let value = param_value_tokens(param, value);
+            quote! { cookies.push(format!("{}={}", #name, #value)); }
+        }
+        crate::ir::ParamStyle::Simple => quote! {},
     }
 }
 
 /// Turn lowered documentation into `#[doc = …]` attributes so IDE hover shows the API docs.
 fn doc_tokens(docs: &crate::ir::Docs) -> TokenStream {
     let mut paragraphs: Vec<&str> = Vec::new();
-    if let Some(summary) = &docs.summary {
+    let summary = docs
+        .summary
+        .as_deref()
+        .filter(|text| !text.trim().is_empty());
+    if let Some(summary) = summary {
         paragraphs.push(summary);
     }
-    if let Some(description) = &docs.description {
-        if docs.summary.as_deref() != Some(description.as_str()) {
+    if let Some(description) = docs
+        .description
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
+        if summary != Some(description) {
             paragraphs.push(description);
         }
     }
     if paragraphs.is_empty() {
-        if let Some(title) = &docs.title {
+        if let Some(title) = docs.title.as_deref().filter(|text| !text.trim().is_empty()) {
             paragraphs.push(title);
         }
     }
     if paragraphs.is_empty() {
         return quote! {};
     }
-    let text = paragraphs.join("\n\n");
+    let text = normalize_rustdoc(&paragraphs.join("\n\n"));
     quote! { #[doc = #text] }
+}
+
+/// Normalize spec-authored prose for Rust's documentation lint surface. Tabs are visually
+/// ambiguous in rustdoc and trip Clippy's `tabs_in_doc_comments`; four spaces preserve table/code
+/// alignment without altering the API's semantic documentation.
+fn normalize_rustdoc(text: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum Continuation {
+        None,
+        List(usize),
+        Quote,
+    }
+
+    fn list_indent(line: &str) -> Option<usize> {
+        let leading = line.len() - line.trim_start_matches(' ').len();
+        let text = &line[leading..];
+        if matches!(text.as_bytes().first(), Some(b'-' | b'*' | b'+')) {
+            let spacing = text.as_bytes()[1..]
+                .iter()
+                .take_while(|byte| **byte == b' ')
+                .count();
+            return (spacing > 0).then_some(leading + 1 + spacing);
+        }
+        let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+        let marker = *text.as_bytes().get(digits)?;
+        if digits == 0 || !matches!(marker, b'.' | b')') {
+            return None;
+        }
+        let spacing = text.as_bytes()[digits + 1..]
+            .iter()
+            .take_while(|byte| **byte == b' ')
+            .count();
+        (spacing > 0).then_some(leading + digits + 1 + spacing)
+    }
+
+    let text = text.replace('\t', "    ");
+    let mut continuation = Continuation::None;
+    let mut fence: Option<char> = None;
+    let mut output = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start_matches(' ');
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            let marker = trimmed.chars().next().expect("non-empty fence");
+            fence = match fence {
+                Some(active) if active == marker => None,
+                None => Some(marker),
+                active => active,
+            };
+            continuation = Continuation::None;
+            output.push(line.to_owned());
+            continue;
+        }
+        if fence.is_some() {
+            output.push(line.to_owned());
+            continue;
+        }
+        if trimmed.is_empty() {
+            continuation = Continuation::None;
+            output.push(String::new());
+        } else if trimmed.starts_with('>') {
+            continuation = Continuation::Quote;
+            output.push(line.to_owned());
+        } else if let Some(indent) = list_indent(line) {
+            continuation = Continuation::List(indent);
+            output.push(line.to_owned());
+        } else {
+            match continuation {
+                Continuation::None => output.push(line.to_owned()),
+                Continuation::Quote => output.push(format!("> {line}")),
+                Continuation::List(indent) => {
+                    let leading = line.len() - trimmed.len();
+                    output.push(format!(
+                        "{}{line}",
+                        " ".repeat(indent.saturating_sub(leading))
+                    ));
+                }
+            }
+        }
+    }
+    output.join("\n")
 }
 
 /// Document the generated `Client` with the API identity and its declared servers.
 fn client_doc_tokens(api: &Api) -> TokenStream {
     let mut text = format!("Client for {} v{}.", api.info.title, api.info.version);
-    if let Some(description) = &api.info.description {
+    if let Some(description) = api
+        .info
+        .description
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+    {
         text.push_str("\n\n");
         text.push_str(description);
     }
@@ -891,12 +1091,17 @@ fn client_doc_tokens(api: &Api) -> TokenStream {
             text.push_str("\n- `");
             text.push_str(&server.url);
             text.push('`');
-            if let Some(description) = &server.description {
+            if let Some(description) = server
+                .description
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+            {
                 text.push_str(" — ");
                 text.push_str(description);
             }
         }
     }
+    let text = normalize_rustdoc(&text);
     quote! { #[doc = #text] }
 }
 
@@ -942,7 +1147,10 @@ pub(crate) fn emit_params_struct(
         if let Some(default) = &param.default_display {
             notes.push(format!("Default: `{default}`."));
         }
-        let notes = notes.iter().map(|note| quote! { #[doc = #note] });
+        let notes = notes
+            .iter()
+            .map(|note| normalize_rustdoc(note))
+            .map(|note| quote! { #[doc = #note] });
         quote! {
             #(#notes)*
             #[serde(rename = #wire, skip_serializing_if = "Option::is_none")]
@@ -1033,7 +1241,7 @@ fn response_variant_def(
     let variant_ident = status_variant_ident(spec);
     match ty {
         Some(ty) => {
-            let ty = ty_tokens(ty, names, options, true);
+            let ty = response_payload_ty_tokens(ty, names, options, true);
             quote! { #variant_ident(#ty), }
         }
         None => quote! { #variant_ident, },
@@ -1144,9 +1352,10 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
-            pub use dispatch::{attach_auth, build_url, classify_error, decode_success, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
+            pub use dispatch::{attach_auth, build_url, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
+            pub use parameter::{serialize_form, serialize_simple, ParameterError};
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;
             pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
@@ -1252,177 +1461,366 @@ fn emit_type_def(
             };
             quote! { #docs pub type #ident = #ty; }
         }
-        TypeKind::Union(union) => match &union.strategy {
-            // Strategy A: a discriminator → a custom `Deserialize`/`Serialize` over a buffered
-            // `serde_json::Value`. NOT serde `#[serde(tag = ...)]`: internal tagging consumes the tag
-            // field out of the buffer, so a variant struct that declares the discriminator as a
-            // (usually required) property would fail with "missing field". Instead the WHOLE value is
-            // handed to the selected variant (it keeps its own tag field), and on serialize the tag is
-            // re-inserted only when the variant did not already write it. No `untagged`, no `Value`
-            // degrade.
-            UnionStrategy::Discriminated { tag_field, tags } => {
-                let variant_defs = union.variants.iter().map(|variant| {
-                    let variant_ident = names
-                        .variants
-                        .get(&(id, variant.name_hint.clone()))
-                        .expect("union variant name allocated");
-                    let ty = ty_tokens(variant.ty, names, options, false);
-                    quote! { #variant_ident(#ty), }
-                });
-                let de_arms = union.variants.iter().zip(tags).map(|(variant, tag)| {
-                    let variant_ident = names
-                        .variants
-                        .get(&(id, variant.name_hint.clone()))
-                        .expect("union variant name allocated");
-                    quote! {
-                        #tag => serde_json::from_value(value)
-                            .map(#ident::#variant_ident)
-                            .map_err(serde::de::Error::custom),
-                    }
-                });
-                let ser_arms = union.variants.iter().zip(tags).map(|(variant, tag)| {
-                    let variant_ident = names
-                        .variants
-                        .get(&(id, variant.name_hint.clone()))
-                        .expect("union variant name allocated");
-                    quote! {
-                        #ident::#variant_ident(inner) => (
-                            serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
-                            #tag,
-                        ),
-                    }
-                });
-                let missing_tag = format!(
-                    "missing discriminator field `{tag_field}` for union {}",
-                    ident.as_str()
-                );
-                let unknown_tag =
-                    format!("unknown discriminator value for union {}", ident.as_str());
-                quote! {
-                    #docs
-                    #deprecated
-                    #[derive(Debug, Clone)]
-                    pub enum #ident {
-                        #(#variant_defs)*
-                    }
+        TypeKind::Never => {
+            let error = format!("no JSON value can inhabit schema {}", ident.as_str());
+            quote! {
+                #docs
+                #deprecated
+                #[derive(Debug, Clone)]
+                pub enum #ident {}
 
-                    impl<'de> serde::Deserialize<'de> for #ident {
-                        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                        where
-                            D: serde::Deserializer<'de>,
-                        {
-                            let value = serde_json::Value::deserialize(deserializer)?;
-                            let tag = value
-                                .get(#tag_field)
-                                .and_then(serde_json::Value::as_str)
-                                .map(std::borrow::ToOwned::to_owned)
-                                .ok_or_else(|| serde::de::Error::custom(#missing_tag))?;
-                            match tag.as_str() {
-                                #(#de_arms)*
-                                _ => Err(serde::de::Error::custom(#unknown_tag)),
-                            }
-                        }
+                impl<'de> serde::Deserialize<'de> for #ident {
+                    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
+                    where
+                        D: serde::Deserializer<'de>,
+                    {
+                        Err(serde::de::Error::custom(#error))
                     }
+                }
 
-                    impl serde::Serialize for #ident {
-                        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-                        where
-                            S: serde::Serializer,
-                        {
-                            let (mut value, tag) = match self {
-                                #(#ser_arms)*
-                            };
-                            if let serde_json::Value::Object(map) = &mut value {
-                                map.entry(#tag_field.to_owned())
-                                    .or_insert_with(|| serde_json::Value::String(tag.to_owned()));
-                            }
-                            value.serialize(serializer)
-                        }
+                impl serde::Serialize for #ident {
+                    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+                    where
+                        S: serde::Serializer,
+                    {
+                        Err(serde::ser::Error::custom(#error))
                     }
                 }
             }
-            // Strategy B: no discriminator but statically-disjoint variants → an enum with a custom
-            // content-inspecting `Deserialize` (buffer the value, dispatch on the proven feature) and
-            // a `Serialize` that emits just the active variant's inner value (no wrapper, no tag).
-            UnionStrategy::Disjoint { features } => {
-                let variant_defs = union.variants.iter().map(|variant| {
-                    let variant_ident = names
-                        .variants
-                        .get(&(id, variant.name_hint.clone()))
-                        .expect("union variant name allocated");
-                    let ty = ty_tokens(variant.ty, names, options, false);
-                    quote! { #variant_ident(#ty), }
-                });
-                let de_arms = union
-                    .variants
-                    .iter()
-                    .zip(features)
-                    .map(|(variant, feature)| {
+        }
+        TypeKind::Union(union) => {
+            match &union.strategy {
+                // Strategy A: a discriminator → a custom `Deserialize`/`Serialize` over a buffered
+                // `serde_json::Value`. NOT serde `#[serde(tag = ...)]`: internal tagging consumes the tag
+                // field out of the buffer, so a variant struct that declares the discriminator as a
+                // (usually required) property would fail with "missing field". Instead the WHOLE value is
+                // handed to the selected variant (it keeps its own tag field), and on serialize the tag is
+                // re-inserted only when the variant did not already write it. No `untagged`, no `Value`
+                // degrade.
+                UnionStrategy::Discriminated {
+                    tag_field,
+                    tags,
+                    categories,
+                } => {
+                    let variant_defs = union.variants.iter().map(|variant| {
                         let variant_ident = names
                             .variants
                             .get(&(id, variant.name_hint.clone()))
                             .expect("union variant name allocated");
-                        let predicate = match feature {
-                            DisjointFeature::JsonType(category) => match category {
-                                JsonCategory::String => quote! { value.is_string() },
-                                JsonCategory::Number => quote! { value.is_number() },
-                                JsonCategory::Boolean => quote! { value.is_boolean() },
-                                JsonCategory::Array => quote! { value.is_array() },
-                                JsonCategory::Object => quote! { value.is_object() },
-                            },
-                            DisjointFeature::RequiredKey(key) => {
-                                quote! { value.get(#key).is_some() }
-                            }
+                        let ty = union_variant_ty_tokens(variant.ty, names, options);
+                        quote! { #variant_ident(#ty), }
+                    });
+                    let category_arms =
+                        union
+                            .variants
+                            .iter()
+                            .zip(categories)
+                            .filter_map(|(variant, category)| {
+                                let category = category.as_ref()?;
+                                let variant_ident = names
+                                    .variants
+                                    .get(&(id, variant.name_hint.clone()))
+                                    .expect("union variant name allocated");
+                                let predicate = match category {
+                                    JsonCategory::String => quote! { value.is_string() },
+                                    JsonCategory::Number => quote! { value.is_number() },
+                                    JsonCategory::Boolean => quote! { value.is_boolean() },
+                                    JsonCategory::Array => quote! { value.is_array() },
+                                    JsonCategory::Object => quote! { value.is_object() },
+                                };
+                                Some(quote! {
+                                    if #predicate {
+                                        return serde_json::from_value(value)
+                                            .map(#ident::#variant_ident)
+                                            .map_err(serde::de::Error::custom);
+                                    }
+                                })
+                            });
+                    let de_arms = union
+                        .variants
+                        .iter()
+                        .zip(tags)
+                        .filter_map(|(variant, tag)| {
+                            let tag = tag.as_ref()?;
+                            let variant_ident = names
+                                .variants
+                                .get(&(id, variant.name_hint.clone()))
+                                .expect("union variant name allocated");
+                            Some(quote! {
+                                #tag => serde_json::from_value(value)
+                                    .map(#ident::#variant_ident)
+                                    .map_err(serde::de::Error::custom),
+                            })
+                        });
+                    let ser_arms = union.variants.iter().zip(tags).map(|(variant, tag)| {
+                        let variant_ident = names
+                            .variants
+                            .get(&(id, variant.name_hint.clone()))
+                            .expect("union variant name allocated");
+                        let tag = match tag {
+                            Some(tag) => quote! { Some(#tag) },
+                            None => quote! { None },
                         };
                         quote! {
-                            if #predicate {
-                                return serde_json::from_value(value)
-                                    .map(#ident::#variant_ident)
-                                    .map_err(serde::de::Error::custom);
+                            #ident::#variant_ident(inner) => (
+                                serde_json::to_value(inner).map_err(serde::ser::Error::custom)?,
+                                #tag,
+                            ),
+                        }
+                    });
+                    let missing_tag = format!(
+                        "missing discriminator field `{tag_field}` for union {}",
+                        ident.as_str()
+                    );
+                    let unknown_tag =
+                        format!("unknown discriminator value for union {}", ident.as_str());
+                    let non_object = format!(
+                        "tagged variant of union {} did not serialize as an object",
+                        ident.as_str()
+                    );
+                    quote! {
+                        #docs
+                        #deprecated
+                        #[derive(Debug, Clone)]
+                        pub enum #ident {
+                            #(#variant_defs)*
+                        }
+
+                        impl<'de> serde::Deserialize<'de> for #ident {
+                            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                            where
+                                D: serde::Deserializer<'de>,
+                            {
+                                let value = serde_json::Value::deserialize(deserializer)?;
+                                #(#category_arms)*
+                                let tag = value
+                                    .get(#tag_field)
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(std::borrow::ToOwned::to_owned)
+                                    .ok_or_else(|| serde::de::Error::custom(#missing_tag))?;
+                                match tag.as_str() {
+                                    #(#de_arms)*
+                                    _ => Err(serde::de::Error::custom(#unknown_tag)),
+                                }
+                            }
+                        }
+
+                        impl serde::Serialize for #ident {
+                            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                            where
+                                S: serde::Serializer,
+                            {
+                                let (mut value, tag): (serde_json::Value, Option<&str>) = match self {
+                                    #(#ser_arms)*
+                                };
+                                if let Some(tag) = tag {
+                                    let serde_json::Value::Object(map) = &mut value else {
+                                        return Err(serde::ser::Error::custom(#non_object));
+                                    };
+                                    map.entry(#tag_field.to_owned()).or_insert_with(|| {
+                                        serde_json::Value::String(tag.to_owned())
+                                    });
+                                }
+                                value.serialize(serializer)
+                            }
+                        }
+                    }
+                }
+                // Strategy B: no discriminator but statically-disjoint variants → an enum with a custom
+                // content-inspecting `Deserialize` (buffer the value, dispatch on the proven feature) and
+                // a `Serialize` that emits just the active variant's inner value (no wrapper, no tag).
+                UnionStrategy::Disjoint { features } => {
+                    let variant_defs = union.variants.iter().map(|variant| {
+                        let variant_ident = names
+                            .variants
+                            .get(&(id, variant.name_hint.clone()))
+                            .expect("union variant name allocated");
+                        let ty = union_variant_ty_tokens(variant.ty, names, options);
+                        quote! { #variant_ident(#ty), }
+                    });
+                    let de_arms = union
+                        .variants
+                        .iter()
+                        .zip(features)
+                        .map(|(variant, feature)| {
+                            let variant_ident = names
+                                .variants
+                                .get(&(id, variant.name_hint.clone()))
+                                .expect("union variant name allocated");
+                            let predicate = match feature {
+                                DisjointFeature::JsonType(category) => match category {
+                                    JsonCategory::String => quote! { value.is_string() },
+                                    JsonCategory::Number => quote! { value.is_number() },
+                                    JsonCategory::Boolean => quote! { value.is_boolean() },
+                                    JsonCategory::Array => quote! { value.is_array() },
+                                    JsonCategory::Object => quote! { value.is_object() },
+                                },
+                                DisjointFeature::RequiredKey(key) => {
+                                    quote! { value.get(#key).is_some() }
+                                }
+                            };
+                            quote! {
+                                if #predicate {
+                                    return serde_json::from_value(value)
+                                        .map(#ident::#variant_ident)
+                                        .map_err(serde::de::Error::custom);
+                                }
+                            }
+                        });
+                    let ser_arms = union.variants.iter().map(|variant| {
+                        let variant_ident = names
+                            .variants
+                            .get(&(id, variant.name_hint.clone()))
+                            .expect("union variant name allocated");
+                        quote! { #ident::#variant_ident(inner) => inner.serialize(serializer), }
+                    });
+                    let error_message =
+                        format!("data did not match any variant of union {}", ident.as_str());
+                    quote! {
+                        #docs
+                        #deprecated
+                        #[derive(Debug, Clone)]
+                        pub enum #ident {
+                            #(#variant_defs)*
+                        }
+
+                        impl<'de> serde::Deserialize<'de> for #ident {
+                            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                            where
+                                D: serde::Deserializer<'de>,
+                            {
+                                let value = serde_json::Value::deserialize(deserializer)?;
+                                #(#de_arms)*
+                                Err(serde::de::Error::custom(#error_message))
+                            }
+                        }
+
+                        impl serde::Serialize for #ident {
+                            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                            where
+                                S: serde::Serializer,
+                            {
+                                match self {
+                                    #(#ser_arms)*
+                                }
+                            }
+                        }
+                    }
+                }
+                UnionStrategy::Trial { mode, priorities } => {
+                    let variant_defs = union.variants.iter().map(|variant| {
+                        let variant_ident = names
+                            .variants
+                            .get(&(id, variant.name_hint.clone()))
+                            .expect("union variant name allocated");
+                        let ty = union_variant_ty_tokens(variant.ty, names, options);
+                        quote! { #variant_ident(#ty), }
+                    });
+                    let attempts = union.variants.iter().zip(priorities).map(
+                    |(variant, priority)| {
+                        let variant_ident = names
+                            .variants
+                            .get(&(id, variant.name_hint.clone()))
+                            .expect("union variant name allocated");
+                        let ty = union_variant_ty_tokens(variant.ty, names, options);
+                        quote! {
+                            if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
+                                match_count += 1;
+                                let replace = match &selected {
+                                    Some((selected_priority, _)) => #priority > *selected_priority,
+                                    None => true,
+                                };
+                                if replace {
+                                    selected = Some((#priority, #ident::#variant_ident(inner)));
+                                }
+                            }
+                        }
+                    },
+                );
+                    let ser_arms = union.variants.iter().map(|variant| {
+                        let variant_ident = names
+                            .variants
+                            .get(&(id, variant.name_hint.clone()))
+                            .expect("union variant name allocated");
+                        quote! {
+                            #ident::#variant_ident(inner) => {
+                                serde_json::to_value(inner).map_err(serde::ser::Error::custom)?
                             }
                         }
                     });
-                let ser_arms = union.variants.iter().map(|variant| {
-                    let variant_ident = names
-                        .variants
-                        .get(&(id, variant.name_hint.clone()))
-                        .expect("union variant name allocated");
-                    quote! { #ident::#variant_ident(inner) => inner.serialize(serializer), }
-                });
-                let error_message =
-                    format!("data did not match any variant of union {}", ident.as_str());
-                quote! {
-                    #docs
-                    #deprecated
-                    #[derive(Debug, Clone)]
-                    pub enum #ident {
-                        #(#variant_defs)*
-                    }
-
-                    impl<'de> serde::Deserialize<'de> for #ident {
-                        fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-                        where
-                            D: serde::Deserializer<'de>,
-                        {
-                            let value = serde_json::Value::deserialize(deserializer)?;
-                            #(#de_arms)*
-                            Err(serde::de::Error::custom(#error_message))
+                    let validations = union.variants.iter().map(|variant| {
+                        let ty = union_variant_ty_tokens(variant.ty, names, options);
+                        quote! {
+                            if serde_json::from_value::<#ty>(value.clone()).is_ok() {
+                                match_count += 1;
+                            }
                         }
-                    }
+                    });
+                    let expected = match mode {
+                        UnionMode::OneOf => "exactly one",
+                        UnionMode::AnyOf => "at least one",
+                    };
+                    let de_valid = match mode {
+                        UnionMode::OneOf => quote! { match_count == 1 },
+                        UnionMode::AnyOf => quote! { match_count >= 1 },
+                    };
+                    let ser_valid = de_valid.clone();
+                    let de_error = format!(
+                        "data must match {expected} typed variant of union {}",
+                        ident.as_str()
+                    );
+                    let ser_error = format!(
+                        "serialized value must match {expected} typed variant of union {}",
+                        ident.as_str()
+                    );
+                    quote! {
+                        #docs
+                        #deprecated
+                        #[derive(Debug, Clone)]
+                        pub enum #ident {
+                            #(#variant_defs)*
+                        }
 
-                    impl serde::Serialize for #ident {
-                        fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-                        where
-                            S: serde::Serializer,
-                        {
-                            match self {
-                                #(#ser_arms)*
+                        impl<'de> serde::Deserialize<'de> for #ident {
+                            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+                            where
+                                D: serde::Deserializer<'de>,
+                            {
+                                let value = serde_json::Value::deserialize(deserializer)?;
+                                let mut match_count = 0_usize;
+                                let mut selected: Option<(u32, Self)> = None;
+                                #(#attempts)*
+                                if #de_valid {
+                                    selected
+                                        .map(|(_, value)| value)
+                                        .ok_or_else(|| serde::de::Error::custom(#de_error))
+                                } else {
+                                    Err(serde::de::Error::custom(#de_error))
+                                }
+                            }
+                        }
+
+                        impl serde::Serialize for #ident {
+                            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+                            where
+                                S: serde::Serializer,
+                            {
+                                let value = match self {
+                                    #(#ser_arms),*
+                                };
+                                let mut match_count = 0_usize;
+                                #(#validations)*
+                                if #ser_valid {
+                                    value.serialize(serializer)
+                                } else {
+                                    Err(serde::ser::Error::custom(#ser_error))
+                                }
                             }
                         }
                     }
                 }
             }
-        },
+        }
         _ => {
             let ty = type_kind_tokens(&def.kind, api, names, options);
             quote! { #docs pub type #ident = #ty; }
@@ -1484,7 +1882,10 @@ fn emit_field(
     if let Some(default) = &field.default {
         notes.push(default.doc_note.clone());
     }
-    let notes = notes.iter().map(|note| quote! { #[doc = #note] });
+    let notes = notes
+        .iter()
+        .map(|note| normalize_rustdoc(note))
+        .map(|note| quote! { #[doc = #note] });
     quote! {
         #(#notes)*
         #[serde(rename = #wire, #serde_default)]
@@ -1572,8 +1973,9 @@ fn type_kind_tokens(
             quote! { (#(#items),*) }
         }
         TypeKind::Bytes => quote! { bytes::Bytes },
+        TypeKind::Null => quote! { () },
         TypeKind::Any => quote! { serde_json::Value },
-        TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Union(_) => {
+        TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Never | TypeKind::Union(_) => {
             unreachable!("named definitions emitted separately")
         }
     }
@@ -1593,6 +1995,24 @@ fn ty_tokens(ty: Ty, names: &Names, _options: &CodegenOptions, qualified: bool) 
         tokens = quote! { Option<#tokens> };
     }
     tokens
+}
+
+/// Union payloads are uniformly indirect so an API's largest object variant cannot inflate every
+/// value of the enum (or trip strict `large_enum_variant` linting). Existing recursive boxing is a
+/// boolean representation flag, so setting it again never produces `Box<Box<T>>`.
+fn union_variant_ty_tokens(ty: Ty, names: &Names, options: &CodegenOptions) -> TokenStream {
+    ty_tokens(Ty { boxed: true, ..ty }, names, options, false)
+}
+
+/// Multi-status response payloads are uniformly indirect for the same bounded-enum-size reason as
+/// schema unions. Single-body response aliases remain allocation-free.
+fn response_payload_ty_tokens(
+    ty: Ty,
+    names: &Names,
+    options: &CodegenOptions,
+    qualified: bool,
+) -> TokenStream {
+    ty_tokens(Ty { boxed: true, ..ty }, names, options, qualified)
 }
 
 fn prim_tokens(prim: Prim, options: &CodegenOptions) -> TokenStream {
@@ -1654,6 +2074,30 @@ fn runtime_status_spec(spec: crate::ir::StatusSpec) -> TokenStream {
         crate::ir::StatusSpec::Range(0) => quote! { support::StatusSpec::Any },
         crate::ir::StatusSpec::Range(prefix) => quote! { support::StatusSpec::Range(#prefix) },
     }
+}
+
+fn response_media_for_spec(
+    responses: &crate::ir::Responses,
+    spec: crate::ir::StatusSpec,
+) -> Option<MediaType> {
+    if spec == crate::ir::StatusSpec::Range(0) {
+        return responses
+            .default
+            .as_ref()
+            .and_then(|response| response.media);
+    }
+    responses
+        .by_status
+        .iter()
+        .find(|(candidate, _)| *candidate == spec)
+        .and_then(|(_, response)| response.media)
+}
+
+fn is_bytes_ty(api: &Api, ty: Ty) -> bool {
+    matches!(
+        api.types.get(ty.id).map(|definition| &definition.kind),
+        Some(TypeKind::Bytes)
+    )
 }
 
 fn reqwest_method(method: crate::ir::Method) -> TokenStream {

@@ -124,11 +124,12 @@ impl<T: DeserializeOwned> EventStream<T> {
     /// which has no incremental read; see the wasm variant below.
     #[cfg(not(target_arch = "wasm32"))]
     async fn pull(&mut self) -> Result<(), Error<Infallible>> {
-        // Present by construction: `next` only calls `pull` when `self.response` is `Some`.
-        let response = self
-            .response
-            .as_mut()
-            .expect("response present when not at eof");
+        // `next` only calls `pull` when the response is present. Still handle an exhausted state
+        // explicitly: runtime state transitions must remain panic-free even if this helper is
+        // rearranged in the future.
+        let Some(response) = self.response.as_mut() else {
+            return Ok(());
+        };
         match response.chunk().await {
             Ok(Some(chunk)) => self.buffer.extend_from_slice(&chunk),
             // Clean EOF: drop the response so the next loop reframes with `at_eof`, flushing any
@@ -146,11 +147,10 @@ impl<T: DeserializeOwned> EventStream<T> {
     /// frame pass, which then flushes every buffered item.
     #[cfg(target_arch = "wasm32")]
     async fn pull(&mut self) -> Result<(), Error<Infallible>> {
-        // Present by construction: `next` only calls `pull` when `self.response` is `Some`.
-        let response = self
-            .response
-            .take()
-            .expect("response present when not at eof");
+        // See the native variant: exhausted state is harmless and must never become a panic.
+        let Some(response) = self.response.take() else {
+            return Ok(());
+        };
         let bytes = response.bytes().await.map_err(Error::from_reqwest)?;
         self.buffer.extend_from_slice(&bytes);
         Ok(())

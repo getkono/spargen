@@ -20,7 +20,7 @@ use crate::{AuthKind, AuthScheme, ClientCore, Credential, Error, ResponseValue};
 pub fn build_url(
     core: &ClientCore,
     path: &str,
-    query: &[(&str, String)],
+    query: &[(String, String)],
 ) -> Result<Url, Error<Infallible>> {
     let mut url = core.base_url().clone();
     let base_path = url.path().trim_end_matches('/');
@@ -169,6 +169,49 @@ where
     Ok(ResponseValue::new(status, headers, value))
 }
 
+/// Decode a raw UTF-8 success body as the JSON string value described by a textual OpenAPI media
+/// type. Converting through `Value::String` keeps generated string enums and string formats typed
+/// while avoiding JSON's quote requirement on the wire.
+pub async fn decode_success_text<T>(
+    _core: &ClientCore,
+    response: Response,
+) -> Result<ResponseValue<T>, Error<Infallible>>
+where
+    T: DeserializeOwned,
+{
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.bytes().await.map_err(Error::from_reqwest)?;
+    let value = decode_text_body::<T>(&body).map_err(|path| Error::Decode {
+        path,
+        body,
+        truncated: false,
+    })?;
+    Ok(ResponseValue::new(status, headers, value))
+}
+
+/// Decode a raw binary success body without attempting JSON deserialization.
+pub async fn decode_success_bytes(
+    _core: &ClientCore,
+    response: Response,
+) -> Result<ResponseValue<Bytes>, Error<Infallible>> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.bytes().await.map_err(Error::from_reqwest)?;
+    Ok(ResponseValue::new(status, headers, body))
+}
+
+/// Deserialize a raw UTF-8 body through a JSON string value. Exposed to the generated shim so
+/// multi-status response variants use exactly the same textual codec as single-body responses.
+pub fn decode_text_body<T>(body: &[u8]) -> Result<T, String>
+where
+    T: DeserializeOwned,
+{
+    let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
+    serde_json::from_value(serde_json::Value::String(text.to_owned()))
+        .map_err(|error| error.to_string())
+}
+
 /// Read a success response body whole, returning its status, headers, and raw bytes so generated
 /// code can select the matching per-status variant and decode it. Non-generic: the per-variant
 /// `serde_json::from_slice` (and the error taxonomy on failure) stays in the thin generated shim,
@@ -245,6 +288,64 @@ where
                         truncated,
                     },
                 }
+            } else {
+                Error::UnexpectedStatus {
+                    status,
+                    headers,
+                    body,
+                }
+            }
+        }
+        Err(error) => error,
+    }
+}
+
+/// Classify a documented textual error body, preserving the same cap and taxonomy as JSON errors.
+pub async fn classify_error_text<E>(
+    core: &ClientCore,
+    response: Response,
+    documented: &[StatusSpec],
+) -> Error<E>
+where
+    E: DeserializeOwned,
+{
+    let status = response.status();
+    let headers = response.headers().clone();
+    match read_capped(core, response).await {
+        Ok((body, truncated)) => {
+            if documented.iter().any(|spec| spec.matches(status)) {
+                match decode_text_body::<E>(&body) {
+                    Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
+                    Err(path) => Error::Decode {
+                        path,
+                        body,
+                        truncated,
+                    },
+                }
+            } else {
+                Error::UnexpectedStatus {
+                    status,
+                    headers,
+                    body,
+                }
+            }
+        }
+        Err(error) => error,
+    }
+}
+
+/// Classify a documented raw-byte error body without passing it through a structured decoder.
+pub async fn classify_error_bytes(
+    core: &ClientCore,
+    response: Response,
+    documented: &[StatusSpec],
+) -> Error<Bytes> {
+    let status = response.status();
+    let headers = response.headers().clone();
+    match read_capped(core, response).await {
+        Ok((body, _truncated)) => {
+            if documented.iter().any(|spec| spec.matches(status)) {
+                Error::Api(ResponseValue::new(status, headers, body))
             } else {
                 Error::UnexpectedStatus {
                     status,
@@ -464,7 +565,7 @@ mod tests {
     #[test]
     fn build_url_appends_and_percent_encodes_query_pairs() {
         let core = core_at("https://example.com");
-        let url = build_url(&core, "/search", &[("q", "a b&c".to_owned())]).unwrap();
+        let url = build_url(&core, "/search", &[("q".to_owned(), "a b&c".to_owned())]).unwrap();
         // The space and ampersand are form-encoded, so the pair round-trips unambiguously.
         assert_eq!(url.query(), Some("q=a+b%26c"));
         let pairs: Vec<(String, String)> = url
@@ -490,7 +591,10 @@ mod tests {
 
     use std::convert::Infallible;
 
-    use super::{read_error_body, read_success_body};
+    use super::{
+        classify_error_bytes, classify_error_text, decode_success_bytes, decode_success_text,
+        decode_text_body, read_error_body, read_success_body,
+    };
     use crate::{Error, ResponseValue};
 
     /// Synthesize an in-memory `reqwest::Response` (no server, no runtime) so the body readers can be
@@ -502,6 +606,74 @@ mod tests {
                 .body(body.to_owned())
                 .expect("valid synthetic response"),
         )
+    }
+
+    fn raw_response(status: u16, body: impl Into<reqwest::Body>) -> reqwest::Response {
+        reqwest::Response::from(
+            http::Response::builder()
+                .status(status)
+                .body(body.into())
+                .expect("valid synthetic response"),
+        )
+    }
+
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    enum TextChoice {
+        #[serde(rename = "ready")]
+        Ready,
+    }
+
+    #[test]
+    fn textual_codec_uses_raw_utf8_as_a_typed_json_string() {
+        assert_eq!(
+            decode_text_body::<String>(b"not quoted").unwrap(),
+            "not quoted"
+        );
+        assert_eq!(
+            decode_text_body::<TextChoice>(b"ready").unwrap(),
+            TextChoice::Ready
+        );
+        assert!(decode_text_body::<String>(&[0xff]).is_err());
+
+        let value = poll_ready(decode_success_text::<String>(
+            &core(),
+            json_response(200, "<p>raw</p>"),
+        ))
+        .unwrap();
+        assert_eq!(value.into_inner(), "<p>raw</p>");
+    }
+
+    #[test]
+    fn binary_codec_preserves_success_and_documented_error_bytes() {
+        let success = poll_ready(decode_success_bytes(
+            &core(),
+            raw_response(200, bytes::Bytes::from_static(b"\0raw\xff")),
+        ))
+        .unwrap();
+        assert_eq!(&success.into_inner()[..], b"\0raw\xff");
+
+        let error = poll_ready(classify_error_bytes(
+            &core(),
+            raw_response(400, bytes::Bytes::from_static(b"bad\0")),
+            &[StatusSpec::Exact(400)],
+        ));
+        match error {
+            Error::Api(response) => assert_eq!(&response.into_inner()[..], b"bad\0"),
+            other => panic!("expected raw API error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn textual_error_codec_keeps_documented_status_semantics() {
+        let error = poll_ready(classify_error_text::<String>(
+            &core(),
+            json_response(400, "plain failure"),
+            &[StatusSpec::Exact(400)],
+        ));
+        match error {
+            Error::Api(response) => assert_eq!(response.into_inner(), "plain failure"),
+            other => panic!("expected textual API error, got {other:?}"),
+        }
     }
 
     #[test]

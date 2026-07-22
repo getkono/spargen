@@ -25,7 +25,7 @@ pub use operation::{
 pub use types::{
     AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Prim,
     PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef, TypeGraph, TypeId,
-    TypeKind, Union, UnionStrategy, UnionVariant, XmlField,
+    TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
 };
 
 /// The whole lowered API: the single artifact frontends produce and backends consume.

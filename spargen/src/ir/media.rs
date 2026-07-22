@@ -1,7 +1,6 @@
 use super::Ty;
 
-/// A supported request/response media type. Other media types (e.g. XML) are R-rejected in the
-/// frontend.
+/// The wire codec selected for a supported request/response media type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaType {
     /// `application/json` (canonical).
@@ -13,10 +12,11 @@ pub enum MediaType {
     /// when both are offered. Scoped to single-body request/response bodies (see
     /// [`Responses::xml_in_multi_status`]).
     Xml,
-    /// `application/octet-stream` (bytes in; bytes or stream out).
+    /// `application/octet-stream` (raw bytes).
     OctetStream,
-    /// `text/plain`.
-    TextPlain,
+    /// A raw UTF-8 textual representation (`text/*`, plus explicitly supported textual vendor
+    /// media such as GitHub's `application/octocat-stream`).
+    Text,
     /// `multipart/form-data` (request bodies): an object schema whose properties are the form
     /// parts — binary/bytes properties become file parts, scalars/composites become text parts.
     Multipart,
@@ -54,6 +54,8 @@ pub enum Framing {
 pub struct RequestBody {
     /// The body media type.
     pub media: MediaType,
+    /// The selected content type essence, preserved for the emitted `Content-Type` header.
+    pub content_type: String,
     /// The body's type, or `None` for an untyped/byte body.
     pub ty: Option<Ty>,
 }
@@ -84,7 +86,7 @@ pub struct Response {
     /// The response body type, if any.
     pub body: Option<Ty>,
     /// The chosen body media type, or `None` for a bodyless response. Codegen routes the decode by
-    /// this (e.g. an XML body decodes through the `quick-xml` runtime helpers rather than serde_json).
+    /// this (e.g. XML/text/binary bodies use their own codecs rather than serde_json).
     pub media: Option<MediaType>,
     /// For a streaming response (chosen media `text/event-stream` or `application/x-ndjson`), the
     /// framing of the streamed items; `None` for a whole-body response. The `body` is the item
@@ -158,7 +160,7 @@ impl Responses {
 
     /// The media type of the operation's single bodied success response, when exactly one success
     /// response carries a body (i.e. [`Self::success`] is [`SuccessShape::Plain`]). Codegen uses this
-    /// to route the success decode (JSON vs XML). `None` when there is no single bodied success.
+    /// to route the success decode. `None` when there is no single bodied success.
     pub fn single_success_media(&self) -> Option<MediaType> {
         let mut bodied = self
             .success_responses()
@@ -172,7 +174,7 @@ impl Responses {
 
     /// The media type of the operation's single bodied error response, when exactly one error
     /// response carries a body (i.e. [`Self::error`] is [`ErrorShape::Single`]). Codegen uses this to
-    /// route the error-body classification (JSON vs XML). `None` when there is no single bodied error.
+    /// route the error-body classification. `None` when there is no single bodied error.
     pub fn single_error_media(&self) -> Option<MediaType> {
         let mut bodied = self
             .error_responses()

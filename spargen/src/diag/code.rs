@@ -32,9 +32,7 @@ pub enum Code {
     PatternPropertiesRejected,
     /// `$dynamicRef`/`$dynamicAnchor` are rejected (matrix: Schema shape → R).
     DynamicRefRejected,
-    /// A `oneOf`/`anyOf` union could not be represented: a discriminated variant is not an object,
-    /// or an undiscriminated union is not provably disjoint (by JSON type category, or a unique
-    /// required key across closed object variants) so a payload cannot be routed unambiguously.
+    /// A `oneOf`/`anyOf` applicator combination could not be represented faithfully.
     NonDisjointUnion,
     /// A heterogeneous or structured `enum`/`const` value set is rejected.
     NonScalarEnum,
@@ -133,7 +131,7 @@ impl Code {
             Code::ValidationKeywordIgnored => "validation-only keyword ignored",
             Code::PatternPropertiesRejected => "patternProperties not representable as a typed map",
             Code::DynamicRefRejected => "dynamic reference unsupported",
-            Code::NonDisjointUnion => "union variants are not disjoint",
+            Code::NonDisjointUnion => "union applicators cannot be represented",
             Code::NonScalarEnum => "enum values are not homogeneous scalars",
             Code::UnsupportedMediaType => "unsupported media type",
             Code::UnsupportedParameterStyle => "unsupported parameter style",
@@ -181,16 +179,16 @@ impl Code {
                 "`$dynamicRef` and `$dynamicAnchor` require dynamic schema-scope evaluation and are rejected."
             }
             Code::NonDisjointUnion => {
-                "`oneOf`/`anyOf` unions are lowered to Rust enums with a custom `Deserialize`/`Serialize` — never `serde(untagged)` and never degraded to `serde_json::Value`. A union with a `discriminator` reads/writes the tag field on a buffered value, so every variant must be an object (a `$ref` to an object component or an inline object); a primitive/array/untyped variant is rejected. A union without a discriminator is emitted only when it is statically disjoint: either every variant occupies a distinct JSON type category (integer and number share one category and never separate), or every variant is a *closed* object (`additionalProperties: false`) with at least one required property whose name appears in no other variant — closed is required because an open object could carry another variant's unique key as an extra field and be misrouted. It is rejected only when neither proof holds — overlapping JSON types, open or non-uniquely-keyed object variants, an untyped variant, or a variant that is itself a union. Add or fix the discriminator, make the object variants closed with disjoint required keys, or omit this API segment with `spargen::omit!`."
+                "`oneOf`/`anyOf` unions are lowered to typed Rust enums with custom `Deserialize`/`Serialize` — never `serde(untagged)` and never degraded to `serde_json::Value`. Fast paths dispatch by discriminator tag, a unique non-object JSON category, or a proven disjoint category/required key. Overlapping variants use typed trial matching over one buffered value: `oneOf` requires exactly one successful variant; `anyOf` deterministically selects the most specific successful variant (enum before broad scalar, integer before number, more-required object before broader object, recursive array specificity, then source order), and serialization revalidates the same rule. Shape constraints adjacent to the union are intersected into every branch. This error is reserved for an applicator combination that is not yet representable, such as declaring both `oneOf` and `anyOf` on the same schema node. Split the applicators into nested schemas or omit this API segment with `spargen::omit!`."
             }
             Code::NonScalarEnum => {
-                "Enums and const values must be homogeneous scalar sets. A `null` member (or `\"null\"` in the schema's type array) is allowed: it is stripped and makes the generated type nullable (`Option<Enum>`), and a value set of only `null` lowers to a nullable untyped value. Sets that mix distinct scalar kinds (e.g. a string with an integer) or that contain object/array members are rejected."
+                "Enums and const values must be homogeneous scalar sets. A `null` member (or `\"null\"` in the schema's type array) is allowed: it is stripped and makes a remaining scalar enum nullable (`Option<Enum>`), while a value set of only `null` lowers to the exact JSON null type (`()`). Sets that mix distinct non-null scalar kinds (e.g. a string with an integer) or that contain object/array members are rejected."
             }
             Code::UnsupportedMediaType => {
-                "Only application/json, application/xml (and text/xml), application/x-www-form-urlencoded, application/octet-stream, text/plain, and multipart/form-data (request bodies) are currently generated; a streaming response media (text/event-stream or application/x-ndjson) generates a typed async EventStream<T>. An application/xml or text/xml body lowers to the same typed struct as JSON and is serialized/decoded through the runtime's feature-gated quick-xml codec (JSON still wins when both are offered); it is supported only as an operation's single success or single error body, so an XML body in a multi-status response enum is rejected. A multipart/form-data body must be an object schema — its properties become the form parts (a binary/bytes property is a file part, a scalar or composite becomes a text part) — so a non-object multipart body is rejected here. text/event-stream and application/x-ndjson are supported only for response bodies, so a streaming request body is rejected."
+                "JSON (`application/json` and `application/*+json`), XML (`application/xml` and `text/xml`), raw binary (`application/octet-stream`), raw UTF-8 text (`text/*` and GitHub's `application/octocat-stream`), form-urlencoded requests, and multipart requests are generated. Text is decoded through a JSON string value so string enums/formats remain typed; binary responses remain `bytes::Bytes`; single- and multi-status success/error dispatch use the selected response's codec. Raw text requires a string-like/binary schema and octet-stream requires a binary schema. XML uses the feature-gated quick-xml codec and is currently limited to an operation's single success or error body. Multipart requires an object request schema; form-urlencoded and multipart response bodies are rejected. Streaming responses (`text/event-stream` and `application/x-ndjson`) generate a typed async `EventStream<T>`; streaming request bodies are rejected."
             }
             Code::UnsupportedParameterStyle => {
-                "Only simple/form styles and JSON content-typed parameters are generated. Deep object, pipe-delimited, and space-delimited styles are rejected."
+                "Path/header parameters support simple style and query/cookie parameters support form style, including the OpenAPI explode defaults and explicit explode overrides. JSON content-typed parameters are generated. Deep object, pipe-delimited, space-delimited, invalid location/style combinations, and allowReserved: true are rejected rather than serialized with incorrect wire semantics."
             }
             Code::ServerInitiatedFlowIgnored => {
                 "Webhooks, callbacks, and links describe server-initiated or hypermedia behavior. They are acknowledged with a warning and no client code is emitted."
@@ -205,7 +203,7 @@ impl Code {
                 "Every scheme named in a `security` requirement must be declared under `components.securitySchemes` as `http` bearer/basic, `apiKey`, `oauth2`, or `openIdConnect` so credentials can be attached at the right location."
             }
             Code::AllOfIrreconcilable => {
-                "`allOf` members are merged into one type: object members flatten into a single struct (union of properties; a property required by any member is required; `additionalProperties` merged conservatively — a member that denies unknown keys wins), and all-scalar members that lower to the same primitive collapse to that primitive. It is rejected as irreconcilable only when the members cannot form one type: a property name appears with conflicting lowered types across members, `additionalProperties` conflict (e.g. two different typed value schemas), object and scalar members are mixed, distinct scalar members disagree, or a member is a direct recursive `$ref` to the component currently being lowered (its fields are not yet known). Restructure the composition or omit this API segment with `spargen::omit!`."
+                "`allOf` members are intersected into one type: object members flatten into a single struct (union of properties; a property required by any member is required; repeated properties recursively retain their narrower compatible intersection; `additionalProperties` is intersected conservatively), while scalar members narrow compatible primitives, enums, arrays, objects, unions, and nullability. Examples include integer within number, enum within its scalar type, and a detailed object within a broader object; an empty array-item intersection becomes an uninhabited item type so the valid empty array remains representable. It is rejected only when the overall intersection is empty or cannot be represented faithfully: incompatible scalar categories, conflicting property/additional-value constraints, an object/scalar mix, or a direct recursive `$ref` member whose fields are not yet known. Restructure the composition or omit this API segment with `spargen::omit!`."
             }
             Code::OutputDrifted => {
                 "The checked-in generated code no longer matches what this spec and spargen version produce. Re-run `spargen generate` and commit the result."

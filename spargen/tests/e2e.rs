@@ -32,7 +32,15 @@ fn generates_standalone_crate_for_basic_oas31_api() {
     assert!(status.success());
 
     let status = Command::new("cargo")
-        .args(["clippy", "--", "-D", "warnings"])
+        .args([
+            "clippy",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
         .current_dir(&out)
         .status()
         .unwrap();
@@ -116,6 +124,141 @@ fn blocking_method_round_trips_against_a_mock() {
 
     server.join().unwrap();
 }
+
+#[test]
+fn typed_parameters_follow_openapi_wire_rules() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+
+        let request_line = request.lines().next().unwrap();
+        assert!(request_line.starts_with("GET /params/1,2?"), "{request}");
+        assert!(request_line.contains("workflow_id=build.yml"), "{request}");
+        assert!(request_line.contains("labels=bug&labels=api"), "{request}");
+        assert!(request_line.contains("compact=one%2Ctwo"), "{request}");
+        assert!(request.contains("x-flags: fast,safe\r\n"), "{request}");
+        assert!(request.contains("cookie: session=a; session=b\r\n"), "{request}");
+
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let workflow_id: basic_client::types::WorkflowId =
+        serde_json::from_str(r#""build.yml""#).unwrap();
+    let params = basic_client::SerializeParamsParams::default()
+        .labels(vec!["bug".to_owned(), "api".to_owned()])
+        .compact(vec!["one".to_owned(), "two".to_owned()])
+        .session(vec!["a".to_owned(), "b".to_owned()]);
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client
+        .serialize_params(
+            vec![1, 2],
+            workflow_id,
+            vec!["fast".to_owned(), "safe".to_owned()],
+            Some(params),
+        )
+        .unwrap();
+
+    server.join().unwrap();
+}
+
+fn serve_once(content_type: &str, status: &str, body: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let content_type = content_type.to_owned();
+    let status = status.to_owned();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0u8; 2048];
+        let _ = stream.read(&mut request).unwrap();
+        let headers = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(headers.as_bytes()).unwrap();
+        stream.write_all(body).unwrap();
+        stream.flush().unwrap();
+    });
+    (format!("http://{addr}"), server)
+}
+
+#[test]
+fn textual_vendor_and_binary_responses_use_raw_wire_codecs() {
+    let (base, server) = serve_once("text/html", "200 OK", b"<p>Hello</p>");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    assert_eq!(client.render_html().unwrap().into_inner(), "<p>Hello</p>");
+    server.join().unwrap();
+
+    let (base, server) = serve_once(
+        "application/octocat-stream",
+        "200 OK",
+        b" /\\_/\\\n( o.o )",
+    );
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    assert_eq!(client.get_octocat().unwrap().into_inner(), " /\\_/\\\n( o.o )");
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/octet-stream", "200 OK", b"\0raw\xff");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    assert_eq!(client.download_raw().unwrap().into_inner().as_ref(), b"\0raw\xff");
+    server.join().unwrap();
+}
+
+#[test]
+#[allow(deprecated)]
+fn textual_documented_errors_decode_without_json_quotes() {
+    let (base, server) = serve_once("text/plain", "400 Bad Request", b"plain failure");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_text_error().unwrap_err() {
+        basic_client::Error::Api(response) => assert_eq!(response.into_inner(), "plain failure"),
+        other => panic!("expected typed textual API error, got {other:?}"),
+    }
+    server.join().unwrap();
+}
+
+#[test]
+fn multi_status_dispatch_uses_each_status_media_codec() {
+    let (base, server) = serve_once("text/plain", "200 OK", b"plain success");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_raw_multi().unwrap().into_inner() {
+        basic_client::GetRawMultiResponse::Status200(body) => {
+            assert_eq!(body.as_str(), "plain success")
+        }
+        other => panic!("expected text success variant, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/octet-stream", "201 Created", b"raw success");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_raw_multi().unwrap().into_inner() {
+        basic_client::GetRawMultiResponse::Status201(body) => {
+            assert_eq!(&body[..], b"raw success")
+        }
+        other => panic!("expected binary success variant, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/octet-stream", "409 Conflict", b"raw failure");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_raw_multi().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetRawMultiError::Status409(body) => {
+                assert_eq!(&body[..], b"raw failure")
+            }
+            other => panic!("expected binary error variant, got {other:?}"),
+        },
+        other => panic!("expected typed API error, got {other:?}"),
+    }
+    server.join().unwrap();
+}
 "##,
     )
     .unwrap();
@@ -164,6 +307,87 @@ fn null_mixed_enum_field_is_option_of_enum() {
     let set: basic_client::types::User =
         serde_json::from_str(r#"{"id": "u", "name": "n", "priority": "high"}"#).unwrap();
     assert_eq!(set.priority, Some(basic_client::types::Priority::High));
+}
+
+#[test]
+fn all_of_compatible_constraints_keep_the_narrow_typed_intersection() {
+    let json = serde_json::json!({
+        "run_id": 7,
+        "status": "queued",
+        "marker": null,
+        "labels": ["linux", "x64"],
+        "steps": [{"name": "build"}],
+        "empty_only": [],
+    });
+    let refined: basic_client::types::Refined = serde_json::from_value(json.clone()).unwrap();
+
+    // `number & integer` is emitted as an integer, and exact JSON null is Rust unit.
+    assert_eq!(refined.run_id, 7_i64);
+    assert_eq!(refined.marker, ());
+    assert_eq!(serde_json::to_value(refined).unwrap(), json);
+
+    let invalid = serde_json::json!({
+        "run_id": 7,
+        "status": "queued",
+        "marker": null,
+        "labels": ["linux"],
+        "steps": [{"name": "build"}],
+        "empty_only": [null],
+    });
+    assert!(serde_json::from_value::<basic_client::types::Refined>(invalid).is_err());
+}
+
+#[test]
+fn overlapping_unions_enforce_one_of_and_canonicalize_any_of() {
+    let string: basic_client::types::AnyString =
+        serde_json::from_str(r#""special""#).unwrap();
+    assert!(matches!(
+        string,
+        basic_client::types::AnyString::StringLiteral(_)
+    ));
+
+    let number: basic_client::types::AnyNumber = serde_json::from_str("7").unwrap();
+    assert!(matches!(
+        number,
+        basic_client::types::AnyNumber::AnyNumberVariant1(_)
+    ));
+
+    let owner: basic_client::types::AnyOwner =
+        serde_json::from_str(r#"{"id":7}"#).unwrap();
+    assert!(matches!(
+        owner,
+        basic_client::types::AnyOwner::DetailedOwner(_)
+    ));
+
+    // Both branches accept `special`, so oneOf rejects it. A manually constructed broad branch is
+    // revalidated during serialization and rejected for the same reason.
+    assert!(serde_json::from_str::<basic_client::types::OneOverlap>(r#""special""#).is_err());
+    let ambiguous = basic_client::types::OneOverlap::OneOverlapVariant0(Box::new(
+        "special".to_owned(),
+    ));
+    assert!(serde_json::to_value(ambiguous).is_err());
+    assert!(serde_json::from_str::<basic_client::types::OneOverlap>(r#""other""#).is_ok());
+}
+
+#[test]
+fn mixed_discriminator_dispatches_arrays_by_category_and_objects_by_tag() {
+    let directory: basic_client::types::MixedContent =
+        serde_json::from_str(r#"["README.md"]"#).unwrap();
+    assert!(matches!(
+        directory,
+        basic_client::types::MixedContent::MixedContentVariant0(_)
+    ));
+
+    let file: basic_client::types::MixedContent =
+        serde_json::from_str(r#"{"type":"file","content":"hello"}"#).unwrap();
+    assert!(matches!(
+        file,
+        basic_client::types::MixedContent::ContentFile(_)
+    ));
+    assert_eq!(
+        serde_json::to_value(file).unwrap(),
+        serde_json::json!({"type": "file", "content": "hello"})
+    );
 }
 
 #[test]
@@ -271,13 +495,13 @@ fn multi_status_response_enums_carry_typed_variants() {
     // runs after selecting by HTTP status), proving the types are real and payload-carrying — not
     // `serde_json::Value`.
     let ok: basic_client::types::MultiOk = serde_json::from_str(r#"{"ok":"yes"}"#).unwrap();
-    match basic_client::GetMultiResponse::Status200(ok) {
+    match basic_client::GetMultiResponse::Status200(Box::new(ok)) {
         basic_client::GetMultiResponse::Status200(body) => assert_eq!(body.ok, "yes"),
         other => panic!("expected Status200, got {other:?}"),
     }
     let created: basic_client::types::MultiCreated =
         serde_json::from_str(r#"{"id":7}"#).unwrap();
-    match basic_client::GetMultiResponse::Status201(created) {
+    match basic_client::GetMultiResponse::Status201(Box::new(created)) {
         basic_client::GetMultiResponse::Status201(body) => assert_eq!(body.id, 7),
         other => panic!("expected Status201, got {other:?}"),
     }
@@ -289,13 +513,13 @@ fn multi_status_response_enums_carry_typed_variants() {
 
     let not_found: basic_client::types::NotFoundError =
         serde_json::from_str(r#"{"reason":"gone"}"#).unwrap();
-    match basic_client::GetMultiError::Status404(not_found) {
+    match basic_client::GetMultiError::Status404(Box::new(not_found)) {
         basic_client::GetMultiError::Status404(body) => assert_eq!(body.reason, "gone"),
         other => panic!("expected Status404, got {other:?}"),
     }
     let conflict: basic_client::types::ConflictError =
         serde_json::from_str(r#"{"detail":"dup"}"#).unwrap();
-    match basic_client::GetMultiError::Status409(conflict) {
+    match basic_client::GetMultiError::Status409(Box::new(conflict)) {
         basic_client::GetMultiError::Status409(body) => assert_eq!(body.detail, "dup"),
         other => panic!("expected Status409, got {other:?}"),
     }
@@ -778,20 +1002,22 @@ where
 // random.
 fn pet_strategy() -> impl Strategy<Value = types::Pet> {
     prop_oneof![
-        "[a-zA-Z0-9 ]{0,16}".prop_map(|name| types::Pet::Cat(types::Cat {
+        "[a-zA-Z0-9 ]{0,16}".prop_map(|name| types::Pet::Cat(Box::new(types::Cat {
             pet_type: "cat".to_owned(),
             name,
-        })),
-        any::<bool>().prop_map(|bark| types::Pet::Dog(types::Dog { bark })),
+        }))),
+        any::<bool>().prop_map(|bark| types::Pet::Dog(Box::new(types::Dog { bark }))),
     ]
 }
 
 // Structurally-disjoint union: a bare string vs an array of strings (distinct JSON categories).
 fn string_or_list_strategy() -> impl Strategy<Value = types::StringOrList> {
     prop_oneof![
-        "[a-zA-Z0-9 ]{0,16}".prop_map(types::StringOrList::StringOrListVariant0),
+        "[a-zA-Z0-9 ]{0,16}".prop_map(|value| {
+            types::StringOrList::StringOrListVariant0(Box::new(value))
+        }),
         proptest::collection::vec("[a-zA-Z0-9 ]{0,8}", 0..5)
-            .prop_map(types::StringOrList::StringOrListVariant1),
+            .prop_map(|value| types::StringOrList::StringOrListVariant1(Box::new(value))),
     ]
 }
 
@@ -801,17 +1027,19 @@ fn notes_strategy() -> impl Strategy<Value = Option<types::StringListOrNull>> {
     prop_oneof![
         Just(None),
         "[a-zA-Z0-9 ]{0,16}"
-            .prop_map(|s| Some(types::StringListOrNull::StringListOrNullVariant0(s))),
+            .prop_map(|s| Some(types::StringListOrNull::StringListOrNullVariant0(Box::new(s)))),
         proptest::collection::vec("[a-zA-Z0-9 ]{0,8}", 0..5)
-            .prop_map(|v| Some(types::StringListOrNull::StringListOrNullVariant1(v))),
+            .prop_map(|v| Some(types::StringListOrNull::StringListOrNullVariant1(Box::new(v)))),
     ]
 }
 
 // Required-key-disjoint union: two CLOSED objects, each carrying a unique required key.
 fn shape_strategy() -> impl Strategy<Value = types::Shape> {
     prop_oneof![
-        (-1000.0f64..1000.0).prop_map(|radius| types::Shape::Circle(types::Circle { radius })),
-        (-1000.0f64..1000.0).prop_map(|side| types::Shape::Square(types::Square { side })),
+        (-1000.0f64..1000.0)
+            .prop_map(|radius| types::Shape::Circle(Box::new(types::Circle { radius }))),
+        (-1000.0f64..1000.0)
+            .prop_map(|side| types::Shape::Square(Box::new(types::Square { side }))),
     ]
 }
 
@@ -988,6 +1216,49 @@ info:
 servers:
   - url: https://example.com/api
 paths:
+  /params/{ids}:
+    get:
+      operationId: serializeParams
+      parameters:
+        - name: ids
+          in: path
+          required: true
+          style: simple
+          explode: false
+          schema:
+            type: array
+            items: { type: integer }
+        - name: workflow_id
+          in: query
+          required: true
+          schema:
+            $ref: "#/components/schemas/WorkflowId"
+        - name: X-Flags
+          in: header
+          required: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: labels
+          in: query
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: compact
+          in: query
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: session
+          in: cookie
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+      responses:
+        "204": { description: No Content }
   /users/{id}:
     get:
       operationId: getUser
@@ -1128,6 +1399,71 @@ paths:
       responses:
         "204":
           description: No Content
+  # Raw textual/vendor and binary response codecs: these bodies are not JSON documents. The
+  # generated dispatch must decode UTF-8 text through a JSON string value (preserving typed string
+  # schemas) and return binary bodies as bytes without attempting serde_json parsing.
+  /render:
+    get:
+      operationId: renderHtml
+      responses:
+        "200":
+          description: rendered HTML
+          content:
+            text/html:
+              schema: { type: string }
+  /octocat:
+    get:
+      operationId: getOctocat
+      responses:
+        "200":
+          description: octocat art
+          content:
+            application/octocat-stream:
+              schema: { type: string }
+  /download:
+    get:
+      operationId: downloadRaw
+      responses:
+        "200":
+          description: raw bytes
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+  /text-error:
+    get:
+      operationId: getTextError
+      deprecated: true
+      responses:
+        "204": { description: success }
+        "400":
+          description: textual failure
+          content:
+            text/plain:
+              schema: { type: string }
+  /raw-multi:
+    get:
+      operationId: getRawMulti
+      responses:
+        "200":
+          description: text success
+          content:
+            text/plain:
+              schema: { type: string }
+        "201":
+          description: binary success
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        "400":
+          description: text error
+          content:
+            text/plain:
+              schema: { type: string }
+        "409":
+          description: binary error
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
   # XML request + response bodies (Issue #13): both lower to typed structs and are
   # serialized/decoded through the embedded quick-xml codec — compile-verifies that the synthesized
   # Cargo.toml enabled quick-xml (the `xml` feature) and that the embedded `support::xml` helpers
@@ -1193,6 +1529,107 @@ components:
       in: header
       name: X-Api-Key
   schemas:
+    BlankDocs:
+      description: ""
+      type: string
+    MarkdownDocs:
+      description: |-
+        *   A list item
+        continuation text
+
+        > A quoted warning
+        continuation text
+      type: string
+    WorkflowId:
+      description: "Workflow identifier\taccepted as a numeric id or file name."
+      oneOf:
+        - type: integer
+        - type: string
+    Refined:
+      allOf:
+        - type: object
+          required: [run_id, status, marker, labels, steps, empty_only]
+          properties:
+            run_id: { type: number }
+            status: { type: string }
+            marker: { type: [string, "null"] }
+            labels:
+              type: array
+              items: { type: [string, "null"] }
+            steps:
+              type: array
+              items: { type: [object, "null"] }
+            empty_only:
+              type: array
+              items: { type: string }
+        - type: object
+          required: [run_id, status, marker, labels, steps, empty_only]
+          properties:
+            run_id: { type: integer }
+            status: { type: string, enum: [queued, complete] }
+            marker: { type: "null" }
+            labels:
+              type: array
+              items: { type: string }
+            steps:
+              type: array
+              items:
+                type: object
+                required: [name]
+                properties:
+                  name: { type: string }
+            empty_only:
+              type: array
+              items: { type: "null" }
+    StringLiteral:
+      type: string
+      enum: [special]
+    AnyString:
+      anyOf:
+        - type: string
+        - $ref: "#/components/schemas/StringLiteral"
+    AnyNumber:
+      anyOf:
+        - type: number
+        - type: integer
+    OneOverlap:
+      oneOf:
+        - type: string
+        - $ref: "#/components/schemas/StringLiteral"
+    BroadOwner:
+      type: object
+    DetailedOwner:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+    AnyOwner:
+      anyOf:
+        - $ref: "#/components/schemas/BroadOwner"
+        - $ref: "#/components/schemas/DetailedOwner"
+    ContentFile:
+      type: object
+      required: [type, content]
+      properties:
+        type: { type: string, enum: [file] }
+        content: { type: string }
+    ContentLink:
+      type: object
+      required: [type, target]
+      properties:
+        type: { type: string, enum: [symlink] }
+        target: { type: string }
+    MixedContent:
+      oneOf:
+        - type: array
+          items: { type: string }
+        - $ref: "#/components/schemas/ContentFile"
+        - $ref: "#/components/schemas/ContentLink"
+      discriminator:
+        propertyName: type
+        mapping:
+          file: "#/components/schemas/ContentFile"
+          symlink: "#/components/schemas/ContentLink"
     User:
       type: object
       required: [id, name]
@@ -1221,6 +1658,18 @@ components:
         # resolves to `None` rather than erroring in the custom Deserialize.
         notes:
           $ref: "#/components/schemas/StringListOrNull"
+        refined:
+          $ref: "#/components/schemas/Refined"
+        any_string:
+          $ref: "#/components/schemas/AnyString"
+        any_number:
+          $ref: "#/components/schemas/AnyNumber"
+        one_overlap:
+          $ref: "#/components/schemas/OneOverlap"
+        any_owner:
+          $ref: "#/components/schemas/AnyOwner"
+        mixed_content:
+          $ref: "#/components/schemas/MixedContent"
     # Discriminated union: `petType` selects the object variant. Cat DECLARES `petType` as a required
     # property (the shape that broke serde internal tagging — "missing field petType"); the custom
     # buffer-to-Value Deserialize hands the WHOLE value to the variant, so Cat keeps its own tag.

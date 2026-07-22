@@ -728,6 +728,8 @@ fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
             format!("({})", rendered.join(", "))
         }
         Some(TypeKind::Bytes) => "Bytes".to_owned(),
+        Some(TypeKind::Null) => "()".to_owned(),
+        Some(TypeKind::Never) => nominal_name(ty, names),
         Some(TypeKind::Any) | None => "Value".to_owned(),
     };
     if ty.nullable {
