@@ -247,6 +247,57 @@ fn all_of_compatible_constraints_keep_the_narrow_typed_intersection() {
 }
 
 #[test]
+fn overlapping_unions_enforce_one_of_and_canonicalize_any_of() {
+    let string: basic_client::types::AnyString =
+        serde_json::from_str(r#""special""#).unwrap();
+    assert!(matches!(
+        string,
+        basic_client::types::AnyString::StringLiteral(_)
+    ));
+
+    let number: basic_client::types::AnyNumber = serde_json::from_str("7").unwrap();
+    assert!(matches!(
+        number,
+        basic_client::types::AnyNumber::AnyNumberVariant1(_)
+    ));
+
+    let owner: basic_client::types::AnyOwner =
+        serde_json::from_str(r#"{"id":7}"#).unwrap();
+    assert!(matches!(
+        owner,
+        basic_client::types::AnyOwner::DetailedOwner(_)
+    ));
+
+    // Both branches accept `special`, so oneOf rejects it. A manually constructed broad branch is
+    // revalidated during serialization and rejected for the same reason.
+    assert!(serde_json::from_str::<basic_client::types::OneOverlap>(r#""special""#).is_err());
+    let ambiguous = basic_client::types::OneOverlap::OneOverlapVariant0("special".to_owned());
+    assert!(serde_json::to_value(ambiguous).is_err());
+    assert!(serde_json::from_str::<basic_client::types::OneOverlap>(r#""other""#).is_ok());
+}
+
+#[test]
+fn mixed_discriminator_dispatches_arrays_by_category_and_objects_by_tag() {
+    let directory: basic_client::types::MixedContent =
+        serde_json::from_str(r#"["README.md"]"#).unwrap();
+    assert!(matches!(
+        directory,
+        basic_client::types::MixedContent::MixedContentVariant0(_)
+    ));
+
+    let file: basic_client::types::MixedContent =
+        serde_json::from_str(r#"{"type":"file","content":"hello"}"#).unwrap();
+    assert!(matches!(
+        file,
+        basic_client::types::MixedContent::ContentFile(_)
+    ));
+    assert_eq!(
+        serde_json::to_value(file).unwrap(),
+        serde_json::json!({"type": "file", "content": "hello"})
+    );
+}
+
+#[test]
 fn component_nullability_propagates_through_ref() {
     // A REQUIRED field referencing the nullable `Priority` component is `Option<Priority>`: the key
     // must be present, but `null` deserializes to `None` and a string to the variant. This only
@@ -1356,6 +1407,55 @@ components:
             empty_only:
               type: array
               items: { type: "null" }
+    StringLiteral:
+      type: string
+      enum: [special]
+    AnyString:
+      anyOf:
+        - type: string
+        - $ref: "#/components/schemas/StringLiteral"
+    AnyNumber:
+      anyOf:
+        - type: number
+        - type: integer
+    OneOverlap:
+      oneOf:
+        - type: string
+        - $ref: "#/components/schemas/StringLiteral"
+    BroadOwner:
+      type: object
+    DetailedOwner:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+    AnyOwner:
+      anyOf:
+        - $ref: "#/components/schemas/BroadOwner"
+        - $ref: "#/components/schemas/DetailedOwner"
+    ContentFile:
+      type: object
+      required: [type, content]
+      properties:
+        type: { type: string, enum: [file] }
+        content: { type: string }
+    ContentLink:
+      type: object
+      required: [type, target]
+      properties:
+        type: { type: string, enum: [symlink] }
+        target: { type: string }
+    MixedContent:
+      oneOf:
+        - type: array
+          items: { type: string }
+        - $ref: "#/components/schemas/ContentFile"
+        - $ref: "#/components/schemas/ContentLink"
+      discriminator:
+        propertyName: type
+        mapping:
+          file: "#/components/schemas/ContentFile"
+          symlink: "#/components/schemas/ContentLink"
     User:
       type: object
       required: [id, name]
@@ -1386,6 +1486,16 @@ components:
           $ref: "#/components/schemas/StringListOrNull"
         refined:
           $ref: "#/components/schemas/Refined"
+        any_string:
+          $ref: "#/components/schemas/AnyString"
+        any_number:
+          $ref: "#/components/schemas/AnyNumber"
+        one_overlap:
+          $ref: "#/components/schemas/OneOverlap"
+        any_owner:
+          $ref: "#/components/schemas/AnyOwner"
+        mixed_content:
+          $ref: "#/components/schemas/MixedContent"
     # Discriminated union: `petType` selects the object variant. Cat DECLARES `petType` as a required
     # property (the shape that broke serde internal tagging — "missing field petType"); the custom
     # buffer-to-Value Deserialize hands the WHOLE value to the variant, so Cat keeps its own tag.

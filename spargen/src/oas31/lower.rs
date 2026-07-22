@@ -8,7 +8,7 @@ use crate::ir::{
     HttpScheme, Info, JsonCategory, MediaType, Operation, OperationId, ParamLoc, ParamStyle,
     Parameter, PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response, Responses,
     ScalarEnum, ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty,
-    TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionStrategy, UnionVariant, XmlField,
+    TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
 };
 use crate::name::synth_operation_id;
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
@@ -515,19 +515,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// member is null collapses to `Option<TheOtherType>` with no enum. The remaining variants are
     /// represented WITHOUT `serde(untagged)` and without degrading to `serde_json::Value`:
     ///
-    /// * with a `discriminator` → an internally-tagged enum ([`UnionStrategy::Internal`]); each
-    ///   variant must lower to an object (serde internal tagging requires struct-like variants),
-    ///   otherwise the discriminator is not representable → `E007`.
-    /// * without one → an enum with a custom content-inspecting `Deserialize`/`Serialize`
-    ///   ([`UnionStrategy::Disjoint`]), but only when the variants are *provably* disjoint by JSON
-    ///   type category or by a unique required key; otherwise → `E007` (narrowed).
+    /// * a `discriminator` dispatches object variants by tag and uniquely categorized non-object
+    ///   variants by JSON category;
+    /// * statically disjoint variants dispatch by JSON category or unique required key;
+    /// * overlapping variants use typed trial matching with exact-one (`oneOf`) or deterministic
+    ///   most-specific (`anyOf`) semantics, including serialization revalidation.
     ///
     /// Every variant type inserts before the union def, so the [`TypeKind::Union`] is the final
     /// graph insert — preserving the [`Self::ensure_component`] last-insert invariant when the union
     /// is a component body.
     fn lower_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
-        // Gather the member schemas in deterministic order (oneOf, then anyOf).
-        let members: Vec<&SchemaOr> = schema.one_of.iter().chain(schema.any_of.iter()).collect();
+        let (members, mode): (Vec<&SchemaOr>, UnionMode) =
+            match (schema.one_of.is_empty(), schema.any_of.is_empty()) {
+                (false, true) => (schema.one_of.iter().collect(), UnionMode::OneOf),
+                (true, false) => (schema.any_of.iter().collect(), UnionMode::AnyOf),
+                (false, false) => {
+                    return self.reject_union(
+                    schema,
+                    "a single schema node declares both `oneOf` and `anyOf`; their intersected \
+                     applicator semantics are not representable as one generated union",
+                );
+                }
+                (true, true) => unreachable!("lower_union is called only for a union schema"),
+            };
+        let sibling = self.lower_union_sibling(schema, hint)?;
 
         // A `"null"` in the enclosing type array, or a null-only member, makes the union nullable.
         let mut nullable = schema.types.types.contains(&JsonType::Null);
@@ -551,7 +562,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // when the union is a component body (a bare `$ref` member would otherwise return an existing
         // id and leave the popped root mismatched).
         if real_members.len() == 1 {
-            let inner = self.lower_schema_or(real_members[0], hint)?;
+            let mut inner = self.lower_schema_or(real_members[0], hint)?;
+            if let Some(sibling) = sibling {
+                inner = self.intersect_types(inner, sibling, &format!("{hint}Constrained"))?;
+            }
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = inner.nullable || nullable;
@@ -567,6 +581,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
+            if let Some(sibling) = sibling {
+                let Some(intersection) =
+                    self.intersect_types(ty, sibling, &format!("{hint}Variant{index}Constrained"))
+                else {
+                    // The sibling constraints make this branch impossible; JSON Schema simply
+                    // removes it from the union's accepted set.
+                    continue;
+                };
+                ty = intersection;
+            }
             // Hoist a variant's own nullability up to the union: a `null` payload then resolves at the
             // outer `Option<Union>` (→ `None`), and the discriminated/disjoint dispatch below only
             // ever inspects non-null content — otherwise a variant like `{type: [string, null]}`
@@ -588,16 +612,58 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ref_names.push(ref_name);
         }
 
+        if variants.is_empty() {
+            return self.reject_union(
+                schema,
+                "union sibling constraints make every variant impossible",
+            );
+        }
+        if variants.len() == 1 {
+            let inner = variants[0].ty;
+            let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
+            let mut ty = self.insert_schema_type(schema, hint, kind);
+            ty.nullable = inner.nullable || nullable;
+            ty.boxed = inner.boxed;
+            return Some(ty);
+        }
+
         let strategy = if let Some(discriminator) = &schema.discriminator {
-            self.discriminated_strategy(schema, &variants, &ref_names, discriminator)?
+            self.discriminated_strategy(&variants, &ref_names, discriminator)
+                .or_else(|| self.disjoint_strategy(&variants))
+                .unwrap_or_else(|| self.trial_strategy(&variants, mode))
         } else {
-            self.disjoint_strategy(schema, &variants)?
+            self.disjoint_strategy(&variants)
+                .unwrap_or_else(|| self.trial_strategy(&variants, mode))
         };
 
         let mut ty =
             self.insert_schema_type(schema, hint, TypeKind::Union(Union { variants, strategy }));
         ty.nullable = nullable;
         Some(ty)
+    }
+
+    /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` so every branch is intersected with
+    /// them. A multi-non-null `type` array is already expressed by the union members and is removed
+    /// here (its `null` member is handled by the union's outer nullability).
+    fn lower_union_sibling(&mut self, schema: &Schema, hint: &str) -> Option<Option<Ty>> {
+        let mut sibling = schema.clone();
+        sibling.one_of.clear();
+        sibling.any_of.clear();
+        sibling.discriminator = None;
+        let non_null_types = sibling
+            .types
+            .types
+            .iter()
+            .filter(|kind| **kind != JsonType::Null)
+            .count();
+        if non_null_types > 1 {
+            sibling.types.types.clear();
+        }
+        if !schema_has_shape_constraint(&sibling) {
+            return Some(None);
+        }
+        self.lower_schema(&sibling, &format!("{hint}Constraint"))
+            .map(Some)
     }
 
     /// Lower one union member, returning its type and — when the member is a `$ref` to a component —
@@ -619,29 +685,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some((ty, None))
     }
 
-    /// Build the discriminated strategy for a discriminated union. Each variant must lower to an
-    /// object (the tag is read/written on an object), otherwise `E007` (narrowed). The tag value
-    /// comes from `discriminator.mapping` (matched by `$ref`) when present, otherwise from the
-    /// variant's own `$ref` component name (implicit mapping).
+    /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its
+    /// unique JSON category. The tag value comes from `discriminator.mapping` (matched by `$ref`)
+    /// when present, otherwise from the variant's own `$ref` component name.
     fn discriminated_strategy(
-        &mut self,
-        schema: &Schema,
+        &self,
         variants: &[UnionVariant],
         ref_names: &[Option<String>],
         discriminator: &super::Discriminator,
     ) -> Option<UnionStrategy> {
         let mut tags = Vec::new();
+        let mut categories = Vec::new();
         for (variant, ref_name) in variants.iter().zip(ref_names) {
             if !matches!(
                 self.graph.get(variant.ty.id).map(|def| &def.kind),
                 Some(TypeKind::Struct(_))
             ) {
-                return self.reject_union(
-                    schema,
-                    "a discriminated union variant is not an object type; the discriminator tag is \
-                     read from an object, so every variant must be a struct (a `$ref` to an object \
-                     component or an inline object)",
-                );
+                let category = self.json_category(variant.ty)?;
+                if category == JsonCategory::Object || categories.contains(&Some(category)) {
+                    return None;
+                }
+                tags.push(None);
+                categories.push(Some(category));
+                continue;
             }
             // Prefer an explicit mapping entry that points at this variant's component; fall back to
             // the component name (implicit mapping). A mapping value may be a bare name or a full
@@ -660,16 +726,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .or_else(|| Some(name.clone()))
                 })
                 .unwrap_or_else(|| variant.name_hint.clone());
-            tags.push(tag);
+            tags.push(Some(tag));
+            categories.push(None);
         }
         Some(UnionStrategy::Discriminated {
             tag_field: discriminator.property_name.clone(),
             tags,
+            categories,
         })
     }
 
-    /// Build the disjoint strategy for an undiscriminated union, or reject with narrowed `E007` when
-    /// the variants are not provably disjoint. Two proofs are attempted in order:
+    /// Build the disjoint fast path for an undiscriminated union. Two proofs are attempted:
     ///
     /// 1. **JSON-type-disjoint**: every variant occupies a distinct JSON primitive category
     ///    (`number` and `integer` share one category, so they never separate).
@@ -677,11 +744,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///    false`) with at least one required property whose name appears in no other variant. Closed
     ///    is essential — an open object could carry another variant's unique key as an extra field
     ///    and be misrouted, so open-object required-key unions are never provably disjoint.
-    fn disjoint_strategy(
-        &mut self,
-        schema: &Schema,
-        variants: &[UnionVariant],
-    ) -> Option<UnionStrategy> {
+    fn disjoint_strategy(&self, variants: &[UnionVariant]) -> Option<UnionStrategy> {
         // Proof 1: pairwise-distinct JSON type categories.
         let categories: Option<Vec<JsonCategory>> =
             variants.iter().map(|v| self.json_category(v.ty)).collect();
@@ -709,13 +772,51 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         }
 
-        self.reject_union(
-            schema,
-            "oneOf/anyOf variants are not provably disjoint: they neither occupy distinct JSON \
-             type categories (integer and number overlap) nor are all closed objects \
-             (additionalProperties: false) with a unique required key per variant, so a payload \
-             cannot be routed to one variant unambiguously",
-        )
+        None
+    }
+
+    fn trial_strategy(&self, variants: &[UnionVariant], mode: UnionMode) -> UnionStrategy {
+        UnionStrategy::Trial {
+            mode,
+            priorities: variants
+                .iter()
+                .map(|variant| self.type_specificity(variant.ty, &mut HashSet::new()))
+                .collect(),
+        }
+    }
+
+    fn type_specificity(&self, ty: Ty, visiting: &mut HashSet<TypeId>) -> u32 {
+        if !visiting.insert(ty.id) {
+            return 0;
+        }
+        let priority = match self.graph.get(ty.id).map(|definition| &definition.kind) {
+            Some(TypeKind::Enum(enumeration)) => {
+                2_000_u32.saturating_sub(enumeration.variants.len() as u32)
+            }
+            Some(TypeKind::Null) => 3_000,
+            Some(TypeKind::Never) => 4_000,
+            Some(TypeKind::Struct(object)) => {
+                let required = object.fields.iter().filter(|field| field.required).count() as u32;
+                1_000 + required * 20 + object.fields.len() as u32
+            }
+            Some(TypeKind::Tuple(items)) => 900 + items.len() as u32,
+            Some(TypeKind::Array(item)) => 800 + self.type_specificity(**item, visiting) / 10,
+            Some(TypeKind::Primitive(Prim::I32)) => 700,
+            Some(TypeKind::Primitive(Prim::I64)) => 650,
+            Some(TypeKind::Primitive(Prim::Uuid | Prim::DateTime | Prim::Date)) => 600,
+            Some(TypeKind::Primitive(Prim::F64 | Prim::String | Prim::Bool) | TypeKind::Bytes) => {
+                500
+            }
+            Some(TypeKind::Union(union)) => union
+                .variants
+                .iter()
+                .map(|variant| self.type_specificity(variant.ty, visiting))
+                .min()
+                .unwrap_or(0),
+            Some(TypeKind::Any) | None => 0,
+        };
+        visiting.remove(&ty.id);
+        priority
     }
 
     /// The JSON primitive category a lowered variant type serializes as, or `None` when it cannot be
@@ -1515,15 +1616,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(non_nullable(union_ty));
         }
         let strategy = match &union.strategy {
-            UnionStrategy::Discriminated { tag_field, tags } => UnionStrategy::Discriminated {
+            UnionStrategy::Discriminated {
+                tag_field,
+                tags,
+                categories,
+            } => UnionStrategy::Discriminated {
                 tag_field: tag_field.clone(),
                 tags: retained.iter().map(|index| tags[*index].clone()).collect(),
+                categories: retained.iter().map(|index| categories[*index]).collect(),
             },
             UnionStrategy::Disjoint { features } => UnionStrategy::Disjoint {
                 features: retained
                     .iter()
                     .map(|index| features[*index].clone())
                     .collect(),
+            },
+            UnionStrategy::Trial { mode, priorities } => UnionStrategy::Trial {
+                mode: *mode,
+                priorities: retained.iter().map(|index| priorities[*index]).collect(),
             },
         };
         Some(self.insert_type(
@@ -2639,6 +2749,19 @@ fn schema_imposes_scalar(schema: &Schema) -> bool {
         || schema.format.as_deref() == Some("binary")
         || !schema.one_of.is_empty()
         || !schema.any_of.is_empty()
+}
+
+fn schema_has_shape_constraint(schema: &Schema) -> bool {
+    !schema.types.types.is_empty()
+        || schema_is_object_like(schema)
+        || schema.items.is_some()
+        || !schema.prefix_items.is_empty()
+        || schema.enum_values.is_some()
+        || schema.const_value.is_some()
+        || schema.content_encoding.is_some()
+        || schema.format.as_deref() == Some("binary")
+        || schema.reference.is_some()
+        || !schema.all_of.is_empty()
 }
 
 /// The provenance of an `allOf` member for diagnostics — the schema's own provenance, or the

@@ -727,9 +727,9 @@ components:
 }
 
 #[test]
-fn e007_non_disjoint_union() {
-    // `integer | number` share the JSON numeric category (they overlap on the wire), so the union is
-    // NOT provably disjoint → E007 (narrowed). A payload `1` could match either variant.
+fn overlapping_numeric_one_of_generates_with_typed_trial_matching() {
+    // `integer | number` overlaps on integral payloads. The generated typed trial union enforces
+    // exact-one matching at runtime (`1` is ambiguous; `1.5` selects number).
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -742,18 +742,15 @@ components:
         - type: number
 "##;
     let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::NonDisjointUnion));
-    // check/generate parity.
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
-    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::NonDisjointUnion));
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
-fn e007_overlapping_required_keys_rejected() {
-    // Two object variants that share their only required key are not disjoint by key presence, and
-    // both are the Object JSON category → no proof holds → E007.
+fn overlapping_object_one_of_generates_with_typed_trial_matching() {
+    // Object variants that overlap structurally use typed trial matching and exact-one semantics.
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -771,8 +768,8 @@ components:
           properties: { kind: { type: string }, b: { type: string } }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::NonDisjointUnion));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 }
 
 #[test]
@@ -793,6 +790,28 @@ components:
     let report = generate(spec);
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn union_sibling_constraints_intersect_every_branch() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    StringOnly:
+      type: string
+      oneOf:
+        - type: string
+        - type: integer
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+
     let checked = check(spec);
     assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
 }
@@ -833,8 +852,8 @@ components:
 }
 
 #[test]
-fn e007_discriminated_non_object_variant_rejected() {
-    // A discriminated variant that is not an object (a primitive) cannot be internally tagged → E007.
+fn discriminated_union_with_unique_non_object_category_generates() {
+    // A non-object variant dispatches by JSON category while object variants dispatch by tag.
     let report = generate(
         r##"
 openapi: 3.1.0
@@ -854,8 +873,8 @@ components:
         propertyName: petType
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::NonDisjointUnion));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 }
 
 #[test]
@@ -885,7 +904,7 @@ components:
 fn required_key_disjoint_objects_generate() {
     // Two CLOSED object variants (`additionalProperties: false`) each with a unique required key
     // (`a` / `b`) → provably disjoint by key presence → GENERATES with a content-inspecting custom
-    // Deserialize. Closed is required for soundness (see `e007_open_object_required_key_rejected`).
+    // Deserialize. Closed is required for this fast path; open variants use typed trial matching.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -915,9 +934,8 @@ components:
 }
 
 #[test]
-fn e007_open_object_required_key_rejected() {
-    // OPEN object variants (default `additionalProperties`) are NOT provably disjoint by required
-    // key: a payload for B could carry A's key `a` as an extra field and be misrouted → E007.
+fn open_object_union_generates_with_typed_trial_matching() {
+    // Open objects cannot use the required-key fast path, so they use typed trial matching.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -938,10 +956,35 @@ components:
         - $ref: "#/components/schemas/B"
 "##;
     let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn e007_combined_one_of_and_any_of_applicators_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    U:
+      oneOf:
+        - type: string
+        - type: integer
+      anyOf:
+        - type: string
+        - type: boolean
+"##;
+    let report = generate(spec);
     assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::NonDisjointUnion));
+
     let checked = check(spec);
     assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::NonDisjointUnion));
 }
 
 #[test]

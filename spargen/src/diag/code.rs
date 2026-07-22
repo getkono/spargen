@@ -32,9 +32,7 @@ pub enum Code {
     PatternPropertiesRejected,
     /// `$dynamicRef`/`$dynamicAnchor` are rejected (matrix: Schema shape → R).
     DynamicRefRejected,
-    /// A `oneOf`/`anyOf` union could not be represented: a discriminated variant is not an object,
-    /// or an undiscriminated union is not provably disjoint (by JSON type category, or a unique
-    /// required key across closed object variants) so a payload cannot be routed unambiguously.
+    /// A `oneOf`/`anyOf` applicator combination could not be represented faithfully.
     NonDisjointUnion,
     /// A heterogeneous or structured `enum`/`const` value set is rejected.
     NonScalarEnum,
@@ -133,7 +131,7 @@ impl Code {
             Code::ValidationKeywordIgnored => "validation-only keyword ignored",
             Code::PatternPropertiesRejected => "patternProperties not representable as a typed map",
             Code::DynamicRefRejected => "dynamic reference unsupported",
-            Code::NonDisjointUnion => "union variants are not disjoint",
+            Code::NonDisjointUnion => "union applicators cannot be represented",
             Code::NonScalarEnum => "enum values are not homogeneous scalars",
             Code::UnsupportedMediaType => "unsupported media type",
             Code::UnsupportedParameterStyle => "unsupported parameter style",
@@ -181,7 +179,7 @@ impl Code {
                 "`$dynamicRef` and `$dynamicAnchor` require dynamic schema-scope evaluation and are rejected."
             }
             Code::NonDisjointUnion => {
-                "`oneOf`/`anyOf` unions are lowered to Rust enums with a custom `Deserialize`/`Serialize` — never `serde(untagged)` and never degraded to `serde_json::Value`. A union with a `discriminator` reads/writes the tag field on a buffered value, so every variant must be an object (a `$ref` to an object component or an inline object); a primitive/array/untyped variant is rejected. A union without a discriminator is emitted only when it is statically disjoint: either every variant occupies a distinct JSON type category (integer and number share one category and never separate), or every variant is a *closed* object (`additionalProperties: false`) with at least one required property whose name appears in no other variant — closed is required because an open object could carry another variant's unique key as an extra field and be misrouted. It is rejected only when neither proof holds — overlapping JSON types, open or non-uniquely-keyed object variants, an untyped variant, or a variant that is itself a union. Add or fix the discriminator, make the object variants closed with disjoint required keys, or omit this API segment with `spargen::omit!`."
+                "`oneOf`/`anyOf` unions are lowered to typed Rust enums with custom `Deserialize`/`Serialize` — never `serde(untagged)` and never degraded to `serde_json::Value`. Fast paths dispatch by discriminator tag, a unique non-object JSON category, or a proven disjoint category/required key. Overlapping variants use typed trial matching over one buffered value: `oneOf` requires exactly one successful variant; `anyOf` deterministically selects the most specific successful variant (enum before broad scalar, integer before number, more-required object before broader object, recursive array specificity, then source order), and serialization revalidates the same rule. Shape constraints adjacent to the union are intersected into every branch. This error is reserved for an applicator combination that is not yet representable, such as declaring both `oneOf` and `anyOf` on the same schema node. Split the applicators into nested schemas or omit this API segment with `spargen::omit!`."
             }
             Code::NonScalarEnum => {
                 "Enums and const values must be homogeneous scalar sets. A `null` member (or `\"null\"` in the schema's type array) is allowed: it is stripped and makes a remaining scalar enum nullable (`Option<Enum>`), while a value set of only `null` lowers to the exact JSON null type (`()`). Sets that mix distinct non-null scalar kinds (e.g. a string with an integer) or that contain object/array members are rejected."

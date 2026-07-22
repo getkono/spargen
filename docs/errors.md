@@ -11,7 +11,7 @@ the library API.
 | `E004` | Error | unresolved `$ref` |
 | `E005` | Error | `patternProperties` not representable as a typed map |
 | `E006` | Error | dynamic reference unsupported |
-| `E007` | Error | union variants are not disjoint |
+| `E007` | Error | union applicators cannot be represented |
 | `E008` | Error | enum values are not homogeneous scalars |
 | `E009` | Error | unsupported media type |
 | `E010` | Error | unsupported parameter style |
