@@ -360,7 +360,9 @@ fn overlapping_unions_enforce_one_of_and_canonicalize_any_of() {
     // Both branches accept `special`, so oneOf rejects it. A manually constructed broad branch is
     // revalidated during serialization and rejected for the same reason.
     assert!(serde_json::from_str::<basic_client::types::OneOverlap>(r#""special""#).is_err());
-    let ambiguous = basic_client::types::OneOverlap::OneOverlapVariant0("special".to_owned());
+    let ambiguous = basic_client::types::OneOverlap::OneOverlapVariant0(Box::new(
+        "special".to_owned(),
+    ));
     assert!(serde_json::to_value(ambiguous).is_err());
     assert!(serde_json::from_str::<basic_client::types::OneOverlap>(r#""other""#).is_ok());
 }
@@ -998,20 +1000,22 @@ where
 // random.
 fn pet_strategy() -> impl Strategy<Value = types::Pet> {
     prop_oneof![
-        "[a-zA-Z0-9 ]{0,16}".prop_map(|name| types::Pet::Cat(types::Cat {
+        "[a-zA-Z0-9 ]{0,16}".prop_map(|name| types::Pet::Cat(Box::new(types::Cat {
             pet_type: "cat".to_owned(),
             name,
-        })),
-        any::<bool>().prop_map(|bark| types::Pet::Dog(types::Dog { bark })),
+        }))),
+        any::<bool>().prop_map(|bark| types::Pet::Dog(Box::new(types::Dog { bark }))),
     ]
 }
 
 // Structurally-disjoint union: a bare string vs an array of strings (distinct JSON categories).
 fn string_or_list_strategy() -> impl Strategy<Value = types::StringOrList> {
     prop_oneof![
-        "[a-zA-Z0-9 ]{0,16}".prop_map(types::StringOrList::StringOrListVariant0),
+        "[a-zA-Z0-9 ]{0,16}".prop_map(|value| {
+            types::StringOrList::StringOrListVariant0(Box::new(value))
+        }),
         proptest::collection::vec("[a-zA-Z0-9 ]{0,8}", 0..5)
-            .prop_map(types::StringOrList::StringOrListVariant1),
+            .prop_map(|value| types::StringOrList::StringOrListVariant1(Box::new(value))),
     ]
 }
 
@@ -1021,17 +1025,19 @@ fn notes_strategy() -> impl Strategy<Value = Option<types::StringListOrNull>> {
     prop_oneof![
         Just(None),
         "[a-zA-Z0-9 ]{0,16}"
-            .prop_map(|s| Some(types::StringListOrNull::StringListOrNullVariant0(s))),
+            .prop_map(|s| Some(types::StringListOrNull::StringListOrNullVariant0(Box::new(s)))),
         proptest::collection::vec("[a-zA-Z0-9 ]{0,8}", 0..5)
-            .prop_map(|v| Some(types::StringListOrNull::StringListOrNullVariant1(v))),
+            .prop_map(|v| Some(types::StringListOrNull::StringListOrNullVariant1(Box::new(v)))),
     ]
 }
 
 // Required-key-disjoint union: two CLOSED objects, each carrying a unique required key.
 fn shape_strategy() -> impl Strategy<Value = types::Shape> {
     prop_oneof![
-        (-1000.0f64..1000.0).prop_map(|radius| types::Shape::Circle(types::Circle { radius })),
-        (-1000.0f64..1000.0).prop_map(|side| types::Shape::Square(types::Square { side })),
+        (-1000.0f64..1000.0)
+            .prop_map(|radius| types::Shape::Circle(Box::new(types::Circle { radius }))),
+        (-1000.0f64..1000.0)
+            .prop_map(|side| types::Shape::Square(Box::new(types::Square { side }))),
     ]
 }
 

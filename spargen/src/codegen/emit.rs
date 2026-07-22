@@ -1417,7 +1417,7 @@ fn emit_type_def(
                             .variants
                             .get(&(id, variant.name_hint.clone()))
                             .expect("union variant name allocated");
-                        let ty = ty_tokens(variant.ty, names, options, false);
+                        let ty = union_variant_ty_tokens(variant.ty, names, options);
                         quote! { #variant_ident(#ty), }
                     });
                     let category_arms =
@@ -1545,7 +1545,7 @@ fn emit_type_def(
                             .variants
                             .get(&(id, variant.name_hint.clone()))
                             .expect("union variant name allocated");
-                        let ty = ty_tokens(variant.ty, names, options, false);
+                        let ty = union_variant_ty_tokens(variant.ty, names, options);
                         quote! { #variant_ident(#ty), }
                     });
                     let de_arms = union
@@ -1623,7 +1623,7 @@ fn emit_type_def(
                             .variants
                             .get(&(id, variant.name_hint.clone()))
                             .expect("union variant name allocated");
-                        let ty = ty_tokens(variant.ty, names, options, false);
+                        let ty = union_variant_ty_tokens(variant.ty, names, options);
                         quote! { #variant_ident(#ty), }
                     });
                     let attempts = union.variants.iter().zip(priorities).map(
@@ -1632,7 +1632,7 @@ fn emit_type_def(
                             .variants
                             .get(&(id, variant.name_hint.clone()))
                             .expect("union variant name allocated");
-                        let ty = ty_tokens(variant.ty, names, options, false);
+                        let ty = union_variant_ty_tokens(variant.ty, names, options);
                         quote! {
                             if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
                                 match_count += 1;
@@ -1659,7 +1659,7 @@ fn emit_type_def(
                         }
                     });
                     let validations = union.variants.iter().map(|variant| {
-                        let ty = ty_tokens(variant.ty, names, options, false);
+                        let ty = union_variant_ty_tokens(variant.ty, names, options);
                         quote! {
                             if serde_json::from_value::<#ty>(value.clone()).is_ok() {
                                 match_count += 1;
@@ -1905,6 +1905,13 @@ fn ty_tokens(ty: Ty, names: &Names, _options: &CodegenOptions, qualified: bool) 
         tokens = quote! { Option<#tokens> };
     }
     tokens
+}
+
+/// Union payloads are uniformly indirect so an API's largest object variant cannot inflate every
+/// value of the enum (or trip strict `large_enum_variant` linting). Existing recursive boxing is a
+/// boolean representation flag, so setting it again never produces `Box<Box<T>>`.
+fn union_variant_ty_tokens(ty: Ty, names: &Names, options: &CodegenOptions) -> TokenStream {
+    ty_tokens(Ty { boxed: true, ..ty }, names, options, false)
 }
 
 fn prim_tokens(prim: Prim, options: &CodegenOptions) -> TokenStream {
