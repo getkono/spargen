@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2](https://github.com/getkono/spargen/compare/spargen-v0.2.1...spargen-v0.2.2) - 2026-07-22
+
+### Added
+
+- *(media)* decode textual and binary responses
+- *(oas31)* support overlapping typed unions
+- *(oas31)* intersect compatible allOf schemas
+
+### Fixed
+
+- *(codegen)* normalize rustdoc continuations
+- *(codegen)* box multi-status response payloads
+- *(codegen)* omit empty rustdoc attributes
+- *(codegen)* box generated union payloads
+- *(codegen)* lint deprecated blocking shims
+- *(codegen)* normalize generated rustdoc whitespace
+- *(codegen)* serialize typed OpenAPI parameters
+- *(runtime)* satisfy strict generated-client lints
+- *(diag)* deduplicate identical diagnostics
+
+### Other
+
+- *(recipes)* generate overlapping utoipa unions
+- *(oas31)* cover typed overlapping unions
+- *(compat)* keep carve fixtures unsupported
+- *(corpus)* gate the complete GitHub API client
+- Update README with project status and description
+
 ## [0.2.1](https://github.com/getkono/spargen/compare/spargen-v0.2.0...spargen-v0.2.1) - 2026-07-20
 
 ### Fixed
