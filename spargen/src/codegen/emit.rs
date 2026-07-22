@@ -1291,6 +1291,33 @@ fn emit_type_def(
             };
             quote! { #docs pub type #ident = #ty; }
         }
+        TypeKind::Never => {
+            let error = format!("no JSON value can inhabit schema {}", ident.as_str());
+            quote! {
+                #docs
+                #deprecated
+                #[derive(Debug, Clone)]
+                pub enum #ident {}
+
+                impl<'de> serde::Deserialize<'de> for #ident {
+                    fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
+                    where
+                        D: serde::Deserializer<'de>,
+                    {
+                        Err(serde::de::Error::custom(#error))
+                    }
+                }
+
+                impl serde::Serialize for #ident {
+                    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+                    where
+                        S: serde::Serializer,
+                    {
+                        Err(serde::ser::Error::custom(#error))
+                    }
+                }
+            }
+        }
         TypeKind::Union(union) => match &union.strategy {
             // Strategy A: a discriminator → a custom `Deserialize`/`Serialize` over a buffered
             // `serde_json::Value`. NOT serde `#[serde(tag = ...)]`: internal tagging consumes the tag
@@ -1611,8 +1638,9 @@ fn type_kind_tokens(
             quote! { (#(#items),*) }
         }
         TypeKind::Bytes => quote! { bytes::Bytes },
+        TypeKind::Null => quote! { () },
         TypeKind::Any => quote! { serde_json::Value },
-        TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Union(_) => {
+        TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Never | TypeKind::Union(_) => {
             unreachable!("named definitions emitted separately")
         }
     }

@@ -89,7 +89,12 @@ pub fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                     );
                 }
             }
-            TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes | TypeKind::Any => {}
+            TypeKind::Primitive(_)
+            | TypeKind::Enum(_)
+            | TypeKind::Bytes
+            | TypeKind::Null
+            | TypeKind::Never
+            | TypeKind::Any => {}
         }
     }
 }

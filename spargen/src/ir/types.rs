@@ -118,6 +118,11 @@ pub enum TypeKind {
     Tuple(Vec<Ty>),
     /// Raw bytes (`octet-stream` / `contentEncoding: base64`).
     Bytes,
+    /// The exact JSON `null` value (emitted as Rust's unit type, whose serde form is `null`).
+    Null,
+    /// An uninhabited schema used inside a container when an item intersection is empty. For
+    /// example, `array<string> & array<null>` is faithfully `Vec<Never>`: only `[]` is valid.
+    Never,
     /// A tagged or structurally-disjoint union (`oneOf`/`anyOf`).
     Union(Union),
     /// An untyped value (`{}` / `true` schema). Faithful representation of an untyped spec node.

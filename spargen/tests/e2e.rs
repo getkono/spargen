@@ -219,6 +219,34 @@ fn null_mixed_enum_field_is_option_of_enum() {
 }
 
 #[test]
+fn all_of_compatible_constraints_keep_the_narrow_typed_intersection() {
+    let json = serde_json::json!({
+        "run_id": 7,
+        "status": "queued",
+        "marker": null,
+        "labels": ["linux", "x64"],
+        "steps": [{"name": "build"}],
+        "empty_only": [],
+    });
+    let refined: basic_client::types::Refined = serde_json::from_value(json.clone()).unwrap();
+
+    // `number & integer` is emitted as an integer, and exact JSON null is Rust unit.
+    assert_eq!(refined.run_id, 7_i64);
+    assert_eq!(refined.marker, ());
+    assert_eq!(serde_json::to_value(refined).unwrap(), json);
+
+    let invalid = serde_json::json!({
+        "run_id": 7,
+        "status": "queued",
+        "marker": null,
+        "labels": ["linux"],
+        "steps": [{"name": "build"}],
+        "empty_only": [null],
+    });
+    assert!(serde_json::from_value::<basic_client::types::Refined>(invalid).is_err());
+}
+
+#[test]
 fn component_nullability_propagates_through_ref() {
     // A REQUIRED field referencing the nullable `Priority` component is `Option<Priority>`: the key
     // must be present, but `null` deserializes to `None` and a string to the variant. This only
@@ -1292,6 +1320,42 @@ components:
       oneOf:
         - type: integer
         - type: string
+    Refined:
+      allOf:
+        - type: object
+          required: [run_id, status, marker, labels, steps, empty_only]
+          properties:
+            run_id: { type: number }
+            status: { type: string }
+            marker: { type: [string, "null"] }
+            labels:
+              type: array
+              items: { type: [string, "null"] }
+            steps:
+              type: array
+              items: { type: [object, "null"] }
+            empty_only:
+              type: array
+              items: { type: string }
+        - type: object
+          required: [run_id, status, marker, labels, steps, empty_only]
+          properties:
+            run_id: { type: integer }
+            status: { type: string, enum: [queued, complete] }
+            marker: { type: "null" }
+            labels:
+              type: array
+              items: { type: string }
+            steps:
+              type: array
+              items:
+                type: object
+                required: [name]
+                properties:
+                  name: { type: string }
+            empty_only:
+              type: array
+              items: { type: "null" }
     User:
       type: object
       required: [id, name]
@@ -1320,6 +1384,8 @@ components:
         # resolves to `None` rather than erroring in the custom Deserialize.
         notes:
           $ref: "#/components/schemas/StringListOrNull"
+        refined:
+          $ref: "#/components/schemas/Refined"
     # Discriminated union: `petType` selects the object variant. Cat DECLARES `petType` as a required
     # property (the shape that broke serde internal tagging — "missing field petType"); the custom
     # buffer-to-Value Deserialize hands the WHOLE value to the variant, so Cat keeps its own tag.

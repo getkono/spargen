@@ -1050,9 +1050,9 @@ components:
 }
 
 #[test]
-fn all_null_enum_generates_as_nullable() {
-    // A value set of only `null` has no scalar remainder: it lowers to a faithful nullable untyped
-    // value rather than being rejected.
+fn all_null_enum_generates_as_exact_null() {
+    // A value set of only `null` has no scalar remainder: it lowers to exact JSON null (`()`) rather
+    // than an unconstrained value or E008.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -1772,6 +1772,52 @@ components:
     let report = generate(spec);
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+}
+
+/// Repeated properties in an `allOf` are intersections. Compatible refinements retain the narrower
+/// typed shape recursively: integer within number, enum within string, non-null within nullable,
+/// exact null, and nested array/object item constraints.
+#[test]
+fn all_of_recursively_intersects_compatible_property_types() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Refined:
+      allOf:
+        - type: object
+          properties:
+            run_id: { type: number }
+            status: { type: string }
+            marker: { type: [string, "null"] }
+            items:
+              type: array
+              items: { type: [object, "null"] }
+        - type: object
+          properties:
+            run_id: { type: integer }
+            status: { type: string, enum: [queued, complete] }
+            marker: { type: "null" }
+            items:
+              type: array
+              items:
+                type: object
+                required: [name]
+                properties:
+                  name: { type: string }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        !has_code(&checked, Code::AllOfIrreconcilable),
+        "{checked:#?}"
+    );
 }
 
 /// A property declared with different lowered types in two `allOf` members is irreconcilable → E013.

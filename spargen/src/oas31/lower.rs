@@ -491,7 +491,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 self.lower_object(schema, hint)?
             }
             Some(JsonType::Object) => self.lower_object(schema, hint)?,
-            Some(JsonType::Null) | None => self.insert_schema_type(schema, hint, TypeKind::Any),
+            Some(JsonType::Null) => self.insert_schema_type(schema, hint, TypeKind::Null),
+            None if schema.types.types.contains(&JsonType::Null) => {
+                self.insert_schema_type(schema, hint, TypeKind::Null)
+            }
+            None => self.insert_schema_type(schema, hint, TypeKind::Any),
         };
         ty.nullable = nullable;
         Some(ty)
@@ -536,11 +540,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
 
-        // Only null members remained: a faithful nullable untyped value.
+        // Only null members remained: the exact JSON null type.
         if real_members.is_empty() {
-            let mut ty = self.insert_schema_type(schema, hint, TypeKind::Any);
-            ty.nullable = true;
-            return Some(ty);
+            return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
         }
 
         // A single real member (the rest were null): `Option<ThatType>`, no enum needed. Re-emit the
@@ -732,7 +734,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ScalarRepr::Int => JsonCategory::Number,
                 ScalarRepr::Bool => JsonCategory::Boolean,
             },
-            TypeKind::Bytes | TypeKind::Any | TypeKind::Union(_) => return None,
+            TypeKind::Bytes
+            | TypeKind::Null
+            | TypeKind::Never
+            | TypeKind::Any
+            | TypeKind::Union(_) => return None,
         })
     }
 
@@ -880,13 +886,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `allOf`. The gathered members are then combined:
     ///
     /// * **all object members** → one flattened [`Struct`]: the union of properties in first-seen
-    ///   order (a property in two members with the same lowered type deduplicates; with *different*
-    ///   lowered types it is irreconcilable → `E013`), the union of `required` (a property required by
-    ///   any member is required), and a conservatively merged `additionalProperties` (a member that
-    ///   denies unknown keys wins over `allow`/`typed`; two different typed value schemas → `E013`);
-    /// * **all scalar members** that lower to the same primitive → collapse to that primitive (a
-    ///   validation-only refinement like `{type: string, minLength: 5}` is a scalar member); distinct
-    ///   scalars → `E013`;
+    ///   order, recursive typed intersections for properties declared by several members, the union
+    ///   of `required`, and a conservatively intersected `additionalProperties` policy;
+    /// * **all scalar members** → their typed intersection, including numeric narrowing, enum
+    ///   narrowing, arrays/objects/unions, and exact nullability; an empty intersection → `E013`;
     /// * an **object/scalar mix** → `E013`.
     ///
     /// Every path inserts its result type as the *final* graph insert (all member/property/component
@@ -915,11 +918,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             );
         }
 
-        // All-scalar allOf: every member must lower to the same emitted type; collapse to it rather
-        // than synthesizing a struct. `same_map_value_type` is the same bounded structural
-        // equivalence used for typed overflow maps (equal leaf shapes, equal `$ref` ids).
+        // All-scalar allOf: recursively intersect compatible members (for example integer with
+        // number, an enum with its underlying scalar, or arrays whose item constraints narrow).
         if !has_object {
-            let Some(first) = scalars.first().copied() else {
+            let Some(mut intersection) = scalars.first().copied() else {
                 // Only no-constraint members (`true`/`{}`) remained: a faithful open object.
                 let ty = self.insert_schema_type(
                     schema,
@@ -931,21 +933,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
                 return Some(self.with_all_of_nullability(schema, ty));
             };
-            if scalars
-                .iter()
-                .any(|ty| !self.same_map_value_type(first, *ty))
-            {
-                return self.reject_all_of(
-                    schema,
-                    "`allOf` scalar members lower to different types and cannot be reconciled",
-                );
+            for (index, member) in scalars.iter().copied().enumerate().skip(1) {
+                let Some(merged) = self.intersect_types(
+                    intersection,
+                    member,
+                    &format!("{hint}Intersection{index}"),
+                ) else {
+                    return self.reject_all_of(
+                        schema,
+                        "`allOf` scalar members have an empty or unrepresentable intersection",
+                    );
+                };
+                intersection = merged;
             }
-            // Re-emit the shared scalar as the final graph insert so the invariant holds even when
+            // Re-emit the intersection as the final graph insert so the invariant holds even when
             // the allOf is a component body (the per-member scalar inserts above are left dead —
             // `#[allow(dead_code)]` on the models module — rather than threading a reserved id).
-            let kind = self.graph.get(first.id).map(|def| def.kind.clone())?;
+            let kind = self
+                .graph
+                .get(intersection.id)
+                .map(|def| def.kind.clone())?;
             let mut ty = self.insert_schema_type(schema, hint, kind);
-            ty.nullable = first.nullable;
+            ty.nullable = intersection.nullable;
             return Some(self.with_all_of_nullability(schema, ty));
         }
 
@@ -967,7 +976,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     required.push(name.clone());
                 }
             }
-            match self.merge_additional(&additional, member_additional) {
+            match self.merge_additional(
+                &additional,
+                member_additional,
+                &format!("{hint}Additional"),
+            ) {
                 Some(merged) => additional = merged,
                 None => {
                     return self.reject_all_of(
@@ -979,15 +992,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             for field in member_fields {
                 match fields.get_mut(&field.name.wire) {
                     Some(existing) => {
-                        // Same property in two members: identical lowered types deduplicate; a type
-                        // mismatch is irreconcilable (never silently drop or pick one).
-                        if !self.same_map_value_type(existing.ty, field.ty) {
-                            return self.reject_all_of(
-                                schema,
-                                "a property appears in multiple `allOf` members with conflicting \
-                                 types",
+                        // A repeated property is an intersection, not an equality assertion: retain
+                        // the narrower compatible type and reject only an empty/unrepresentable
+                        // intersection.
+                        let Some(intersection) = self.intersect_types(
+                            existing.ty,
+                            field.ty,
+                            &format!("{hint}{}Intersection", field.name.wire),
+                        ) else {
+                            let message = format!(
+                                "property `{}` appears in multiple `allOf` members with \
+                                 conflicting types",
+                                field.name.wire
                             );
-                        }
+                            return self.reject_all_of(schema, &message);
+                        };
+                        existing.ty = intersection;
                         existing.required = existing.required || field.required;
                     }
                     None => {
@@ -1155,18 +1175,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// value must satisfy every member, so any member denying unknown keys forbids them outright);
     /// two typed value schemas must lower to the same type. Returns `None` when irreconcilable.
     fn merge_additional(
-        &self,
+        &mut self,
         acc: &AdditionalProps,
         next: &AdditionalProps,
+        hint: &str,
     ) -> Option<AdditionalProps> {
         Some(match (acc, next) {
             (AdditionalProps::Deny, _) | (_, AdditionalProps::Deny) => AdditionalProps::Deny,
             (AdditionalProps::Typed(x), AdditionalProps::Typed(y)) => {
-                if self.same_map_value_type(**x, **y) {
-                    AdditionalProps::Typed(x.clone())
-                } else {
-                    return None;
-                }
+                let intersection = self.intersect_types(**x, **y, hint)?;
+                AdditionalProps::Typed(Box::new(intersection))
             }
             (AdditionalProps::Typed(x), AdditionalProps::Allow)
             | (AdditionalProps::Allow, AdditionalProps::Typed(x)) => {
@@ -1283,6 +1301,239 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(AdditionalProps::Typed(Box::new(ty)))
     }
 
+    /// Compute a typed intersection for two already-lowered schemas. Nullability is intersected
+    /// independently from the non-null shape; an intersection containing only JSON `null` becomes
+    /// [`TypeKind::Null`]. Derived arrays, objects, enums, and narrowed unions are inserted into the
+    /// graph so codegen still sees an ordinary, fully typed IR node.
+    fn intersect_types(&mut self, a: Ty, b: Ty, hint: &str) -> Option<Ty> {
+        let a_kind = self.graph.get(a.id)?.kind.clone();
+        let b_kind = self.graph.get(b.id)?.kind.clone();
+        let accepts_null = type_accepts_null(a, &a_kind) && type_accepts_null(b, &b_kind);
+
+        let non_null = if matches!(a_kind, TypeKind::Null) || matches!(b_kind, TypeKind::Null) {
+            None
+        } else {
+            self.intersect_non_null(a, &a_kind, b, &b_kind, hint)
+        };
+
+        match non_null {
+            Some(mut ty) => {
+                ty.nullable = accepts_null;
+                Some(ty)
+            }
+            None if accepts_null => {
+                Some(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+            }
+            None => None,
+        }
+    }
+
+    fn intersect_non_null(
+        &mut self,
+        a: Ty,
+        a_kind: &TypeKind,
+        b: Ty,
+        b_kind: &TypeKind,
+        hint: &str,
+    ) -> Option<Ty> {
+        if a.id == b.id {
+            let mut ty = a;
+            ty.nullable = false;
+            ty.boxed = a.boxed || b.boxed;
+            return Some(ty);
+        }
+
+        match (a_kind, b_kind) {
+            (TypeKind::Any, _) => Some(non_nullable(b)),
+            (_, TypeKind::Any) => Some(non_nullable(a)),
+            (TypeKind::Primitive(left), TypeKind::Primitive(right)) => {
+                let primitive = intersect_primitives(*left, *right)?;
+                if primitive == *left {
+                    Some(non_nullable(a))
+                } else if primitive == *right {
+                    Some(non_nullable(b))
+                } else {
+                    Some(self.insert_type(
+                        hint,
+                        TypeKind::Primitive(primitive),
+                        Docs::default(),
+                        None,
+                    ))
+                }
+            }
+            (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
+                let variants: Vec<ScalarValue> = left
+                    .variants
+                    .iter()
+                    .filter(|value| right.variants.contains(value))
+                    .cloned()
+                    .collect();
+                if variants.is_empty() {
+                    None
+                } else if variants == left.variants {
+                    Some(non_nullable(a))
+                } else if variants == right.variants {
+                    Some(non_nullable(b))
+                } else {
+                    Some(self.insert_type(
+                        hint,
+                        TypeKind::Enum(ScalarEnum {
+                            repr: left.repr,
+                            variants,
+                        }),
+                        Docs::default(),
+                        None,
+                    ))
+                }
+            }
+            (TypeKind::Enum(enumeration), TypeKind::Primitive(primitive))
+                if enum_matches_primitive(enumeration.repr, *primitive) =>
+            {
+                Some(non_nullable(a))
+            }
+            (TypeKind::Primitive(primitive), TypeKind::Enum(enumeration))
+                if enum_matches_primitive(enumeration.repr, *primitive) =>
+            {
+                Some(non_nullable(b))
+            }
+            (TypeKind::Array(left), TypeKind::Array(right)) => {
+                let item_hint = format!("{hint}Item");
+                let item = self
+                    .intersect_types(**left, **right, &item_hint)
+                    .unwrap_or_else(|| {
+                        self.insert_type(&item_hint, TypeKind::Never, Docs::default(), None)
+                    });
+                if same_ty(item, **left) {
+                    Some(non_nullable(a))
+                } else if same_ty(item, **right) {
+                    Some(non_nullable(b))
+                } else {
+                    Some(self.insert_type(
+                        hint,
+                        TypeKind::Array(Box::new(item)),
+                        Docs::default(),
+                        None,
+                    ))
+                }
+            }
+            (TypeKind::Tuple(left), TypeKind::Tuple(right)) if left.len() == right.len() => {
+                let items = left
+                    .iter()
+                    .zip(right)
+                    .enumerate()
+                    .map(|(index, (left, right))| {
+                        self.intersect_types(*left, *right, &format!("{hint}Item{index}"))
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
+            }
+            (TypeKind::Struct(left), TypeKind::Struct(right)) => {
+                self.intersect_structs(left, right, hint)
+            }
+            (TypeKind::Union(union), _) => self.intersect_union(a, union, b, hint),
+            (_, TypeKind::Union(union)) => self.intersect_union(b, union, a, hint),
+            (TypeKind::Bytes, TypeKind::Bytes) => Some(non_nullable(a)),
+            _ => None,
+        }
+    }
+
+    fn intersect_structs(&mut self, left: &Struct, right: &Struct, hint: &str) -> Option<Ty> {
+        let mut fields: IndexMap<String, Field> = left
+            .fields
+            .iter()
+            .cloned()
+            .map(|field| (field.name.wire.clone(), field))
+            .collect();
+        for field in &right.fields {
+            match fields.get_mut(&field.name.wire) {
+                Some(existing) => {
+                    existing.ty = self.intersect_types(
+                        existing.ty,
+                        field.ty,
+                        &format!("{hint}{}", field.name.wire),
+                    )?;
+                    existing.required = existing.required || field.required;
+                    if existing.required {
+                        if let Some(default) = &mut existing.default {
+                            default.applied = None;
+                        }
+                    }
+                }
+                None => {
+                    fields.insert(field.name.wire.clone(), field.clone());
+                }
+            }
+        }
+        let additional = self.merge_additional(
+            &left.additional,
+            &right.additional,
+            &format!("{hint}Additional"),
+        )?;
+        Some(self.insert_type(
+            hint,
+            TypeKind::Struct(Struct {
+                fields: fields.into_values().collect(),
+                additional,
+            }),
+            Docs::default(),
+            None,
+        ))
+    }
+
+    fn intersect_union(
+        &mut self,
+        union_ty: Ty,
+        union: &Union,
+        other: Ty,
+        hint: &str,
+    ) -> Option<Ty> {
+        let mut variants = Vec::new();
+        let mut retained = Vec::new();
+        for (index, variant) in union.variants.iter().enumerate() {
+            if let Some(ty) =
+                self.intersect_types(variant.ty, other, &format!("{hint}Variant{index}"))
+            {
+                variants.push(UnionVariant {
+                    name_hint: variant.name_hint.clone(),
+                    ty,
+                });
+                retained.push(index);
+            }
+        }
+        if variants.len() == 1 {
+            return variants.into_iter().next().map(|variant| variant.ty);
+        }
+        if variants.is_empty() {
+            return None;
+        }
+        if variants.len() == union.variants.len()
+            && variants
+                .iter()
+                .zip(&union.variants)
+                .all(|(left, right)| same_ty(left.ty, right.ty))
+        {
+            return Some(non_nullable(union_ty));
+        }
+        let strategy = match &union.strategy {
+            UnionStrategy::Discriminated { tag_field, tags } => UnionStrategy::Discriminated {
+                tag_field: tag_field.clone(),
+                tags: retained.iter().map(|index| tags[*index].clone()).collect(),
+            },
+            UnionStrategy::Disjoint { features } => UnionStrategy::Disjoint {
+                features: retained
+                    .iter()
+                    .map(|index| features[*index].clone())
+                    .collect(),
+            },
+        };
+        Some(self.insert_type(
+            hint,
+            TypeKind::Union(Union { variants, strategy }),
+            Docs::default(),
+            None,
+        ))
+    }
+
     /// Whether two lowered value types would emit the *same* Rust type as a shared map value, so
     /// multiple `patternProperties`/`additionalProperties` values can collapse into one typed
     /// overflow map. A bounded structural equivalence:
@@ -1328,6 +1579,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (Some(a_def), Some(b_def)) => match (&a_def.kind, &b_def.kind) {
                 (TypeKind::Primitive(x), TypeKind::Primitive(y)) => x == y,
                 (TypeKind::Bytes, TypeKind::Bytes) => true,
+                (TypeKind::Null, TypeKind::Null) | (TypeKind::Never, TypeKind::Never) => true,
                 (TypeKind::Any, TypeKind::Any) => true,
                 (TypeKind::Array(x), TypeKind::Array(y)) => {
                     self.same_map_value_type_guarded(**x, **y, visiting)
@@ -1433,12 +1685,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .filter(|value| !matches!(value.node, Node::Null))
             .collect();
 
-        // Only `null` members remained (`enum: [null]` / `const: null`): no scalar variants to
-        // lower, so emit a faithful nullable `Any` rather than rejecting.
+        // Only `null` members remained (`enum: [null]` / `const: null`): emit the exact JSON null
+        // type (`()`), not a nullable unconstrained value that would also accept non-null content.
         if remainder.is_empty() {
-            let mut ty = self.insert_schema_type(schema, hint, TypeKind::Any);
-            ty.nullable = true;
-            return Some(ty);
+            return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
         }
 
         let mut variants = Vec::new();
@@ -1871,7 +2121,7 @@ fn parameter_shape_supported_inner(
         return false;
     };
     let supported = match &definition.kind {
-        TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes => true,
+        TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes | TypeKind::Null => true,
         TypeKind::Array(item) if !scalar_only => {
             parameter_shape_supported_inner(graph, **item, true, visiting)
         }
@@ -1893,10 +2143,55 @@ fn parameter_shape_supported_inner(
         TypeKind::Union(union) => union.variants.iter().all(|variant| {
             parameter_shape_supported_inner(graph, variant.ty, scalar_only, visiting)
         }),
-        TypeKind::Struct(_) | TypeKind::Array(_) | TypeKind::Tuple(_) | TypeKind::Any => false,
+        TypeKind::Struct(_)
+        | TypeKind::Array(_)
+        | TypeKind::Tuple(_)
+        | TypeKind::Never
+        | TypeKind::Any => false,
     };
     visiting.remove(&ty.id);
     supported
+}
+
+fn type_accepts_null(ty: Ty, kind: &TypeKind) -> bool {
+    ty.nullable || matches!(kind, TypeKind::Null | TypeKind::Any)
+}
+
+fn non_nullable(mut ty: Ty) -> Ty {
+    ty.nullable = false;
+    ty
+}
+
+fn same_ty(left: Ty, right: Ty) -> bool {
+    left.id == right.id && left.nullable == right.nullable && left.boxed == right.boxed
+}
+
+fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
+    use Prim::{Bool, Date, DateTime, String, Uuid, F64, I32, I64};
+    Some(match (left, right) {
+        (Bool, Bool) => Bool,
+        (I32, I32 | I64 | F64) | (I64 | F64, I32) => I32,
+        (I64, I64 | F64) | (F64, I64) => I64,
+        (F64, F64) => F64,
+        (String, String) => String,
+        (String, formatted @ (Uuid | DateTime | Date))
+        | (formatted @ (Uuid | DateTime | Date), String) => formatted,
+        (Uuid, Uuid) => Uuid,
+        (DateTime, DateTime) => DateTime,
+        (Date, Date) => Date,
+        _ => return None,
+    })
+}
+
+fn enum_matches_primitive(repr: ScalarRepr, primitive: Prim) -> bool {
+    match repr {
+        ScalarRepr::String => matches!(
+            primitive,
+            Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date
+        ),
+        ScalarRepr::Int => matches!(primitive, Prim::I32 | Prim::I64 | Prim::F64),
+        ScalarRepr::Bool => primitive == Prim::Bool,
+    }
 }
 
 fn lower_security_requirement(requirement: &SecurityRequirement) -> crate::ir::SecurityRequirement {
@@ -2066,7 +2361,12 @@ fn reachable_types(graph: &TypeGraph, roots: &[TypeId]) -> HashSet<TypeId> {
             TypeKind::Union(union) => {
                 stack.extend(union.variants.iter().map(|variant| variant.ty.id))
             }
-            TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Bytes | TypeKind::Any => {}
+            TypeKind::Primitive(_)
+            | TypeKind::Enum(_)
+            | TypeKind::Bytes
+            | TypeKind::Null
+            | TypeKind::Never
+            | TypeKind::Any => {}
         }
     }
     visited
@@ -2332,10 +2632,13 @@ fn schema_is_object_like(schema: &Schema) -> bool {
 /// an `enum`/`const`, or `contentEncoding`) — as opposed to a pure annotation member (`{}` /
 /// `{description: ...}`) that constrains nothing.
 fn schema_imposes_scalar(schema: &Schema) -> bool {
-    schema.types.types.iter().any(|ty| *ty != JsonType::Null)
+    !schema.types.types.is_empty()
         || schema.enum_values.is_some()
         || schema.const_value.is_some()
         || schema.content_encoding.is_some()
+        || schema.format.as_deref() == Some("binary")
+        || !schema.one_of.is_empty()
+        || !schema.any_of.is_empty()
 }
 
 /// The provenance of an `allOf` member for diagnostics — the schema's own provenance, or the
