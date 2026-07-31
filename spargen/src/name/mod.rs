@@ -32,10 +32,8 @@ pub struct Names {
     pub operations: HashMap<OperationId, Ident>,
     /// Optional-parameters `…Params` struct name per operation.
     pub params_structs: HashMap<OperationId, Ident>,
-    /// Rust identifier for every operation parameter, in the IR's parameter order per operation.
-    /// Required arguments and optional `…Params` fields have separate lexical scopes but share
-    /// this lookup table because the index identifies which scope allocated the name.
-    pub parameters: HashMap<OperationId, Vec<Ident>>,
+    /// Signature and request-construction bindings per operation.
+    pub operation_bindings: HashMap<OperationId, OperationBindings>,
     /// Type name per type.
     pub types: HashMap<TypeId, Ident>,
     /// Field name per `(type, wire property name)`.
@@ -47,6 +45,30 @@ pub struct Names {
     pub struct_overflow: HashMap<TypeId, Ident>,
     /// Variant name per `(type, wire variant value)`.
     pub variants: HashMap<(TypeId, String), Ident>,
+}
+
+/// Every binding whose spelling is part of an emitted operation's signature or request-building
+/// prelude. Codegen consumes these identifiers directly, so it never maintains a parallel list of
+/// generator-owned names that must stay synchronized with allocation.
+#[derive(Debug)]
+pub struct OperationBindings {
+    /// Rust identifier for every OpenAPI parameter, in IR order. Required arguments and optional
+    /// `…Params` fields occupy separate lexical scopes, but the index identifies the source item.
+    pub parameters: Vec<Ident>,
+    /// The optional-parameters struct argument, when the operation has optional parameters.
+    pub params: Option<Ident>,
+    /// The request-body argument, when the operation has a typed request body.
+    pub body: Option<Ident>,
+    /// Mutable path assembled before URL construction.
+    pub request_path: Ident,
+    /// Mutable query-pair collection assembled before URL construction.
+    pub request_query: Ident,
+    /// Fully constructed request URL.
+    pub request_url: Ident,
+    /// Mutable reqwest request builder.
+    pub request_builder: Ident,
+    /// Mutable cookie-fragment collection, used only by operations with cookie parameters.
+    pub request_cookies: Ident,
 }
 
 /// Allocate every identifier the API needs, in one deterministic pass. Naming conflicts
@@ -83,30 +105,20 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             ),
         );
 
-        // Required parameters live in the generated method body. Reserve every binding codegen
-        // owns before allocating wire-derived argument names, so a parameter can never shadow a
-        // value used to construct the request. `body` and `params` are reserved only when that
-        // operation emits those arguments, preserving ordinary parameter names otherwise.
+        // Fixed signature arguments keep their conventional names. Required wire parameters share
+        // that signature scope, while optional parameters are fields (and identically named
+        // setters) on their own params struct.
         let mut required_scope = Scope::default();
-        for binding in [
-            "request_path",
-            "request_query",
-            "request_url",
-            "request_builder",
-            "request_cookies",
-        ] {
-            required_scope.reserve(binding, IdentRole::Param);
-        }
-        if operation.request_body.is_some() {
-            required_scope.reserve("body", IdentRole::Param);
-        }
-        if operation.params.iter().any(|parameter| !parameter.required) {
-            required_scope.reserve("params", IdentRole::Param);
-        }
-
-        // Optional parameters are fields (and identically named setters) on their own params
-        // struct, so allocate them in a separate scope rather than needlessly disambiguating them
-        // against required method arguments.
+        let params = operation
+            .params
+            .iter()
+            .any(|parameter| !parameter.required)
+            .then(|| required_scope.reserve("params", IdentRole::Param));
+        let body = operation
+            .request_body
+            .as_ref()
+            .and_then(|request_body| request_body.ty)
+            .map(|_| required_scope.reserve("body", IdentRole::Param));
         let mut optional_scope = Scope::default();
         let mut parameter_names = Vec::with_capacity(operation.params.len());
         for parameter in &operation.params {
@@ -117,9 +129,24 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             };
             parameter_names.push(scope.alloc(&parameter.name, role, &parameter.provenance.pointer));
         }
+
+        // Internal request-construction locals yield to the complete emitted signature. Allocating
+        // them from the same scope preserves wire-derived argument spellings and makes shadowing
+        // impossible without a second hard-coded reservation channel in codegen.
+        let pointer = &operation.provenance.pointer;
+        let bindings = OperationBindings {
+            parameters: parameter_names,
+            params,
+            body,
+            request_path: required_scope.alloc("request_path", IdentRole::Param, pointer),
+            request_query: required_scope.alloc("request_query", IdentRole::Param, pointer),
+            request_url: required_scope.alloc("request_url", IdentRole::Param, pointer),
+            request_builder: required_scope.alloc("request_builder", IdentRole::Param, pointer),
+            request_cookies: required_scope.alloc("request_cookies", IdentRole::Param, pointer),
+        };
         names
-            .parameters
-            .insert(operation.id.clone(), parameter_names);
+            .operation_bindings
+            .insert(operation.id.clone(), bindings);
     }
 
     for (id, def) in api.types.iter() {

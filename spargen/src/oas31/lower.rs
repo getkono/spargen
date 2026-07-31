@@ -63,14 +63,7 @@ pub fn lower(
                 .clone()
                 .unwrap_or_else(|| synth_operation_id(*method, &path_template));
 
-            let mut params = Vec::new();
-            for parameter in item.parameters.iter().chain(operation.parameters.iter()) {
-                if let Some(parameter) = ctx.resolve_parameter(parameter) {
-                    if let Some(parameter) = ctx.lower_parameter(&parameter) {
-                        params.push(parameter);
-                    }
-                }
-            }
+            let params = ctx.lower_operation_parameters(&item.parameters, &operation.parameters);
 
             let request_body = operation
                 .request_body
@@ -2176,6 +2169,68 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     RefOr::Ref(_) => None,
                 }),
         }
+    }
+
+    /// Build the operation's effective parameter set before lowering schemas into the IR.
+    ///
+    /// OpenAPI identifies a parameter by `(name, in)`: an operation declaration with the same key
+    /// replaces the path-item declaration. Replacing in place preserves the stable path-item order,
+    /// while parameters introduced by the operation follow it in their declared order. Duplicate
+    /// keys inside either individual scope are invalid rather than a second override channel.
+    fn lower_operation_parameters(
+        &mut self,
+        path_parameters: &[RefOr<ParameterObject>],
+        operation_parameters: &[RefOr<ParameterObject>],
+    ) -> Vec<Parameter> {
+        let mut effective = self.resolve_parameter_scope(path_parameters, "path item");
+        let inherited_positions: HashMap<(String, String), usize> = effective
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| ((parameter.name.clone(), parameter.location.clone()), index))
+            .collect();
+
+        for parameter in self.resolve_parameter_scope(operation_parameters, "operation") {
+            let key = (parameter.name.clone(), parameter.location.clone());
+            if let Some(index) = inherited_positions.get(&key) {
+                effective[*index] = parameter;
+            } else {
+                effective.push(parameter);
+            }
+        }
+
+        effective
+            .iter()
+            .filter_map(|parameter| self.lower_parameter(parameter))
+            .collect()
+    }
+
+    fn resolve_parameter_scope(
+        &mut self,
+        parameters: &[RefOr<ParameterObject>],
+        scope: &str,
+    ) -> Vec<ParameterObject> {
+        let mut seen = HashSet::new();
+        let mut resolved = Vec::new();
+        for parameter in parameters {
+            let Some(parameter) = self.resolve_parameter(parameter) else {
+                continue;
+            };
+            let key = (parameter.name.clone(), parameter.location.clone());
+            if !seen.insert(key) {
+                Diagnostic::error(Code::InvalidInput, parameter.provenance.clone())
+                    .message(format!(
+                        "{scope} declares parameter `{}` in `{}` more than once",
+                        parameter.name, parameter.location
+                    ))
+                    .remedy(
+                        "remove the duplicate; only an operation may override a path-item parameter",
+                    )
+                    .emit(self.diags);
+                continue;
+            }
+            resolved.push(parameter);
+        }
+        resolved
     }
 
     fn resolve_request_body(&self, body: &RefOr<RequestBodyObject>) -> Option<RequestBodyObject> {

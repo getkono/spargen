@@ -33,7 +33,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Api, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec, SuccessShape, Ty, TypeKind,
+    Api, ErrorShape, ParamLoc, Prim, ScalarRepr, ScalarValue, StatusSpec, SuccessShape, Ty,
+    TypeKind,
 };
 use crate::name::Names;
 
@@ -52,8 +53,9 @@ pub(crate) struct Surface {
 struct OpSurface {
     /// The generated Rust method identifier.
     method_name: String,
-    /// Parameters keyed by wire name (path/query/header/cookie alike).
-    params: BTreeMap<String, ParamSurface>,
+    /// Parameters keyed by stable wire identity. Location participates because OpenAPI permits the
+    /// same wire name in different parameter locations.
+    params: BTreeMap<ParamKey, ParamSurface>,
     /// The canonical request-body type, or `None` for a bodyless operation. A present body is a
     /// required `&T` argument in the generated signature (the IR does not model an optional body).
     request_body: Option<String>,
@@ -66,8 +68,19 @@ struct OpSurface {
 /// A single parameter's surface: its canonical type and whether it is required (required params are
 /// positional method arguments; optional ones ride in the `…Params` struct).
 struct ParamSurface {
+    /// The generated Rust argument or params-field identifier.
+    rust_name: String,
     ty: String,
     required: bool,
+}
+
+/// A parameter's stable specification identity. Generated Rust names cannot serve as identity:
+/// required arguments and optional params fields occupy separate scopes and may legitimately share
+/// one spelling.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+struct ParamKey {
+    location: &'static str,
+    wire_name: String,
 }
 
 /// A public model type's surface, by generation kind. Only nominal types with real distinct
@@ -155,6 +168,10 @@ pub enum ChangeKind {
     ParamTypeChanged,
     /// A parameter's required-ness flipped. **Major** — the method signature changes either way.
     ParamRequirednessChanged,
+    /// A parameter's generated Rust identifier changed. **Major** — optional params fields and
+    /// setters are named consumer API, and all generated signature changes are treated
+    /// conservatively.
+    ParamRenamed,
     /// A new public type appeared. **Minor** — additive.
     TypeAdded,
     /// A public type was removed. **Major**.
@@ -200,6 +217,7 @@ impl ChangeKind {
             | ChangeKind::ParamRemoved
             | ChangeKind::ParamTypeChanged
             | ChangeKind::ParamRequirednessChanged
+            | ChangeKind::ParamRenamed
             | ChangeKind::TypeRemoved
             | ChangeKind::TypeKindChanged
             | ChangeKind::RequiredFieldAdded
@@ -227,6 +245,7 @@ impl ChangeKind {
             ChangeKind::ParamRemoved => "param-removed",
             ChangeKind::ParamTypeChanged => "param-type-changed",
             ChangeKind::ParamRequirednessChanged => "param-requiredness-changed",
+            ChangeKind::ParamRenamed => "param-renamed",
             ChangeKind::TypeAdded => "type-added",
             ChangeKind::TypeRemoved => "type-removed",
             ChangeKind::TypeKindChanged => "type-kind-changed",
@@ -313,15 +332,19 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
 
         let mut params = BTreeMap::new();
         for (index, param) in operation.params.iter().enumerate() {
-            let param_name = names
-                .parameters
+            let rust_name = names
+                .operation_bindings
                 .get(&operation.id)
-                .and_then(|parameters| parameters.get(index))
+                .and_then(|bindings| bindings.parameters.get(index))
                 .map(|ident| ident.as_str().to_owned())
                 .unwrap_or_else(|| param.name.clone());
             params.insert(
-                param_name,
+                ParamKey {
+                    location: param_location_label(param.location),
+                    wire_name: param.name.clone(),
+                },
                 ParamSurface {
+                    rust_name,
                     ty: canon_ty(param.ty, api, names),
                     required: param.required,
                 },
@@ -492,9 +515,12 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             format!("error type `{}` -> `{}`", old.error, new.error),
         ));
     }
-    for name in keys(&old.params, &new.params) {
-        let location = format!("{key} param `{name}`");
-        match (old.params.get(name), new.params.get(name)) {
+    for param_key in keys(&old.params, &new.params) {
+        let location = format!(
+            "{key} {} param `{}`",
+            param_key.location, param_key.wire_name
+        );
+        match (old.params.get(param_key), new.params.get(param_key)) {
             (None, Some(param)) => {
                 let kind = if param.required {
                     ChangeKind::RequiredParamAdded
@@ -531,7 +557,7 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
                 if old_param.required != new_param.required {
                     changes.push(Change::new(
                         ChangeKind::ParamRequirednessChanged,
-                        location,
+                        location.clone(),
                         format!(
                             "parameter now {}",
                             if new_param.required {
@@ -542,9 +568,28 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
                         ),
                     ));
                 }
+                if old_param.rust_name != new_param.rust_name {
+                    changes.push(Change::new(
+                        ChangeKind::ParamRenamed,
+                        location,
+                        format!(
+                            "generated parameter renamed `{}` -> `{}`",
+                            old_param.rust_name, new_param.rust_name
+                        ),
+                    ));
+                }
             }
             (None, None) => unreachable!("key drawn from the union of both maps"),
         }
+    }
+}
+
+fn param_location_label(location: ParamLoc) -> &'static str {
+    match location {
+        ParamLoc::Path => "path",
+        ParamLoc::Query => "query",
+        ParamLoc::Header => "header",
+        ParamLoc::Cookie => "cookie",
     }
 }
 
@@ -703,10 +748,10 @@ fn diff_union(
 }
 
 /// The sorted union of two maps' keys — the deterministic traversal spine of every diff.
-fn keys<'a, V>(
-    old: &'a BTreeMap<String, V>,
-    new: &'a BTreeMap<String, V>,
-) -> impl Iterator<Item = &'a String> {
+fn keys<'a, K: Ord, V>(
+    old: &'a BTreeMap<K, V>,
+    new: &'a BTreeMap<K, V>,
+) -> impl Iterator<Item = &'a K> {
     old.keys()
         .chain(new.keys())
         .collect::<BTreeSet<_>>()

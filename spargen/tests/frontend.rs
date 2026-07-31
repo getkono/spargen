@@ -18,6 +18,21 @@ fn generate(spec: &str) -> Report {
     ))
 }
 
+/// Run `generate` and retain the emitted module so successful frontend behavior can be asserted at
+/// the public generated-API boundary.
+fn generate_source(spec: &str) -> (Report, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(&spec_path, spec).unwrap();
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&Config::new(
+        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
+        OutputTarget::Module(Utf8PathBuf::from_path_buf(out.clone()).unwrap()),
+    ));
+    let source = std::fs::read_to_string(out).unwrap_or_default();
+    (report, source)
+}
+
 /// As [`generate`], but through the `check` entry point (no codegen/emit).
 fn check(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
@@ -1692,6 +1707,81 @@ paths:
 
     let checked = check(spec);
     assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+}
+
+#[test]
+fn operation_parameter_overrides_path_item_parameter_by_wire_identity() {
+    // OpenAPI explicitly allows an operation parameter to override a path-item parameter with the
+    // same `(name, in)`. The effective operation has ONE required integer argument: the inherited
+    // optional string must not survive as a params-struct field or consume the natural Rust name.
+    let (report, generated) = generate_source(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    parameters:
+      - name: mode
+        in: query
+        schema: { type: string }
+    get:
+      operationId: search
+      parameters:
+        - name: mode
+          in: query
+          required: true
+          schema: { type: integer }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    let signature = generated
+        .split("pub async fn search")
+        .nth(1)
+        .expect("search method emitted")
+        .split(") ->")
+        .next()
+        .expect("method signature terminator emitted");
+    assert!(signature.contains("mode:"), "{signature}");
+    assert!(!signature.contains("mode_"), "{signature}");
+    assert!(!signature.contains("params:"), "{signature}");
+}
+
+#[test]
+fn duplicate_parameters_within_one_scope_are_e011() {
+    for parameters in [
+        // Duplicate path-item parameters are not overrides.
+        r##"
+    parameters:
+      - { name: mode, in: query, schema: { type: string } }
+      - { name: mode, in: query, schema: { type: integer } }
+    get:
+      responses:
+        "204": { description: No Content }
+"##,
+        // Nor are duplicate parameters declared by one operation.
+        r##"
+    get:
+      parameters:
+        - { name: mode, in: query, schema: { type: string } }
+        - { name: mode, in: query, schema: { type: integer } }
+      responses:
+        "204": { description: No Content }
+"##,
+    ] {
+        let spec = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths:\n  /search:\n{parameters}"
+        );
+        let report = generate(&spec);
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+
+        let checked = check(&spec);
+        assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+        assert!(has_code(&checked, Code::InvalidInput), "{checked:#?}");
+    }
 }
 
 #[test]

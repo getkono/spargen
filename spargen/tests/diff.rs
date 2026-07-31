@@ -57,6 +57,53 @@ const PARAM_OPTIONAL_STRING: &str = "      parameters:
           schema: { type: string }
 ";
 
+const PARAM_COLLIDING_REQUIRED_INT: &str = "      parameters:
+        - name: foo-bar
+          in: query
+          required: true
+          schema: { type: integer }
+        - name: foo_bar
+          in: query
+          required: false
+          schema: { type: string }
+";
+
+const PARAM_COLLIDING_REQUIRED_BOOL: &str = "      parameters:
+        - name: foo-bar
+          in: query
+          required: true
+          schema: { type: boolean }
+        - name: foo_bar
+          in: query
+          required: false
+          schema: { type: string }
+";
+
+const PARAM_OPTIONAL_UNDERSCORE: &str = "      parameters:
+        - name: foo_bar
+          in: query
+          required: false
+          schema: { type: string }
+";
+
+const PARAM_OPTIONAL_HYPHEN: &str = "      parameters:
+        - name: foo-bar
+          in: query
+          required: false
+          schema: { type: string }
+";
+
+const PARAM_OPTIONAL_PREFIX_COLLISION: &str = "      parameters:
+        - name: foo-bar
+          in: query
+          required: false
+          schema: { type: string }
+        - name: foo_bar
+          in: query
+          required: false
+          schema: { type: string }
+";
+
 const EXTRA_OP: &str = "  /owners:
     get:
       operationId: listOwners
@@ -175,6 +222,45 @@ fn changed_param_type_is_major() {
     let new = spec(PARAM_OPTIONAL_STRING, "id", PET_PROPS, "");
     let report = diff(&old, &new);
     assert_eq!(kinds(&report), vec![ChangeKind::ParamTypeChanged]);
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn changed_required_param_type_is_not_hidden_by_optional_name_collision() {
+    // Required arguments and optional params fields have separate Rust scopes, so both wire names
+    // legitimately allocate to `foo_bar`. The compatibility surface must retain both parameters
+    // rather than flattening them into one generated-name-keyed map entry.
+    let old = spec(PARAM_COLLIDING_REQUIRED_INT, "id", PET_PROPS, "");
+    let new = spec(PARAM_COLLIDING_REQUIRED_BOOL, "id", PET_PROPS, "");
+    let report = diff(&old, &new);
+    assert_eq!(kinds(&report), vec![ChangeKind::ParamTypeChanged]);
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn changed_generated_optional_param_name_is_major() {
+    // Inserting a colliding optional parameter before an existing field forces the existing field
+    // and setter onto a disambiguated Rust identifier. The stable wire identity stays the same, so
+    // report the generated API rename directly instead of misclassifying it as removal/addition.
+    let old = spec(PARAM_OPTIONAL_UNDERSCORE, "id", PET_PROPS, "");
+    let new = spec(PARAM_OPTIONAL_PREFIX_COLLISION, "id", PET_PROPS, "");
+    let report = diff(&old, &new);
+    let kinds = kinds(&report);
+    assert!(kinds.contains(&ChangeKind::ParamRenamed), "{kinds:?}");
+    assert!(kinds.contains(&ChangeKind::OptionalParamAdded), "{kinds:?}");
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn changed_wire_name_is_not_hidden_by_identical_rust_name() {
+    // Both wire names normalize to `foo_bar`, but changing the query key changes request behavior.
+    // Wire identity—not generated spelling—must drive parameter matching across surfaces.
+    let old = spec(PARAM_OPTIONAL_HYPHEN, "id", PET_PROPS, "");
+    let new = spec(PARAM_OPTIONAL_UNDERSCORE, "id", PET_PROPS, "");
+    let report = diff(&old, &new);
+    let kinds = kinds(&report);
+    assert!(kinds.contains(&ChangeKind::ParamRemoved), "{kinds:?}");
+    assert!(kinds.contains(&ChangeKind::OptionalParamAdded), "{kinds:?}");
     assert_eq!(report.bump, Impact::Major);
 }
 

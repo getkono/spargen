@@ -194,7 +194,7 @@ impl Code {
                 "Webhooks, callbacks, and links describe server-initiated or hypermedia behavior. They are acknowledged with a warning and no client code is emitted."
             }
             Code::InvalidInput => {
-                "The input is malformed JSON/YAML or is missing a required OpenAPI structure needed before feature auditing can continue."
+                "The input is malformed JSON/YAML or violates a required OpenAPI structure needed before feature auditing can continue. This includes duplicate parameters with the same `(name, in)` inside one path-item or operation parameter list; an operation may override a matching path-item parameter, but neither list may contain duplicates itself."
             }
             Code::DuplicateObjectKey => {
                 "An object (JSON or YAML mapping) declares the same key more than once. Duplicate keys make the member ambiguous — a reader cannot tell which value wins, and downstream a duplicated `properties` name or schema keyword would resolve inconsistently — so spargen rejects the document at parse time and points at the second occurrence rather than silently keeping one. Remove or rename the duplicate key."

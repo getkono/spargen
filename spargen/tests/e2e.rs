@@ -77,6 +77,25 @@ fn generates_standalone_crate_for_basic_oas31_api() {
         generated.contains("#[cfg(all(feature = \"blocking\", not(target_arch = \"wasm32\")))]"),
         "BlockingClient must be gated on the blocking feature and off wasm"
     );
+    // Generator-owned request locals yield to wire-derived argument names. A valid header named
+    // `request_builder` therefore keeps its natural argument spelling; only the internal reqwest
+    // builder receives a collision suffix.
+    let binding_method = generated
+        .split("pub async fn request_binding_collision")
+        .nth(1)
+        .expect("request-binding collision operation emitted")
+        .split("pub async fn")
+        .next()
+        .expect("operation body follows its signature");
+    assert!(
+        binding_method.contains("request_builder: types::RequestBuilder"),
+        "wire-derived argument should keep its spelling: {binding_method}"
+    );
+    assert!(
+        binding_method.contains("let mut request_builder_")
+            && !binding_method.contains("let mut request_builder ="),
+        "the internal request builder should be disambiguated instead: {binding_method}"
+    );
 
     // A real round-trip driven by a blocking method against a std-thread mock server (the generated
     // crate is not inside an async runtime, so building a `BlockingClient` here is valid). Gated on
@@ -200,6 +219,38 @@ fn required_path_query_parameter_is_not_shadowed_by_codegen_locals() {
     client
         .read_file("/tmp/example.txt".to_owned())
         .expect("read_file sends the caller-provided path query value");
+
+    server.join().unwrap();
+}
+
+#[test]
+fn operation_parameter_override_is_sent_once() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 2048];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+
+        assert_eq!(
+            request.lines().next(),
+            Some("GET /parameter-override?mode=42 HTTP/1.1"),
+            "{request}"
+        );
+
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client
+        .parameter_override(42)
+        .expect("the operation-level parameter is the sole wire value");
 
     server.join().unwrap();
 }
@@ -1260,10 +1311,26 @@ paths:
           schema: { type: string }
       responses:
         "204": { description: No Content }
-  # All wire-derived parameter identifiers pass through one collision-aware allocator. Required
-  # arguments cannot collide with generator-owned method bindings (`body`, `params`,
-  # `request_builder`),
-  # and distinct required/optional wire names that normalize to the same Rust spelling remain
+  # An operation parameter with the same `(name, in)` as a path-item parameter replaces it. The
+  # blocking round-trip pins both the one-argument method and exactly one serialized query value.
+  /parameter-override:
+    parameters:
+      - name: mode
+        in: query
+        schema: { type: string }
+    get:
+      operationId: parameterOverride
+      parameters:
+        - name: mode
+          in: query
+          required: true
+          schema: { type: integer }
+      responses:
+        "204": { description: No Content }
+  # All wire-derived parameter identifiers pass through one collision-aware allocator. Fixed
+  # signature arguments (`body`, `params`) retain their conventional names, while generator-owned
+  # method locals (such as `request_builder`) yield to wire-derived arguments.
+  # Distinct required/optional wire names that normalize to the same Rust spelling remain
   # independently addressable. The generated crate's check + strict Clippy gate is the regression
   # assertion: before allocation moved into `name`, this operation emitted duplicate identifiers.
   /binding-collisions:
