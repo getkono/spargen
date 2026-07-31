@@ -1950,6 +1950,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 explode: false,
                 deprecated: parameter.deprecated,
                 default_display,
+                provenance: parameter.provenance.clone(),
             });
         } else {
             self.insert_type(
@@ -1980,6 +1981,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             explode,
             deprecated: parameter.deprecated,
             default_display,
+            provenance: parameter.provenance.clone(),
         })
     }
 

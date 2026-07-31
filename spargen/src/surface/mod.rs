@@ -312,9 +312,15 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
             .unwrap_or_else(|| operation.id.0.clone());
 
         let mut params = BTreeMap::new();
-        for param in &operation.params {
+        for (index, param) in operation.params.iter().enumerate() {
+            let param_name = names
+                .parameters
+                .get(&operation.id)
+                .and_then(|parameters| parameters.get(index))
+                .map(|ident| ident.as_str().to_owned())
+                .unwrap_or_else(|| param.name.clone());
             params.insert(
-                param.name.clone(),
+                param_name,
                 ParamSurface {
                     ty: canon_ty(param.ty, api, names),
                     required: param.required,

@@ -32,6 +32,10 @@ pub struct Names {
     pub operations: HashMap<OperationId, Ident>,
     /// Optional-parameters `…Params` struct name per operation.
     pub params_structs: HashMap<OperationId, Ident>,
+    /// Rust identifier for every operation parameter, in the IR's parameter order per operation.
+    /// Required arguments and optional `…Params` fields have separate lexical scopes but share
+    /// this lookup table because the index identifies which scope allocated the name.
+    pub parameters: HashMap<OperationId, Vec<Ident>>,
     /// Type name per type.
     pub types: HashMap<TypeId, Ident>,
     /// Field name per `(type, wire property name)`.
@@ -78,6 +82,44 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                 &operation.provenance.pointer,
             ),
         );
+
+        // Required parameters live in the generated method body. Reserve every binding codegen
+        // owns before allocating wire-derived argument names, so a parameter can never shadow a
+        // value used to construct the request. `body` and `params` are reserved only when that
+        // operation emits those arguments, preserving ordinary parameter names otherwise.
+        let mut required_scope = Scope::default();
+        for binding in [
+            "request_path",
+            "request_query",
+            "request_url",
+            "request_builder",
+            "request_cookies",
+        ] {
+            required_scope.reserve(binding, IdentRole::Param);
+        }
+        if operation.request_body.is_some() {
+            required_scope.reserve("body", IdentRole::Param);
+        }
+        if operation.params.iter().any(|parameter| !parameter.required) {
+            required_scope.reserve("params", IdentRole::Param);
+        }
+
+        // Optional parameters are fields (and identically named setters) on their own params
+        // struct, so allocate them in a separate scope rather than needlessly disambiguating them
+        // against required method arguments.
+        let mut optional_scope = Scope::default();
+        let mut parameter_names = Vec::with_capacity(operation.params.len());
+        for parameter in &operation.params {
+            let (scope, role) = if parameter.required {
+                (&mut required_scope, IdentRole::Param)
+            } else {
+                (&mut optional_scope, IdentRole::Field)
+            };
+            parameter_names.push(scope.alloc(&parameter.name, role, &parameter.provenance.pointer));
+        }
+        names
+            .parameters
+            .insert(operation.id.clone(), parameter_names);
     }
 
     for (id, def) in api.types.iter() {

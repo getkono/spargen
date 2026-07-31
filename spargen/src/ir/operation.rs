@@ -105,6 +105,10 @@ pub struct Parameter {
     /// (never serde-wired: a params struct is only serialized, and a server-side default means the
     /// client may legitimately omit the value).
     pub default_display: Option<String>,
+    /// Where the parameter came from. Naming uses this to disambiguate Rust identifiers
+    /// deterministically when wire names normalize to the same spelling or collide with a
+    /// generator-owned method binding.
+    pub provenance: Provenance,
 }
 
 /// Where a parameter is carried.
