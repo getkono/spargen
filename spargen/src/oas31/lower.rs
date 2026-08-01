@@ -896,6 +896,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (name, child) in &schema.properties {
             let ty = self.lower_schema_or(child, &format!("{hint}{name}"))?;
             let is_required = required.contains(name);
+            let preserve_null = matches!(
+                child,
+                SchemaOr::Schema(child_schema) if child_schema.preserve_null
+            ) && !is_required
+                && ty.nullable;
             let default = self.field_default(child, ty, is_required);
             let xml = self.field_xml(child);
             fields.push(Field {
@@ -905,6 +910,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 deprecated: schema.deprecated,
                 read_only: schema.read_only,
                 write_only: schema.write_only,
+                preserve_null,
                 default,
                 xml,
             });

@@ -74,6 +74,10 @@ the version it emits, and the idioms spargen handles.
   client is the extension point for TLS choice, proxies, middleware, and timeouts.
 - One `async` method per operation: required parameters positional, optional parameters in a
   per-operation `…Params` struct deriving `Default`, `Result<ResponseValue<T>, Error<E>>` out.
+- Streaming operations return the public `EventStream<T>` type; `Framing` is also exported for
+  callers that construct or inspect stream framing.
+- On an optional nullable property, `x-spargen-preserve-null: true` generates
+  `Option<Option<T>>` so omitted, explicit `null`, and present values remain distinct.
 - `Client::with_credential(scheme, credential)` registers static secrets (via
   [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
   requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.

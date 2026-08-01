@@ -15,6 +15,29 @@ use super::CodegenOptions;
 
 /// Emit the `types` (models) module for every type in the graph, in deterministic order.
 pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStream {
+    let preserve_null_helper = api
+        .types
+        .iter()
+        .any(|(_, def)| {
+            matches!(
+                &def.kind,
+                TypeKind::Struct(structure)
+                    if structure.fields.iter().any(|field| field.preserve_null)
+            )
+        })
+        .then(|| {
+            quote! {
+                fn __spargen_deserialize_optional_nullable<'de, D, T>(
+                    deserializer: D,
+                ) -> Result<Option<Option<T>>, D::Error>
+                where
+                    D: serde::Deserializer<'de>,
+                    T: serde::Deserialize<'de>,
+                {
+                    Ok(Some(Option::<T>::deserialize(deserializer)?))
+                }
+            }
+        });
     let items = api
         .types
         .iter()
@@ -26,6 +49,7 @@ pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) ->
             use serde::{Deserialize, Serialize};
             use std::collections::BTreeMap;
 
+            #preserve_null_helper
             #(#items)*
         }
     }
@@ -1903,18 +1927,22 @@ fn emit_field(
         .xml
         .wire_override(&field.name.wire)
         .unwrap_or_else(|| field.name.wire.clone());
-    // `ty_tokens` already wraps a nullable type in `Option` (`"null"` in the type array), so only an
-    // *optional* non-nullable field needs the extra `Option` here — wrapping a nullable field again
-    // would yield `Option<Option<T>>`. A required nullable field stays a single `Option<T>` (present
-    // but may be `null`); an optional field of either kind is a single `Option<T>`.
+    // `ty_tokens` wraps a nullable type in `Option`. Optional nullable fields normally collapse
+    // absent and explicit `null` into that same option; the opt-in extension retains both layers.
     let mut ty = ty_tokens(field.ty, names, options, false);
-    if !field.required && !field.ty.nullable {
+    if !field.required && (!field.ty.nullable || field.preserve_null) {
         ty = quote! { Option<#ty> };
     }
     // An optional field always deserializes an absent value; when the spec gives a representable
     // scalar default, point serde at a generated provider so the default fills in rather than
     // `None`. Otherwise fall back to `Option::default()` (`None`).
-    let serde_default = if field.required {
+    let serde_default = if field.preserve_null {
+        quote! {
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "__spargen_deserialize_optional_nullable",
+        }
+    } else if field.required {
         quote! {}
     } else if field
         .default

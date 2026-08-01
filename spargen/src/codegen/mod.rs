@@ -82,9 +82,9 @@ pub fn generate(
         #[allow(unused_imports)]
         pub use support::{
             AuthError, Credential, Error, ExecuteFuture, ExposeSecret, HttpBackend, LinkPaginator,
-            Middleware, MiddlewareBackend, Next, ReqwestBackend, ResponseValue, RetryBackend,
-            RetryOutcome, RetryPolicy, SecretString, TokenFuture, TokenProvider, TransportError,
-            exponential_backoff, next_link,
+            EventStream, Framing, Middleware, MiddlewareBackend, Next, ReqwestBackend, ResponseValue,
+            RetryBackend, RetryOutcome, RetryPolicy, SecretString, TokenFuture, TokenProvider,
+            TransportError, exponential_backoff, next_link,
         };
 
         #support

@@ -267,6 +267,8 @@ pub struct Field {
     pub read_only: bool,
     /// `writeOnly` annotation (W-class, surfaced in rustdoc).
     pub write_only: bool,
+    /// Whether an optional nullable property distinguishes absent from explicit JSON `null`.
+    pub preserve_null: bool,
     /// The JSON Schema `default` disposition, if the field declared one. `None` when the field has
     /// no `default`.
     pub default: Option<FieldDefault>,

@@ -651,6 +651,10 @@ fn parse_schema_or(
             .get("writeOnly")
             .and_then(SpannedValue::as_bool)
             .unwrap_or(false),
+        preserve_null: map
+            .get("x-spargen-preserve-null")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
         title: map.get("title").and_then(string).map(str::to_owned),
         description: map.get("description").and_then(string).map(str::to_owned),
         provenance: provenance(pointer, value),

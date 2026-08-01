@@ -57,6 +57,8 @@ pub struct Schema {
     pub read_only: bool,
     /// `writeOnly` (W-class annotation).
     pub write_only: bool,
+    /// Preserve the distinction between an absent property and an explicit JSON `null`.
+    pub preserve_null: bool,
     /// `title` → rustdoc.
     pub title: Option<String>,
     /// `description` → rustdoc.
