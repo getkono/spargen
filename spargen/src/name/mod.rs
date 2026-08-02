@@ -32,6 +32,10 @@ pub struct Names {
     pub operations: HashMap<OperationId, Ident>,
     /// Optional-parameters `…Params` struct name per operation.
     pub params_structs: HashMap<OperationId, Ident>,
+    /// Generator-owned signature and request-building bindings per operation. Required OpenAPI
+    /// parameters reserve their natural Rust spellings first, so these identifiers can never
+    /// shadow caller-provided values.
+    pub operation_bindings: HashMap<OperationId, OperationBindings>,
     /// Type name per type.
     pub types: HashMap<TypeId, Ident>,
     /// Field name per `(type, wire property name)`.
@@ -43,6 +47,25 @@ pub struct Names {
     pub struct_overflow: HashMap<TypeId, Ident>,
     /// Variant name per `(type, wire variant value)`.
     pub variants: HashMap<(TypeId, String), Ident>,
+}
+
+/// Generator-owned bindings emitted inside one operation method.
+#[derive(Debug)]
+pub struct OperationBindings {
+    /// The optional-parameters struct argument, when one is emitted.
+    pub params: Option<Ident>,
+    /// The request-body argument, when one is emitted.
+    pub body: Option<Ident>,
+    /// Mutable path assembled before URL construction.
+    pub path: Ident,
+    /// Mutable query-pair collection.
+    pub query: Ident,
+    /// Fully constructed request URL.
+    pub url: Ident,
+    /// Mutable request builder, then the built request.
+    pub request: Ident,
+    /// Mutable cookie-fragment collection.
+    pub cookies: Ident,
 }
 
 /// Allocate every identifier the API needs, in one deterministic pass. Naming conflicts
@@ -77,6 +100,41 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                 IdentRole::Type,
                 &operation.provenance.pointer,
             ),
+        );
+
+        // Required parameters are fixed by the generated public surface. Reserve their natural
+        // spellings, then allocate every generator-owned binding in the same lexical scope so the
+        // implementation yields on collision without renaming ordinary arguments.
+        let mut binding_scope = Scope::default();
+        for parameter in operation
+            .params
+            .iter()
+            .filter(|parameter| parameter.required)
+        {
+            binding_scope.reserve(&parameter.name, IdentRole::Param);
+        }
+        let pointer = &operation.provenance.pointer;
+        let params = operation
+            .params
+            .iter()
+            .any(|parameter| !parameter.required)
+            .then(|| binding_scope.alloc("params", IdentRole::Param, pointer));
+        let body = operation
+            .request_body
+            .as_ref()
+            .and_then(|request_body| request_body.ty)
+            .map(|_| binding_scope.alloc("body", IdentRole::Param, pointer));
+        names.operation_bindings.insert(
+            operation.id.clone(),
+            OperationBindings {
+                params,
+                body,
+                path: binding_scope.alloc("path", IdentRole::Param, pointer),
+                query: binding_scope.alloc("query", IdentRole::Param, pointer),
+                url: binding_scope.alloc("url", IdentRole::Param, pointer),
+                request: binding_scope.alloc("request", IdentRole::Param, pointer),
+                cookies: binding_scope.alloc("cookies", IdentRole::Param, pointer),
+            },
         );
     }
 
