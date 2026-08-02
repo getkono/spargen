@@ -41,8 +41,8 @@ Current cases:
 - `meilisearch`: `meilisearch/open-api@a2bd2133ac9f9b85fca8fb8b1aa69063c8f1002c`,
   `open-api.json`, SHA-256
   `83cbd10cea1ca75590dc31f1d2e40ef2b636297d47b39c9aefd813e41454cfd1` (OpenAPI 3.1.0; clears the
-  version gate and exercises the pipeline, rejecting on incompatible typed intersections → `E013`;
-  unsupported media also remains).
+  version gate and exercises official structural validation, rejecting because Tag `externalDocs`
+  descriptions are `null` where OpenAPI 3.1 requires strings → `E011`).
 
 Excluded by decision: HoneyHive, IOTA gas-station, and Redocly.
 
@@ -56,9 +56,8 @@ cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --f
 cargo run -q -p spargen -- check corpus/stripe/spec3.json --format json  # reject:E001 (3.0.0)
 cargo run -q -p spargen -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json  # reject:E001 (3.0.1)
 cargo run -q -p spargen -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json  # reject:E001 (3.0.0)
-# meilisearch is 3.1.0: it clears the version gate and rejects with E013 deep in the pipeline.
-# The default batch_cap (100) fills with W001, so raise it to surface the E013 error:
-cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json --config <(printf '[features]\nbatch_cap = 100000\n')  # reject:E013 (3.1.0)
+# meilisearch is 3.1.0: it clears the version gate, then fails strict official-schema validation.
+cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json  # reject:E011 (3.1.0)
 ```
 
 The full GitHub 3.1 pin is the large-corpus generation gate: strict generation must succeed, and

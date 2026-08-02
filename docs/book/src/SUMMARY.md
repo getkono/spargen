@@ -10,6 +10,7 @@
 
 # Reference
 
+- [OpenAPI 3.2 Scope](./openapi-3.2.md)
 - [Feature Support](./support-matrix.md)
 - [Diagnostics](./errors.md)
 - [Compatibility & Omit Profiles](./compatibility.md)

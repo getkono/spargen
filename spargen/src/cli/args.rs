@@ -6,7 +6,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 #[command(
     name = "spargen",
     version,
-    about = "A compile-time-correct Rust client generator for OpenAPI 3.1.x."
+    about = "A compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x."
 )]
 pub struct Cli {
     /// The subcommand to run.

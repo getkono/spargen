@@ -29,8 +29,281 @@ fn check(spec: &str) -> Report {
     ))
 }
 
+fn generate_with_code(spec: &str) -> (Report, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(&spec_path, spec).unwrap();
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&Config::new(
+        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
+        OutputTarget::Module(Utf8PathBuf::from_path_buf(out.clone()).unwrap()),
+    ));
+    let code = std::fs::read_to_string(out).unwrap_or_default();
+    (report, code)
+}
+
 fn has_code(report: &Report, code: Code) -> bool {
     report.diagnostics.iter().any(|d| d.code == code)
+}
+
+#[test]
+fn e011_official_structure_schema_rejects_missing_info() {
+    let spec = "openapi: 3.1.0\npaths: {}\n";
+    let generated = generate(spec);
+    let checked = check(spec);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+#[test]
+fn response_description_requirement_is_version_gated() {
+    let body = r#"
+info: { title: T, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      responses:
+        '200': { summary: ok }
+"#;
+    let oas31 = generate(&format!("openapi: 3.1.0\n{body}"));
+    assert_eq!(oas31.outcome, Outcome::Rejected, "{oas31:#?}");
+    assert!(has_code(&oas31, Code::InvalidInput), "{oas31:#?}");
+
+    let oas32 = generate(&format!("openapi: 3.2.0\n{body}"));
+    assert_ne!(oas32.outcome, Outcome::Rejected, "{oas32:#?}");
+}
+
+#[test]
+fn boolean_false_schema_lowers_to_an_uninhabited_type() {
+    let spec = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /forbidden:
+    get:
+      responses:
+        '200':
+          description: impossible
+          content:
+            application/json:
+              schema: false
+"#;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("enum ResponseBody"), "{code}");
+}
+
+#[test]
+fn multi_type_array_generates_a_typed_union() {
+    let spec = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /value:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { type: [string, integer] }
+"#;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("enum ResponseBody"), "{code}");
+    assert!(!code.contains("serde_json :: Value"), "{code}");
+}
+
+#[test]
+fn schema_ref_siblings_are_intersected_not_dropped() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /extended:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Extended' }
+components:
+  schemas:
+    Base:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+    Extended:
+      $ref: '#/components/schemas/Base'
+      type: object
+      properties: { extra: { type: integer } }
+      required: [extra]
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("pub id"), "{code}");
+    assert!(code.contains("pub extra"), "{code}");
+}
+
+#[test]
+fn schema_component_alias_chains_resolve_and_cycles_reject() {
+    let valid = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /item:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/A' } }
+components:
+  schemas:
+    A: { $ref: '#/components/schemas/B' }
+    B: { $ref: '#/components/schemas/Item' }
+    Item:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##;
+    let (report, code) = generate_with_code(valid);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("pub id"), "{code}");
+
+    let cycle = valid.replace(
+        "B: { $ref: '#/components/schemas/Item' }",
+        "B: { $ref: '#/components/schemas/A' }",
+    );
+    let report = generate(&cycle);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+}
+
+#[test]
+fn local_relative_schema_refs_resolve_from_their_own_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pet:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: 'schemas.yaml#/Pet' }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("schemas.yaml"),
+        r##"
+Id: { type: string }
+Pet:
+  type: object
+  properties:
+    id: { $ref: '#/Id' }
+  required: [id]
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&Config::new(
+        dir.join("openapi.yaml"),
+        OutputTarget::Module(out.clone()),
+    ));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    let code = std::fs::read_to_string(out).unwrap();
+    assert!(code.contains("pub id"), "{code}");
+    assert!(!code.contains("serde_json :: Value"), "{code}");
+}
+
+#[test]
+fn oas32_self_is_a_canonical_reference_identity() {
+    let spec = r##"
+openapi: 3.2.0
+$self: https://api.example.test/openapi.yaml
+info: { title: T, version: 1.0.0 }
+paths:
+  /pet:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: 'https://api.example.test/openapi.yaml#/components/schemas/Pet'
+components:
+  schemas:
+    Pet:
+      type: object
+      properties: { id: { type: string } }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::Oas32ConstructIgnored),
+        "{report:#?}"
+    );
+    assert!(
+        !has_code(&report, Code::AbsoluteRefUnsupported),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn oas32_relative_self_establishes_the_local_reference_base() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::create_dir(dir.join("canonical")).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.2.0
+$self: canonical/api.yaml
+info: { title: T, version: 1.0.0 }
+paths:
+  /pet:
+    get:
+      responses:
+        '200':
+          content:
+            application/json:
+              schema: { $ref: 'api.yaml#/components/schemas/Pet' }
+components:
+  schemas:
+    Pet: { $ref: 'schemas.yaml#/Pet' }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("canonical/schemas.yaml"),
+        r##"
+Pet:
+  type: object
+  properties: { id: { type: string } }
+  required: [id]
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&Config::new(
+        dir.join("openapi.yaml"),
+        OutputTarget::Module(out.clone()),
+    ));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    let code = std::fs::read_to_string(out).unwrap();
+    assert!(code.contains("pub id"), "{code}");
 }
 
 /// A remote-`$ref` spec fixture referencing a single vendored schema, plus a helper to lay it out
@@ -393,13 +666,11 @@ paths: {}
 }
 
 #[test]
-fn oas32_base_dialect_accepted() {
-    // The OAS 3.2 base dialect string is accepted alongside the 3.1 one — both are the JSON Schema
-    // 2020-12-based OAS dialect. No `E002`.
-    let spec = r##"
+fn oas32_retains_the_oas31_base_dialect_identifier() {
+    let accepted = r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
-jsonSchemaDialect: https://spec.openapis.org/oas/3.2/dialect/base
+jsonSchemaDialect: https://spec.openapis.org/oas/3.1/dialect/base
 paths:
   /ping:
     get:
@@ -407,9 +678,14 @@ paths:
       responses:
         '200': { description: ok }
 "##;
-    let report = generate(spec);
+    let report = generate(accepted);
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
+
+    let nonexistent = accepted.replace("oas/3.1/dialect", "oas/3.2/dialect");
+    let report = generate(&nonexistent);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedDialect), "{report:#?}");
 }
 
 #[test]
@@ -437,9 +713,7 @@ paths:
 }
 
 #[test]
-fn oas32_self_warns_w010_and_generates() {
-    // `$self` sets the document base URI for reference resolution; it does not change locally
-    // generated code, so it is acknowledged with `W010` and generation still succeeds.
+fn oas32_self_without_refs_generates_without_a_warning() {
     let spec = r##"
 openapi: 3.2.0
 $self: https://api.example.com/openapi.yaml
@@ -454,22 +728,20 @@ paths:
     let report = generate(spec);
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::Oas32ConstructIgnored),
+        !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
     );
     // check/generate parity.
     let checked = check(spec);
     assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
     assert!(
-        has_code(&checked, Code::Oas32ConstructIgnored),
+        !has_code(&checked, Code::Oas32ConstructIgnored),
         "{checked:#?}"
     );
 }
 
 #[test]
-fn oas32_additional_operations_warns_w010_and_generates() {
-    // `additionalOperations` declares custom HTTP methods spargen does not generate; the fixed `get`
-    // still generates while the custom method is acknowledged with `W010`.
+fn oas32_additional_operations_generate_custom_methods() {
     let spec = r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
@@ -485,18 +757,18 @@ paths:
         responses:
           '200': { description: ok }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::Oas32ConstructIgnored),
+        !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
     );
+    assert!(code.contains("copy_pets"), "{code}");
+    assert!(code.contains("b\"COPY\""), "{code}");
 }
 
 #[test]
-fn oas32_querystring_param_warns_w010_and_generates() {
-    // An `in: querystring` parameter treats the whole query string as one value; spargen skips it
-    // with `W010` and still generates the rest of the operation.
+fn oas32_querystring_param_generates_a_typed_argument() {
     let spec = r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
@@ -514,14 +786,97 @@ paths:
       responses:
         '200': { description: ok }
 "##;
-    let report = generate(spec);
+    let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(
-        has_code(&report, Code::Oas32ConstructIgnored),
+        !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
     );
-    // The `querystring` param must NOT be rejected as an invalid location.
     assert!(!has_code(&report, Code::InvalidInput), "{report:#?}");
+    assert!(code.contains("pub q: Option<types::Q>"), "{code}");
+    assert!(code.contains("serialize_form"), "{code}");
+    assert!(code.contains("build_url_with_query_string"), "{code}");
+}
+
+#[test]
+fn oas32_querystring_and_named_query_are_rejected_together() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    get:
+      parameters:
+        - name: whole
+          in: querystring
+          content:
+            application/json:
+              schema: { type: object }
+        - name: page
+          in: query
+          schema: { type: integer }
+      responses:
+        '200': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+}
+
+#[test]
+fn oas32_cookie_style_generates_cookie_header_serialization() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /prefs:
+    get:
+      parameters:
+        - name: prefs
+          in: cookie
+          style: cookie
+          required: true
+          schema:
+            type: object
+            properties: { theme: { type: string }, compact: { type: boolean } }
+      responses:
+        '200': { description: ok }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedParameterStyle),
+        "{report:#?}"
+    );
+    assert!(code.contains("join(\"; \")"), "{code}");
+}
+
+#[test]
+fn oas32_component_media_type_references_generate_typed_bodies() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pet:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              $ref: '#/components/mediaTypes/PetJson'
+components:
+  mediaTypes:
+    PetJson:
+      schema:
+        type: object
+        properties: { id: { type: string } }
+        required: [id]
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("pub id"), "{code}");
+    assert!(!code.contains("serde_json :: Value"), "{code}");
 }
 
 #[test]
@@ -568,6 +923,257 @@ components:
 }
 
 #[test]
+fn oas32_json_sequence_item_schema_generates_rfc7464_streaming() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json-seq:
+              itemSchema:
+                type: object
+                properties: { id: { type: integer } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("Framing::JsonSequence"), "{code}");
+}
+
+#[test]
+fn oas32_sequential_schema_is_not_misread_as_an_item_schema() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/jsonl:
+              schema:
+                type: array
+                items: { type: string }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+}
+
+#[test]
+fn explicit_media_encoding_is_rejected_instead_of_ignored() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /form:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties: { tags: { type: array, items: { type: string } } }
+            encoding:
+              tags: { style: form, explode: true }
+      responses:
+        '204': { description: ok }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+}
+
+#[test]
+fn oas32_discriminator_default_mapping_is_rejected_explicitly() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - { $ref: '#/components/schemas/Cat' }
+        - { $ref: '#/components/schemas/Dog' }
+      discriminator:
+        propertyName: kind
+        defaultMapping: Dog
+    Cat: { type: object, properties: { kind: { const: cat } } }
+    Dog: { type: object, properties: { kind: { type: string } } }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+}
+
+#[test]
+fn oas32_xml_attribute_node_type_maps_to_the_existing_typed_xml_path() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /item:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, xml: { nodeType: attribute } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    assert!(code.contains("@id"), "{code}");
+}
+
+#[test]
+fn conditional_schema_keywords_warn_and_their_children_are_audited() {
+    let warned = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Conditional:
+      type: object
+      if: { required: [kind] }
+      then: { properties: { value: { type: string } } }
+"##;
+    let report = generate(warned);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+
+    let dynamic = warned.replace(
+        "then: { properties: { value: { type: string } } }",
+        "then: { $dynamicRef: '#node' }",
+    );
+    let report = generate(&dynamic);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::DynamicRefRejected), "{report:#?}");
+}
+
+#[test]
+fn operation_ids_and_path_parameter_bindings_are_validated() {
+    let duplicate_id = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /a:
+    get: { operationId: same, responses: { '204': { description: ok } } }
+  /b:
+    get: { operationId: same, responses: { '204': { description: ok } } }
+"##;
+    let report = generate(duplicate_id);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+
+    let missing_path_parameter = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets/{id}:
+    get: { responses: { '204': { description: ok } } }
+"##;
+    let report = generate(missing_path_parameter);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+}
+
+#[test]
+fn operation_parameters_override_matching_path_item_parameters() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    parameters:
+      - { name: limit, in: query, schema: { type: integer } }
+    get:
+      parameters:
+        - { name: limit, in: query, schema: { type: string } }
+      responses: { '204': { description: ok } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(code.matches("pub limit:").count(), 1, "{code}");
+}
+
+#[test]
+fn response_component_aliases_resolve_and_cycles_reject() {
+    let base = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /item:
+    get:
+      responses:
+        '200': { $ref: '#/components/responses/A' }
+components:
+  responses:
+    A: { $ref: '#/components/responses/B' }
+    B:
+      summary: shared result
+      description: ok
+      content:
+        application/json: { schema: { type: string } }
+"##;
+    let (report, code) = generate_with_code(base);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("shared result"), "{code}");
+
+    let cycle = base.replace(
+        "B:\n      summary: shared result\n      description: ok\n      content:\n        application/json: { schema: { type: string } }",
+        "B: { $ref: '#/components/responses/A' }",
+    );
+    let report = generate(&cycle);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+}
+
+#[test]
+fn oas32_tag_hierarchy_is_validated_and_documented() {
+    let valid = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+tags:
+  - { name: api, summary: Public API, kind: nav }
+  - { name: pets, parent: api, summary: Pet calls }
+paths:
+  /pets:
+    get:
+      tags: [pets]
+      responses:
+        '200': { summary: Listed, description: all pets }
+"##;
+    let (report, code) = generate_with_code(valid);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("Public API"), "{code}");
+    assert!(code.contains("Response `200`: Listed"), "{code}");
+
+    let cycle = valid.replace(
+        "{ name: api, summary: Public API, kind: nav }",
+        "{ name: api, parent: pets, summary: Public API, kind: nav }",
+    );
+    let report = generate(&cycle);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+}
+
+#[test]
 fn oas32_item_schema_on_non_streaming_media_warns_w010() {
     // `itemSchema` is only meaningful for sequential/streaming media. On a plain JSON response it is
     // acknowledged with `W010` (not silently dropped) and generation still succeeds via `schema`.
@@ -590,6 +1196,32 @@ paths:
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(
         has_code(&report, Code::Oas32ConstructIgnored),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn validation_keywords_in_reusable_stream_item_schema_warn_w001() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      responses:
+        '200':
+          content:
+            application/x-ndjson:
+              $ref: '#/components/mediaTypes/EventStream'
+components:
+  mediaTypes:
+    EventStream:
+      itemSchema: { type: string, minLength: 1 }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::ValidationKeywordIgnored),
         "{report:#?}"
     );
 }

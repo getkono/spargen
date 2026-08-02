@@ -114,4 +114,5 @@ Key points of the surface:
 
 - [Runtime & Ergonomics](./runtime.md) — retry, middleware, blocking, wasm, pagination, streaming.
 - [Framework Recipes](./recipes.md) — generating from utoipa / aide / poem-openapi output.
-- [Feature Support](./support-matrix.md) — exactly which 3.1 constructs are handled.
+- [OpenAPI 3.2 Scope](./openapi-3.2.md) — the focused delta from 3.1 and its disposition.
+- [Feature Support](./support-matrix.md) — exactly which 3.1/3.2 constructs are handled.

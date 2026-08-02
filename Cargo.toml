@@ -1,4 +1,4 @@
-# Spargen — a compile-time-correct Rust client generator for OpenAPI 3.1.x.
+# Spargen — a compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x.
 #
 # Two published crates: `spargen` (the library + CLI) and `spargen-macro` (a thin proc-macro
 # shim exposing `generate_api!`). Neither ever enters a consumer's RUNTIME graph — a proc-macro
@@ -22,7 +22,7 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["Justin Chung"]
 repository = "https://github.com/getkono/spargen"
-description = "A compile-time-correct Rust client generator for OpenAPI 3.1.x."
+description = "A compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x."
 keywords = ["openapi", "codegen", "client"]
 categories = ["development-tools", "api-bindings"]
 

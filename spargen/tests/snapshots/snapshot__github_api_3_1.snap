@@ -4,6 +4,6 @@ expression: summary(&report)
 ---
 outcome: Generated
 diagnostics (code: count):
-  W001: 199
+  W001: 203
   W002: 1
   W005: 6

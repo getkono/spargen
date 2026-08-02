@@ -15,7 +15,7 @@ pub enum Code {
     /// The `openapi` field declares an unsupported version (e.g. 3.0.x); no conversion is
     /// offered.
     UnsupportedOpenApiVersion,
-    /// `jsonSchemaDialect` is not the default OAS 3.1 dialect.
+    /// `jsonSchemaDialect` is not the shared OAS 3.1/3.2 base dialect.
     UnsupportedDialect,
     /// A remote (`http`/`https`) `$ref` is not pinned in `spargen.lock` (or is an unfetchable
     /// absolute-URI scheme). Remote refs resolve only from vendored, hash-pinned copies.
@@ -70,8 +70,7 @@ pub enum Code {
     /// An unsupported XML representation hint (`xml.namespace`, `xml.prefix`, or `xml.wrapped`) was
     /// ignored; only `xml.name`/`xml.attribute` are honored (matrix: Media → W).
     XmlHintIgnored,
-    /// An OpenAPI 3.2-only construct (`$self`, `additionalOperations`, `in: querystring`) was
-    /// acknowledged but not lowered into generated code (matrix: Version → W).
+    /// OpenAPI 3.2 `itemSchema` appeared on non-sequential media, where it has no wire meaning.
     Oas32ConstructIgnored,
     /// Schema composition nests deeper than spargen will lower (a very long `$ref` chain or a
     /// pathologically nested inline schema), so lowering is stopped before it could exhaust the
@@ -146,7 +145,7 @@ impl Code {
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
             Code::SchemaDefaultNotApplied => "schema default not applied",
             Code::XmlHintIgnored => "unsupported XML hint ignored",
-            Code::Oas32ConstructIgnored => "OpenAPI 3.2 construct ignored",
+            Code::Oas32ConstructIgnored => "non-sequential itemSchema ignored",
             Code::SchemaNestingTooDeep => "schema nesting is too deep to lower",
         }
     }
@@ -158,7 +157,7 @@ impl Code {
                 "The root `openapi` field must declare `3.1.x` or `3.2.x`. OpenAPI 3.2 is a compatible superset of 3.1 (same JSON Schema 2020-12 semantics) and is accepted through the same frontend. OpenAPI 3.0.x uses a different schema dialect and is rejected rather than converted."
             }
             Code::UnsupportedDialect => {
-                "`jsonSchemaDialect`, when present, must be the OAS 3.1 base dialect (`https://spec.openapis.org/oas/3.1/dialect/base`) or the OAS 3.2 base dialect (`https://spec.openapis.org/oas/3.2/dialect/base`); both are the JSON Schema 2020-12-based OAS dialect."
+                "`jsonSchemaDialect`, when present, must be the OAS base dialect (`https://spec.openapis.org/oas/3.1/dialect/base`). OpenAPI 3.2 deliberately retains the same dialect URI; there is no separate OAS 3.2 dialect identifier. Other dialects are permitted by OpenAPI but optional for tooling, and spargen rejects them because their keywords cannot be lowered under the compile-time-correctness contract."
             }
             Code::AbsoluteRefUnsupported => {
                 "Remote (`http`/`https`) `$ref` resolution is hermetic: `generate` and `check` never touch the network. A remote ref is resolved only from a locally vendored copy whose bytes are hash-pinned in `spargen.lock`. This error fires when a remote ref is not yet pinned there (or names an unfetchable absolute-URI scheme such as `urn:`). Run `spargen lock <spec>` to fetch, vendor under `.spargen/vendor/`, and pin it — then `generate`/`check` resolve it offline. Alternatively, vendor the document by hand and reference it with a relative file path."
@@ -179,16 +178,16 @@ impl Code {
                 "`$dynamicRef` and `$dynamicAnchor` require dynamic schema-scope evaluation and are rejected."
             }
             Code::NonDisjointUnion => {
-                "`oneOf`/`anyOf` unions are lowered to typed Rust enums with custom `Deserialize`/`Serialize` — never `serde(untagged)` and never degraded to `serde_json::Value`. Fast paths dispatch by discriminator tag, a unique non-object JSON category, or a proven disjoint category/required key. Overlapping variants use typed trial matching over one buffered value: `oneOf` requires exactly one successful variant; `anyOf` deterministically selects the most specific successful variant (enum before broad scalar, integer before number, more-required object before broader object, recursive array specificity, then source order), and serialization revalidates the same rule. Shape constraints adjacent to the union are intersected into every branch. This error is reserved for an applicator combination that is not yet representable, such as declaring both `oneOf` and `anyOf` on the same schema node. Split the applicators into nested schemas or omit this API segment with `spargen::omit!`."
+                "`oneOf`/`anyOf` unions are lowered to typed Rust enums with custom `Deserialize`/`Serialize` — never `serde(untagged)` and never degraded to `serde_json::Value`. Fast paths dispatch by discriminator tag, a unique non-object JSON category, or a proven disjoint category/required key. Overlapping variants use typed trial matching over one buffered value: `oneOf` requires exactly one successful variant; `anyOf` deterministically selects the most specific successful variant (enum before broad scalar, integer before number, more-required object before broader object, recursive array specificity, then source order), and serialization revalidates the same rule. Shape constraints adjacent to the union are intersected into every branch. This error is reserved for an applicator combination that is not yet representable, such as declaring both `oneOf` and `anyOf` on the same schema node, or OpenAPI 3.2 `discriminator.defaultMapping` without a generated fallback branch. Split the applicators, make every discriminator branch explicit, or omit this API segment with `spargen::omit!`."
             }
             Code::NonScalarEnum => {
                 "Enums and const values must be homogeneous scalar sets. A `null` member (or `\"null\"` in the schema's type array) is allowed: it is stripped and makes a remaining scalar enum nullable (`Option<Enum>`), while a value set of only `null` lowers to the exact JSON null type (`()`). Sets that mix distinct non-null scalar kinds (e.g. a string with an integer) or that contain object/array members are rejected."
             }
             Code::UnsupportedMediaType => {
-                "JSON (`application/json` and `application/*+json`), XML (`application/xml` and `text/xml`), raw binary (`application/octet-stream`), raw UTF-8 text (`text/*` and GitHub's `application/octocat-stream`), form-urlencoded requests, and multipart requests are generated. Text is decoded through a JSON string value so string enums/formats remain typed; binary responses remain `bytes::Bytes`; single- and multi-status success/error dispatch use the selected response's codec. Raw text requires a string-like/binary schema and octet-stream requires a binary schema. XML uses the feature-gated quick-xml codec and is currently limited to an operation's single success or error body. Multipart requires an object request schema; form-urlencoded and multipart response bodies are rejected. Streaming responses (`text/event-stream` and `application/x-ndjson`) generate a typed async `EventStream<T>`; streaming request bodies are rejected."
+                "JSON (`application/json` and `application/*+json`), XML (`application/xml` and `text/xml`), raw binary (`application/octet-stream`), raw UTF-8 text (`text/*` and GitHub's `application/octocat-stream`), form-urlencoded requests, and multipart requests are generated. Text is decoded through a JSON string value so string enums/formats remain typed; binary responses remain `bytes::Bytes`; single- and multi-status success/error dispatch use the selected response's codec. Raw text requires a string-like/binary schema and octet-stream requires a binary schema. XML uses the feature-gated quick-xml codec and is currently limited to an operation's single success or error body. Multipart requires an object request schema; form-urlencoded and multipart response bodies are rejected. Sequential responses with `itemSchema` (`text/event-stream`, JSON Lines/NDJSON, and JSON Text Sequences) generate a typed async `EventStream<T>`; streaming requests, a complete-sequence `schema` without `itemSchema`, and explicit Media Type Object `encoding`/`prefixEncoding`/`itemEncoding` are rejected until their exact wire representation can be generated."
             }
             Code::UnsupportedParameterStyle => {
-                "Path/header parameters support simple style and query/cookie parameters support form style, including the OpenAPI explode defaults and explicit explode overrides. JSON content-typed parameters are generated. Deep object, pipe-delimited, space-delimited, invalid location/style combinations, and allowReserved: true are rejected rather than serialized with incorrect wire semantics."
+                "Path/header parameters support simple style and query/cookie parameters support form style, including the OpenAPI explode defaults and explicit explode overrides. OpenAPI 3.2 cookie style is emitted without percent encoding, and a single whole-query-string parameter supports JSON or application/x-www-form-urlencoded content. JSON content-typed parameters are generated. Deep object, pipe-delimited, space-delimited, invalid location/style combinations, and allowReserved: true are rejected rather than serialized with incorrect wire semantics."
             }
             Code::ServerInitiatedFlowIgnored => {
                 "Webhooks, callbacks, and links describe server-initiated or hypermedia behavior. They are acknowledged with a warning and no client code is emitted."
@@ -221,7 +220,7 @@ impl Code {
                 "A `default` is applied as a serde deserialization default only when it is a single scalar (bool/integer/number/string) that matches the field's own scalar type or one of its enum variants. Object, array, null, heterogeneous, or type-mismatched defaults cannot be lowered to a Rust literal, so the value is recorded in the field's rustdoc but not wired — deserialization of an absent field yields `None` rather than the default."
             }
             Code::Oas32ConstructIgnored => {
-                "OpenAPI 3.2 is accepted through the 3.1 frontend, but a handful of 3.2-only constructs describe behavior spargen does not generate a client for, and are acknowledged with this warning rather than silently dropped. `$self` sets the document's base URI for reference resolution and does not change locally-generated code. `additionalOperations` declares custom/extension HTTP methods on a path item, for which no client method is emitted. An `in: querystring` parameter treats the entire URL query string as a single value; that parameter is skipped and the rest of the operation still generates. The new fixed `QUERY` method is fully supported and does NOT trigger this warning."
+                "OpenAPI 3.2 `itemSchema` describes one item of sequential media. On a non-sequential media type it does not define any wire behavior, so spargen acknowledges and ignores it while continuing to use the complete-body `schema`. Move the item schema to sequential media such as `application/x-ndjson`, `application/json-seq`, or `text/event-stream`, or use only `schema` for ordinary media."
             }
             Code::SchemaNestingTooDeep => {
                 "Lowering a schema into a Rust type is recursive: each nested object property, array item, `allOf`/`oneOf`/`anyOf` member, and `$ref` target descends one level. Spargen caps that descent so a pathologically deep composition — a very long chain of components that each `$ref` the next, or a deeply nested inline schema — is rejected with this error instead of being allowed to exhaust the call stack and abort the process. A genuine API surface never approaches the limit; hitting it almost always means the spec was machine-generated or adversarial. Flatten the offending chain, or omit that API segment with `spargen::omit!`."

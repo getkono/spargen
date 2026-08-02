@@ -1,6 +1,6 @@
 //! # spargen
 //!
-//! A compile-time-correct Rust HTTP client generator for OpenAPI 3.1.x. Spec in, spar out:
+//! A compile-time-correct Rust HTTP client generator for OpenAPI 3.1.x and 3.2.x. Spec in, spar out:
 //! everything structural is decided at generation time; nothing is interpreted at runtime.
 //!
 //! This crate is the library half of the `spargen` tool. Its public surface is the `build.rs`

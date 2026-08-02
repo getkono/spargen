@@ -15,11 +15,11 @@ Included public APIs:
 | `stripe` | `stripe/openapi` | `d5d11f661d1180a847d6e26774517756e6a493a1` | `openapi/spec3.json` | `e24a26de4188fd64dec4c043d5d3726277fdcb07556a493ea481c305b0a223d8` | Reject `E001` (OpenAPI 3.0.0) |
 | `twilio-api-2010` | `twilio/twilio-oai` | `bb6288e9f540d2d63540bbaadf6b73fd262c2df3` | `spec/json/twilio_api_v2010.json` | `a6753266b8b05a201e8658734e332ee51d07a0913f2d419335d87bdb287643a2` | Reject `E001` (OpenAPI 3.0.1) |
 | `kubernetes-authentication-v1` | `kubernetes/kubernetes` | `fb3cf74c50ec5d117a7d17f1115c9413fd492c3d` | `api/openapi-spec/v3/apis__authentication.k8s.io__v1_openapi.json` | `443427d822f77db77202c96df06d453845abc5cc67390180129a67e6c74d421e` | Reject `E001` (OpenAPI 3.0.0) |
-| `meilisearch` | `meilisearch/open-api` | `a2bd2133ac9f9b85fca8fb8b1aa69063c8f1002c` | `open-api.json` | `83cbd10cea1ca75590dc31f1d2e40ef2b636297d47b39c9aefd813e41454cfd1` | Reject `E013` (OpenAPI 3.1.0; clears the gate, real pipeline) |
+| `meilisearch` | `meilisearch/open-api` | `a2bd2133ac9f9b85fca8fb8b1aa69063c8f1002c` | `open-api.json` | `83cbd10cea1ca75590dc31f1d2e40ef2b636297d47b39c9aefd813e41454cfd1` | Reject `E011` (OpenAPI 3.1.0; invalid null `externalDocs.description`) |
 
 The last four are pinned real-world APIs added to broaden coverage: Stripe, Twilio and a
 representative Kubernetes API-group document are still OpenAPI 3.0.x/3.0.1, so they pin the version
-gate (`E001`) on major APIs; `meilisearch` is genuine OpenAPI 3.1.0 and exercises the full pipeline
-past the gate, rejecting on incompatible typed intersections (`E013`; unsupported media also remains).
+gate (`E001`) on major APIs; `meilisearch` is genuine OpenAPI 3.1.0 and exercises strict official
+document validation past the gate, rejecting its null Tag `externalDocs.description` fields (`E011`).
 
 Explicitly not included per planning constraints: HoneyHive, IOTA gas-station, and Redocly.

@@ -26,6 +26,8 @@ pub enum MediaType {
     /// `application/x-ndjson` (newline-delimited JSON, response bodies): a stream of items, one per
     /// line. Lowered to a streaming operation returning `EventStream<T>`.
     Ndjson,
+    /// RFC 7464 JSON Text Sequences and `+json-seq` media.
+    JsonSequence,
 }
 
 impl MediaType {
@@ -34,6 +36,7 @@ impl MediaType {
         match self {
             MediaType::EventStream => Some(Framing::Sse),
             MediaType::Ndjson => Some(Framing::Ndjson),
+            MediaType::JsonSequence => Some(Framing::JsonSequence),
             _ => None,
         }
     }
@@ -45,8 +48,12 @@ impl MediaType {
 pub enum Framing {
     /// Server-Sent Events (`text/event-stream`).
     Sse,
+    /// Standards-compliant SSE events converted to JSON objects before schema deserialization.
+    SseEvent,
     /// Newline-delimited JSON (`application/x-ndjson`).
     Ndjson,
+    /// RFC 7464 records separated by ASCII RS (`0x1E`).
+    JsonSequence,
 }
 
 /// A request body (matrix: Bodies).

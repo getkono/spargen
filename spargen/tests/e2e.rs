@@ -2049,6 +2049,13 @@ paths:
   /records:
     get:
       operationId: listRecords
+      parameters:
+        - name: filter
+          in: querystring
+          content:
+            application/x-www-form-urlencoded:
+              schema:
+                $ref: "#/components/schemas/Query"
       responses:
         "200":
           description: ok

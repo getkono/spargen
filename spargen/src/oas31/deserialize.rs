@@ -7,12 +7,11 @@ use crate::source::{InputBundle, Node, Number, SpannedMap, SpannedValue};
 use super::{
     Components, Discriminator, Document, Info, JsonType, MediaTypeObject, OperationObject,
     ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject, ResponseObject,
-    ResponsesObject, Schema, SchemaOr, SecurityRequirement, SecuritySchemeObject, Server, TypeSet,
-    ValidationKeywords, XmlHints,
+    ResponsesObject, Schema, SchemaOr, SecurityRequirement, SecuritySchemeObject, Server, Tag,
+    TypeSet, ValidationKeywords, XmlHints,
 };
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
-const OAS32_DIALECT: &str = "https://spec.openapis.org/oas/3.2/dialect/base";
 
 /// Build the typed [`Document`] from a loaded [`InputBundle`], carrying spans through.
 pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<Document, Aborted> {
@@ -33,31 +32,16 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
         return Err(Aborted);
     }
 
-    // OpenAPI 3.2 is a compatible superset of 3.1: same JSON Schema 2020-12 dialect, additive
-    // Path/Operation fields. It lowers through this frontend unchanged; the 3.2-only constructs that
-    // are NOT lowered are acknowledged with `W010` (never silently dropped) as they are encountered.
-    if let Some(self_uri) = root.get("$self") {
-        Diagnostic::warning(
-            Code::Oas32ConstructIgnored,
-            provenance(&root_pointer.push("$self"), self_uri),
-        )
-        .message(
-            "`$self` (OpenAPI 3.2) sets the document's base URI for reference resolution; it does \
-             not change locally-generated client code",
-        )
-        .emit(diags);
-    }
-
     if let Some(dialect) = root.get("jsonSchemaDialect") {
         let dialect_text = string(dialect);
-        if dialect_text != Some(OAS31_DIALECT) && dialect_text != Some(OAS32_DIALECT) {
+        if dialect_text != Some(OAS31_DIALECT) {
             Diagnostic::error(
                 Code::UnsupportedDialect,
                 provenance(&root_pointer.push("jsonSchemaDialect"), dialect),
             )
-            .message("jsonSchemaDialect is not the OAS 3.1 or 3.2 base dialect")
+            .message("jsonSchemaDialect is not the OpenAPI Schema Object dialect")
             .remedy(format!(
-                "set jsonSchemaDialect to `{OAS31_DIALECT}` or `{OAS32_DIALECT}`, or omit it"
+                "set jsonSchemaDialect to `{OAS31_DIALECT}`, or omit it"
             ))
             .emit(diags);
         }
@@ -92,6 +76,11 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
         .get("security")
         .map(|value| parse_security(value, &root_pointer.push("security")))
         .unwrap_or_default();
+    let tags = root
+        .get("tags")
+        .map(|value| parse_tags(value, &root_pointer.push("tags"), diags))
+        .unwrap_or_default();
+    validate_tag_hierarchy(&tags, diags);
 
     if let Some(webhooks) = root.get("webhooks") {
         Diagnostic::warning(
@@ -103,11 +92,13 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
     }
 
     let document = Document {
+        is_oas32: openapi_text.starts_with("3.2."),
         info,
         servers,
         paths,
         components,
         security,
+        tags,
         provenance: provenance(&root_pointer, root),
     };
     diags.into_result(document)
@@ -168,6 +159,7 @@ fn parse_server(
 ) -> Option<Server> {
     let _ = object(value, pointer, diags)?;
     Some(Server {
+        name: value.get("name").and_then(string).map(str::to_owned),
         url: value.get("url").and_then(string).unwrap_or("/").to_owned(),
         description: value.get("description").and_then(string).map(str::to_owned),
     })
@@ -199,19 +191,18 @@ fn parse_path_item(
             }
         }
     }
-    // OpenAPI 3.2's `additionalOperations` map declares custom/extension HTTP methods on the path.
-    // spargen does not generate client methods for arbitrary methods; acknowledge it with `W010`
-    // rather than silently dropping it. (The new fixed `QUERY` method IS lowered, via `parse_method`.)
     if let Some(additional) = value.get("additionalOperations") {
-        Diagnostic::warning(
-            Code::Oas32ConstructIgnored,
-            provenance(&pointer.push("additionalOperations"), additional),
-        )
-        .message(
-            "`additionalOperations` (OpenAPI 3.2) declares custom HTTP methods on this path; \
-             spargen generates no client method for them",
-        )
-        .emit(diags);
+        if let Some(additional) = object(additional, &pointer.push("additionalOperations"), diags) {
+            for (method, value) in additional.iter() {
+                if let Some(operation) = parse_operation(
+                    value,
+                    &pointer.push("additionalOperations").push(&method.name),
+                    diags,
+                ) {
+                    operations.insert(Method::Custom(method.name.clone()), operation);
+                }
+            }
+        }
     }
     let parameters = value
         .get("parameters")
@@ -267,6 +258,14 @@ fn parse_operation(
             .get("deprecated")
             .and_then(SpannedValue::as_bool)
             .unwrap_or(false),
+        tags: value
+            .get("tags")
+            .and_then(array)
+            .unwrap_or_default()
+            .iter()
+            .filter_map(string)
+            .map(str::to_owned)
+            .collect(),
         provenance: provenance(pointer, value),
     })
 }
@@ -362,12 +361,67 @@ fn parse_response(
         .emit(diags);
     }
     Some(ResponseObject {
+        summary: value.get("summary").and_then(string).map(str::to_owned),
+        description: value.get("description").and_then(string).map(str::to_owned),
         content: value
             .get("content")
             .map(|value| parse_media_map(value, &pointer.push("content"), diags))
             .unwrap_or_default(),
         provenance: provenance(pointer, value),
     })
+}
+
+fn parse_tags(value: &SpannedValue, pointer: &JsonPointer, diags: &mut Diagnostics) -> Vec<Tag> {
+    array(value)
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| {
+            let pointer = pointer.index(index);
+            let _ = object(value, &pointer, diags)?;
+            Some(Tag {
+                name: value
+                    .get("name")
+                    .and_then(string)
+                    .unwrap_or_default()
+                    .to_owned(),
+                summary: value.get("summary").and_then(string).map(str::to_owned),
+                description: value.get("description").and_then(string).map(str::to_owned),
+                parent: value.get("parent").and_then(string).map(str::to_owned),
+                kind: value.get("kind").and_then(string).map(str::to_owned),
+                provenance: provenance(&pointer, value),
+            })
+        })
+        .collect()
+}
+
+fn validate_tag_hierarchy(tags: &[Tag], diags: &mut Diagnostics) {
+    let by_name: IndexMap<&str, &Tag> = tags.iter().map(|tag| (tag.name.as_str(), tag)).collect();
+    for tag in tags {
+        let mut seen = std::collections::HashSet::new();
+        let mut current = tag;
+        while let Some(parent) = current.parent.as_deref() {
+            if !seen.insert(current.name.as_str()) {
+                Diagnostic::error(Code::InvalidInput, tag.provenance.clone())
+                    .message(format!(
+                        "tag hierarchy containing `{}` has a cycle",
+                        tag.name
+                    ))
+                    .emit(diags);
+                break;
+            }
+            let Some(next) = by_name.get(parent) else {
+                Diagnostic::error(Code::InvalidInput, tag.provenance.clone())
+                    .message(format!(
+                        "tag `{}` references missing parent `{parent}`",
+                        tag.name
+                    ))
+                    .emit(diags);
+                break;
+            };
+            current = next;
+        }
+    }
 }
 
 fn parse_media_map(
@@ -381,30 +435,42 @@ fn parse_media_map(
                 .map(|(key, value)| {
                     (
                         key.name.clone(),
-                        MediaTypeObject {
-                            schema: value.get("schema").and_then(|schema| {
-                                parse_schema_ref_or(
-                                    schema,
-                                    &pointer.push(&key.name).push("schema"),
-                                    diags,
-                                )
-                            }),
-                            // OpenAPI 3.2 `itemSchema`: the per-item type for sequential/streaming
-                            // media. Parsed here so streaming responses can type their `EventStream`
-                            // item and so a stray `itemSchema` is never silently dropped downstream.
-                            item_schema: value.get("itemSchema").and_then(|schema| {
-                                parse_schema_ref_or(
-                                    schema,
-                                    &pointer.push(&key.name).push("itemSchema"),
-                                    diags,
-                                )
-                            }),
-                        },
+                        parse_media_type(value, &pointer.push(&key.name), diags),
                     )
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn parse_media_type(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> MediaTypeObject {
+    MediaTypeObject {
+        reference: value
+            .get("$ref")
+            .and_then(string)
+            .map(|reference| Reference {
+                reference: reference.to_owned(),
+                provenance: provenance(pointer, value),
+            }),
+        schema: value
+            .get("schema")
+            .and_then(|schema| parse_schema_ref_or(schema, &pointer.push("schema"), diags)),
+        item_schema: value
+            .get("itemSchema")
+            .and_then(|schema| parse_schema_ref_or(schema, &pointer.push("itemSchema"), diags)),
+        explicit_encodings: ["encoding", "prefixEncoding", "itemEncoding"]
+            .into_iter()
+            .filter_map(|field| {
+                value
+                    .get(field)
+                    .map(|value| (field.to_owned(), provenance(&pointer.push(field), value)))
+            })
+            .collect(),
+    }
 }
 
 fn parse_components(
@@ -450,6 +516,21 @@ fn parse_components(
         diags,
         parse_request_body,
     );
+    components.media_types = map
+        .get("mediaTypes")
+        .and_then(SpannedValue::as_object)
+        .map(|media_types| {
+            media_types
+                .iter()
+                .map(|(key, value)| {
+                    (
+                        key.name.clone(),
+                        parse_media_type(value, &pointer.push("mediaTypes").push(&key.name), diags),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     components.security_schemes = parse_component_map(
         map.get("securitySchemes"),
         &pointer.push("securitySchemes"),
@@ -506,6 +587,13 @@ fn parse_schema_ref_or(
     diags: &mut Diagnostics,
 ) -> Option<RefOr<Schema>> {
     if let Some(reference) = value.get("$ref").and_then(string) {
+        let has_shape_sibling = value.as_object().is_some_and(|map| {
+            map.iter()
+                .any(|(key, _)| key.name != "$ref" && key.name != "default")
+        });
+        if has_shape_sibling {
+            return parse_schema(value, pointer, diags).map(RefOr::Item);
+        }
         if let Some(default) = value.get("default") {
             Diagnostic::warning(
                 Code::SchemaDefaultNotApplied,
@@ -520,6 +608,7 @@ fn parse_schema_ref_or(
         }
         Some(RefOr::Ref(Reference {
             reference: reference.to_owned(),
+            provenance: provenance(pointer, value),
         }))
     } else {
         parse_schema(value, pointer, diags).map(RefOr::Item)
@@ -531,13 +620,43 @@ pub(super) fn parse_schema(
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<Schema> {
-    let SchemaOr::Schema(schema) = parse_schema_or(value, pointer, diags)? else {
-        Diagnostic::error(Code::InvalidInput, provenance(pointer, value))
-            .message("boolean schema is not valid in this OpenAPI position")
-            .emit(diags);
-        return None;
-    };
-    Some(*schema)
+    match parse_schema_or(value, pointer, diags)? {
+        SchemaOr::Schema(schema) => Some(*schema),
+        SchemaOr::Bool(boolean) => Some(boolean_schema(boolean, provenance(pointer, value))),
+    }
+}
+
+fn boolean_schema(value: bool, provenance: Provenance) -> Schema {
+    Schema {
+        boolean: Some(value),
+        types: TypeSet::default(),
+        reference: None,
+        properties: IndexMap::new(),
+        required: Vec::new(),
+        additional_properties: None,
+        pattern_properties: IndexMap::new(),
+        items: None,
+        prefix_items: Vec::new(),
+        all_of: Vec::new(),
+        one_of: Vec::new(),
+        any_of: Vec::new(),
+        discriminator: None,
+        defs: IndexMap::new(),
+        validation_children: Vec::new(),
+        enum_values: None,
+        const_value: None,
+        default: None,
+        format: None,
+        content_encoding: None,
+        xml: None,
+        validation: ValidationKeywords::default(),
+        deprecated: false,
+        read_only: false,
+        write_only: false,
+        title: None,
+        description: None,
+        provenance,
+    }
 }
 
 fn parse_schema_or(
@@ -555,8 +674,29 @@ fn parse_schema_or(
             .message("$dynamicRef and $dynamicAnchor require dynamic schema scope evaluation")
             .emit(diags);
     }
+    if map.get("$id").is_some() || map.get("$anchor").is_some() {
+        Diagnostic::error(Code::UnresolvedRef, provenance(pointer, value))
+            .message("static `$id`/`$anchor` schema resource scopes are not yet supported")
+            .emit(diags);
+    }
+    if let Some(dialect) = map.get("$schema").and_then(string) {
+        if dialect != OAS31_DIALECT {
+            Diagnostic::error(
+                Code::UnsupportedDialect,
+                provenance(
+                    &pointer.push("$schema"),
+                    map.get("$schema").expect("present"),
+                ),
+            )
+            .message(format!(
+                "schema resource uses unsupported dialect `{dialect}`"
+            ))
+            .emit(diags);
+        }
+    }
 
     let schema = Schema {
+        boolean: None,
         types: parse_type_set(map.get("type")),
         reference: map.get("$ref").and_then(string).map(str::to_owned),
         properties: map
@@ -626,6 +766,7 @@ fn parse_schema_or(
                     .collect()
             })
             .unwrap_or_default(),
+        validation_children: parse_validation_children(map, pointer, diags),
         enum_values: map
             .get("enum")
             .and_then(array)
@@ -678,6 +819,17 @@ fn parse_discriminator(
     diags: &mut Diagnostics,
 ) -> Option<Discriminator> {
     let _ = object(value, pointer, diags)?;
+    if let Some(default_mapping) = value.get("defaultMapping") {
+        Diagnostic::error(
+            Code::NonDisjointUnion,
+            provenance(&pointer.push("defaultMapping"), default_mapping),
+        )
+        .message(
+            "discriminator.defaultMapping requires a generated fallback branch for absent or \
+             unknown discriminator values, which is not yet representable",
+        )
+        .emit(diags);
+    }
     Some(Discriminator {
         property_name: value
             .get("propertyName")
@@ -705,10 +857,12 @@ fn parse_xml(value: &SpannedValue) -> Option<XmlHints> {
     let _ = value.as_object()?;
     Some(XmlHints {
         name: value.get("name").and_then(string).map(str::to_owned),
-        attribute: value
-            .get("attribute")
-            .and_then(SpannedValue::as_bool)
-            .unwrap_or(false),
+        attribute: value.get("nodeType").and_then(string) == Some("attribute")
+            || value
+                .get("attribute")
+                .and_then(SpannedValue::as_bool)
+                .unwrap_or(false),
+        node_type: value.get("nodeType").and_then(string).map(str::to_owned),
         namespace: value.get("namespace").and_then(string).map(str::to_owned),
         prefix: value.get("prefix").and_then(string).map(str::to_owned),
         wrapped: value
@@ -769,7 +923,65 @@ fn parse_validation(map: &SpannedMap) -> ValidationKeywords {
             .unwrap_or(false),
         min_properties: map.get("minProperties").and_then(number_u64),
         max_properties: map.get("maxProperties").and_then(number_u64),
+        other: [
+            "not",
+            "if",
+            "then",
+            "else",
+            "contains",
+            "minContains",
+            "maxContains",
+            "dependentSchemas",
+            "dependentRequired",
+            "propertyNames",
+            "unevaluatedProperties",
+            "unevaluatedItems",
+            "contentMediaType",
+            "contentSchema",
+        ]
+        .iter()
+        .any(|keyword| map.get(keyword).is_some()),
     }
+}
+
+fn parse_validation_children(
+    map: &SpannedMap,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Vec<(String, SchemaOr)> {
+    let mut children = Vec::new();
+    for keyword in [
+        "not",
+        "if",
+        "then",
+        "else",
+        "contains",
+        "propertyNames",
+        "unevaluatedProperties",
+        "unevaluatedItems",
+        "contentSchema",
+    ] {
+        if let Some(value) = map.get(keyword) {
+            if let Some(schema) = parse_schema_or(value, &pointer.push(keyword), diags) {
+                children.push((keyword.to_owned(), schema));
+            }
+        }
+    }
+    if let Some(dependent) = map
+        .get("dependentSchemas")
+        .and_then(SpannedValue::as_object)
+    {
+        for (key, value) in dependent.iter() {
+            if let Some(schema) = parse_schema_or(
+                value,
+                &pointer.push("dependentSchemas").push(&key.name),
+                diags,
+            ) {
+                children.push((format!("dependentSchemas/{}", key.name), schema));
+            }
+        }
+    }
+    children
 }
 
 fn parse_ref_array<T>(
@@ -795,6 +1007,7 @@ fn parse_ref_or<T>(
     if let Some(reference) = value.get("$ref").and_then(string) {
         Some(RefOr::Ref(Reference {
             reference: reference.to_owned(),
+            provenance: provenance(pointer, value),
         }))
     } else {
         parse(value, pointer, diags).map(RefOr::Item)

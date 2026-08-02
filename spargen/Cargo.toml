@@ -35,6 +35,9 @@ camino = { workspace = true }
 # source
 indexmap = { workspace = true }
 yaml-rust2 = { workspace = true }
+# oas31 — generator-side validation only. Default features stay off so validation is fully
+# hermetic: the official OpenAPI schemas are embedded below and no HTTP/file retriever is linked.
+jsonschema = { version = "0.49.3", default-features = false }
 # name
 proc-macro2 = { workspace = true }
 quote = { workspace = true }

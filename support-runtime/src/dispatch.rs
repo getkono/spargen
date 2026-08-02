@@ -42,6 +42,32 @@ pub fn build_url(
     Ok(url)
 }
 
+/// Build a URL whose entire query string is owned by an OpenAPI 3.2 `in: querystring` parameter.
+/// JSON content is appended as one key-only encoded value, while form content is appended as named
+/// pairs. Both forms replace any query embedded in the selected server URL.
+pub fn build_url_with_query_string(
+    core: &ClientCore,
+    path: &str,
+    query: &[(String, String)],
+    query_string: Option<&str>,
+) -> Result<Url, Error<Infallible>> {
+    let mut url = build_url(core, path, &[])?;
+    // `in: querystring` owns the complete query. A query embedded in the selected server URL must
+    // not leak into that value; form-urlencoded whole-query values are appended as pairs below,
+    // while JSON is appended as one key-only encoded value.
+    url.set_query(None);
+    if !query.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (name, value) in query {
+            pairs.append_pair(name, value);
+        }
+    }
+    if let Some(query_string) = query_string {
+        url.query_pairs_mut().append_key_only(query_string);
+    }
+    Ok(url)
+}
+
 /// Attach credentials for an operation's security requirement. `requirements` is an OR
 /// of alternatives, each an AND of schemes; the first alternative whose schemes all have a
 /// registered credential wins, deterministically. An empty alternative (`{}` in the spec) marks
@@ -530,7 +556,7 @@ mod tests {
         assert!(value.is_sensitive());
     }
 
-    use super::{build_url, StatusSpec};
+    use super::{build_url, build_url_with_query_string, StatusSpec};
 
     fn core_at(base: &str) -> ClientCore {
         ClientCore::new(base).unwrap()
@@ -573,6 +599,35 @@ mod tests {
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
         assert_eq!(pairs, vec![("q".to_owned(), "a b&c".to_owned())]);
+    }
+
+    #[test]
+    fn build_url_encodes_a_whole_json_query_string_without_a_name() {
+        let core = core_at("https://example.com?stale=server-value");
+        let url = build_url_with_query_string(
+            &core,
+            "/search",
+            &[],
+            Some(r#"{"numbers":[1,2],"flag":null}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            url.query(),
+            Some("%7B%22numbers%22%3A%5B1%2C2%5D%2C%22flag%22%3Anull%7D")
+        );
+    }
+
+    #[test]
+    fn build_url_replaces_the_server_query_with_a_form_whole_query_string() {
+        let core = core_at("https://example.com?stale=server-value");
+        let url = build_url_with_query_string(
+            &core,
+            "/search",
+            &[("term".to_owned(), "rust api".to_owned())],
+            None,
+        )
+        .unwrap();
+        assert_eq!(url.query(), Some("term=rust+api"));
     }
 
     #[test]

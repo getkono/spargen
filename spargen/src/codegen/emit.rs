@@ -124,6 +124,7 @@ pub(crate) fn emit_operation(
     let bindings = operation_bindings(operation, names);
     let path_binding = &bindings.path;
     let query_binding = &bindings.query;
+    let raw_query_binding = &bindings.raw_query;
     let url_binding = &bindings.url;
     let request_binding = &bindings.request;
     let cookies_binding = &bindings.cookies;
@@ -132,7 +133,7 @@ pub(crate) fn emit_operation(
         .get(&operation.id)
         .expect("operation name allocated");
     let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
-    let reqwest_method = reqwest_method(operation.method);
+    let reqwest_method = reqwest_method(&operation.method);
     let success_ty = success_type(operation, names, options);
     let error_ty = quote! { #error_ident };
     let docs = doc_tokens(&operation.docs);
@@ -179,6 +180,62 @@ pub(crate) fn emit_operation(
                 .as_ref()
                 .expect("optional parameters argument allocated");
             let serialize = query_param_tokens(param, &name, quote! { value }, query_binding);
+            quote! {
+                if let Some(value) = #params_binding
+                    .as_ref()
+                    .and_then(|params| params.#ident.as_ref())
+                {
+                    #serialize
+                }
+            }
+        });
+    let uses_querystring = operation
+        .params
+        .iter()
+        .any(|parameter| parameter.location == ParamLoc::QueryString);
+    let uses_json_querystring = operation.params.iter().any(|parameter| {
+        parameter.location == ParamLoc::QueryString
+            && matches!(
+                &parameter.style,
+                crate::ir::ParamStyle::Content(MediaType::Json)
+            )
+    });
+    let raw_query_init = uses_querystring.then(|| {
+        if uses_json_querystring {
+            quote! { let mut #raw_query_binding: Option<String> = None; }
+        } else {
+            quote! { let #raw_query_binding: Option<String> = None; }
+        }
+    });
+    let required_querystring = operation
+        .params
+        .iter()
+        .filter(|parameter| parameter.required && parameter.location == ParamLoc::QueryString)
+        .map(|parameter| {
+            let ident = param_ident(parameter, crate::name::IdentRole::Param);
+            querystring_param_tokens(
+                parameter,
+                quote! { &#ident },
+                query_binding,
+                raw_query_binding,
+            )
+        });
+    let optional_querystring = operation
+        .params
+        .iter()
+        .filter(|parameter| !parameter.required && parameter.location == ParamLoc::QueryString)
+        .map(|parameter| {
+            let ident = param_ident(parameter, crate::name::IdentRole::Field);
+            let params_binding = bindings
+                .params
+                .as_ref()
+                .expect("optional parameters argument allocated");
+            let serialize = querystring_param_tokens(
+                parameter,
+                quote! { value },
+                query_binding,
+                raw_query_binding,
+            );
             quote! {
                 if let Some(value) = #params_binding
                     .as_ref()
@@ -323,7 +380,7 @@ pub(crate) fn emit_operation(
                 }
                 // Streaming media are response-only; a streaming request body is rejected during
                 // lowering (narrowed `E009`), so this arm is unreachable for any emitted operation.
-                MediaType::EventStream | MediaType::Ndjson => quote! {},
+                MediaType::EventStream | MediaType::Ndjson | MediaType::JsonSequence => quote! {},
             }
         }
     } else {
@@ -607,7 +664,9 @@ pub(crate) fn emit_operation(
         Some(framing) => {
             let framing_tokens = match framing {
                 crate::ir::Framing::Sse => quote! { support::Framing::Sse },
+                crate::ir::Framing::SseEvent => quote! { support::Framing::SseEvent },
                 crate::ir::Framing::Ndjson => quote! { support::Framing::Ndjson },
+                crate::ir::Framing::JsonSequence => quote! { support::Framing::JsonSequence },
             };
             quote! { Ok(support::EventStream::new(response, #framing_tokens)) }
         }
@@ -615,6 +674,19 @@ pub(crate) fn emit_operation(
     };
     // The return type is shared with the blocking shim so both surfaces stay identical.
     let (return_ok_ty, _) = operation_return_ty(operation, names, options);
+
+    let build_url = if uses_querystring {
+        quote! {
+            support::build_url_with_query_string(
+                &self.core,
+                &#path_binding,
+                &#query_binding,
+                #raw_query_binding.as_deref(),
+            )
+        }
+    } else {
+        quote! { support::build_url(&self.core, &#path_binding, &#query_binding) }
+    };
 
     quote! {
         #docs
@@ -628,13 +700,12 @@ pub(crate) fn emit_operation(
             let mut #path_binding = #path_init.to_owned();
             #(#path_replacements)*
             let mut #query_binding: Vec<(String, String)> = Vec::new();
+            #raw_query_init
             #(#required_query)*
             #(#optional_query)*
-            let #url_binding = support::build_url(
-                &self.core,
-                &#path_binding,
-                &#query_binding,
-            )
+            #(#required_querystring)*
+            #(#optional_querystring)*
+            let #url_binding = #build_url
                 .map_err(support::Error::widen)?;
             let mut #request_binding = self.core.http().request(#reqwest_method, #url_binding);
             #(#required_headers)*
@@ -1000,7 +1071,7 @@ fn query_param_tokens(
     query_binding: &crate::name::Ident,
 ) -> TokenStream {
     match &param.style {
-        crate::ir::ParamStyle::Form => {
+        crate::ir::ParamStyle::Form | crate::ir::ParamStyle::Cookie => {
             let explode = param.explode;
             quote! {
                 #query_binding.extend(
@@ -1017,6 +1088,29 @@ fn query_param_tokens(
     }
 }
 
+fn querystring_param_tokens(
+    param: &crate::ir::Parameter,
+    value: TokenStream,
+    query_binding: &crate::name::Ident,
+    raw_query_binding: &crate::name::Ident,
+) -> TokenStream {
+    match &param.style {
+        crate::ir::ParamStyle::Content(MediaType::Json) => quote! {
+            #raw_query_binding = Some(
+                serde_json::to_string(#value)
+                    .map_err(support::Error::request_construction)?,
+            );
+        },
+        crate::ir::ParamStyle::Content(MediaType::FormUrlEncoded) => quote! {
+            #query_binding.extend(
+                support::serialize_form("", #value, true)
+                    .map_err(support::Error::request_construction)?,
+            );
+        },
+        _ => quote! {},
+    }
+}
+
 /// Emit serialization of one cookie parameter into the operation's cookie fragments.
 fn cookie_param_tokens(
     param: &crate::ir::Parameter,
@@ -1025,7 +1119,7 @@ fn cookie_param_tokens(
     cookies_binding: &crate::name::Ident,
 ) -> TokenStream {
     match &param.style {
-        crate::ir::ParamStyle::Form => {
+        crate::ir::ParamStyle::Form | crate::ir::ParamStyle::Cookie => {
             let explode = param.explode;
             quote! {
                 for (name, value) in support::serialize_form(#name, #value, #explode)
@@ -1433,7 +1527,7 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
-            pub use dispatch::{attach_auth, build_url, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
+            pub use dispatch::{attach_auth, build_url, build_url_with_query_string, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use parameter::{serialize_form, serialize_simple, ParameterError};
@@ -2181,7 +2275,7 @@ fn is_bytes_ty(api: &Api, ty: Ty) -> bool {
     )
 }
 
-fn reqwest_method(method: crate::ir::Method) -> TokenStream {
+fn reqwest_method(method: &crate::ir::Method) -> TokenStream {
     match method {
         crate::ir::Method::Get => quote! { reqwest::Method::GET },
         crate::ir::Method::Put => quote! { reqwest::Method::PUT },
@@ -2196,6 +2290,13 @@ fn reqwest_method(method: crate::ir::Method) -> TokenStream {
         crate::ir::Method::Query => quote! {
             reqwest::Method::from_bytes(b"QUERY").expect("QUERY is a valid HTTP method token")
         },
+        crate::ir::Method::Custom(method) => {
+            let bytes = proc_macro2::Literal::byte_string(method.as_bytes());
+            quote! {
+                reqwest::Method::from_bytes(#bytes)
+                    .expect("validated additionalOperations key is a valid HTTP method token")
+            }
+        }
     }
 }
 

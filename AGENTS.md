@@ -1,6 +1,6 @@
 # spargen
 
-A compile-time-correct Rust client generator for OpenAPI 3.1.x. The [`README.md`](README.md)
+A compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x. The [`README.md`](README.md)
 carries the product contract; [`docs/support-matrix.md`](docs/support-matrix.md) and
 [`docs/errors.md`](docs/errors.md) are the operational surface — read them before non-trivial
 changes.

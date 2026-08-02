@@ -60,6 +60,8 @@ pub struct OperationBindings {
     pub path: Ident,
     /// Mutable query-pair collection.
     pub query: Ident,
+    /// Serialized whole-query value for an `in: querystring` parameter.
+    pub raw_query: Ident,
     /// Fully constructed request URL.
     pub url: Ident,
     /// Mutable request builder, then the built request.
@@ -131,6 +133,7 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                 body,
                 path: binding_scope.alloc("path", IdentRole::Param, pointer),
                 query: binding_scope.alloc("query", IdentRole::Param, pointer),
+                raw_query: binding_scope.alloc("raw_query", IdentRole::Param, pointer),
                 url: binding_scope.alloc("url", IdentRole::Param, pointer),
                 request: binding_scope.alloc("request", IdentRole::Param, pointer),
                 cookies: binding_scope.alloc("cookies", IdentRole::Param, pointer),

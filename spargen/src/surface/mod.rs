@@ -304,7 +304,7 @@ impl DiffReport {
 pub(crate) fn build(api: &Api, names: &Names) -> Surface {
     let mut operations = BTreeMap::new();
     for operation in &api.operations {
-        let key = format!("{} {}", method_label(operation.method), operation.path.raw);
+        let key = format!("{} {}", method_label(&operation.method), operation.path.raw);
         let method_name = names
             .operations
             .get(&operation.id)
@@ -818,6 +818,6 @@ fn prim_label(prim: Prim) -> &'static str {
     }
 }
 
-fn method_label(method: crate::ir::Method) -> String {
+fn method_label(method: &crate::ir::Method) -> String {
     method.as_str().to_uppercase()
 }

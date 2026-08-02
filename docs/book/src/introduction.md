@@ -1,6 +1,7 @@
 # Introduction
 
-**spargen** is a compile-time-correct Rust client generator for OpenAPI **3.1.x**. Nothing else.
+**spargen** is a compile-time-correct Rust client generator for OpenAPI **3.1.x and 3.2.x**.
+Nothing older.
 
 The name: a *spar* is the single load-bearing beam of an aircraft wing — sized on the drawing
 board, carrying the entire span in flight with nothing propping it up. That is the product:
@@ -22,7 +23,7 @@ to `serde_json::Value`. The [feature support matrix](./support-matrix.md) and th
 [diagnostic index](./errors.md) are the operational contract; `spargen explain E013` prints the
 same text the docs carry.
 
-### OpenAPI 3.1.x, natively
+### OpenAPI 3.1 and 3.2, natively
 
 Most of the modern Rust server ecosystem emits OpenAPI **3.1** (utoipa, aide, poem-openapi —
 everything downstream of JSON Schema 2020-12), but the ecosystem's client generators target
@@ -32,7 +33,8 @@ Schema 2020-12 (`nullable` → type arrays, numeric `exclusiveMinimum`, `$defs`,
 generating — "works" only by accident and silently miscompiles any schema that uses 3.1
 semantics.
 
-Spargen speaks 3.1 natively and fails loudly and precisely on what it does not support. 3.0.x
+Spargen speaks 3.1 and its focused 3.2 extension natively and fails loudly and precisely on what
+it does not support. The [OpenAPI 3.2 scope](./openapi-3.2.md) summarizes that small delta. 3.0.x
 input is **rejected** with a diagnostic (`E001`), never converted.
 
 ### A freestanding runtime
