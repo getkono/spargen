@@ -29,8 +29,9 @@
 //! Pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`, with `diag` as the
 //! only vocabulary shared across stages.
 
-pub mod diag;
+mod diag;
 
+mod cache;
 mod codegen;
 mod compat;
 mod emit;
@@ -41,15 +42,12 @@ mod source;
 mod support;
 mod surface;
 
-#[cfg(feature = "cli")]
-pub mod cli;
-
 use std::str::FromStr;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
 pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule};
-pub use diag::{Code, Diagnostic, JsonPointer, Severity, Span};
+pub use diag::{Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, Severity, Span, UnknownCode};
 #[cfg(feature = "remote-fetch")]
 pub use source::{VendorReport, VendoredRef};
 pub use surface::{Change, ChangeKind, DiffReport, Impact};
@@ -74,20 +72,6 @@ impl Default for Features {
     }
 }
 
-/// Where generated code is written.
-#[derive(Debug, Clone)]
-pub enum OutputTarget {
-    /// A module (file or directory) checked into an existing crate.
-    Module(Utf8PathBuf),
-    /// A standalone, publishable crate.
-    Crate {
-        /// The crate directory to create.
-        dir: Utf8PathBuf,
-        /// The crate name.
-        name: String,
-    },
-}
-
 /// Configuration for one generation run — the primary `build.rs` input. Construct with
 /// [`Config::new`] and adjust fields as needed.
 #[derive(Debug, Clone)]
@@ -95,7 +79,7 @@ pub struct Config {
     /// Path to the root OpenAPI document.
     pub spec: Utf8PathBuf,
     /// Where to write generated code.
-    pub output: OutputTarget,
+    pub output: Utf8PathBuf,
     /// Generated-output feature toggles.
     pub features: Features,
     /// Explicit compatibility omissions applied before OpenAPI validation/lowering.
@@ -104,8 +88,6 @@ pub struct Config {
     pub error_body_cap: usize,
     /// Max diagnostics collected before batching stops.
     pub batch_cap: usize,
-    /// Audit and check drift only; do not write output (`--check`).
-    pub check_only: bool,
     /// Auto-carve: instead of failing on rejections, iteratively omit the minimal enclosing
     /// omittable construct for each rejection and generate the rest (`--carve`). Every carved
     /// construct is reported via `W009`; residual, un-carvable rejections are reported honestly.
@@ -115,15 +97,14 @@ pub struct Config {
 impl Config {
     /// A config with sensible defaults: features on, 64 KiB error-body cap, a bounded diagnostic
     /// batch, writing enabled.
-    pub fn new(spec: impl Into<Utf8PathBuf>, output: OutputTarget) -> Self {
+    pub fn new(spec: impl Into<Utf8PathBuf>, output: impl Into<Utf8PathBuf>) -> Self {
         Self {
             spec: spec.into(),
-            output,
+            output: output.into(),
             features: Features::default(),
             omit: Omit::default(),
             error_body_cap: 64 * 1024,
             batch_cap: 100,
-            check_only: false,
             carve: false,
         }
     }
@@ -132,12 +113,10 @@ impl Config {
 /// The outcome of a pipeline run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
-    /// Code was generated and written.
+    /// The generated module is ready, either freshly rendered or verified from the build cache.
     Generated,
-    /// `--check`: checked-in output matches the spec.
+    /// The support audit completed without a rejection.
     Clean,
-    /// `--check`: checked-in output drifted from the spec.
-    Drifted,
     /// The spec used an R-class construct; generation failed loudly.
     Rejected,
 }
@@ -158,20 +137,105 @@ pub struct Report {
 /// // build.rs — spec to first typed API call in well under ten lines.
 /// let config = spargen::Config::new(
 ///     "api/openapi.yaml",
-///     spargen::OutputTarget::Module("src/api.rs".into()),
+///     "src/api.rs",
 /// );
 /// let report = spargen::generate(&config);
 /// println!("cargo:warning=spargen outcome: {:?}", report.outcome);
 /// ```
 pub fn generate(config: &Config) -> Report {
-    run_on_frontend_stack(|| {
-        if config.carve {
-            run_carve(config, PipelineMode::Generate)
-        } else {
-            run_pipeline(config, PipelineMode::Generate)
+    let cache_dir = cache::cache_dir();
+    generate_with_cache_dir(config, cache_dir.as_deref(), cache_dir.is_some())
+}
+
+fn generate_with_cache_dir(
+    config: &Config,
+    cache_dir: Option<&Utf8Path>,
+    emit_cargo_directives: bool,
+) -> Report {
+    let mut snapshot = match run_on_frontend_stack(|| cache::InputSnapshot::load(config)) {
+        Ok(snapshot) => snapshot,
+        Err(diagnostics) => {
+            if emit_cargo_directives {
+                cache::cargo_directives(config, None);
+            }
+            return Report {
+                diagnostics,
+                outcome: Outcome::Rejected,
+            };
         }
-    })
-    .report
+    };
+    if emit_cargo_directives {
+        cache::cargo_directives(config, Some(&snapshot));
+    }
+
+    let cache_path = cache_dir.map(|dir| cache::cache_path(dir, &config.output));
+    if cache_dir.is_some() {
+        if let Some(content_digest) = cache::verified_output(&config.output, &snapshot.digest) {
+            let diagnostics = cache_path
+                .as_deref()
+                .map(|path| cache::read_diagnostics(path, &snapshot.digest, &content_digest))
+                .unwrap_or_default();
+            if let Some(path) = &cache_path {
+                if let Err(message) =
+                    cache::write_cache(path, &snapshot.digest, &content_digest, &diagnostics)
+                {
+                    return pipeline_error_report(message);
+                }
+            }
+            return Report {
+                diagnostics,
+                outcome: Outcome::Generated,
+            };
+        }
+    }
+
+    for _ in 0..3 {
+        let preview = preview_inner(config);
+        if preview.report.outcome != Outcome::Generated {
+            return preview.report;
+        }
+        let Some(rendered) = preview.files.first().map(String::as_str) else {
+            return pipeline_error_report("generation produced no module".to_owned());
+        };
+
+        let after = match run_on_frontend_stack(|| cache::InputSnapshot::load(config)) {
+            Ok(snapshot) => snapshot,
+            Err(diagnostics) => {
+                return Report {
+                    diagnostics,
+                    outcome: Outcome::Rejected,
+                };
+            }
+        };
+        if snapshot.digest != after.digest {
+            snapshot = after;
+            if emit_cargo_directives {
+                cache::cargo_directives(config, Some(&snapshot));
+            }
+            continue;
+        }
+
+        let (contents, content_digest) = cache::finalized(rendered, &snapshot.digest);
+        if let Err(message) = cache::write_output(&config.output, &contents) {
+            return pipeline_error_report(message);
+        }
+        if let Some(path) = &cache_path {
+            if let Err(message) = cache::write_cache(
+                path,
+                &snapshot.digest,
+                &content_digest,
+                &preview.report.diagnostics,
+            ) {
+                return pipeline_error_report(message);
+            }
+        }
+        return preview.report;
+    }
+
+    pipeline_error_report(
+        "generation inputs changed repeatedly while they were being read; retry the build"
+            .to_owned(),
+    )
 }
 
 /// Run the support-audit only, without codegen (`spargen check`) — a CI contract gate between spec
@@ -187,49 +251,13 @@ pub fn check(config: &Config) -> Report {
     .report
 }
 
-/// The rendered output of a generation run, produced **in memory without touching the filesystem**.
-///
-/// Backs `spargen generate --out -` (CLI preview) and the `generate_api!` proc-macro
-/// (`spargen-macro`): both need the exact bytes [`generate`] would write, without a file. The
-/// contents are byte-identical to [`generate`]'s on-disk output for the same [`Config`], and every
-/// bit as deterministic.
 #[derive(Debug, Clone)]
-pub struct Preview {
-    /// The pipeline report (diagnostics + outcome), identical to what [`generate`] returns.
-    pub report: Report,
-    /// The rendered files — each path (relative to the output target) with its final on-disk
-    /// contents, in deterministic order. Empty unless `report.outcome` is [`Outcome::Generated`].
-    pub files: Vec<PreviewFile>,
+struct PipelinePreview {
+    report: Report,
+    files: Vec<String>,
 }
 
-/// One rendered file from a [`preview`] run.
-#[derive(Debug, Clone)]
-pub struct PreviewFile {
-    /// The path relative to the output target — `lib.rs` for a module, or `src/lib.rs` +
-    /// `Cargo.toml` for a crate layout.
-    pub path: Utf8PathBuf,
-    /// The final file contents, provenance header stamped — exactly what [`generate`] would write.
-    pub contents: String,
-}
-
-/// Render a client **in memory** and return its files, writing nothing to disk.
-///
-/// The same pipeline as [`generate`] right up to output — frontend → codegen → emit planning —
-/// minus the filesystem write. Use it to preview generated code (pipe it to `rustfmt`, show it in
-/// a UI) or to drive generation from a proc-macro. Carve (`config.carve`) is honored exactly as
-/// [`generate`] honors it; `config.check_only` is not meaningful for a preview and is ignored.
-///
-/// ```no_run
-/// let config = spargen::Config::new(
-///     "api/openapi.yaml",
-///     spargen::OutputTarget::Module("api.rs".into()),
-/// );
-/// let preview = spargen::preview(&config);
-/// if preview.report.outcome == spargen::Outcome::Generated {
-///     print!("{}", preview.files[0].contents); // the rendered module
-/// }
-/// ```
-pub fn preview(config: &Config) -> Preview {
+fn preview_inner(config: &Config) -> PipelinePreview {
     let result = run_on_frontend_stack(|| {
         if config.carve {
             run_carve(config, PipelineMode::Preview)
@@ -239,17 +267,9 @@ pub fn preview(config: &Config) -> Preview {
     });
     let files = result
         .plan
-        .map(|plan| {
-            plan.files
-                .into_iter()
-                .map(|file| PreviewFile {
-                    path: file.path,
-                    contents: file.contents,
-                })
-                .collect()
-        })
+        .map(|plan| plan.files.into_iter().map(|file| file.contents).collect())
         .unwrap_or_default();
-    Preview {
+    PipelinePreview {
         report: result.report,
         files,
     }
@@ -342,16 +362,14 @@ fn diff_inner(old: &Config, new: &Config) -> DiffOutcome {
     }
 }
 
-/// The filesystem paths [`generate`]/[`check`] read for `config`: the root spec, every
-/// relative-file `$ref` target reachable from it, and each vendored remote copy. This is the raw
-/// on-disk footprint of a spec — the CLI `--watch` loop builds its watch set on top of it (adding
-/// the config and lock files).
+/// The filesystem paths generation reads for `config`: the root spec, every relative-file `$ref`
+/// target reachable from it, and each vendored remote copy.
 ///
 /// Best-effort and side-effect-free: it loads the bundle only (no lowering, no output, no
 /// network). If the spec cannot even be loaded (e.g. it is momentarily malformed mid-edit), the
 /// returned list is just the spec path, so a watcher can still wait for it to be fixed.
 /// Deterministic for a given on-disk state.
-pub fn source_files(config: &Config) -> Vec<Utf8PathBuf> {
+fn source_files(config: &Config) -> Vec<Utf8PathBuf> {
     let mut diags = diag::Diagnostics::new(config.batch_cap);
     match source::InputBundle::load(&config.spec, &mut diags) {
         Ok(bundle) => {
@@ -363,6 +381,46 @@ pub fn source_files(config: &Config) -> Vec<Utf8PathBuf> {
             paths
         }
         Err(_) => vec![config.spec.clone()],
+    }
+}
+
+/// Private cross-crate bridge used exclusively by `spargen-macro`.
+#[doc(hidden)]
+pub mod __private {
+    use camino::Utf8PathBuf;
+
+    use super::{Config, Outcome, Report};
+
+    #[doc(hidden)]
+    pub struct MacroPreview {
+        pub report: Report,
+        pub contents: Option<String>,
+        pub source_files: Vec<Utf8PathBuf>,
+    }
+
+    #[doc(hidden)]
+    pub fn preview(config: &Config) -> MacroPreview {
+        let preview = super::preview_inner(config);
+        let contents = preview.files.first().cloned();
+        let mut source_files = super::source_files(config);
+        let spec_dir = config
+            .spec
+            .parent()
+            .unwrap_or_else(|| camino::Utf8Path::new(""));
+        let lock = spec_dir.join("spargen.lock");
+        if lock.is_file() {
+            source_files.push(lock);
+        }
+        source_files.sort();
+        source_files.dedup();
+        if preview.report.outcome != Outcome::Generated {
+            source_files.retain(|path| path == &config.spec);
+        }
+        MacroPreview {
+            report: preview.report,
+            contents,
+            source_files,
+        }
     }
 }
 
@@ -401,17 +459,15 @@ pub fn vendor(config: &Config) -> VendorOutcome {
 
 #[derive(Debug, Clone, Copy)]
 enum PipelineMode {
-    /// Render and write to disk (`spargen::generate`).
-    Generate,
     /// Frontend audit only, no codegen (`spargen::check`).
     Check,
-    /// Render in memory and return the plan, no write (`spargen::preview`).
+    /// Render in memory for the build cache or private proc-macro bridge.
     Preview,
 }
 
 /// The result of a pipeline run: the user-facing [`Report`] plus, when the run rendered code in
 /// [`PipelineMode::Preview`], the in-memory [`emit::EmitPlan`]. `plan` is `None` for `check`,
-/// `--check` drift runs, `generate`'s on-disk write, and every rejection — only a preview keeps it.
+/// On-disk writes and rejections retain no plan; only a preview keeps it.
 struct PipelineResult {
     report: Report,
     plan: Option<emit::EmitPlan>,
@@ -470,8 +526,8 @@ fn lower_frontend(
 }
 
 /// Codegen + emit-planning for an already-lowered API: the shared tail of `generate` and
-/// `preview`. Returns the fully-rendered [`emit::EmitPlan`] (contents stamped, `Cargo.toml`
-/// synthesized), or `Err(())` with the layout error already pushed onto `diags`.
+/// the internal preview. Returns the fully rendered module plan or `Err(())` with the layout error
+/// already pushed onto `diags`.
 fn build_emit_plan(
     config: &Config,
     api: &ir::Api,
@@ -490,38 +546,6 @@ fn build_emit_plan(
     );
 
     let emit_options = emit::EmitOptions {
-        layout: match &config.output {
-            OutputTarget::Module(path) => emit::OutputLayout::Module { path: path.clone() },
-            OutputTarget::Crate { dir, name } => emit::OutputLayout::Crate {
-                dir: dir.clone(),
-                package: emit::PackageMeta {
-                    name: name.clone(),
-                    version: "0.0.0".to_owned(),
-                },
-            },
-        },
-        features: emit::FeatureSet {
-            uuid: config.features.uuid,
-            time: config.features.time,
-            // Derived from the API so the synthesized manifest carries exactly the extra
-            // reqwest/bytes features the emitted code needs (deterministic, minimal).
-            multipart: api.operations.iter().any(|operation| {
-                operation
-                    .request_body
-                    .as_ref()
-                    .is_some_and(|body| body.media == ir::MediaType::Multipart)
-            }),
-            bytes_serde: api.types.iter().any(|(_, def)| {
-                matches!(&def.kind, ir::TypeKind::Struct(object)
-                if object.fields.iter().any(|field| matches!(
-                    api.types.get(field.ty.id).map(|def| &def.kind),
-                    Some(ir::TypeKind::Bytes)
-                )))
-            }),
-            // Pull in quick-xml exactly when the API uses an XML body (same predicate that gates the
-            // embedded `support::xml` module), so the manifest and embedded code stay in lockstep.
-            xml: api.uses_xml(),
-        },
         spec: emit::SpecMeta {
             source: if config.omit.is_empty() {
                 config.spec.to_string()
@@ -557,40 +581,11 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> PipelineResult {
     match mode {
         // Handled above; `plan` was never built for it.
         PipelineMode::Check => unreachable!("check returns before codegen"),
-        // Preview keeps the rendered plan and writes nothing (`--check` is not meaningful here).
+        // Preview keeps the rendered plan and writes nothing.
         PipelineMode::Preview => PipelineResult {
             report: report(diags, Outcome::Generated),
             plan: Some(plan),
         },
-        PipelineMode::Generate => {
-            if config.check_only {
-                let outcome = match emit::check_drift(&plan, camino::Utf8Path::new("")) {
-                    Ok(emit::DriftReport::Clean) => report(diags, Outcome::Clean),
-                    Ok(emit::DriftReport::Drifted(paths)) => {
-                        emit_drift(&mut diags, &paths, "drifted from the spec");
-                        report(diags, Outcome::Drifted)
-                    }
-                    Ok(emit::DriftReport::Missing(paths)) => {
-                        emit_drift(&mut diags, &paths, "missing on disk");
-                        report(diags, Outcome::Drifted)
-                    }
-                    Err(error) => {
-                        emit_pipeline_error(&mut diags, error.to_string());
-                        report(diags, Outcome::Rejected)
-                    }
-                };
-                PipelineResult::bare(outcome)
-            } else {
-                let outcome = match emit::write(&plan) {
-                    Ok(()) => report(diags, Outcome::Generated),
-                    Err(error) => {
-                        emit_pipeline_error(&mut diags, error.to_string());
-                        report(diags, Outcome::Rejected)
-                    }
-                };
-                PipelineResult::bare(outcome)
-            }
-        }
     }
 }
 
@@ -616,7 +611,6 @@ fn run_carve(config: &Config, mode: PipelineMode) -> PipelineResult {
         let probe = Config {
             omit: omit.clone(),
             carve: false,
-            check_only: false,
             // The carve mapper must see *every* error diagnostic to carve correctly, so the probe
             // runs with an unbounded batch (a spec has finitely many constructs). The user's
             // `batch_cap` still governs the final, user-facing report below.
@@ -654,18 +648,6 @@ fn run_carve(config: &Config, mode: PipelineMode) -> PipelineResult {
     }
 }
 
-fn emit_drift(diags: &mut diag::Diagnostics, paths: &[camino::Utf8PathBuf], what: &str) {
-    for path in paths {
-        diag::Diagnostic::warning(
-            Code::OutputDrifted,
-            diag::Provenance::new(JsonPointer::root(), None),
-        )
-        .message(format!("checked-in output `{path}` is {what}"))
-        .remedy("re-run spargen generate and commit the result")
-        .emit(diags);
-    }
-}
-
 fn emit_pipeline_error(diags: &mut diag::Diagnostics, message: String) {
     diag::Diagnostic::error(
         Code::InvalidInput,
@@ -673,6 +655,12 @@ fn emit_pipeline_error(diags: &mut diag::Diagnostics, message: String) {
     )
     .message(message)
     .emit(diags);
+}
+
+fn pipeline_error_report(message: String) -> Report {
+    let mut diagnostics = diag::Diagnostics::new(1);
+    emit_pipeline_error(&mut diagnostics, message);
+    report(diagnostics, Outcome::Rejected)
 }
 
 fn report(diags: diag::Diagnostics, outcome: Outcome) -> Report {

@@ -114,5 +114,6 @@ generated client turns the `xml` feature on only when its spec uses an `applicat
 ## Format mappings (`uuid` / `time`)
 
 `format: uuid` maps to the `uuid` crate and `format: date-time` / `date` to `time`, as opt-out
-mappings on the emitted crate. `spargen generate --no-uuid` / `--no-time` fall back to `String`.
-These live in the synthesized crate manifest, not the base runtime dependency set.
+mappings in generated code. Set `config.features.uuid` / `config.features.time` to `false` (or use
+the macro's `no_uuid` / `no_time`) to fall back to `String`. Consumers declare the corresponding
+optional dependencies and features in their own manifest.

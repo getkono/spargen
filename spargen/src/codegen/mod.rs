@@ -8,8 +8,6 @@
 mod emit;
 mod format;
 
-use camino::Utf8PathBuf;
-
 use crate::diag::Diagnostics;
 use crate::ir::Api;
 use crate::name::Names;
@@ -43,8 +41,6 @@ impl Default for CodegenOptions {
 /// A single generated source file, already formatted rustfmt-clean via `prettyplease`.
 #[derive(Debug, Clone)]
 pub struct GeneratedFile {
-    /// The file's path, relative to the output root.
-    pub path: Utf8PathBuf,
     /// The formatted source.
     pub contents: String,
 }
@@ -99,9 +95,6 @@ pub fn generate(
         )
     });
     GeneratedCode {
-        files: vec![GeneratedFile {
-            path: Utf8PathBuf::from("lib.rs"),
-            contents,
-        }],
+        files: vec![GeneratedFile { contents }],
     }
 }

@@ -28,26 +28,18 @@ with no metacharacter is an exact rule and behaves exactly as before. The matche
 | `**`   | zero or more characters across any depth (including `/`)         |
 | `?`    | exactly one character other than `/`                             |
 
-```toml
-[[omit]]
-path = "/admin/**"                     # every path under /admin (bulk)
-[[omit]]
-component = "schema"                    # every schema named Legacy… (bulk)
-name = "Legacy*"
-```
-
-```
-spargen generate spec.yaml --out src/api.rs \
-  --omit-path "/admin/**" \
-  --omit-operation "get /internal/*" \
-  --omit-component "schema:Legacy*"
+```rust
+config.omit = spargen::omit! {
+    paths { "/admin/**"; }
+    operations { get "/internal/*"; }
+    components { schemas { "Legacy*"; } }
+};
 ```
 
 ## Auto-carve
 
-`--carve` (CLI) or `carve = true` under `[features]` in `spargen.toml` (library:
-`Config { carve: true, .. }`) turns a spec that would **reject** into a generate-what-you-can
-outcome — the "generate every spec" escape hatch. Instead of failing on rejections, spargen:
+`Config { carve: true, .. }` (or the macro's `carve` argument) turns a spec that would **reject**
+into a generate-what-you-can outcome. Instead of failing on rejections, spargen:
 
 1. runs the frontend audit;
 2. maps each error diagnostic's JSON pointer to the smallest enclosing **omittable** construct — a
@@ -71,7 +63,7 @@ Library API:
 ```rust
 let mut config = spargen::Config::new(
     "api/openapi.yaml",
-    spargen::OutputTarget::Module("src/api.rs".into()),
+    "src/api.rs",
 );
 
 config.omit = spargen::omit! {
@@ -104,23 +96,19 @@ Use omit profiles as reviewed compatibility code. Do not generate them automatic
 developer tooling may suggest rules, but committed profiles should be explicit and stale-rule
 failures should be fixed promptly.
 
-## Config file (`spargen.toml`) and CLI omit surface
+## Analysis CLI
 
-The CLI (`spargen generate` / `spargen check`) can build the same `Config` — features, caps, and
-omit rules — from a `spargen.toml` file and/or repeatable flags, with no `build.rs`.
+`spargen check` can apply batch, carve, and omit settings from `spargen.toml` and
+repeatable flags while auditing a schema. This never generates code; keep the generation profile
+in `build.rs` or the macro invocation.
 
 `spargen.toml` is auto-discovered beside the spec (`--config <path>` overrides the location). Its
-schema mirrors `Config`; omit-rule kinds are discriminated by **field presence** (TOML has no
-enums):
+omit-rule kinds are discriminated by **field presence** (TOML has no enums):
 
 ```toml
 [features]
-uuid = true             # default true; false ≡ --no-uuid
-time = true             # default true; false ≡ --no-time
-error_body_cap = 65536  # optional (default 65536)
 batch_cap = 100         # optional (default 100)
-as_crate = false        # optional; generate a standalone crate instead of a module
-carve = false           # optional; auto-carve unsupported constructs (same as --carve)
+carve = false           # optional; auto-carve unsupported constructs
 
 [[omit]]
 path = "/pets/{id}"                     # → OmitRule::Path (exact)
@@ -144,7 +132,7 @@ file = "extra.yaml"                     #   file optional (file-local pointer)
 Equivalent repeatable CLI flags (unioned with any config-file omit rules):
 
 ```
-spargen generate spec.yaml --out src/api.rs \
+spargen check spec.yaml \
   --omit-path "/pets/{id}" \
   --omit-operation "get /pets" \
   --omit-component "schema:LegacyPet" \
@@ -154,4 +142,5 @@ spargen generate spec.yaml --out src/api.rs \
 **Precedence (low → high): built-in defaults < `spargen.toml` < CLI flags.** A missing
 auto-discovered config file is fine (defaults apply); a missing `--config` target, a malformed
 config file, or bad omit-flag syntax is a clear error with a non-zero (usage) exit — never a panic.
-The library `Config` API is unchanged; this is CLI-level plumbing.
+The generation APIs do not load `spargen.toml`; application build code is the authoritative
+generation configuration.

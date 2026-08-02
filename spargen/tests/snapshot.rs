@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8PathBuf;
-use spargen::{Config, Outcome, OutputTarget, Report};
+use spargen::{Config, Outcome, Report};
 
 /// Absolute path to a corpus spec (relative to the workspace root, one level up from this crate).
 fn corpus_path(rel: &str) -> Utf8PathBuf {
@@ -31,7 +31,7 @@ fn corpus_path(rel: &str) -> Utf8PathBuf {
 /// uncapped so the WHOLE diagnostic set is captured (the default cap of 100 truncates the big
 /// specs, hiding both the terminal rejection code and the true warning counts).
 fn config_for(spec: Utf8PathBuf, out: Utf8PathBuf, carve: bool) -> Config {
-    let mut config = Config::new(spec, OutputTarget::Module(out));
+    let mut config = Config::new(spec, out);
     config.batch_cap = usize::MAX;
     config.carve = carve;
     config

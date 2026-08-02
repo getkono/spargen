@@ -11,8 +11,8 @@ PR-required gates (all run in CI):
   - `spargen/tests/frontend.rs` — one fixture per diagnostic code; rejections and warnings each
     demonstrably fire, and `check` stays in parity with `generate`.
   - `spargen/tests/determinism.rs` — double generation is byte-identical.
-  - `spargen/tests/drift.rs` — the `--check` clean/drifted/missing contract (`W004`).
-  - `spargen/tests/e2e.rs` — a generated standalone crate passes `cargo check` and
+  - `spargen/src/cache.rs` — complete input fingerprints and missing/stale/edited output detection.
+  - `spargen/tests/e2e.rs` — generated modules in application-owned fixture crates pass `cargo check` and
     `cargo clippy -D warnings`, covering secured operations and the compatibility omit overlay.
   - `support-runtime` unit tests — URL building, auth attachment, status classification, and the
     error taxonomy, polled without an async runtime.

@@ -49,9 +49,6 @@ pub enum Code {
     /// types, conflicting `additionalProperties`, an object/scalar mix, incompatible scalars, or a
     /// direct recursive `$ref` member whose fields are not yet known (matrix: Schema shape).
     AllOfIrreconcilable,
-    /// `generate --check` found checked-in output that drifted from (or is missing against) the
-    /// spec.
-    OutputDrifted,
     /// The input could not be parsed or violates a required structural OpenAPI shape.
     InvalidInput,
     /// An object declares the same key twice; the duplicate makes the member ambiguous, so it is
@@ -79,7 +76,7 @@ pub enum Code {
 }
 
 impl Code {
-    /// The stable string form, e.g. `"E001"` or `"W004"`.
+    /// The stable string form, e.g. `"E001"` or `"W009"`.
     pub fn as_str(self) -> &'static str {
         match self {
             Code::UnsupportedOpenApiVersion => "E001",
@@ -99,7 +96,6 @@ impl Code {
             Code::DuplicateObjectKey => "E022",
             Code::UnknownSecurityScheme => "E012",
             Code::AllOfIrreconcilable => "E013",
-            Code::OutputDrifted => "W004",
             Code::OmittedConstruct => "W009",
             Code::InvalidOmitRule => "E019",
             Code::OmitCreatedInvalidDocument => "E020",
@@ -139,7 +135,6 @@ impl Code {
             Code::DuplicateObjectKey => "duplicate object key",
             Code::UnknownSecurityScheme => "unknown security scheme",
             Code::AllOfIrreconcilable => "irreconcilable allOf composition",
-            Code::OutputDrifted => "checked-in output drifted",
             Code::InvalidOmitRule => "invalid omit rule",
             Code::OmittedConstruct => "construct omitted",
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
@@ -204,9 +199,6 @@ impl Code {
             Code::AllOfIrreconcilable => {
                 "`allOf` members are intersected into one type: object members flatten into a single struct (union of properties; a property required by any member is required; repeated properties recursively retain their narrower compatible intersection; `additionalProperties` is intersected conservatively), while scalar members narrow compatible primitives, enums, arrays, objects, unions, and nullability. Examples include integer within number, enum within its scalar type, and a detailed object within a broader object; an empty array-item intersection becomes an uninhabited item type so the valid empty array remains representable. It is rejected only when the overall intersection is empty or cannot be represented faithfully: incompatible scalar categories, conflicting property/additional-value constraints, an object/scalar mix, or a direct recursive `$ref` member whose fields are not yet known. Restructure the composition or omit this API segment with `spargen::omit!`."
             }
-            Code::OutputDrifted => {
-                "The checked-in generated code no longer matches what this spec and spargen version produce. Re-run `spargen generate` and commit the result."
-            }
             Code::InvalidOmitRule => {
                 "A compatibility omit rule must match at least one exact path, operation, component, pointer, or file-local pointer and cannot omit the document root."
             }
@@ -263,7 +255,6 @@ impl Code {
             Code::OmitCreatedInvalidDocument,
             Code::ValidationKeywordIgnored,
             Code::ServerInitiatedFlowIgnored,
-            Code::OutputDrifted,
             Code::OmittedConstruct,
             Code::SchemaDefaultNotApplied,
             Code::XmlHintIgnored,

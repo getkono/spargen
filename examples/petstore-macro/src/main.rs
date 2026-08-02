@@ -14,7 +14,15 @@ use secrecy::SecretString;
 // The entire client, generated at compile time from the spec beside this crate's Cargo.toml.
 // The expansion carries no inner attributes, so it drops straight into a module.
 mod petstore {
-    spargen_macro::generate_api!("petstore.yaml");
+    spargen_macro::generate_api!(
+        spec = "petstore.yaml",
+        no_uuid,
+        no_time,
+        carve,
+        error_body_cap = 32_768,
+        batch_cap = 200,
+        omit { components { schemas { "Legacy"; } } }
+    );
 }
 
 use petstore::{types, Client, Credential, Error};
@@ -112,7 +120,10 @@ fn handle(mut stream: TcpStream) {
     }
 
     let (status, response_body) = if authorization != format!("Bearer {TOKEN}") {
-        ("401 Unauthorized", r#"{"message":"unauthorized"}"#.to_owned())
+        (
+            "401 Unauthorized",
+            r#"{"message":"unauthorized"}"#.to_owned(),
+        )
     } else {
         match (method, path) {
             ("GET", "/pets") => (

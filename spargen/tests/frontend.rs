@@ -3,7 +3,7 @@
 //! `generate`; the E013 case also proves `check` runs the same lowering (check/generate parity).
 
 use camino::Utf8PathBuf;
-use spargen::{Code, Config, Outcome, OutputTarget, Report};
+use spargen::{Code, Config, Outcome, Report};
 
 /// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
 /// tempdir (and any written output) is discarded once the report — which owns its data — is built.
@@ -14,7 +14,7 @@ fn generate(spec: &str) -> Report {
     let out = temp.path().join("client.rs");
     spargen::generate(&Config::new(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        OutputTarget::Module(Utf8PathBuf::from_path_buf(out).unwrap()),
+        Utf8PathBuf::from_path_buf(out).unwrap(),
     ))
 }
 
@@ -25,7 +25,7 @@ fn check(spec: &str) -> Report {
     std::fs::write(&spec_path, spec).unwrap();
     spargen::check(&Config::new(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        OutputTarget::Module(Utf8PathBuf::from("unused.rs")),
+        Utf8PathBuf::from("unused.rs"),
     ))
 }
 
@@ -36,7 +36,7 @@ fn generate_with_code(spec: &str) -> (Report, String) {
     let out = temp.path().join("client.rs");
     let report = spargen::generate(&Config::new(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        OutputTarget::Module(Utf8PathBuf::from_path_buf(out.clone()).unwrap()),
+        Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
     let code = std::fs::read_to_string(out).unwrap_or_default();
     (report, code)
@@ -217,10 +217,7 @@ Pet:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&Config::new(
-        dir.join("openapi.yaml"),
-        OutputTarget::Module(out.clone()),
-    ));
+    let report = spargen::generate(&Config::new(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
@@ -297,10 +294,7 @@ Pet:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&Config::new(
-        dir.join("openapi.yaml"),
-        OutputTarget::Module(out.clone()),
-    ));
+    let report = spargen::generate(&Config::new(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
@@ -361,10 +355,7 @@ mod remote {
             std::fs::write(&path, vendor).unwrap();
         }
         let out = dir.join("client.rs");
-        let config = spargen::Config::new(
-            dir.join("openapi.yaml"),
-            spargen::OutputTarget::Module(out.clone()),
-        );
+        let config = spargen::Config::new(dir.join("openapi.yaml"), out.clone());
         let report = if check_only {
             spargen::check(&config)
         } else {
@@ -457,10 +448,7 @@ mod remote {
             std::fs::write(&path, content).unwrap();
         }
         let out = dir.join("client.rs");
-        let config = spargen::Config::new(
-            dir.join("openapi.yaml"),
-            spargen::OutputTarget::Module(out.clone()),
-        );
+        let config = spargen::Config::new(dir.join("openapi.yaml"), out.clone());
         let report = if check_only {
             spargen::check(&config)
         } else {
@@ -3075,7 +3063,7 @@ components:
     let out = temp.path().join("client.rs");
     let report = spargen::generate(&Config::new(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        OutputTarget::Module(Utf8PathBuf::from_path_buf(out.clone()).unwrap()),
+        Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     assert!(report.diagnostics.is_empty(), "{report:#?}");

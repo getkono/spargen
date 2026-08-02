@@ -26,7 +26,7 @@ Two facts frame all of it:
 - **Unsupported constructs never degrade silently.** Anything spargen cannot represent is
   supported, warned, or rejected with a stable code — see the [support matrix](support-matrix.md)
   and [diagnostic index](errors.md). When a real spec trips a rejection, the
-  [`--carve` escape hatch](#carving-unsupported-idioms) drops just that island and generates the
+  [`carve` escape hatch](#carving-unsupported-idioms) drops just that island and generates the
   rest.
 
 The specs used below are vendored under [`corpus/recipes/`](../corpus/recipes/README.md) and are
@@ -35,28 +35,15 @@ stay honest.
 
 ## Wiring the generate step (applies to all frameworks)
 
-Once you have an exported spec file, generation is one command. Emit a **module** to `include!`:
-
-```bash
-spargen generate openapi.json --out src/api.rs
-```
-
-or a standalone, publishable **crate**:
-
-```bash
-spargen generate openapi.json --out crates/api-client --as-crate
-```
-
-To keep the client in lockstep with the server, run generation from `build.rs` and commit the
-result (spargen output is deterministic — same version + spec ⇒ byte-identical output):
+Once you have exported and committed the spec, generate during compilation from `build.rs`.
+Choose an `OUT_DIR` path for ephemeral output or a source path for output you also commit:
 
 ```rust
 // build.rs
 fn main() {
-    println!("cargo:rerun-if-changed=openapi.json");
     let config = spargen::Config::new(
         "openapi.json",
-        spargen::OutputTarget::Module("src/api.rs".into()),
+        "src/api.rs",
     );
     let report = spargen::generate(&config);
     println!("cargo:warning=spargen outcome: {:?}", report.outcome);
@@ -92,11 +79,7 @@ std::fs::write("openapi.json", json).unwrap();
 the spec over HTTP via `utoipa-swagger-ui`/`utoipa-axum`, hitting that route and saving the body
 works too.)
 
-**Generate.**
-
-```bash
-spargen generate openapi.json --out src/api.rs
-```
+**Generate.** Compile the crate containing the shared `build.rs` above.
 
 **Idioms spargen handles.** The vendored [`corpus/recipes/utoipa.json`](../corpus/recipes/utoipa.json)
 mirrors a typical utoipa document and generates cleanly. It covers:
@@ -145,11 +128,7 @@ std::fs::write("openapi.json", serde_json::to_string_pretty(&api).unwrap()).unwr
 route and saving the body is equivalent. `finish_api_with(&mut api, transform)` lets you set
 titles/versions during assembly.)
 
-**Generate.**
-
-```bash
-spargen generate openapi.json --out src/api.rs
-```
+**Generate.** Compile the crate containing the shared `build.rs` above.
 
 **Idioms spargen handles.** The vendored [`corpus/recipes/aide.json`](../corpus/recipes/aide.json)
 mirrors a schemars-backed aide document. It generates with only validation-only warnings
@@ -200,11 +179,7 @@ result to spargen. Any of these works:
   on a schema of type `T` with the 3.1 form `type: ["T", "null"]` (or, for a `$ref`,
   `oneOf: [{ "type": "null" }, { "$ref": … }]`).
 
-Then:
-
-```bash
-spargen generate openapi-3.1.json --out src/api.rs
-```
+Then point the shared `build.rs` at `openapi-3.1.json` and compile.
 
 **Why the hard stop?** OpenAPI 3.0 and 3.1 differ in their schema model (3.1 adopts JSON Schema
 2020-12; 3.0 uses its own dialect with `nullable`). Spargen targets the 3.1 dialect and refuses to
@@ -221,18 +196,15 @@ Real framework output occasionally contains a construct spargen cannot faithfull
 example a JSON Schema `$dynamicRef`, which rejects with [`E006`](errors.md). By default one such
 island rejects the **whole** document.
 
-`--carve` is the escape hatch: it drops only the unrepresentable constructs (each reported once with
+`Config::carve` is the escape hatch: it drops only the unrepresentable constructs (each reported once with
 `W009`), then generates everything else. It reaches a fixpoint (cascading through any components that
 referenced a carved schema) and stays deterministic.
 
-```bash
-# Rejects whole: one bad operation sinks the document.
-spargen generate openapi.json --out src/api.rs
-# => Rejected (E006)
-
-# Generates the rest; the offending operation is dropped and reported as W009.
-spargen generate openapi.json --out src/api.rs --carve
-# => Generated (W009: get /measure omitted)
+```rust
+let mut config = spargen::Config::new("openapi.json", "src/api.rs");
+config.carve = true;
+let report = spargen::generate(&config);
+assert_eq!(report.outcome, spargen::Outcome::Generated);
 ```
 
 `spargen check --carve` audits the carved subset the same way. If you would rather remove specific

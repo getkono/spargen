@@ -11,6 +11,8 @@ cargo run --manifest-path examples/petstore-macro/Cargo.toml
 It spins up a local mock server and drives the generated client through a few typed calls
 (list, create, fetch, a typed 404). The broader feature surface (auth failure modes, retry,
 undocumented statuses, …) lives in the `petstore` example; this one exists to exercise the macro.
+Its invocation covers every macro configuration control, and `schemas.yaml` is a transitive
+relative-file `$ref` that guards Cargo dependency tracking.
 
 ## The runtime-graph invariant
 

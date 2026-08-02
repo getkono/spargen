@@ -50,7 +50,7 @@ impl Omit {
             self.apply_rule(rule, bundle, diags);
         }
         validate_remaining(bundle, diags);
-        diags.into_result(())
+        diags.result(())
     }
 
     /// Stable fingerprint used in generated provenance headers.
@@ -647,134 +647,104 @@ macro_rules! omit {
     () => {
         $crate::Omit::default()
     };
+    (@parse $omit:ident;) => {};
+    (@parse $omit:ident; operations { $($body:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@operations $omit; $($body)*);
+        $crate::omit!(@parse $omit; $($rest)*);
+    }};
+    (@parse $omit:ident; paths { $($body:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@paths $omit; $($body)*);
+        $crate::omit!(@parse $omit; $($rest)*);
+    }};
+    (@parse $omit:ident; components { $($body:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@components $omit; $($body)*);
+        $crate::omit!(@parse $omit; $($rest)*);
+    }};
+    (@parse $omit:ident; pointers { $($body:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@pointers $omit; None; $($body)*);
+        $crate::omit!(@parse $omit; $($rest)*);
+    }};
+    (@parse $omit:ident; file($file:literal) { pointers { $($body:tt)* } } $($rest:tt)*) => {{
+        $crate::omit!(@pointers $omit; Some($file); $($body)*);
+        $crate::omit!(@parse $omit; $($rest)*);
+    }};
+    (@operations $omit:ident;) => {};
+    (@operations $omit:ident; get $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Get, path: $path });
+        $crate::omit!(@operations $omit; $($rest)*);
+    }};
+    (@operations $omit:ident; put $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Put, path: $path });
+        $crate::omit!(@operations $omit; $($rest)*);
+    }};
+    (@operations $omit:ident; post $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Post, path: $path });
+        $crate::omit!(@operations $omit; $($rest)*);
+    }};
+    (@operations $omit:ident; delete $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Delete, path: $path });
+        $crate::omit!(@operations $omit; $($rest)*);
+    }};
+    (@operations $omit:ident; options $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Options, path: $path });
+        $crate::omit!(@operations $omit; $($rest)*);
+    }};
+    (@operations $omit:ident; head $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Head, path: $path });
+        $crate::omit!(@operations $omit; $($rest)*);
+    }};
+    (@operations $omit:ident; patch $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Patch, path: $path });
+        $crate::omit!(@operations $omit; $($rest)*);
+    }};
+    (@operations $omit:ident; trace $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Trace, path: $path });
+        $crate::omit!(@operations $omit; $($rest)*);
+    }};
+    (@paths $omit:ident;) => {};
+    (@paths $omit:ident; $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Path { path: $path });
+        $crate::omit!(@paths $omit; $($rest)*);
+    }};
+    (@components $omit:ident;) => {};
+    (@components $omit:ident; schemas { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::ComponentKind::Schemas; $($names)*);
+        $crate::omit!(@components $omit; $($rest)*);
+    }};
+    (@components $omit:ident; responses { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::ComponentKind::Responses; $($names)*);
+        $crate::omit!(@components $omit; $($rest)*);
+    }};
+    (@components $omit:ident; parameters { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::ComponentKind::Parameters; $($names)*);
+        $crate::omit!(@components $omit; $($rest)*);
+    }};
+    (@components $omit:ident; request_bodies { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::ComponentKind::RequestBodies; $($names)*);
+        $crate::omit!(@components $omit; $($rest)*);
+    }};
+    (@components $omit:ident; headers { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::ComponentKind::Headers; $($names)*);
+        $crate::omit!(@components $omit; $($rest)*);
+    }};
+    (@components $omit:ident; security_schemes { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::ComponentKind::SecuritySchemes; $($names)*);
+        $crate::omit!(@components $omit; $($rest)*);
+    }};
+    (@component_names $omit:ident; $kind:expr;) => {};
+    (@component_names $omit:ident; $kind:expr; $name:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Component { kind: $kind, name: $name });
+        $crate::omit!(@component_names $omit; $kind; $($rest)*);
+    }};
+    (@pointers $omit:ident; $file:expr;) => {};
+    (@pointers $omit:ident; $file:expr; $pointer:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::Pointer { file: $file, pointer: $pointer });
+        $crate::omit!(@pointers $omit; $file; $($rest)*);
+    }};
     ($($tokens:tt)*) => {{
         let mut omit = $crate::Omit::default();
-        $crate::__spargen_omit_parse!(omit; $($tokens)*);
+        $crate::omit!(@parse omit; $($tokens)*);
         omit
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __spargen_omit_parse {
-    ($omit:ident;) => {};
-    ($omit:ident; operations { $($body:tt)* } $($rest:tt)*) => {{
-        $crate::__spargen_omit_operations!($omit; $($body)*);
-        $crate::__spargen_omit_parse!($omit; $($rest)*);
-    }};
-    ($omit:ident; paths { $($body:tt)* } $($rest:tt)*) => {{
-        $crate::__spargen_omit_paths!($omit; $($body)*);
-        $crate::__spargen_omit_parse!($omit; $($rest)*);
-    }};
-    ($omit:ident; components { $($body:tt)* } $($rest:tt)*) => {{
-        $crate::__spargen_omit_components!($omit; $($body)*);
-        $crate::__spargen_omit_parse!($omit; $($rest)*);
-    }};
-    ($omit:ident; pointers { $($body:tt)* } $($rest:tt)*) => {{
-        $crate::__spargen_omit_pointers!($omit; None; $($body)*);
-        $crate::__spargen_omit_parse!($omit; $($rest)*);
-    }};
-    ($omit:ident; file($file:literal) { pointers { $($body:tt)* } } $($rest:tt)*) => {{
-        $crate::__spargen_omit_pointers!($omit; Some($file); $($body)*);
-        $crate::__spargen_omit_parse!($omit; $($rest)*);
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __spargen_omit_operations {
-    ($omit:ident;) => {};
-    ($omit:ident; get $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Get, path: $path });
-        $crate::__spargen_omit_operations!($omit; $($rest)*);
-    }};
-    ($omit:ident; put $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Put, path: $path });
-        $crate::__spargen_omit_operations!($omit; $($rest)*);
-    }};
-    ($omit:ident; post $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Post, path: $path });
-        $crate::__spargen_omit_operations!($omit; $($rest)*);
-    }};
-    ($omit:ident; delete $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Delete, path: $path });
-        $crate::__spargen_omit_operations!($omit; $($rest)*);
-    }};
-    ($omit:ident; options $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Options, path: $path });
-        $crate::__spargen_omit_operations!($omit; $($rest)*);
-    }};
-    ($omit:ident; head $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Head, path: $path });
-        $crate::__spargen_omit_operations!($omit; $($rest)*);
-    }};
-    ($omit:ident; patch $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Patch, path: $path });
-        $crate::__spargen_omit_operations!($omit; $($rest)*);
-    }};
-    ($omit:ident; trace $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Trace, path: $path });
-        $crate::__spargen_omit_operations!($omit; $($rest)*);
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __spargen_omit_paths {
-    ($omit:ident;) => {};
-    ($omit:ident; $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Path { path: $path });
-        $crate::__spargen_omit_paths!($omit; $($rest)*);
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __spargen_omit_components {
-    ($omit:ident;) => {};
-    ($omit:ident; schemas { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::__spargen_omit_component_names!($omit; $crate::ComponentKind::Schemas; $($names)*);
-        $crate::__spargen_omit_components!($omit; $($rest)*);
-    }};
-    ($omit:ident; responses { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::__spargen_omit_component_names!($omit; $crate::ComponentKind::Responses; $($names)*);
-        $crate::__spargen_omit_components!($omit; $($rest)*);
-    }};
-    ($omit:ident; parameters { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::__spargen_omit_component_names!($omit; $crate::ComponentKind::Parameters; $($names)*);
-        $crate::__spargen_omit_components!($omit; $($rest)*);
-    }};
-    ($omit:ident; request_bodies { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::__spargen_omit_component_names!($omit; $crate::ComponentKind::RequestBodies; $($names)*);
-        $crate::__spargen_omit_components!($omit; $($rest)*);
-    }};
-    ($omit:ident; headers { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::__spargen_omit_component_names!($omit; $crate::ComponentKind::Headers; $($names)*);
-        $crate::__spargen_omit_components!($omit; $($rest)*);
-    }};
-    ($omit:ident; security_schemes { $($names:tt)* } $($rest:tt)*) => {{
-        $crate::__spargen_omit_component_names!($omit; $crate::ComponentKind::SecuritySchemes; $($names)*);
-        $crate::__spargen_omit_components!($omit; $($rest)*);
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __spargen_omit_component_names {
-    ($omit:ident; $kind:expr;) => {};
-    ($omit:ident; $kind:expr; $name:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Component { kind: $kind, name: $name });
-        $crate::__spargen_omit_component_names!($omit; $kind; $($rest)*);
-    }};
-}
-
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __spargen_omit_pointers {
-    ($omit:ident; $file:expr;) => {};
-    ($omit:ident; $file:expr; $pointer:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Pointer { file: $file, pointer: $pointer });
-        $crate::__spargen_omit_pointers!($omit; $file; $($rest)*);
     }};
 }
 

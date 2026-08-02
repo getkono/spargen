@@ -1,5 +1,5 @@
 # The proc-macro front-end for spargen. A thin shim: `generate_api!` resolves the spec path,
-# calls `spargen::preview` (the same in-memory renderer behind `spargen generate --out -`), and
+# calls spargen's private in-memory renderer, and
 # expands to the rendered client — no filesystem, no CLI.
 #
 # This is a SECOND published crate alongside `spargen`, and the ONLY way to keep the strict
@@ -26,7 +26,7 @@ readme = "README.md"
 proc-macro = true
 
 [dependencies]
-# The generator. `default-features = false` drops the CLI stack (clap/toml/notify/reqwest); the
+# The generator. `default-features = false` drops the CLI stack (clap/toml/reqwest); the
 # generation pipeline itself is always compiled. `uuid`/`time` output mappings are controlled at
 # call time via `Config.features`, not these cargo features, so none are needed here.
 spargen = { path = "../spargen", version = "0.2.2", default-features = false }

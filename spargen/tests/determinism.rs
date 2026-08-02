@@ -1,9 +1,8 @@
 //! The headline invariant (CLAUDE.md): same spargen version + spec + config produces
-//! byte-identical output. Generating the same spec into two independent crate directories must
-//! yield identical `Cargo.toml` and `src/lib.rs`.
+//! byte-identical output. Generating the same spec into two module paths must yield identical code.
 
 use camino::Utf8PathBuf;
-use spargen::{Config, Outcome, OutputTarget};
+use spargen::{Config, Outcome};
 
 const SPEC: &str = r##"
 openapi: 3.1.0
@@ -38,13 +37,10 @@ components:
         age: { type: integer }
 "##;
 
-fn generate_crate(spec_path: &Utf8PathBuf, dir: &std::path::Path) {
+fn generate_module(spec_path: &Utf8PathBuf, path: &std::path::Path) {
     let report = spargen::generate(&Config::new(
         spec_path.clone(),
-        OutputTarget::Crate {
-            dir: Utf8PathBuf::from_path_buf(dir.to_path_buf()).unwrap(),
-            name: "det_client".to_owned(),
-        },
+        Utf8PathBuf::from_path_buf(path.to_path_buf()).unwrap(),
     ));
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
 }
@@ -59,17 +55,10 @@ fn two_runs_produce_byte_identical_output() {
 
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
-    generate_crate(&spec_path, a.path());
-    generate_crate(&spec_path, b.path());
+    generate_module(&spec_path, &a.path().join("api.rs"));
+    generate_module(&spec_path, &b.path().join("api.rs"));
 
-    let lib_a = std::fs::read(a.path().join("src/lib.rs")).unwrap();
-    let lib_b = std::fs::read(b.path().join("src/lib.rs")).unwrap();
-    assert_eq!(lib_a, lib_b, "generated src/lib.rs is not deterministic");
-
-    let manifest_a = std::fs::read(a.path().join("Cargo.toml")).unwrap();
-    let manifest_b = std::fs::read(b.path().join("Cargo.toml")).unwrap();
-    assert_eq!(
-        manifest_a, manifest_b,
-        "generated Cargo.toml is not deterministic"
-    );
+    let module_a = std::fs::read(a.path().join("api.rs")).unwrap();
+    let module_b = std::fs::read(b.path().join("api.rs")).unwrap();
+    assert_eq!(module_a, module_b, "generated module is not deterministic");
 }

@@ -9,11 +9,7 @@
 //!
 //! ```toml
 //! [features]
-//! uuid = true            # default true; false ⇒ same as `--no-uuid`
-//! time = true            # default true; false ⇒ same as `--no-time`
-//! error_body_cap = 65536 # optional; bytes of an error body retained (default 65536)
 //! batch_cap = 100        # optional; max diagnostics collected (default 100)
-//! as_crate = false       # optional; generate a standalone crate instead of a module
 //! carve = false          # optional; auto-carve unsupported constructs (same as `--carve`)
 //!
 //! # Zero or more omit rules. The rule KIND is discriminated by field presence. A path/name (or
@@ -36,7 +32,7 @@
 
 use camino::Utf8Path;
 
-use crate::{ComponentKind, Omit, OmitMethod, OmitRule};
+use spargen::{ComponentKind, Omit, OmitMethod, OmitRule};
 
 /// A clear, user-facing config/flag error. Rendered to stderr by [`run`](super::run), which then
 /// exits with a usage status — never a panic.
@@ -73,16 +69,10 @@ pub struct OmitFlags {
     pub pointers: Vec<String>,
 }
 
-/// Feature/crate/cap overrides expressed by CLI flags (as opposed to the config file). A `Some`
-/// value means the flag was explicitly given and takes precedence over the config file.
+/// Analysis overrides expressed by CLI flags. A `Some` value means the flag was explicitly given
+/// and takes precedence over the config file.
 #[derive(Debug, Default)]
 pub struct CliOverrides {
-    /// `--no-uuid` present ⇒ `Some(false)`.
-    pub uuid: Option<bool>,
-    /// `--no-time` present ⇒ `Some(false)`.
-    pub time: Option<bool>,
-    /// `--as-crate` present ⇒ `Some(true)`.
-    pub as_crate: Option<bool>,
     /// `--carve` present ⇒ `Some(true)`.
     pub carve: Option<bool>,
 }
@@ -90,16 +80,8 @@ pub struct CliOverrides {
 /// The fully resolved settings after merging defaults, config file, and CLI flags.
 #[derive(Debug)]
 pub struct Settings {
-    /// `format: uuid` mapping (default on).
-    pub uuid: bool,
-    /// `format: date-time`/`date` mapping (default on).
-    pub time: bool,
-    /// Emit a standalone crate rather than a module.
-    pub as_crate: bool,
     /// Auto-carve unsupported constructs instead of failing on rejection.
     pub carve: bool,
-    /// Max bytes of an error response body retained.
-    pub error_body_cap: usize,
     /// Max diagnostics collected before batching stops.
     pub batch_cap: usize,
     /// The union of config-file and CLI omit rules.
@@ -122,30 +104,14 @@ pub fn resolve(
     let file = load_file(spec, config_path)?;
 
     // Defaults, then config-file overrides.
-    let mut uuid = true;
-    let mut time = true;
-    let mut as_crate = false;
     let mut carve = false;
-    let mut error_body_cap = 64 * 1024;
     let mut batch_cap = 100;
     let mut rules = Vec::new();
 
     if let Some(file) = &file {
         if let Some(features) = &file.features {
-            if let Some(value) = features.uuid {
-                uuid = value;
-            }
-            if let Some(value) = features.time {
-                time = value;
-            }
-            if let Some(value) = features.as_crate {
-                as_crate = value;
-            }
             if let Some(value) = features.carve {
                 carve = value;
-            }
-            if let Some(value) = features.error_body_cap {
-                error_body_cap = value;
             }
             if let Some(value) = features.batch_cap {
                 batch_cap = value;
@@ -159,15 +125,6 @@ pub fn resolve(
     }
 
     // CLI flags win over the config file.
-    if let Some(value) = overrides.uuid {
-        uuid = value;
-    }
-    if let Some(value) = overrides.time {
-        time = value;
-    }
-    if let Some(value) = overrides.as_crate {
-        as_crate = value;
-    }
     if let Some(value) = overrides.carve {
         carve = value;
     }
@@ -189,11 +146,7 @@ pub fn resolve(
     }
 
     Ok(Settings {
-        uuid,
-        time,
-        as_crate,
         carve,
-        error_body_cap,
         batch_cap,
         omit: Omit { rules },
     })
@@ -344,11 +297,7 @@ struct FileConfig {
 #[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FeaturesToml {
-    uuid: Option<bool>,
-    time: Option<bool>,
-    error_body_cap: Option<usize>,
     batch_cap: Option<usize>,
-    as_crate: Option<bool>,
     carve: Option<bool>,
 }
 
@@ -448,10 +397,6 @@ mod tests {
         let file: FileConfig = toml::from_str(
             r#"
             [features]
-            uuid = false
-            time = false
-            as_crate = true
-            error_body_cap = 4096
             batch_cap = 7
 
             [[omit]]
@@ -472,9 +417,6 @@ mod tests {
         )
         .unwrap();
         let features = file.features.unwrap();
-        assert_eq!(features.uuid, Some(false));
-        assert_eq!(features.as_crate, Some(true));
-        assert_eq!(features.error_body_cap, Some(4096));
         assert_eq!(features.batch_cap, Some(7));
         let rules: Vec<OmitRule> = file.omit.iter().map(|e| e.to_rule().unwrap()).collect();
         assert_eq!(rules[0], OmitRule::Path { path: "/pets/{id}" });

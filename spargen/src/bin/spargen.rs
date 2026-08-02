@@ -1,9 +1,17 @@
-//! The `spargen` binary — gated behind the default-on `cli` feature. A thin wrapper that parses
-//! arguments and delegates to [`spargen::cli::run`].
+//! Non-generating command-line tooling for vendoring and inspecting OpenAPI inputs.
 
+#[path = "../cli/args.rs"]
+mod args;
+#[path = "../cli/config.rs"]
+mod config;
+#[path = "../cli/exit.rs"]
+mod exit;
+#[path = "../cli/run.rs"]
+mod run;
+
+use args::Cli;
 use clap::Parser;
-use spargen::cli::{run, Cli};
 
 fn main() -> std::process::ExitCode {
-    run(Cli::parse())
+    run::run(Cli::parse())
 }

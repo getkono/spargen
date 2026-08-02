@@ -1,96 +1,18 @@
 use std::process::ExitCode;
 
-use crate::{check, explain, generate, Config, Outcome, OutputTarget};
+use spargen::{check, explain, Config, Outcome};
 
+use super::args::{Cli, Command, Format};
 use super::config::{self, CliOverrides, ConfigError, OmitFlags, Settings};
-use super::{Cli, Command, ExitStatus, Format};
+use super::exit::ExitStatus;
 
 /// Execute a parsed CLI invocation and return the process exit code.
 ///
-/// Delegates to the crate facade — [`generate`](crate::generate), [`check`](crate::check),
-/// [`explain`](crate::explain) — renders diagnostics in the requested [`Format`](super::Format),
+/// Delegates to the crate facade, renders diagnostics in the requested [`Format`](super::Format),
 /// and maps the outcome onto the [`ExitStatus`](super::ExitStatus) contract. Per the DAG, the CLI
 /// depends only on the facade.
-pub fn run(cli: Cli) -> ExitCode {
+pub(crate) fn run(cli: Cli) -> ExitCode {
     match cli.command {
-        Command::Generate(args) => {
-            let overrides = CliOverrides {
-                // `--no-uuid`/`--no-time`/`--as-crate` are presence flags: set only when given, so
-                // they override the config file, and stay `None` (config/default wins) otherwise.
-                uuid: args.no_uuid.then_some(false),
-                time: args.no_time.then_some(false),
-                as_crate: args.as_crate.then_some(true),
-                carve: args.carve.then_some(true),
-            };
-            let flags = OmitFlags {
-                paths: args.omit_path,
-                operations: args.omit_operation,
-                components: args.omit_component,
-                pointers: args.omit_pointer,
-            };
-            let settings =
-                match config::resolve(&args.spec, args.config.as_deref(), &overrides, &flags) {
-                    Ok(settings) => settings,
-                    Err(error) => return config_error(error),
-                };
-
-            // `--out -` streams the generated module to stdout (a preview) and writes nothing —
-            // the Unix dash convention, so `spargen generate api.yaml --out - | rustfmt` works.
-            // It is a single-module view, so it is incompatible with the multi-file / stateful
-            // modes below.
-            let preview_to_stdout = args.out.as_str() == "-";
-            if preview_to_stdout {
-                if settings.as_crate {
-                    return usage_error(
-                        "--out - previews a single module to stdout; it is not supported with \
-                         --as-crate (a crate is multiple files). Write the crate to a directory \
-                         instead.",
-                    );
-                }
-                if args.check {
-                    return usage_error("--out - (stdout preview) cannot be combined with --check");
-                }
-                if args.watch {
-                    return usage_error("--out - (stdout preview) cannot be combined with --watch");
-                }
-            }
-
-            let output = if settings.as_crate {
-                let name = args
-                    .out
-                    .file_name()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| "generated-api".to_owned());
-                OutputTarget::Crate {
-                    dir: args.out.clone(),
-                    name,
-                }
-            } else {
-                OutputTarget::Module(args.out.clone())
-            };
-            let mut config = Config::new(args.spec, output);
-            apply_settings(&mut config, settings);
-            config.check_only = args.check;
-
-            if preview_to_stdout {
-                // Render in memory; print the module to stdout and diagnostics to stderr, so the
-                // piped code stays pure. `--format` governs diagnostics only, which for a preview
-                // are advisory — keep them human-readable on stderr regardless.
-                let preview = crate::preview(&config);
-                render_diagnostics_human(&preview.report.diagnostics);
-                if let Some(file) = preview.files.first() {
-                    print!("{}", file.contents);
-                }
-                return status_for_report(&preview.report).into();
-            }
-
-            if args.watch {
-                return super::watch::watch(&config, args.config.as_deref(), args.format);
-            }
-            let report = generate(&config);
-            render_report(&report, args.format);
-            status_for_report(&report).into()
-        }
         Command::Check(args) => {
             let flags = OmitFlags {
                 paths: args.omit_path,
@@ -100,27 +22,25 @@ pub fn run(cli: Cli) -> ExitCode {
             };
             let overrides = CliOverrides {
                 carve: args.carve.then_some(true),
-                ..CliOverrides::default()
             };
             let settings =
                 match config::resolve(&args.spec, args.config.as_deref(), &overrides, &flags) {
                     Ok(settings) => settings,
                     Err(error) => return config_error(error),
                 };
-            let mut config =
-                Config::new(args.spec, OutputTarget::Module("__spargen_check.rs".into()));
+            let mut config = Config::new(args.spec, "__spargen_check.rs");
             apply_settings(&mut config, settings);
             let report = check(&config);
             render_report(&report, args.format);
             status_for_report(&report).into()
         }
         Command::Lock(args) => {
-            let config = Config::new(args.spec, OutputTarget::Module("__spargen_lock.rs".into()));
-            let outcome = crate::vendor(&config);
+            let config = Config::new(args.spec, "__spargen_lock.rs");
+            let outcome = spargen::vendor(&config);
             let has_errors = outcome
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.severity == crate::Severity::Error);
+                .any(|diagnostic| diagnostic.severity == spargen::Severity::Error);
             match args.format {
                 Format::Human => {
                     render_diagnostics_human(&outcome.diagnostics);
@@ -167,22 +87,16 @@ pub fn run(cli: Cli) -> ExitCode {
             }
         }
         Command::Diff(args) => {
-            let old = Config::new(
-                args.old,
-                OutputTarget::Module("__spargen_diff_old.rs".into()),
-            );
-            let new = Config::new(
-                args.new,
-                OutputTarget::Module("__spargen_diff_new.rs".into()),
-            );
-            let outcome = crate::diff(&old, &new);
+            let old = Config::new(args.old, "__spargen_diff_old.rs");
+            let new = Config::new(args.new, "__spargen_diff_new.rs");
+            let outcome = spargen::diff(&old, &new);
             render_diff(&outcome, args.format);
             // A spec that fails to lower is a hard error (status 1) regardless of `--exit-code`;
             // otherwise a breaking diff fails only when the caller opted into the CI gate.
             match &outcome.report {
                 None => ExitStatus::Diagnostics.into(),
                 Some(report) => {
-                    if args.exit_code && report.bump == crate::Impact::Major {
+                    if args.exit_code && report.bump == spargen::Impact::Major {
                         ExitStatus::Diagnostics.into()
                     } else {
                         ExitStatus::Ok.into()
@@ -217,9 +131,6 @@ pub fn run(cli: Cli) -> ExitCode {
 /// Fold resolved [`Settings`] into the library [`Config`]. The `Config` API itself is unchanged;
 /// this is the CLI's config-file + omit-flag plumbing.
 fn apply_settings(config: &mut Config, settings: Settings) {
-    config.features.uuid = settings.uuid;
-    config.features.time = settings.time;
-    config.error_body_cap = settings.error_body_cap;
     config.batch_cap = settings.batch_cap;
     config.omit = settings.omit;
     config.carve = settings.carve;
@@ -231,31 +142,24 @@ fn config_error(error: ConfigError) -> ExitCode {
     ExitStatus::Usage.into()
 }
 
-/// Render a flag-combination error to stderr and exit with a usage status.
-fn usage_error(message: &str) -> ExitCode {
-    eprintln!("error: {message}");
-    ExitStatus::Usage.into()
-}
-
-pub(super) fn status_for_report(report: &crate::Report) -> ExitStatus {
+fn status_for_report(report: &spargen::Report) -> ExitStatus {
     match report.outcome {
         Outcome::Generated | Outcome::Clean => {
             if report
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.severity == crate::Severity::Error)
+                .any(|diagnostic| diagnostic.severity == spargen::Severity::Error)
             {
                 ExitStatus::Diagnostics
             } else {
                 ExitStatus::Ok
             }
         }
-        Outcome::Drifted => ExitStatus::Drift,
         Outcome::Rejected => ExitStatus::Diagnostics,
     }
 }
 
-pub(super) fn render_report(report: &crate::Report, format: Format) {
+fn render_report(report: &spargen::Report, format: Format) {
     match format {
         Format::Human => render_diagnostics_human(&report.diagnostics),
         Format::Json => {
@@ -271,11 +175,11 @@ pub(super) fn render_report(report: &crate::Report, format: Format) {
 }
 
 /// Render diagnostics to stderr in the rustc-style human format (also used by `spargen lock`).
-fn render_diagnostics_human(diagnostics: &[crate::Diagnostic]) {
+fn render_diagnostics_human(diagnostics: &[spargen::Diagnostic]) {
     for diagnostic in diagnostics {
         let severity = match diagnostic.severity {
-            crate::Severity::Error => "error",
-            crate::Severity::Warning => "warning",
+            spargen::Severity::Error => "error",
+            spargen::Severity::Warning => "warning",
         };
         eprintln!(
             "{severity}[{}]: {}\n  pointer: {}",
@@ -290,7 +194,7 @@ fn render_diagnostics_human(diagnostics: &[crate::Diagnostic]) {
 /// Render a `spargen diff` outcome in the requested format. A spec that failed to lower is reported
 /// as such (with its rejection diagnostics); otherwise the classified change list, the overall
 /// recommended bump, and a one-line summary are printed.
-fn render_diff(outcome: &crate::DiffOutcome, format: Format) {
+fn render_diff(outcome: &spargen::DiffOutcome, format: Format) {
     match format {
         Format::Human => {
             let mut rejected = false;
@@ -327,7 +231,7 @@ fn render_diff(outcome: &crate::DiffOutcome, format: Format) {
     }
 }
 
-fn diff_json(outcome: &crate::DiffOutcome) -> serde_json::Value {
+fn diff_json(outcome: &spargen::DiffOutcome) -> serde_json::Value {
     match &outcome.report {
         Some(report) => serde_json::json!({
             "ok": true,
@@ -360,7 +264,7 @@ fn diff_json(outcome: &crate::DiffOutcome) -> serde_json::Value {
     }
 }
 
-fn diagnostics_json(diagnostics: &[crate::Diagnostic]) -> Vec<serde_json::Value> {
+fn diagnostics_json(diagnostics: &[spargen::Diagnostic]) -> Vec<serde_json::Value> {
     diagnostics
         .iter()
         .map(|diagnostic| {
