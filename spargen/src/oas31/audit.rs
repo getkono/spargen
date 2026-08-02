@@ -18,6 +18,48 @@ pub fn audit(document: &Document, diags: &mut Diagnostics) {
         }
     }
 
+    let components_pointer = JsonPointer::root().push("components");
+    for (name, parameter) in &document.components.parameters {
+        if let RefOr::Item(parameter) = parameter {
+            audit_parameter(
+                parameter,
+                components_pointer.push("parameters").push(name),
+                diags,
+            );
+        }
+    }
+    for (name, body) in &document.components.request_bodies {
+        if let RefOr::Item(body) = body {
+            audit_content(
+                &body.content,
+                components_pointer
+                    .push("requestBodies")
+                    .push(name)
+                    .push("content"),
+                diags,
+            );
+        }
+    }
+    for (name, response) in &document.components.responses {
+        if let RefOr::Item(response) = response {
+            audit_content(
+                &response.content,
+                components_pointer
+                    .push("responses")
+                    .push(name)
+                    .push("content"),
+                diags,
+            );
+        }
+    }
+    for (name, media) in &document.components.media_types {
+        audit_media(
+            media,
+            components_pointer.push("mediaTypes").push(name),
+            diags,
+        );
+    }
+
     for (path, item) in &document.paths.items {
         for (method, operation) in &item.operations {
             let op_pointer = JsonPointer::root()
@@ -31,57 +73,63 @@ pub fn audit(document: &Document, diags: &mut Diagnostics) {
                 .enumerate()
             {
                 if let RefOr::Item(parameter) = parameter {
-                    if let Some(RefOr::Item(schema)) = &parameter.schema {
-                        audit_schema(
-                            schema,
-                            op_pointer.push("parameters").index(index).push("schema"),
-                            diags,
-                        );
-                    }
-                    for (media, object) in &parameter.content {
-                        audit_media(
-                            object,
-                            op_pointer
-                                .push("parameters")
-                                .index(index)
-                                .push("content")
-                                .push(media),
-                            diags,
-                        );
-                    }
+                    audit_parameter(parameter, op_pointer.push("parameters").index(index), diags);
                 }
             }
             if let Some(RefOr::Item(body)) = &operation.request_body {
-                for (media, object) in &body.content {
-                    audit_media(
-                        object,
-                        op_pointer.push("requestBody").push("content").push(media),
+                audit_content(
+                    &body.content,
+                    op_pointer.push("requestBody").push("content"),
+                    diags,
+                );
+            }
+            for (status, response) in &operation.responses.by_status {
+                if let RefOr::Item(response) = response {
+                    audit_content(
+                        &response.content,
+                        op_pointer.push("responses").push(status).push("content"),
                         diags,
                     );
                 }
             }
-            for (status, response) in &operation.responses.by_status {
-                if let RefOr::Item(response) = response {
-                    for (media, object) in &response.content {
-                        audit_media(
-                            object,
-                            op_pointer
-                                .push("responses")
-                                .push(status)
-                                .push("content")
-                                .push(media),
-                            diags,
-                        );
-                    }
-                }
+            if let Some(RefOr::Item(response)) = &operation.responses.default {
+                audit_content(
+                    &response.content,
+                    op_pointer.push("responses").push("default").push("content"),
+                    diags,
+                );
             }
         }
+    }
+}
+
+fn audit_parameter(
+    parameter: &super::ParameterObject,
+    pointer: JsonPointer,
+    diags: &mut Diagnostics,
+) {
+    if let Some(RefOr::Item(schema)) = &parameter.schema {
+        audit_schema(schema, pointer.push("schema"), diags);
+    }
+    audit_content(&parameter.content, pointer.push("content"), diags);
+}
+
+fn audit_content(
+    content: &indexmap::IndexMap<String, MediaTypeObject>,
+    pointer: JsonPointer,
+    diags: &mut Diagnostics,
+) {
+    for (media, object) in content {
+        audit_media(object, pointer.push(media), diags);
     }
 }
 
 fn audit_media(media: &MediaTypeObject, pointer: JsonPointer, diags: &mut Diagnostics) {
     if let Some(RefOr::Item(schema)) = &media.schema {
         audit_schema(schema, pointer.push("schema"), diags);
+    }
+    if let Some(RefOr::Item(schema)) = &media.item_schema {
+        audit_schema(schema, pointer.push("itemSchema"), diags);
     }
 }
 
@@ -137,6 +185,9 @@ fn audit_schema(schema: &Schema, pointer: JsonPointer, diags: &mut Diagnostics) 
     for (name, child) in &schema.defs {
         audit_schema_or(child, pointer.push("$defs").push(name), diags);
     }
+    for (keyword, child) in &schema.validation_children {
+        audit_schema_or(child, pointer.push(keyword), diags);
+    }
 }
 
 fn audit_schema_or(schema: &SchemaOr, pointer: JsonPointer, diags: &mut Diagnostics) {
@@ -159,4 +210,5 @@ fn has_validation_keywords(validation: &ValidationKeywords) -> bool {
         || validation.unique_items
         || validation.min_properties.is_some()
         || validation.max_properties.is_some()
+        || validation.other
 }

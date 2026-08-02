@@ -128,7 +128,7 @@ Spec B — a minimal hand-written **OpenAPI 3.0.3** document (one operation, one
 
 What this actually shows:
 
-- **There is no spec all three accept.** spargen is 3.1-only and *rejects* 3.0 loudly (`E001`);
+- **There is no spec all three accept.** spargen is 3.1/3.2-only and *rejects* 3.0 loudly (`E001`);
   progenitor is 3.0-only and *rejects* 3.1 (`invalid version: 3.1.0`). That disjointness is the
   single most important comparison result — see below. openapi-generator accepts both.
 - On a spec spargen supports (3.1), it generates in **~10 ms** vs openapi-generator's **~1.25 s** —
@@ -147,7 +147,7 @@ What this actually shows:
 The three tools do genuinely different jobs; a wall-clock table without this context would
 mislead.
 
-- **OpenAPI version scope is disjoint.** Spargen is **3.1-only** and treats 3.0 as a hard,
+- **OpenAPI version scope is disjoint.** Spargen is **3.1/3.2-only** and treats 3.0 as a hard,
   diagnosed rejection (`E001`) rather than silently mis-generating it. progenitor is built on the
   `openapiv3` crate and is **3.0-only** — it rejects 3.1 outright. openapi-generator spans 2.0/3.0/
   3.1. So the *same* spec cannot be a like-for-like input for spargen and progenitor; each must run

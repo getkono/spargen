@@ -2,14 +2,12 @@
 
 > Status (Alpha): If it compiles, it should work. Currently being adopted by a few projects by author. Issues will be reviewed promptly.
 
-A compile-time-correct Rust client generator for OpenAPI 3.1.x. Nothing else.
+A compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x. Nothing older.
 
 The name: a *spar* is the single load-bearing beam of an aircraft wing — sized on the drawing
 board, carrying the entire span in flight with nothing propping it up. That is the product:
 everything structural is decided at generation time; nothing is interpreted at runtime. Spec in,
 spar out.
-
-> Note: We intend to support OpenAPI 3.2+ in the near future as demands is required. We choose to omit 3.0.x and older due to divergence; for Rust, Progenitor's client generator may suffice.
 
 ## Why
 
@@ -21,17 +19,17 @@ Schema 2020-12 (`nullable` → type arrays, numeric `exclusiveMinimum`, `$defs`,
 generating — "works" only by accident and silently miscompiles any schema that uses 3.1
 semantics.
 
-Spargen speaks 3.1 natively, fails loudly and precisely on what it does not support, and treats
-dependency hygiene as a first-class constraint. 3.0.x input is rejected with a diagnostic, never
-converted.
+Spargen speaks 3.1 and its focused 3.2 extension natively, fails loudly and precisely on what it
+does not support, and treats dependency hygiene as a first-class constraint. 3.0.x input is
+rejected with a diagnostic, never converted.
 
 ## What it does
 
-Spargen consumes an OpenAPI 3.1.x document (JSON or YAML, plus local relative-file `$ref`s) at
-generation time and produces idiomatic, deterministic Rust: typed models, a `Client`, one method
-per operation, and typed errors. Generated code compiles or generation fails — with a diagnostic
-that names the exact spec construct, its JSON Pointer, and a remedy. Three ways to run it — all
-produce byte-identical output, so they are interchangeable:
+Spargen consumes an OpenAPI 3.1.x or 3.2.x document (JSON or YAML, plus local relative-file
+`$ref`s) at generation time and produces idiomatic, deterministic Rust: typed models, a `Client`,
+one method per operation, and typed errors. Generated code compiles or generation fails — with a
+diagnostic that names the exact spec construct, its JSON Pointer, and a remedy. Three ways to run
+it — all produce byte-identical output, so they are interchangeable:
 
 | Mode | How | Generated code | No CLI? |
 | --- | --- | --- | --- |
@@ -103,14 +101,17 @@ the version it emits, and the idioms spargen handles.
 
 ## Status
 
-Implemented and verified today: the full pipeline for a substantial 3.1 subset — objects,
-arrays, tuples, maps, scalar primitives and `format` mappings, homogeneous scalar enums,
+Implemented and verified today: the full pipeline for substantial 3.1 and 3.2 surfaces — boolean
+schemas, objects, arrays, tuples, maps, scalar primitives and `format` mappings, homogeneous scalar enums,
 `$ref`s (including self- and mutually-recursive schemas, whose cycle-closing references are
 boxed), `allOf` merging, `oneOf`/`anyOf` unions, path/query/header/cookie parameters, JSON /
 form-urlencoded / octet-stream / text bodies, per-status responses (including multi-status
 success/error bodies lowered to typed per-operation response enums), auth attachment, and the
 complete diagnostics surface (`check` / `generate` / `explain`, `--format json`, stable codes,
-batch reporting).
+batch reporting). OpenAPI 3.2 adds canonical `$self` reference identity, `QUERY` and custom HTTP
+methods, whole-query-string and cookie-style parameters, reusable media types, typed SSE/JSON
+sequence streams, and expanded documentation metadata. See the concise
+[OpenAPI 3.2 scope](docs/openapi-3.2.md) for the exact delta from 3.1.
 
 Anything outside the documented surface is rejected or warned loudly, never silent; see the
 [support matrix](docs/support-matrix.md) for the exact boundary. Diagnostics carry file-level
@@ -122,7 +123,7 @@ generating and intentionally rejecting real-world cases.
 
 The full documentation site is an [mdBook](https://rust-lang.github.io/mdBook/) under
 [`docs/book/`](docs/book) — an Introduction, Getting Started, and CLI/Runtime reference, wired
-together with the [support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
+together with the [OpenAPI 3.2 scope](docs/openapi-3.2.md), [support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
 [compatibility](docs/compatibility.md), [recipes](docs/recipes.md), [corpus](docs/corpus.md),
 [benchmarks](docs/benchmarks.md), and [testing](docs/testing.md) docs (included, not duplicated).
 Build it locally:
@@ -167,9 +168,9 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 The primary published crate is internally partitioned into subsystems with a declared dependency DAG —
 `diag`, `source`, `ir`, `oas31`, `name`, `support`, `codegen`, `emit`, `compat`, `cli`, and the
-`lib.rs` facade. Everything that knows OpenAPI 3.1 syntax lives in the `oas31` frontend, which
-lowers into a version-agnostic IR; codegen never sees a spec document. A future spec version
-becomes a sibling frontend that lowers into the same IR and touches nothing downstream. The
+`lib.rs` facade. Everything that knows OpenAPI 3.1/3.2 syntax lives in the `oas31` frontend, which
+lowers into a version-agnostic IR; codegen never sees a spec document. A future incompatible spec
+version can become a sibling frontend that lowers into the same IR and touches nothing downstream. The
 emitted runtime is real, standalone-compilable source in the `support-runtime` workspace member
 (`publish = false`), tested in its own right and embedded verbatim into output.
 

@@ -33,8 +33,13 @@ pub enum Framing {
     /// field lines within an event are concatenated into one JSON payload. A `data: [DONE]`
     /// sentinel terminates the stream.
     Sse,
+    /// Standards-compliant Server-Sent Events converted into JSON objects with `data`, `event`,
+    /// `id`, and `retry` fields before deserializing the OpenAPI 3.2 `itemSchema` type.
+    SseEvent,
     /// Newline-delimited JSON (`application/x-ndjson`): one JSON item per non-empty line.
     Ndjson,
+    /// RFC 7464 JSON Text Sequences (`application/json-seq` / `application/*+json-seq`).
+    JsonSequence,
 }
 
 /// A typed async stream of items decoded from a streaming response body (SSE or ndjson).
@@ -175,6 +180,8 @@ fn next_frame(buffer: &mut Vec<u8>, framing: Framing, at_eof: bool) -> FramePoll
     match framing {
         Framing::Ndjson => ndjson_next(buffer, at_eof),
         Framing::Sse => sse_next(buffer, at_eof),
+        Framing::SseEvent => sse_event_next(buffer, at_eof),
+        Framing::JsonSequence => json_sequence_next(buffer, at_eof),
     }
 }
 
@@ -207,6 +214,47 @@ fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
             return FramePoll::Item(line);
         }
         return FramePoll::NeedMore;
+    }
+}
+
+/// RFC 7464 framing: each item starts with ASCII Record Separator (`0x1E`) and runs until the next
+/// separator (or EOF). Newlines are record terminators/formatting and are trimmed around the JSON
+/// text, while embedded newlines remain valid JSON whitespace.
+fn json_sequence_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
+    let Some(first) = buffer.iter().position(|byte| *byte == 0x1e) else {
+        if at_eof {
+            buffer.clear();
+        }
+        return FramePoll::NeedMore;
+    };
+    if first > 0 {
+        buffer.drain(..first);
+    }
+    let end = buffer[1..]
+        .iter()
+        .position(|byte| *byte == 0x1e)
+        .map(|index| index + 1);
+    let Some(end) = end.or(at_eof.then_some(buffer.len())) else {
+        return FramePoll::NeedMore;
+    };
+    let mut payload = buffer[1..end].to_vec();
+    while payload.last().is_some_and(u8::is_ascii_whitespace) {
+        payload.pop();
+    }
+    let start = payload
+        .iter()
+        .position(|byte| !byte.is_ascii_whitespace())
+        .unwrap_or(payload.len());
+    payload.drain(..start);
+    if end == buffer.len() {
+        buffer.clear();
+    } else {
+        buffer.drain(..end);
+    }
+    if payload.is_empty() {
+        FramePoll::NeedMore
+    } else {
+        FramePoll::Item(payload)
     }
 }
 
@@ -253,6 +301,112 @@ fn sse_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
             other => return other,
         }
     }
+}
+
+#[derive(Default)]
+struct SseFields {
+    data: Vec<u8>,
+    event: Option<Vec<u8>>,
+    id: Option<Vec<u8>>,
+    retry: Option<u64>,
+}
+
+/// OpenAPI 3.2 SSE framing. The event stream is parsed before Schema Object application, so each
+/// dispatched event becomes the JSON-equivalent object described by `itemSchema` rather than
+/// treating `data:` as an embedded JSON document.
+fn sse_event_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
+    loop {
+        let mut pos = 0;
+        let mut fields = SseFields::default();
+        let mut saw_terminator = false;
+        while let Some((line, next)) = take_line(buffer, pos) {
+            pos = next;
+            if line.is_empty() {
+                saw_terminator = true;
+                break;
+            }
+            append_sse_field(line, &mut fields);
+        }
+        if !saw_terminator {
+            if !at_eof {
+                return FramePoll::NeedMore;
+            }
+            if pos < buffer.len() {
+                let mut line = &buffer[pos..];
+                if line.last() == Some(&b'\r') {
+                    line = &line[..line.len() - 1];
+                }
+                append_sse_field(line, &mut fields);
+            }
+            buffer.clear();
+        } else {
+            buffer.drain(..pos);
+        }
+        match finish_sse_fields(fields) {
+            FramePoll::NeedMore if !buffer.is_empty() => continue,
+            result => return result,
+        }
+    }
+}
+
+fn append_sse_field(line: &[u8], fields: &mut SseFields) {
+    if line.first() == Some(&b':') {
+        return;
+    }
+    let (field, value) = match line.iter().position(|byte| *byte == b':') {
+        Some(colon) => {
+            let mut value = &line[colon + 1..];
+            if value.first() == Some(&b' ') {
+                value = &value[1..];
+            }
+            (&line[..colon], value)
+        }
+        None => (line, &b""[..]),
+    };
+    match field {
+        b"data" => {
+            fields.data.extend_from_slice(value);
+            fields.data.push(b'\n');
+        }
+        b"event" => fields.event = Some(value.to_vec()),
+        b"id" if !value.contains(&0) => fields.id = Some(value.to_vec()),
+        b"retry" => {
+            fields.retry = std::str::from_utf8(value)
+                .ok()
+                .and_then(|value| value.parse().ok());
+        }
+        _ => {}
+    }
+}
+
+fn finish_sse_fields(mut fields: SseFields) -> FramePoll {
+    if fields.data.is_empty() {
+        return FramePoll::NeedMore;
+    }
+    if fields.data.last() == Some(&b'\n') {
+        fields.data.pop();
+    }
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "data".to_owned(),
+        serde_json::Value::String(String::from_utf8_lossy(&fields.data).into_owned()),
+    );
+    if let Some(event) = fields.event {
+        object.insert(
+            "event".to_owned(),
+            serde_json::Value::String(String::from_utf8_lossy(&event).into_owned()),
+        );
+    }
+    if let Some(id) = fields.id {
+        object.insert(
+            "id".to_owned(),
+            serde_json::Value::String(String::from_utf8_lossy(&id).into_owned()),
+        );
+    }
+    if let Some(retry) = fields.retry {
+        object.insert("retry".to_owned(), serde_json::Value::from(retry));
+    }
+    FramePoll::Item(serde_json::Value::Object(object).to_string().into_bytes())
 }
 
 /// Turn an event's assembled `data` payload into a poll result: empty → nothing to dispatch, the
@@ -380,6 +534,15 @@ mod tests {
     }
 
     #[test]
+    fn json_sequence_frames_record_separator_delimited_values() {
+        let mut buf = b"\x1e{\"a\":1}\n\x1e{\n  \"a\": 2\n}\n".to_vec();
+        let (items, done) = drain(&mut buf, Framing::JsonSequence, true);
+        assert_eq!(items, vec![r#"{"a":1}"#, "{\n  \"a\": 2\n}"]);
+        assert!(!done);
+        assert!(buf.is_empty());
+    }
+
+    #[test]
     fn sse_concatenates_multiple_data_lines_and_ignores_other_fields() {
         // Two `data:` lines join with a newline; the `event:`/`id:` fields and the `:` comment are
         // ignored. The blank line terminates the event.
@@ -388,6 +551,32 @@ mod tests {
         assert_eq!(items, vec!["{\"a\":\n1}"]);
         assert!(!done);
         assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn oas32_sse_frames_the_parsed_event_as_a_json_object() {
+        let mut buf = b": ignored\nevent: add\nid: 7\nretry: 5\ndata: first\ndata: second\nunknown: ignored\n\n".to_vec();
+        let (items, done) = drain(&mut buf, Framing::SseEvent, false);
+        assert_eq!(items.len(), 1);
+        let event: serde_json::Value = serde_json::from_str(&items[0]).unwrap();
+        assert_eq!(
+            event,
+            serde_json::json!({
+                "data": "first\nsecond",
+                "event": "add",
+                "id": "7",
+                "retry": 5
+            })
+        );
+        assert!(!done);
+    }
+
+    #[test]
+    fn oas32_sse_does_not_treat_done_data_as_a_private_sentinel() {
+        let mut buf = b"data: [DONE]\n\n".to_vec();
+        let (items, done) = drain(&mut buf, Framing::SseEvent, false);
+        assert_eq!(items.len(), 1);
+        assert!(!done);
     }
 
     #[test]

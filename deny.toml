@@ -10,6 +10,9 @@ version = 2
 # Spargen and its dependency surface are permissive-only.
 allow = [
     "MIT",
+    # `borrow-or-share`, reached only through the generator-side official-schema validator's URI
+    # resolver, uses MIT No Attribution. It is OSI-approved and does not enter generated output.
+    "MIT-0",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",

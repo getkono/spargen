@@ -5,11 +5,13 @@ use crate::ir::Method;
 
 use super::Schema;
 
-/// The typed OAS 3.1.1 document model. Built by
+/// The typed OAS 3.1/3.2 document model. Built by
 /// [`parse_document`](super::parse_document) from the span-preserving source tree; every node
 /// retains provenance for diagnostics.
 #[derive(Debug, Clone)]
 pub struct Document {
+    /// Whether the declared OpenAPI feature version is 3.2.x.
+    pub is_oas32: bool,
     /// `info`.
     pub info: Info,
     /// `servers`.
@@ -20,6 +22,8 @@ pub struct Document {
     pub components: Components,
     /// Top-level `security`.
     pub security: Vec<SecurityRequirement>,
+    /// Top-level tag metadata, including OpenAPI 3.2 hierarchy fields.
+    pub tags: Vec<Tag>,
     /// Provenance of the document root.
     pub provenance: Provenance,
 }
@@ -39,6 +43,8 @@ pub enum RefOr<T> {
 pub struct Reference {
     /// The raw reference string.
     pub reference: String,
+    /// Where the reference occurred, including its source file.
+    pub provenance: Provenance,
 }
 
 /// `info`.
@@ -53,6 +59,7 @@ pub struct Info {
 /// A `servers` entry.
 #[derive(Debug, Clone)]
 pub struct Server {
+    pub name: Option<String>,
     pub url: String,
     pub description: Option<String>,
 }
@@ -83,6 +90,7 @@ pub struct OperationObject {
     pub responses: ResponsesObject,
     pub security: Option<Vec<SecurityRequirement>>,
     pub deprecated: bool,
+    pub tags: Vec<String>,
     pub provenance: Provenance,
 }
 
@@ -122,19 +130,37 @@ pub struct ResponsesObject {
 /// An OAS Response Object.
 #[derive(Debug, Clone)]
 pub struct ResponseObject {
+    pub summary: Option<String>,
+    pub description: Option<String>,
     /// Media type → schema.
     pub content: IndexMap<String, MediaTypeObject>,
+    pub provenance: Provenance,
+}
+
+/// Top-level Tag Object metadata.
+#[derive(Debug, Clone)]
+pub struct Tag {
+    pub name: String,
+    pub summary: Option<String>,
+    pub description: Option<String>,
+    pub parent: Option<String>,
+    pub kind: Option<String>,
     pub provenance: Provenance,
 }
 
 /// An OAS Media Type Object.
 #[derive(Debug, Clone)]
 pub struct MediaTypeObject {
+    /// OpenAPI 3.2 allows a Media Type Object itself to be a Reference Object.
+    pub reference: Option<Reference>,
     pub schema: Option<RefOr<Schema>>,
     /// OpenAPI 3.2 `itemSchema`: the per-item type for a sequential/streaming media
     /// (`text/event-stream`, `application/x-ndjson`). For a streaming response it supplies the
     /// streamed item type `T`; on a non-streaming media it is meaningless and acknowledged (`W010`).
     pub item_schema: Option<RefOr<Schema>>,
+    /// Explicit OpenAPI Media Type Object encoding fields, retained so lowering can reject them
+    /// after the complete warning audit instead of aborting document parsing early.
+    pub explicit_encodings: Vec<(String, Provenance)>,
 }
 
 /// `components`. Only the maps spargen consumes are modeled.
@@ -144,6 +170,7 @@ pub struct Components {
     pub responses: IndexMap<String, RefOr<ResponseObject>>,
     pub parameters: IndexMap<String, RefOr<ParameterObject>>,
     pub request_bodies: IndexMap<String, RefOr<RequestBodyObject>>,
+    pub media_types: IndexMap<String, MediaTypeObject>,
     pub security_schemes: IndexMap<String, RefOr<SecuritySchemeObject>>,
 }
 

@@ -2,7 +2,7 @@ use crate::ir::{Method, PathTemplate};
 
 /// Synthesize an `operationId` from an operation's method and path template when the spec omits one.
 /// Deterministic, e.g. `GET /users/{id}` → `get_users_by_id`.
-pub fn synth_operation_id(method: Method, path: &PathTemplate) -> String {
+pub fn synth_operation_id(method: &Method, path: &PathTemplate) -> String {
     let method = match method {
         Method::Get => "get",
         Method::Put => "put",
@@ -13,6 +13,7 @@ pub fn synth_operation_id(method: Method, path: &PathTemplate) -> String {
         Method::Patch => "patch",
         Method::Trace => "trace",
         Method::Query => "query",
+        Method::Custom(method) => method,
     };
 
     let mut parts = vec![method.to_owned()];

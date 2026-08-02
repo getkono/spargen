@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
-use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
-use crate::source::{is_remote_ref, remote_split_fragment, rewrite_refs_absolute, InputBundle};
+use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
+use crate::source::{rewrite_refs_absolute, InputBundle};
 
 use super::{deserialize::parse_schema, Document, Schema};
 
@@ -32,46 +32,29 @@ impl<'doc> Resolver<'doc> {
     pub fn resolve(
         &self,
         reference: &str,
-        at: &JsonPointer,
+        at: &Provenance,
         diags: &mut Diagnostics,
     ) -> Result<Resolved<'doc>, Aborted> {
-        let _ = self.bundle.root_id();
-        if is_remote_ref(reference) {
-            return self.resolve_remote(reference, at, diags);
+        let from = at
+            .span
+            .map(|span| span.file)
+            .unwrap_or_else(|| self.bundle.root_id());
+
+        // Root component refs borrow the already-parsed component so named types and recursion are
+        // shared. Every other JSON Pointer (including local relative files) is parsed from its
+        // source node with that node's own provenance.
+        if from == self.bundle.root_id() {
+            if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                if let Some(super::RefOr::Item(schema)) = self.document.components.schemas.get(name)
+                {
+                    return Ok(Resolved {
+                        schema: Cow::Borrowed(schema),
+                    });
+                }
+            }
         }
 
-        let Some(name) = reference.strip_prefix("#/components/schemas/") else {
-            Diagnostic::error(
-                Code::UnresolvedRef,
-                Provenance::new(at.clone(), self.document.provenance.span),
-            )
-            .message(format!("unsupported or unresolved $ref `{reference}`"))
-            .emit(diags);
-            return Err(Aborted);
-        };
-        let Some(target) = self.document.components.schemas.get(name) else {
-            Diagnostic::error(
-                Code::UnresolvedRef,
-                Provenance::new(at.clone(), self.document.provenance.span),
-            )
-            .message(format!("unresolved schema component `$ref` `{reference}`"))
-            .emit(diags);
-            return Err(Aborted);
-        };
-        let super::RefOr::Item(schema) = target else {
-            Diagnostic::error(
-                Code::UnresolvedRef,
-                Provenance::new(at.clone(), self.document.provenance.span),
-            )
-            .message(format!(
-                "nested component $ref `{reference}` is not resolved yet"
-            ))
-            .emit(diags);
-            return Err(Aborted);
-        };
-        Ok(Resolved {
-            schema: Cow::Borrowed(schema),
-        })
+        self.resolve_bundle(reference, from, at, diags)
     }
 
     /// Resolve a remote `$ref` against the vendored document already loaded into the bundle. The
@@ -79,40 +62,32 @@ impl<'doc> Resolver<'doc> {
     /// nested remote/relative refs resolve against the vendored doc's own URL, then parsed to a
     /// [`Schema`]. If the vendored doc is absent the bundle load already rejected it (`E003`/`E021`)
     /// and aborted; this only re-checks defensively.
-    fn resolve_remote(
+    fn resolve_bundle(
         &self,
         reference: &str,
-        at: &JsonPointer,
+        from: crate::diag::FileId,
+        at: &Provenance,
         diags: &mut Diagnostics,
     ) -> Result<Resolved<'doc>, Aborted> {
-        let (base_url, fragment) = remote_split_fragment(reference);
-        let Some(file) = self.bundle.remote_file(base_url) else {
-            Diagnostic::error(
-                Code::AbsoluteRefUnsupported,
-                Provenance::new(at.clone(), self.document.provenance.span),
-            )
-            .message(format!("remote $ref `{reference}` is not pinned"))
-            .remedy("run `spargen lock <spec>` to fetch, vendor, and pin it")
-            .emit(diags);
+        let Some((file, pointer)) = self.bundle.reference_target(reference, from) else {
+            Diagnostic::error(Code::UnresolvedRef, at.clone())
+                .message(format!("unsupported or unresolved $ref `{reference}`"))
+                .emit(diags);
             return Err(Aborted);
         };
-        let pointer = JsonPointer::from(fragment.to_owned());
         let Some(node) = self.bundle.value_at(file).pointer(&pointer) else {
-            Diagnostic::error(
-                Code::UnresolvedRef,
-                Provenance::new(at.clone(), self.document.provenance.span),
-            )
-            .message(format!(
-                "remote $ref fragment `#{fragment}` was not found in the vendored document for `{base_url}`"
-            ))
-            .emit(diags);
+            Diagnostic::error(Code::UnresolvedRef, at.clone())
+                .message(format!(
+                    "$ref target `{reference}` was not found in the input bundle"
+                ))
+                .emit(diags);
             return Err(Aborted);
         };
-        // Rewrite refs on a clone so nested refs inside the vendored doc become absolute URLs (they
-        // were already loaded during bundle walk), then parse into a typed schema.
         let mut node = node.clone();
-        rewrite_refs_absolute(&mut node, base_url);
-        let Some(schema) = parse_schema(&node, at, diags) else {
+        if let Some(base_url) = self.bundle.remote_origin(file) {
+            rewrite_refs_absolute(&mut node, base_url);
+        }
+        let Some(schema) = parse_schema(&node, &pointer, diags) else {
             return Err(Aborted);
         };
         Ok(Resolved {

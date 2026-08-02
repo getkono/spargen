@@ -7,7 +7,7 @@ use super::{Docs, MediaType, RequestBody, Responses, SecurityRequirement, Ty};
 pub struct OperationId(pub String);
 
 /// An HTTP method.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Method {
     Get,
     Put,
@@ -19,11 +19,13 @@ pub enum Method {
     Trace,
     /// The `QUERY` method, added as a fixed path-item field by OpenAPI 3.2.
     Query,
+    /// An extension method declared through OpenAPI 3.2 `additionalOperations`.
+    Custom(String),
 }
 
 impl Method {
-    /// The lowercase OAS path-item key.
-    pub fn as_str(self) -> &'static str {
+    /// The OAS method token.
+    pub fn as_str(&self) -> &str {
         match self {
             Method::Get => "get",
             Method::Put => "put",
@@ -34,6 +36,7 @@ impl Method {
             Method::Patch => "patch",
             Method::Trace => "trace",
             Method::Query => "query",
+            Method::Custom(method) => method,
         }
     }
 }
@@ -112,6 +115,8 @@ pub struct Parameter {
 pub enum ParamLoc {
     Path,
     Query,
+    /// OpenAPI 3.2's whole-query parameter.
+    QueryString,
     Header,
     Cookie,
 }
@@ -123,6 +128,8 @@ pub enum ParamStyle {
     Simple,
     /// `style: form`.
     Form,
-    /// A `content`-typed parameter, serialized in the given media type (JSON).
+    /// OpenAPI 3.2 cookie syntax (form-shaped values joined with Cookie delimiters, no escaping).
+    Cookie,
+    /// A `content`-typed parameter, serialized in the given media type.
     Content(MediaType),
 }

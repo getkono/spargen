@@ -9,6 +9,9 @@ use crate::source::SpannedValue;
 /// [`audit`](super::audit) can W-warn them by pointer; shape keywords drive lowering to the IR.
 #[derive(Debug, Clone)]
 pub struct Schema {
+    /// A boolean schema when this value appears in an OpenAPI position whose outer model stores a
+    /// full `Schema` rather than [`SchemaOr`]. `true` accepts any value; `false` accepts none.
+    pub boolean: Option<bool>,
     /// The `type` set, including type arrays and `"null"`.
     pub types: TypeSet,
     /// A `$ref`, if this node is a reference.
@@ -36,6 +39,10 @@ pub struct Schema {
     pub discriminator: Option<Discriminator>,
     /// `$defs`.
     pub defs: IndexMap<String, SchemaOr>,
+    /// Subschemas reached only through validation/applicator keywords that do not change the Rust
+    /// storage shape. They are still parsed and audited so nested unsupported constructs cannot
+    /// disappear silently.
+    pub validation_children: Vec<(String, SchemaOr)>,
     /// `enum` values (spanned, so non-scalar members can be diagnosed).
     pub enum_values: Option<Vec<SpannedValue>>,
     /// `const` value.
@@ -74,6 +81,8 @@ pub struct XmlHints {
     pub name: Option<String>,
     /// `xml.attribute`: serialize as an XML attribute rather than a child element.
     pub attribute: bool,
+    /// OpenAPI 3.2 `nodeType`.
+    pub node_type: Option<String>,
     /// `xml.namespace`: an XML namespace URI (unsupported → `W006`).
     pub namespace: Option<String>,
     /// `xml.prefix`: a namespace prefix (unsupported → `W006`).
@@ -142,4 +151,7 @@ pub struct ValidationKeywords {
     pub unique_items: bool,
     pub min_properties: Option<u64>,
     pub max_properties: Option<u64>,
+    /// Another JSON Schema validation/applicator keyword is present (`not`, `if`/`then`/`else`,
+    /// `contains`, `dependent*`, `unevaluated*`, `propertyNames`, or content validation).
+    pub other: bool,
 }

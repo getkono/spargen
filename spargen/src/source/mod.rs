@@ -27,7 +27,6 @@ pub use value::{Node, Number, SpannedKey, SpannedMap, SpannedValue};
 // Remote-ref helpers shared with `oas31::resolve` for hermetic fragment resolution.
 pub(crate) use remote::is_absolute_ref as is_remote_ref;
 pub(crate) use remote::rewrite_refs_to_absolute as rewrite_refs_absolute;
-pub(crate) use remote::split_fragment as remote_split_fragment;
 
 #[cfg(feature = "remote-fetch")]
 pub use vendor::{vendor, ReqwestFetcher, VendorReport, VendoredRef};

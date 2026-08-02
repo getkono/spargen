@@ -41,9 +41,9 @@ run = [
   "sh -c 'cargo run -q -p spargen -- check corpus/stripe/spec3.json --format json >/tmp/spargen-stripe.json || test $? -eq 1; grep -q E001 /tmp/spargen-stripe.json'",
   "sh -c 'cargo run -q -p spargen -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json >/tmp/spargen-twilio.json || test $? -eq 1; grep -q E001 /tmp/spargen-twilio.json'",
   "sh -c 'cargo run -q -p spargen -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json >/tmp/spargen-k8s.json || test $? -eq 1; grep -q E001 /tmp/spargen-k8s.json'",
-  # meilisearch is 3.1.0: clears the gate, rejects with E013 in the pipeline. Raise batch_cap so
-  # the E013 error is not truncated behind the W001 warnings before we grep for it.
-  "sh -c 'printf \"[features]\\nbatch_cap = 100000\\n\" >/tmp/spargen-cap.toml; cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json --config /tmp/spargen-cap.toml >/tmp/spargen-meili.json || test $? -eq 1; grep -q E013 /tmp/spargen-meili.json'",
+  # meilisearch is 3.1.0 and clears the version gate, but its null externalDocs descriptions fail
+  # the official 3.1 document schema before lowering.
+  "sh -c 'cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json >/tmp/spargen-meili.json || test $? -eq 1; grep -q E011 /tmp/spargen-meili.json'",
 ]
 
 [tasks.github-api]

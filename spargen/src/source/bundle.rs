@@ -9,7 +9,7 @@ use crate::diag::{
 };
 
 use super::lock::{Lock, LOCK_FILE_NAME, VENDOR_DIR};
-use super::remote::{classify_ref, collect_refs, RefTarget};
+use super::remote::{classify_ref, collect_refs, resolve_ref_url, split_fragment, RefTarget};
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
 
@@ -35,7 +35,7 @@ impl SourceFile {
 /// against that document's URL.
 #[derive(Debug, Clone)]
 enum Origin {
-    Local,
+    Local(Utf8PathBuf),
     Remote(String),
 }
 
@@ -93,9 +93,8 @@ impl InputBundle {
                             queue.push_back(loaded);
                         }
                     }
-                    RefTarget::UnsupportedRemote(url) => {
-                        bundle.reject_unpinned(&url, file, diags);
-                    }
+                    RefTarget::UnsupportedRemote(url) if bundle.url_to_file.contains_key(&url) => {}
+                    RefTarget::UnsupportedRemote(url) => bundle.reject_unpinned(&url, file, diags),
                     RefTarget::Remote(url) => {
                         if bundle.url_to_file.contains_key(&url) {
                             continue;
@@ -143,6 +142,47 @@ impl InputBundle {
     /// The vendored document loaded for an absolute base `url`, if it was pinned and loaded.
     pub(crate) fn remote_file(&self, url: &str) -> Option<FileId> {
         self.url_to_file.get(url).copied()
+    }
+
+    /// Resolve a `$ref` from `from` to a loaded document and JSON Pointer. All reachable files were
+    /// loaded during bundle construction, so this performs no I/O and never reaches the network.
+    pub(crate) fn reference_target(
+        &self,
+        reference: &str,
+        from: FileId,
+    ) -> Option<(FileId, JsonPointer)> {
+        let (_, fragment) = split_fragment(reference);
+        let remote_base = match self.origins.get(&from) {
+            Some(Origin::Remote(url)) => Some(url.as_str()),
+            _ => None,
+        };
+        let file = match classify_ref(reference, remote_base) {
+            RefTarget::InDocument => from,
+            RefTarget::LocalRelative(path) => {
+                let path = self.resolve_path(from, &path);
+                self.file_id_by_path(&path)?
+            }
+            RefTarget::Remote(url) => self.remote_file(&url)?,
+            RefTarget::UnsupportedRemote(uri) => self.url_to_file.get(&uri).copied()?,
+        };
+        let pointer = if fragment.is_empty() {
+            JsonPointer::root()
+        } else if fragment.starts_with('/') {
+            JsonPointer::from(fragment.to_owned())
+        } else {
+            // Named JSON Schema anchors are indexed separately by the OAS frontend. Do not mistake
+            // one for a JSON Pointer.
+            return None;
+        };
+        Some((file, pointer))
+    }
+
+    /// The retrieval URL for a vendored remote document.
+    pub(crate) fn remote_origin(&self, file: FileId) -> Option<&str> {
+        match self.origins.get(&file) {
+            Some(Origin::Remote(url)) => Some(url),
+            _ => None,
+        }
     }
 
     /// The filesystem paths of every loaded document: the root spec, each relative-file `$ref`
@@ -195,12 +235,13 @@ impl InputBundle {
         self.files.insert(
             id,
             SourceFile {
-                path,
+                path: path.clone(),
                 text: Arc::<str>::from(text),
             },
         );
         self.values.insert(id, parsed);
-        self.origins.insert(id, Origin::Local);
+        self.origins.insert(id, Origin::Local(path));
+        self.register_self_identity(id, None);
         Ok(id)
     }
 
@@ -267,6 +308,7 @@ impl InputBundle {
         self.values.insert(id, parsed);
         self.origins.insert(id, Origin::Remote(url.to_owned()));
         self.url_to_file.insert(url.to_owned(), id);
+        self.register_self_identity(id, Some(url));
         Ok(Some(id))
     }
 
@@ -300,12 +342,54 @@ impl InputBundle {
         self.files
             .iter()
             .find_map(|(id, file)| (file.path == path).then_some(*id))
+            .or_else(|| {
+                self.origins.iter().find_map(|(id, origin)| match origin {
+                    Origin::Local(identity) if identity == path => Some(*id),
+                    Origin::Local(_) | Origin::Remote(_) => None,
+                })
+            })
     }
 
     fn resolve_path(&self, base: FileId, path: &str) -> Utf8PathBuf {
-        let base_path = &self.file(base).expect("base file exists").path;
+        let base_path = match self.origins.get(&base) {
+            Some(Origin::Local(path)) => path,
+            _ => &self.file(base).expect("base file exists").path,
+        };
         let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
         parent.join(path)
+    }
+
+    /// Register an OpenAPI 3.2 `$self` identity and make it the base for subsequent references.
+    /// Relative identities in local documents are resolved from the retrieval path; identities in
+    /// remote documents are resolved from the pinned retrieval URL.
+    fn register_self_identity(&mut self, file: FileId, retrieval_url: Option<&str>) {
+        let Some(self_uri) = self
+            .value_at(file)
+            .get("$self")
+            .and_then(SpannedValue::as_str)
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        let (base, _) = split_fragment(&self_uri);
+        if base.is_empty() {
+            return;
+        }
+        if let Some(retrieval_url) = retrieval_url {
+            let canonical = resolve_ref_url(retrieval_url, base);
+            self.origins.insert(file, Origin::Remote(canonical.clone()));
+            self.url_to_file.insert(canonical, file);
+        } else if base.starts_with("http://") || base.starts_with("https://") {
+            self.origins.insert(file, Origin::Remote(base.to_owned()));
+            self.url_to_file.insert(base.to_owned(), file);
+        } else if !base.contains(':') {
+            let canonical = self.resolve_path(file, base);
+            self.origins.insert(file, Origin::Local(canonical));
+        } else {
+            // Opaque canonical identities can still resolve exact absolute references back to this
+            // document. They cannot supply a hierarchical base for relative reference resolution.
+            self.url_to_file.insert(base.to_owned(), file);
+        }
     }
 }
 

@@ -29,4 +29,4 @@ the library API.
 | `W005` | Warning | schema default not applied |
 | `W006` | Warning | unsupported XML hint ignored |
 | `W009` | Warning | construct omitted |
-| `W010` | Warning | OpenAPI 3.2 construct ignored |
+| `W010` | Warning | non-sequential `itemSchema` ignored |

@@ -15,7 +15,7 @@ use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
 use super::{
     Document, JsonType, ParameterObject, RefOr, RequestBodyObject, Resolver, ResponseObject,
-    Schema, SchemaOr, SecurityRequirement,
+    Schema, SchemaOr, SecurityRequirement, ValidationKeywords,
 };
 
 /// Maximum schema-lowering recursion depth. Each nested object property, array item,
@@ -28,7 +28,7 @@ use super::{
 /// facade) so lowering this many levels deep is comfortably safe.
 const MAX_SCHEMA_DEPTH: u32 = 128;
 
-/// Lower the typed 3.1.1 [`Document`] into the version-agnostic [`Api`] IR.
+/// Lower a typed OpenAPI 3.1 or 3.2 [`Document`] into the version-agnostic [`Api`] IR.
 pub fn lower(
     document: &Document,
     resolver: &Resolver,
@@ -42,34 +42,100 @@ pub fn lower(
         graph: TypeGraph::default(),
         components: HashMap::new(),
         in_progress: HashMap::new(),
+        component_alias_stack: HashSet::new(),
         remote_components: HashMap::new(),
         remote_in_progress: HashMap::new(),
         remote_alias_stack: HashSet::new(),
         depth: 0,
     };
 
-    for (name, schema) in &document.components.schemas {
-        if matches!(schema, RefOr::Item(_)) {
-            let _ = ctx.ensure_component(name);
-        }
+    for name in document.components.schemas.keys() {
+        let _ = ctx.ensure_component(name);
     }
 
     let mut operations = Vec::new();
+    let mut operation_ids = HashSet::new();
     for (path, item) in &document.paths.items {
         for (method, operation) in &item.operations {
             let path_template = parse_path_template(path);
             let id = operation
                 .operation_id
                 .clone()
-                .unwrap_or_else(|| synth_operation_id(*method, &path_template));
+                .unwrap_or_else(|| synth_operation_id(method, &path_template));
+            if !operation_ids.insert(id.clone()) {
+                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                    .message(format!(
+                        "operationId `{id}` is not unique within the API description"
+                    ))
+                    .emit(ctx.diags);
+            }
 
             let mut params = Vec::new();
-            for parameter in item.parameters.iter().chain(operation.parameters.iter()) {
+            let mut merged_parameters: IndexMap<(String, String), ParameterObject> =
+                IndexMap::new();
+            for parameter in &item.parameters {
                 if let Some(parameter) = ctx.resolve_parameter(parameter) {
-                    if let Some(parameter) = ctx.lower_parameter(&parameter) {
-                        params.push(parameter);
+                    let key = (parameter.location.clone(), parameter.name.clone());
+                    if merged_parameters.insert(key, parameter).is_some() {
+                        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                            .message("path-item parameters contain a duplicate name/location pair")
+                            .emit(ctx.diags);
                     }
                 }
+            }
+            let mut operation_parameter_keys = HashSet::new();
+            for parameter in &operation.parameters {
+                if let Some(parameter) = ctx.resolve_parameter(parameter) {
+                    let key = (parameter.location.clone(), parameter.name.clone());
+                    if !operation_parameter_keys.insert(key.clone()) {
+                        Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                            .message("operation parameters contain a duplicate name/location pair")
+                            .emit(ctx.diags);
+                    }
+                    // Operation-level parameters override the matching path-item parameter.
+                    merged_parameters.insert(key, parameter);
+                }
+            }
+            for parameter in merged_parameters.values() {
+                if let Some(parameter) = ctx.lower_parameter(parameter) {
+                    params.push(parameter);
+                }
+            }
+            let placeholders: HashSet<&str> = path_template
+                .segments
+                .iter()
+                .filter_map(|segment| match segment {
+                    PathSegment::Param(name) => Some(name.as_str()),
+                    PathSegment::Literal(_) => None,
+                })
+                .collect();
+            let path_parameters: HashSet<&str> = params
+                .iter()
+                .filter(|parameter| parameter.location == ParamLoc::Path)
+                .map(|parameter| parameter.name.as_str())
+                .collect();
+            if placeholders != path_parameters {
+                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                    .message(format!(
+                        "path template parameters {placeholders:?} do not match declared path \
+                         parameters {path_parameters:?}"
+                    ))
+                    .emit(ctx.diags);
+            }
+            let querystrings = params
+                .iter()
+                .filter(|parameter| parameter.location == ParamLoc::QueryString)
+                .count();
+            let named_queries = params
+                .iter()
+                .any(|parameter| parameter.location == ParamLoc::Query);
+            if querystrings > 1 || (querystrings == 1 && named_queries) {
+                Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                    .message(
+                        "an operation may declare at most one `in: querystring` parameter and may \
+                         not combine it with `in: query` parameters",
+                    )
+                    .emit(ctx.diags);
             }
 
             let request_body = operation
@@ -128,9 +194,30 @@ pub fn lower(
                 }
             }
 
+            let mut operation_description = operation.description.clone();
+            if !operation.tags.is_empty() {
+                append_text(
+                    &mut operation_description,
+                    format!("Tags: {}.", operation.tags.join(", ")),
+                );
+            }
+            for (status, response) in &operation.responses.by_status {
+                if let Some(response) = ctx.resolve_response(response) {
+                    append_response_docs(&mut operation_description, status, &response);
+                }
+            }
+            if let Some(response) = operation
+                .responses
+                .default
+                .as_ref()
+                .and_then(|response| ctx.resolve_response(response))
+            {
+                append_response_docs(&mut operation_description, "default", &response);
+            }
+
             operations.push(Operation {
                 id: OperationId(id),
-                method: *method,
+                method: method.clone(),
                 path: path_template,
                 params,
                 request_body,
@@ -140,7 +227,7 @@ pub fn lower(
                 docs: Docs {
                     title: None,
                     summary: operation.summary.clone(),
-                    description: operation.description.clone(),
+                    description: operation_description,
                     deprecated: operation.deprecated,
                 },
                 provenance: operation.provenance.clone(),
@@ -153,22 +240,54 @@ pub fn lower(
     // wire format. Suppress (and warn `W006` on) the rename for any shared/non-XML-reachable type.
     gate_xml_field_renames(&mut ctx.graph, &operations, ctx.diags);
 
+    let mut api_description = document.info.summary.clone();
+    if let Some(description) = &document.info.description {
+        append_text(&mut api_description, description.clone());
+    }
+    if !document.tags.is_empty() {
+        let tags = document
+            .tags
+            .iter()
+            .map(|tag| {
+                let mut label = tag.name.clone();
+                if let Some(summary) = &tag.summary {
+                    label.push_str(": ");
+                    label.push_str(summary);
+                }
+                if let Some(description) = &tag.description {
+                    label.push_str(" — ");
+                    label.push_str(description);
+                }
+                if let Some(parent) = &tag.parent {
+                    label.push_str(&format!(" (parent: {parent})"));
+                }
+                if let Some(kind) = &tag.kind {
+                    label.push_str(&format!(" [{kind}]"));
+                }
+                label
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        append_text(&mut api_description, format!("Tags: {tags}."));
+    }
     let api = Api {
         info: Info {
             title: document.info.title.clone(),
             version: document.info.version.clone(),
-            description: document
-                .info
-                .description
-                .clone()
-                .or(document.info.summary.clone()),
+            description: api_description,
         },
         servers: document
             .servers
             .iter()
             .map(|server| Server {
                 url: server.url.clone(),
-                description: server.description.clone(),
+                description: {
+                    let mut docs = server.name.as_ref().map(|name| format!("Server `{name}`."));
+                    if let Some(description) = &server.description {
+                        append_text(&mut docs, description.clone());
+                    }
+                    docs
+                },
             })
             .collect(),
         operations,
@@ -176,6 +295,27 @@ pub fn lower(
         security_schemes,
     };
     ctx.diags.into_result(api)
+}
+
+fn append_text(target: &mut Option<String>, text: String) {
+    match target {
+        Some(target) if !target.is_empty() => {
+            target.push_str("\n\n");
+            target.push_str(&text);
+        }
+        Some(target) => *target = text,
+        None => *target = Some(text),
+    }
+}
+
+fn append_response_docs(target: &mut Option<String>, status: &str, response: &ResponseObject) {
+    let mut docs = response.summary.clone();
+    if let Some(description) = &response.description {
+        append_text(&mut docs, description.clone());
+    }
+    if let Some(docs) = docs {
+        append_text(target, format!("Response `{status}`: {docs}"));
+    }
 }
 
 struct LowerCtx<'a, 'doc> {
@@ -193,6 +333,9 @@ struct LowerCtx<'a, 'doc> {
     /// in this map is a cycle-closing back-edge and is boxed against the reserved id, carrying the
     /// same nullability a completed lowering would.
     in_progress: HashMap<String, (TypeId, bool)>,
+    /// Guards chains of component aliases (`A -> B -> A`) that do not have a concrete schema body
+    /// to enter the normal reserve/box recursion path.
+    component_alias_stack: HashSet<String>,
     /// The remote-`$ref` analogue of [`Self::components`], keyed by the absolute `url#fragment`. A
     /// remote ref resolves to a fresh owned schema each call, so — unlike local components — it has
     /// no `document`-level identity; this map gives it one, so repeated remote uses share one
@@ -229,8 +372,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 boxed: true,
             });
         }
-        let RefOr::Item(schema) = self.document.components.schemas.get(name)? else {
-            return None;
+        let component = self.document.components.schemas.get(name)?;
+        let RefOr::Item(schema) = component else {
+            let reference = match component {
+                RefOr::Ref(reference) => reference.clone(),
+                RefOr::Item(_) => return None,
+            };
+            if !self.component_alias_stack.insert(name.to_owned()) {
+                Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
+                    .message(format!(
+                        "schema component alias `{name}` forms a reference cycle"
+                    ))
+                    .emit(self.diags);
+                return None;
+            }
+            let ty = if let Some(target) = reference.reference.strip_prefix("#/components/schemas/")
+            {
+                self.ensure_component(target)
+            } else if is_remote_ref(&reference.reference) {
+                self.ensure_remote(&reference.reference)
+            } else {
+                self.resolver
+                    .resolve(&reference.reference, &reference.provenance, self.diags)
+                    .ok()
+                    .and_then(|resolved| self.lower_schema(&resolved.schema, name))
+            };
+            self.component_alias_stack.remove(name);
+            if let Some(ty) = ty {
+                self.components
+                    .insert(name.to_owned(), (ty.id, ty.nullable));
+            }
+            return ty;
         };
         // Nullability is a pure function of the component's own schema — the same inputs
         // `lower_schema`/`lower_enum` use — so computing it once at reserve time lets every `$ref`
@@ -296,7 +468,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let resolved = self
             .resolver
-            .resolve(reference, &crate::diag::JsonPointer::root(), self.diags)
+            .resolve(reference, &self.document.provenance, self.diags)
             .ok()?;
         let schema = resolved.schema.into_owned();
 
@@ -347,12 +519,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(self.insert_type(hint, TypeKind::Any, Docs::default(), None))
             }
             SchemaOr::Bool(false) => {
-                Diagnostic::error(Code::InvalidInput, self.document.provenance.clone())
-                    .message(
-                        "boolean false schemas are not representable in generated client types",
-                    )
-                    .emit(self.diags);
-                None
+                Some(self.insert_type(hint, TypeKind::Never, Docs::default(), None))
             }
             SchemaOr::Schema(schema) => self.lower_schema(schema, hint),
         }
@@ -383,21 +550,46 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn lower_schema_inner(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        if let Some(value) = schema.boolean {
+            let kind = if value {
+                TypeKind::Any
+            } else {
+                TypeKind::Never
+            };
+            return Some(self.insert_schema_type(schema, hint, kind));
+        }
+
         if let Some(reference) = &schema.reference {
-            if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                return self.ensure_component(name);
+            let referenced = if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                self.ensure_component(name)?
+                // Remote refs go through the cycle-safe, deduped remote path (keyed by
+                // `url#fragment`), mirroring `ensure_component`; a bare relative/other ref falls
+                // through to `resolve`, which reports it (E003/E004).
+            } else if is_remote_ref(reference) {
+                self.ensure_remote(reference)?
+            } else {
+                let resolved = self
+                    .resolver
+                    .resolve(reference, &schema.provenance, self.diags)
+                    .ok()?;
+                self.lower_schema(&resolved.schema, hint)?
+            };
+
+            // In JSON Schema 2020-12 `$ref` is an applicator, not a replacement for the containing
+            // schema. Intersect every shape-bearing sibling instead of silently discarding it.
+            let mut sibling = schema.clone();
+            sibling.reference = None;
+            if !schema_has_shape_constraint(&sibling) {
+                return Some(referenced);
             }
-            // Remote refs go through the cycle-safe, deduped remote path (keyed by `url#fragment`),
-            // mirroring `ensure_component`; a bare relative/other ref falls through to `resolve`,
-            // which reports it (E003/E004).
-            if is_remote_ref(reference) {
-                return self.ensure_remote(reference);
-            }
-            let resolved = self
-                .resolver
-                .resolve(reference, &schema.provenance.pointer, self.diags)
-                .ok()?;
-            return self.lower_schema(&resolved.schema, hint);
+            let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
+            let intersection =
+                self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))?;
+            let kind = self.graph.get(intersection.id)?.kind.clone();
+            let mut ty = self.insert_schema_type(schema, hint, kind);
+            ty.nullable = intersection.nullable;
+            ty.boxed = intersection.boxed;
+            return Some(ty);
         }
 
         if !schema.all_of.is_empty() {
@@ -413,6 +605,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         if let Some(value) = &schema.const_value {
             return self.lower_enum(std::slice::from_ref(value), schema, hint);
+        }
+
+        let non_null_types: Vec<JsonType> = schema
+            .types
+            .types
+            .iter()
+            .copied()
+            .filter(|ty| *ty != JsonType::Null)
+            .collect();
+        if non_null_types.len() > 1 {
+            return self.lower_type_array(schema, hint, &non_null_types);
         }
 
         // A binary payload — `contentEncoding: base64` or `format: binary` (the OpenAPI file/upload
@@ -499,6 +702,44 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         ty.nullable = nullable;
         Some(ty)
+    }
+
+    fn lower_type_array(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        non_null_types: &[JsonType],
+    ) -> Option<Ty> {
+        let mut branches = Vec::with_capacity(non_null_types.len());
+        for ty in non_null_types {
+            let mut branch = schema.clone();
+            branch.types.types = vec![*ty];
+            branch.title = None;
+            branch.description = None;
+            branches.push(SchemaOr::Schema(Box::new(branch)));
+        }
+
+        let mut union = schema.clone();
+        union.boolean = None;
+        union.reference = None;
+        union.types.types.retain(|ty| *ty == JsonType::Null);
+        union.properties.clear();
+        union.required.clear();
+        union.additional_properties = None;
+        union.pattern_properties.clear();
+        union.items = None;
+        union.prefix_items.clear();
+        union.all_of.clear();
+        union.one_of.clear();
+        union.any_of = branches;
+        union.discriminator = None;
+        union.enum_values = None;
+        union.const_value = None;
+        union.format = None;
+        union.content_encoding = None;
+        union.xml = None;
+        union.validation = ValidationKeywords::default();
+        self.lower_union(&union, hint)
     }
 
     fn lower_object(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
@@ -959,6 +1200,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if hints.wrapped {
             unsupported.push("wrapped");
         }
+        if matches!(hints.node_type.as_deref(), Some("text" | "cdata" | "none")) {
+            unsupported.push("nodeType");
+        }
         if !unsupported.is_empty() {
             Diagnostic::warning(Code::XmlHintIgnored, schema.provenance.clone())
                 .message(format!(
@@ -1215,7 +1459,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // as an inline member.
             let resolved = self
                 .resolver
-                .resolve(reference, &schema.provenance.pointer, self.diags)
+                .resolve(reference, &schema.provenance, self.diags)
                 .ok()?;
             let target = resolved.schema.into_owned();
             return self.gather_inline(&target, hint, out);
@@ -1876,18 +2120,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             "query" => ParamLoc::Query,
             "header" => ParamLoc::Header,
             "cookie" => ParamLoc::Cookie,
-            // OpenAPI 3.2's `in: querystring` treats the whole URL query string as a single
-            // `content`-typed value. spargen does not model that; acknowledge it with `W010` and
-            // skip the parameter so the rest of the operation still generates the compatible subset.
-            "querystring" => {
-                Diagnostic::warning(Code::Oas32ConstructIgnored, parameter.provenance.clone())
-                    .message(
-                        "`in: querystring` (OpenAPI 3.2) treats the entire query string as one \
-                         value; this parameter is not generated",
-                    )
-                    .emit(self.diags);
-                return None;
-            }
+            "querystring" => ParamLoc::QueryString,
             _ => {
                 Diagnostic::error(Code::InvalidInput, parameter.provenance.clone())
                     .message(format!(
@@ -1898,13 +2131,74 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return None;
             }
         };
+        if location == ParamLoc::QueryString {
+            let Some((media_name, object)) = parameter.content.iter().next() else {
+                Diagnostic::error(
+                    Code::UnsupportedParameterStyle,
+                    parameter.provenance.clone(),
+                )
+                .message("`in: querystring` requires one content media type with a schema")
+                .emit(self.diags);
+                return None;
+            };
+            let object = self.resolve_media_object(object)?;
+            let media = lower_media_type(media_name, &parameter.provenance, self.diags)?;
+            if !matches!(media, MediaType::Json | MediaType::FormUrlEncoded) {
+                Diagnostic::error(
+                    Code::UnsupportedParameterStyle,
+                    parameter.provenance.clone(),
+                )
+                .message(format!(
+                    "querystring media type `{media_name}` is not supported; use JSON or \
+                         application/x-www-form-urlencoded"
+                ))
+                .emit(self.diags);
+                return None;
+            }
+            let Some(schema) = object.schema.as_ref() else {
+                Diagnostic::error(
+                    Code::UnsupportedParameterStyle,
+                    parameter.provenance.clone(),
+                )
+                .message("querystring content requires a schema for a typed client argument")
+                .emit(self.diags);
+                return None;
+            };
+            let ty = self.lower_schema_ref(schema, &parameter.name)?;
+            if media == MediaType::FormUrlEncoded
+                && !matches!(
+                    self.graph.get(ty.id).map(|definition| &definition.kind),
+                    Some(TypeKind::Struct(_))
+                )
+            {
+                Diagnostic::error(
+                    Code::UnsupportedParameterStyle,
+                    parameter.provenance.clone(),
+                )
+                .message("form-urlencoded querystring parameters require an object schema")
+                .emit(self.diags);
+                return None;
+            }
+            return Some(Parameter {
+                name: parameter.name.clone(),
+                location,
+                ty,
+                required: parameter.required,
+                style: ParamStyle::Content(media),
+                explode: true,
+                deprecated: parameter.deprecated,
+                default_display: self.param_default_display(object.schema.as_ref(), ty),
+            });
+        }
         let style_name = parameter.style.as_deref().unwrap_or(match location {
             ParamLoc::Path | ParamLoc::Header => "simple",
             ParamLoc::Query | ParamLoc::Cookie => "form",
+            ParamLoc::QueryString => unreachable!("querystring returned above"),
         });
         let style = match (location, style_name) {
             (ParamLoc::Path | ParamLoc::Header, "simple") => ParamStyle::Simple,
             (ParamLoc::Query | ParamLoc::Cookie, "form") => ParamStyle::Form,
+            (ParamLoc::Cookie, "cookie") => ParamStyle::Cookie,
             _ => {
                 Diagnostic::error(
                     Code::UnsupportedParameterStyle,
@@ -1929,11 +2223,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let explode = parameter
             .explode
-            .unwrap_or(matches!(style, ParamStyle::Form));
+            .unwrap_or(matches!(style, ParamStyle::Form | ParamStyle::Cookie));
         let ty = if let Some(schema) = &parameter.schema {
             let ty = self.lower_schema_ref(schema, &parameter.name)?;
             self.remap_binary_param(ty, &parameter.name)
         } else if let Some((media, object)) = parameter.content.iter().next() {
+            let object = self.resolve_media_object(object)?;
             let media = lower_media_type(media, &parameter.provenance, self.diags)?;
             let ty = object
                 .schema
@@ -1985,6 +2280,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
         let (media_name, object) = choose_media(&body.content, &body.provenance, self.diags)?;
+        let object = self.resolve_media_object(object)?;
         let media = lower_media_type(media_name, &body.provenance, self.diags)?;
         // Streaming media is a response-only construct: a `text/event-stream` / `application/x-ndjson`
         // *request* body has no representation here, so it stays rejected (narrowed `E009`) rather
@@ -2092,14 +2388,33 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn lower_response(&mut self, response: &ResponseObject) -> Option<Response> {
         let body = choose_media(&response.content, &response.provenance, self.diags).and_then(
             |(media_name, object)| {
+                let object = self.resolve_media_object(object)?;
                 let media = lower_media_type(media_name, &response.provenance, self.diags)?;
                 // For a sequential/streaming media (`text/event-stream` / `application/x-ndjson`),
                 // OpenAPI 3.2 gives the PER-ITEM type in `itemSchema`; a whole-body `schema` does not
                 // apply to a stream, so `itemSchema` is preferred (falling back to `schema` for the
                 // pre-3.2 form where the item type was written as `schema`). On a non-streaming media
                 // `itemSchema` is meaningless: acknowledge it with `W010` and use `schema`.
-                let schema_source = if media.stream_framing().is_some() {
-                    object.item_schema.as_ref().or(object.schema.as_ref())
+                let (schema_source, stream) = if let Some(framing) = media.stream_framing() {
+                    if let Some(item_schema) = object.item_schema.as_ref() {
+                        let framing = if media == MediaType::EventStream && self.document.is_oas32 {
+                            crate::ir::Framing::SseEvent
+                        } else {
+                            framing
+                        };
+                        (Some(item_schema), Some(framing))
+                    } else if self.document.is_oas32 && object.schema.is_some() {
+                        Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
+                            .message(
+                                "in OpenAPI 3.2, `schema` on sequential media describes the \
+                                 complete sequence; use `itemSchema` for a streaming client result",
+                            )
+                            .remedy("replace `schema` with `itemSchema`, or choose a non-sequential response media type")
+                            .emit(self.diags);
+                        return None;
+                    } else {
+                        (object.schema.as_ref(), Some(framing))
+                    }
                 } else {
                     if object.item_schema.is_some() {
                         Diagnostic::warning(
@@ -2112,7 +2427,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         )
                         .emit(self.diags);
                     }
-                    object.schema.as_ref()
+                    (object.schema.as_ref(), None)
                 };
                 let ty =
                     schema_source.and_then(|schema| self.lower_schema_ref(schema, "ResponseBody"));
@@ -2147,61 +2462,186 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         return None;
                     }
                 }
-                Some((media, ty))
+                Some((media, ty, stream))
             },
         );
         // A streaming response media (`text/event-stream` / `application/x-ndjson`) records its
         // framing; the body is then the streamed item type `T`. A whole-body response has no
         // framing. Streaming only takes effect when this is the operation's single success body
         // (see `Responses::stream_success`).
-        let stream = body.and_then(|(media, _)| media.stream_framing());
         Some(Response {
-            media: body.map(|(media, _)| media),
-            body: body.and_then(|(_, ty)| ty),
-            stream,
+            media: body.map(|(media, _, _)| media),
+            body: body.and_then(|(_, ty, _)| ty),
+            stream: body.and_then(|(_, _, stream)| stream),
         })
     }
 
-    fn resolve_parameter(&self, parameter: &RefOr<ParameterObject>) -> Option<ParameterObject> {
-        match parameter {
-            RefOr::Item(parameter) => Some(parameter.clone()),
-            RefOr::Ref(reference) => reference
-                .reference
-                .strip_prefix("#/components/parameters/")
-                .and_then(|name| self.document.components.parameters.get(name))
-                .and_then(|parameter| match parameter {
-                    RefOr::Item(parameter) => Some(parameter.clone()),
-                    RefOr::Ref(_) => None,
-                }),
+    fn resolve_parameter(&mut self, parameter: &RefOr<ParameterObject>) -> Option<ParameterObject> {
+        let mut current = parameter;
+        let mut seen = HashSet::new();
+        loop {
+            match current {
+                RefOr::Item(parameter) => return Some(parameter.clone()),
+                RefOr::Ref(reference) => {
+                    if !seen.insert(reference.reference.clone()) {
+                        return self.reject_component_alias(
+                            &reference.provenance,
+                            "parameter",
+                            "cycle",
+                        );
+                    }
+                    let Some(name) = reference.reference.strip_prefix("#/components/parameters/")
+                    else {
+                        return self.reject_component_alias(
+                            &reference.provenance,
+                            "parameter",
+                            &reference.reference,
+                        );
+                    };
+                    let Some(target) = self.document.components.parameters.get(name) else {
+                        return self.reject_component_alias(
+                            &reference.provenance,
+                            "parameter",
+                            &reference.reference,
+                        );
+                    };
+                    current = target;
+                }
+            }
         }
     }
 
-    fn resolve_request_body(&self, body: &RefOr<RequestBodyObject>) -> Option<RequestBodyObject> {
-        match body {
-            RefOr::Item(body) => Some(body.clone()),
-            RefOr::Ref(reference) => reference
-                .reference
-                .strip_prefix("#/components/requestBodies/")
-                .and_then(|name| self.document.components.request_bodies.get(name))
-                .and_then(|body| match body {
-                    RefOr::Item(body) => Some(body.clone()),
-                    RefOr::Ref(_) => None,
-                }),
+    fn resolve_request_body(
+        &mut self,
+        body: &RefOr<RequestBodyObject>,
+    ) -> Option<RequestBodyObject> {
+        let mut current = body;
+        let mut seen = HashSet::new();
+        loop {
+            match current {
+                RefOr::Item(body) => return Some(body.clone()),
+                RefOr::Ref(reference) => {
+                    if !seen.insert(reference.reference.clone()) {
+                        return self.reject_component_alias(
+                            &reference.provenance,
+                            "request body",
+                            "cycle",
+                        );
+                    }
+                    let Some(name) = reference
+                        .reference
+                        .strip_prefix("#/components/requestBodies/")
+                    else {
+                        return self.reject_component_alias(
+                            &reference.provenance,
+                            "request body",
+                            &reference.reference,
+                        );
+                    };
+                    let Some(target) = self.document.components.request_bodies.get(name) else {
+                        return self.reject_component_alias(
+                            &reference.provenance,
+                            "request body",
+                            &reference.reference,
+                        );
+                    };
+                    current = target;
+                }
+            }
         }
     }
 
-    fn resolve_response(&self, response: &RefOr<ResponseObject>) -> Option<ResponseObject> {
-        match response {
-            RefOr::Item(response) => Some(response.clone()),
-            RefOr::Ref(reference) => reference
-                .reference
-                .strip_prefix("#/components/responses/")
-                .and_then(|name| self.document.components.responses.get(name))
-                .and_then(|response| match response {
-                    RefOr::Item(response) => Some(response.clone()),
-                    RefOr::Ref(_) => None,
-                }),
+    fn resolve_response(&mut self, response: &RefOr<ResponseObject>) -> Option<ResponseObject> {
+        let mut current = response;
+        let mut seen = HashSet::new();
+        loop {
+            match current {
+                RefOr::Item(response) => return Some(response.clone()),
+                RefOr::Ref(reference) => {
+                    if !seen.insert(reference.reference.clone()) {
+                        return self.reject_component_alias(
+                            &reference.provenance,
+                            "response",
+                            "cycle",
+                        );
+                    }
+                    let Some(name) = reference.reference.strip_prefix("#/components/responses/")
+                    else {
+                        return self.reject_component_alias(
+                            &reference.provenance,
+                            "response",
+                            &reference.reference,
+                        );
+                    };
+                    let Some(target) = self.document.components.responses.get(name) else {
+                        return self.reject_component_alias(
+                            &reference.provenance,
+                            "response",
+                            &reference.reference,
+                        );
+                    };
+                    current = target;
+                }
+            }
         }
+    }
+
+    fn reject_component_alias<T>(
+        &mut self,
+        provenance: &crate::diag::Provenance,
+        kind: &str,
+        reference: &str,
+    ) -> Option<T> {
+        Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+            .message(format!("unresolved {kind} reference `{reference}`"))
+            .emit(self.diags);
+        None
+    }
+
+    fn resolve_media_object(
+        &mut self,
+        object: &super::MediaTypeObject,
+    ) -> Option<super::MediaTypeObject> {
+        let mut current = object.clone();
+        let mut seen = HashSet::new();
+        while let Some(reference) = current.reference.clone() {
+            if !seen.insert(reference.reference.clone()) {
+                Diagnostic::error(Code::UnresolvedRef, reference.provenance)
+                    .message("media type reference cycle cannot be resolved")
+                    .emit(self.diags);
+                return None;
+            }
+            let Some(name) = reference.reference.strip_prefix("#/components/mediaTypes/") else {
+                Diagnostic::error(Code::UnresolvedRef, reference.provenance)
+                    .message(format!(
+                        "unsupported or unresolved Media Type Object reference `{}`",
+                        reference.reference
+                    ))
+                    .emit(self.diags);
+                return None;
+            };
+            let Some(target) = self.document.components.media_types.get(name) else {
+                Diagnostic::error(Code::UnresolvedRef, reference.provenance)
+                    .message(format!("unresolved Media Type Object component `{name}`"))
+                    .emit(self.diags);
+                return None;
+            };
+            current = target.clone();
+        }
+        if let Some((field, provenance)) = current.explicit_encodings.first() {
+            Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
+                .message(format!(
+                    "explicit Media Type Object `{field}` is not representable by spargen's wire \
+                     encoder"
+                ))
+                .remedy(
+                    "use the media type's default property encoding, or omit this API segment with \
+                     spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        Some(current)
     }
 
     /// Lower a possibly-`$ref` schema. Component refs go through [`Self::ensure_component`] so
@@ -2217,11 +2657,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 } else {
                     let resolved = self
                         .resolver
-                        .resolve(
-                            &reference.reference,
-                            &crate::diag::JsonPointer::root(),
-                            self.diags,
-                        )
+                        .resolve(&reference.reference, &reference.provenance, self.diags)
                         .ok()?;
                     self.lower_schema(&resolved.schema, hint)
                 }
@@ -2599,7 +3035,11 @@ fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
         "application/x-www-form-urlencoded" => (MediaType::FormUrlEncoded, 3),
         "application/octet-stream" => (MediaType::OctetStream, 4),
         "text/event-stream" => (MediaType::EventStream, 6),
-        "application/x-ndjson" => (MediaType::Ndjson, 6),
+        "application/x-ndjson" | "application/jsonl" => (MediaType::Ndjson, 6),
+        "application/json-seq" => (MediaType::JsonSequence, 6),
+        media if media.starts_with("application/") && media.ends_with("+json-seq") => {
+            (MediaType::JsonSequence, 6)
+        }
         "application/octocat-stream" => (MediaType::Text, 5),
         media if media.starts_with("text/") => (MediaType::Text, 5),
         _ => return None,
