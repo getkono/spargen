@@ -170,6 +170,38 @@ fn typed_parameters_follow_openapi_wire_rules() {
     server.join().unwrap();
 }
 
+#[test]
+fn required_path_query_parameter_is_not_shadowed_by_codegen_local() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 2048];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+
+        assert_eq!(
+            request.lines().next(),
+            Some("GET /files?path=%2Ftmp%2Fexample.txt HTTP/1.1"),
+            "{request}"
+        );
+
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client
+        .read_file("/tmp/example.txt".to_owned())
+        .expect("read_file sends the caller-provided path query value");
+
+    server.join().unwrap();
+}
+
 fn serve_once(content_type: &str, status: &str, body: &'static [u8]) -> (String, std::thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1216,6 +1248,67 @@ info:
 servers:
   - url: https://example.com/api
 paths:
+  /files:
+    get:
+      operationId: readFile
+      parameters:
+        - name: path
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+  # Required parameters reserve their natural identifiers before generator-owned bindings are
+  # allocated. This compile-verifies collisions with every request-building local plus the fixed
+  # optional-params and request-body arguments; `/files` above pins the wire behavior.
+  /binding-collisions:
+    get:
+      operationId: bindingCollisions
+      parameters:
+        - name: query
+          in: query
+          required: true
+          schema: { type: string }
+        - name: url
+          in: query
+          required: true
+          schema: { type: string }
+        - name: request
+          in: header
+          required: true
+          schema: { type: string }
+        - name: cookies
+          in: cookie
+          required: true
+          schema: { type: string }
+        - name: optional
+          in: query
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+  /signature-binding-collisions:
+    post:
+      operationId: signatureBindingCollisions
+      parameters:
+        - name: body
+          in: query
+          required: true
+          schema: { type: string }
+        - name: params
+          in: query
+          required: true
+          schema: { type: string }
+        - name: optional
+          in: query
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollisionPayload"
+      responses:
+        "204": { description: No Content }
   /params/{ids}:
     get:
       operationId: serializeParams
@@ -1529,6 +1622,8 @@ components:
       in: header
       name: X-Api-Key
   schemas:
+    CollisionPayload:
+      type: string
     BlankDocs:
       description: ""
       type: string

@@ -15,6 +15,15 @@ pub struct Scope {
 }
 
 impl Scope {
+    /// Mark the escaped spelling of `hint` as occupied without disambiguating it.
+    ///
+    /// This is used when a binding is already part of an externally-derived surface and later
+    /// generator-owned bindings must yield to it.
+    pub fn reserve(&mut self, hint: &str, role: IdentRole) {
+        let ident = super::escape(hint, role);
+        self.used.insert(ident.as_str().to_owned());
+    }
+
     /// Allocate a unique identifier for `hint` in `role`. If the cased/escaped name is already
     /// taken in this scope, `provenance` seeds a stable disambiguator.
     pub fn alloc(&mut self, hint: &str, role: IdentRole, provenance: &JsonPointer) -> Ident {
@@ -51,6 +60,18 @@ mod tests {
     use crate::diag::JsonPointer;
 
     use super::{IdentRole, Scope};
+
+    #[test]
+    fn allocation_yields_to_reserved_identifier() {
+        let pointer = JsonPointer::from("/paths/~1files/get");
+        let mut scope = Scope::default();
+        scope.reserve("path", IdentRole::Param);
+
+        let allocated = scope.alloc("path", IdentRole::Param, &pointer);
+
+        assert_ne!(allocated.as_str(), "path");
+        assert!(allocated.as_str().starts_with("path_"));
+    }
 
     proptest! {
         #[test]
