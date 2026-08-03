@@ -18,6 +18,10 @@ run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 description = "Type-check the whole workspace"
 run = "cargo check --workspace --all-features"
 
+[tasks.runtime-dependencies]
+description = "Resolve generated-runtime dependencies at their declared floors and compile them"
+run = "cargo test -p spargen --test e2e runtime_dependency_floors_compile_with_direct_minimal_versions -- --exact --ignored --nocapture"
+
 [tasks.deny]
 description = "Supply-chain audit (licenses, advisories, bans)"
 run = "cargo deny check"

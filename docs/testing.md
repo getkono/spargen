@@ -20,13 +20,16 @@ PR-required gates (all run in CI):
   unions), and boilerplate check-clean, against the pinned specs in `corpus/manifest.toml`.
 - End-to-end example: `examples/petstore` generates from `build.rs` and drives the client over
   real HTTP against a local mock server.
+- Runtime dependency contract: unit fixtures reject unsupported ranges and missing conditional
+  features; the application-owned build fixture proves `cargo check` surfaces `E023`; the
+  `runtime-dependencies` job resolves direct dependencies to their declared minimums and compiles
+  the generated client natively and for wasm.
 
 Release/scheduled gates (not yet automated; run before publishing):
 
 - Full corpus check against every pinned case in `corpus/manifest.toml`.
 - Generated crate compile/clippy for every corpus case expected to generate.
-- Dependency-graph audit proving generated crates depend only on `reqwest`, `serde`,
-  `serde_json`, `bytes`, `secrecy`, and optional `uuid`/`time` — no `spargen` runtime dependency.
+- Dependency-graph audit proving no `spargen` crate enters the runtime graph.
 - Public API diff of generated output fixtures (the semver surface).
 
 Future hardening, in priority order: fuzzing the JSON/YAML source parsers, mutation testing

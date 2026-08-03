@@ -59,6 +59,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
 
+  runtime-dependencies:
+    name: Runtime dependency floors
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p spargen --test e2e runtime_dependency_floors_compile_with_direct_minimal_versions -- --exact --ignored --nocapture
+
   package:
     name: Package (self-contained)
     runs-on: ubuntu-latest
