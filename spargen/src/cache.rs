@@ -6,10 +6,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, Span};
+use crate::runtime_contract::RuntimeRequirements;
 use crate::source::{sha256_hex, InputBundle};
 use crate::{Code, Config, OmitRule};
 
-const CACHE_FORMAT: u32 = 1;
+const CACHE_FORMAT: u32 = 2;
 const INPUT_PREFIX: &str = "// input-sha256: ";
 const CONTENT_PREFIX: &str = "// content-sha256: ";
 
@@ -143,28 +144,37 @@ pub(crate) fn verified_output(path: &Utf8Path, input_digest: &str) -> Option<Str
     (actual == expected).then_some(actual)
 }
 
-pub(crate) fn read_diagnostics(
+pub(crate) struct CachedRun {
+    pub diagnostics: Vec<Diagnostic>,
+    pub requirements: RuntimeRequirements,
+}
+
+pub(crate) fn read_cache(
     path: &Utf8Path,
     input_digest: &str,
     content_digest: &str,
-) -> Vec<Diagnostic> {
+) -> Option<CachedRun> {
     let Ok(bytes) = std::fs::read(path) else {
-        return Vec::new();
+        return None;
     };
     let Ok(record) = serde_json::from_slice::<CacheRecord>(&bytes) else {
-        return Vec::new();
+        return None;
     };
     if record.format != CACHE_FORMAT
         || record.input_sha256 != input_digest
         || record.content_sha256 != content_digest
     {
-        return Vec::new();
+        return None;
     }
-    record
+    let diagnostics = record
         .diagnostics
         .into_iter()
         .filter_map(CachedDiagnostic::into_diagnostic)
-        .collect()
+        .collect();
+    Some(CachedRun {
+        diagnostics,
+        requirements: record.requirements,
+    })
 }
 
 pub(crate) fn write_cache(
@@ -172,12 +182,14 @@ pub(crate) fn write_cache(
     input_digest: &str,
     content_digest: &str,
     diagnostics: &[Diagnostic],
+    requirements: &RuntimeRequirements,
 ) -> Result<(), String> {
     let record = CacheRecord {
         format: CACHE_FORMAT,
         input_sha256: input_digest.to_owned(),
         content_sha256: content_digest.to_owned(),
         diagnostics: diagnostics.iter().map(CachedDiagnostic::from).collect(),
+        requirements: requirements.clone(),
     };
     let bytes = serde_json::to_vec(&record).map_err(|error| error.to_string())?;
     atomic_write(path, &bytes).map_err(|error| format!("failed to write cache `{path}`: {error}"))
@@ -254,6 +266,7 @@ struct CacheRecord {
     input_sha256: String,
     content_sha256: String,
     diagnostics: Vec<CachedDiagnostic>,
+    requirements: RuntimeRequirements,
 }
 
 #[derive(Serialize, Deserialize)]

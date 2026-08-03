@@ -24,17 +24,17 @@ time = ["dep:time"]
 blocking = ["dep:tokio"]
 
 [dependencies]
-bytes = {{ version = "1", features = ["serde"] }}
-quick-xml = {{ version = "0.41", features = ["serialize"] }}
-reqwest = {{ version = "0.12", default-features = false, features = ["json", "multipart"] }}
-secrecy = "0.10"
-serde = {{ version = "1", features = ["derive"] }}
-serde_json = "1"
-uuid = {{ version = "1", features = ["serde"], optional = true }}
-time = {{ version = "0.3", features = ["serde", "formatting", "parsing"], optional = true }}
+bytes = {{ version = "1.12.1", features = ["serde"] }}
+quick-xml = {{ version = "0.41.0", features = ["serialize"] }}
+reqwest = {{ version = "0.12.28", default-features = false, features = ["json", "multipart"] }}
+secrecy = "0.10.3"
+serde = {{ version = "1.0.229", features = ["derive"] }}
+serde_json = "1.0.151"
+uuid = {{ version = "1.24.0", features = ["serde"], optional = true }}
+time = {{ version = "0.3.55", features = ["serde", "formatting", "parsing"], optional = true }}
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = {{ version = "1", features = ["rt"], optional = true }}
+tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
 "#
         ),
     )
@@ -43,6 +43,167 @@ tokio = {{ version = "1", features = ["rt"], optional = true }}
         Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap(),
         Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap(),
     ))
+}
+
+#[test]
+fn cargo_build_rejects_a_runtime_requirement_below_the_supported_floor() {
+    let temp = tempfile::tempdir().unwrap();
+    let crate_dir = temp.path().join("consumer");
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+    let spargen_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "unsupported-runtime-consumer"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1.12.0"
+reqwest = {{ version = "0.12.28", default-features = false }}
+secrecy = "0.10.3"
+serde = {{ version = "1.0.229", features = ["derive"] }}
+serde_json = "1.0.151"
+
+[build-dependencies]
+spargen = {{ path = {:?}, default-features = false }}
+
+[workspace]
+"#,
+            spargen_path
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("build.rs"),
+        r#"fn main() {
+    let config = spargen::Config::new("openapi.yaml", "src/generated.rs");
+    let report = spargen::generate(&config);
+    for diagnostic in &report.diagnostics {
+        eprintln!("{}: {}", diagnostic.code.as_str(), diagnostic.message);
+    }
+    assert_eq!(report.outcome, spargen::Outcome::Generated, "{report:#?}");
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("src/lib.rs"),
+        "include!(\"generated.rs\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("openapi.yaml"),
+        r#"openapi: 3.1.0
+info: { title: Minimal, version: 1.0.0 }
+paths: {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("cargo")
+        .arg("check")
+        .current_dir(&crate_dir)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "unsupported floor unexpectedly compiled"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E023"), "{stderr}");
+    assert!(stderr.contains(">=1.12.1, <2.0.0"), "{stderr}");
+    assert!(
+        !crate_dir.join("src/generated.rs").exists(),
+        "a rejected runtime contract must not write generated output"
+    );
+}
+
+#[test]
+#[ignore = "nightly direct-minimal-versions proof; run by the runtime-dependencies CI job"]
+fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let out = temp.path().join("minimum_runtime_client");
+    let report = generate_fixture_crate(&spec, &out, "minimum_runtime_client");
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let status = Command::new("cargo")
+        .args([
+            "+nightly",
+            "generate-lockfile",
+            "-Z",
+            "direct-minimal-versions",
+        ])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "direct-minimal lockfile generation failed"
+    );
+
+    let lock: toml::Value =
+        toml::from_str(&std::fs::read_to_string(out.join("Cargo.lock")).unwrap()).unwrap();
+    let packages = lock["package"].as_array().unwrap();
+    for (name, expected) in [
+        ("bytes", "1.12.1"),
+        ("quick-xml", "0.41.0"),
+        ("reqwest", "0.12.28"),
+        ("secrecy", "0.10.3"),
+        ("serde", "1.0.229"),
+        ("serde_json", "1.0.151"),
+        ("time", "0.3.55"),
+        ("tokio", "1.53.1"),
+        ("uuid", "1.24.0"),
+    ] {
+        assert!(
+            packages.iter().any(|package| {
+                package["name"].as_str() == Some(name)
+                    && package["version"].as_str() == Some(expected)
+            }),
+            "direct-minimal lock must select {name} {expected}"
+        );
+    }
+
+    let status = Command::new("cargo")
+        .args([
+            "clippy",
+            "--locked",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the declared runtime floors must compile natively"
+    );
+
+    if wasm32_target_installed() {
+        let status = Command::new("cargo")
+            .args([
+                "check",
+                "--locked",
+                "--all-features",
+                "--target",
+                "wasm32-unknown-unknown",
+            ])
+            .current_dir(&out)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "the declared runtime floors must compile for wasm"
+        );
+    }
 }
 
 #[test]
@@ -89,7 +250,7 @@ fn generated_module_compiles_in_basic_oas31_crate() {
         "fixture manifest must declare the blocking feature: {manifest}"
     );
     assert!(
-        manifest.contains(r#"tokio = { version = "1", features = ["rt"], optional = true }"#),
+        manifest.contains(r#"tokio = { version = "1.53.1", features = ["rt"], optional = true }"#),
         "tokio must be an optional dependency: {manifest}"
     );
     assert!(
@@ -1752,6 +1913,12 @@ components:
       properties:
         id:
           type: string
+        external_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
         name:
           type: string
         tree:
@@ -2227,6 +2394,119 @@ fn macro_preview_is_deterministic() {
     );
     let again = spargen::__private::preview(&config);
     assert_eq!(again.contents.as_deref(), Some(contents.as_str()));
+}
+
+#[test]
+fn macro_manifest_audit_derives_only_capabilities_referenced_by_the_api() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = temp.path().join("Cargo.toml");
+    std::fs::write(
+        &manifest,
+        r#"[package]
+name = "audit-consumer"
+version = "0.0.0"
+
+[dependencies]
+bytes = "1.12.1"
+reqwest = { version = "0.12.28", default-features = false }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[workspace]
+"#,
+    )
+    .unwrap();
+    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+    let output = Utf8PathBuf::from_path_buf(temp.path().join("unused.rs")).unwrap();
+    std::fs::write(
+        &spec,
+        "openapi: 3.1.0\ninfo: { title: Core, version: 1.0.0 }\npaths: {}\n",
+    )
+    .unwrap();
+
+    let core = spargen::__private::preview_for_macro(
+        &Config::new(spec.clone(), output.clone()),
+        manifest.to_str().unwrap(),
+    );
+    assert_eq!(
+        core.report.outcome,
+        Outcome::Generated,
+        "{:#?}",
+        core.report
+    );
+
+    std::fs::write(
+        &spec,
+        r##"openapi: 3.1.0
+info: { title: Conditional, version: 1.0.0 }
+paths:
+  /json:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { type: string }
+      responses:
+        "204": { description: ok }
+  /binary-array:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string, format: binary }
+  /xml:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/xml:
+              schema: { $ref: "#/components/schemas/XmlBody" }
+components:
+  schemas:
+    XmlBody:
+      type: object
+      properties:
+        value: { type: string }
+    Identifier: { type: string, format: uuid }
+    Timestamp: { type: string, format: date-time }
+"##,
+    )
+    .unwrap();
+
+    let conditional = spargen::__private::preview_for_macro(
+        &Config::new(spec, output),
+        manifest.to_str().unwrap(),
+    );
+    assert_eq!(conditional.report.outcome, Outcome::Rejected);
+    let messages = conditional
+        .report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            assert_eq!(diagnostic.code, Code::RuntimeDependencyContract);
+            diagnostic.message.as_str()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages.contains("feature `json` on `reqwest`"),
+        "{messages}"
+    );
+    assert!(
+        messages.contains("feature `serde` on `bytes`"),
+        "{messages}"
+    );
+    assert!(messages.contains("requires `quick-xml`"), "{messages}");
+    assert!(messages.contains("requires `uuid`"), "{messages}");
+    assert!(messages.contains("requires `time`"), "{messages}");
+    assert!(!messages.contains("multipart"), "{messages}");
+    assert!(!messages.contains("tokio"), "{messages}");
 }
 
 /// A preview of a spec that uses an unsupported construct rejects loudly (matching `generate`) and

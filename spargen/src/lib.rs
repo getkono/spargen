@@ -38,6 +38,7 @@ mod emit;
 mod ir;
 mod name;
 mod oas31;
+mod runtime_contract;
 mod source;
 mod support;
 mod surface;
@@ -152,6 +153,7 @@ fn generate_with_cache_dir(
     cache_dir: Option<&Utf8Path>,
     emit_cargo_directives: bool,
 ) -> Report {
+    let consumer_manifest = runtime_contract::build_script_manifest();
     let mut snapshot = match run_on_frontend_stack(|| cache::InputSnapshot::load(config)) {
         Ok(snapshot) => snapshot,
         Err(diagnostics) => {
@@ -171,21 +173,32 @@ fn generate_with_cache_dir(
     let cache_path = cache_dir.map(|dir| cache::cache_path(dir, &config.output));
     if cache_dir.is_some() {
         if let Some(content_digest) = cache::verified_output(&config.output, &snapshot.digest) {
-            let diagnostics = cache_path
+            let cached = cache_path
                 .as_deref()
-                .map(|path| cache::read_diagnostics(path, &snapshot.digest, &content_digest))
-                .unwrap_or_default();
-            if let Some(path) = &cache_path {
-                if let Err(message) =
-                    cache::write_cache(path, &snapshot.digest, &content_digest, &diagnostics)
-                {
-                    return pipeline_error_report(message);
+                .and_then(|path| cache::read_cache(path, &snapshot.digest, &content_digest));
+            if let Some(mut cached) = cached {
+                if let Some(manifest) = consumer_manifest.as_deref() {
+                    let audit = runtime_contract::audit(manifest, &cached.requirements);
+                    if emit_cargo_directives {
+                        runtime_contract::cargo_directives(&audit.manifests);
+                    }
+                    cached.diagnostics.extend(audit.diagnostics);
+                    if cached
+                        .diagnostics
+                        .iter()
+                        .any(|diagnostic| diagnostic.severity == Severity::Error)
+                    {
+                        return Report {
+                            diagnostics: cached.diagnostics,
+                            outcome: Outcome::Rejected,
+                        };
+                    }
                 }
+                return Report {
+                    diagnostics: cached.diagnostics,
+                    outcome: Outcome::Generated,
+                };
             }
-            return Report {
-                diagnostics,
-                outcome: Outcome::Generated,
-            };
         }
     }
 
@@ -197,6 +210,23 @@ fn generate_with_cache_dir(
         let Some(rendered) = preview.files.first().map(String::as_str) else {
             return pipeline_error_report("generation produced no module".to_owned());
         };
+        let Some(requirements) = preview.requirements.as_ref() else {
+            return pipeline_error_report("generation produced no runtime requirements".to_owned());
+        };
+        if let Some(manifest) = consumer_manifest.as_deref() {
+            let audit = runtime_contract::audit(manifest, requirements);
+            if emit_cargo_directives {
+                runtime_contract::cargo_directives(&audit.manifests);
+            }
+            if !audit.diagnostics.is_empty() {
+                let mut diagnostics = preview.report.diagnostics;
+                diagnostics.extend(audit.diagnostics);
+                return Report {
+                    diagnostics,
+                    outcome: Outcome::Rejected,
+                };
+            }
+        }
 
         let after = match run_on_frontend_stack(|| cache::InputSnapshot::load(config)) {
             Ok(snapshot) => snapshot,
@@ -225,6 +255,7 @@ fn generate_with_cache_dir(
                 &snapshot.digest,
                 &content_digest,
                 &preview.report.diagnostics,
+                requirements,
             ) {
                 return pipeline_error_report(message);
             }
@@ -255,6 +286,7 @@ pub fn check(config: &Config) -> Report {
 struct PipelinePreview {
     report: Report,
     files: Vec<String>,
+    requirements: Option<runtime_contract::RuntimeRequirements>,
 }
 
 fn preview_inner(config: &Config) -> PipelinePreview {
@@ -272,6 +304,7 @@ fn preview_inner(config: &Config) -> PipelinePreview {
     PipelinePreview {
         report: result.report,
         files,
+        requirements: result.requirements,
     }
 }
 
@@ -387,7 +420,7 @@ fn source_files(config: &Config) -> Vec<Utf8PathBuf> {
 /// Private cross-crate bridge used exclusively by `spargen-macro`.
 #[doc(hidden)]
 pub mod __private {
-    use camino::Utf8PathBuf;
+    use camino::{Utf8Path, Utf8PathBuf};
 
     use super::{Config, Outcome, Report};
 
@@ -400,9 +433,30 @@ pub mod __private {
 
     #[doc(hidden)]
     pub fn preview(config: &Config) -> MacroPreview {
+        preview_impl(config, None)
+    }
+
+    #[doc(hidden)]
+    pub fn preview_for_macro(config: &Config, manifest: &str) -> MacroPreview {
+        preview_impl(config, Some(Utf8Path::new(manifest)))
+    }
+
+    fn preview_impl(config: &Config, manifest: Option<&Utf8Path>) -> MacroPreview {
         let preview = super::preview_inner(config);
         let contents = preview.files.first().cloned();
         let mut source_files = super::source_files(config);
+        let mut report = preview.report;
+        if report.outcome == Outcome::Generated {
+            if let (Some(manifest), Some(requirements)) = (manifest, preview.requirements.as_ref())
+            {
+                let audit = super::runtime_contract::audit(manifest, requirements);
+                source_files.extend(audit.manifests);
+                if !audit.diagnostics.is_empty() {
+                    report.diagnostics.extend(audit.diagnostics);
+                    report.outcome = Outcome::Rejected;
+                }
+            }
+        }
         let spec_dir = config
             .spec
             .parent()
@@ -413,11 +467,11 @@ pub mod __private {
         }
         source_files.sort();
         source_files.dedup();
-        if preview.report.outcome != Outcome::Generated {
+        if report.outcome != Outcome::Generated {
             source_files.retain(|path| path == &config.spec);
         }
         MacroPreview {
-            report: preview.report,
+            report,
             contents,
             source_files,
         }
@@ -471,12 +525,17 @@ enum PipelineMode {
 struct PipelineResult {
     report: Report,
     plan: Option<emit::EmitPlan>,
+    requirements: Option<runtime_contract::RuntimeRequirements>,
 }
 
 impl PipelineResult {
     /// A report-only result (no retained plan) — the shape of every non-preview terminal.
     fn bare(report: Report) -> Self {
-        Self { report, plan: None }
+        Self {
+            report,
+            plan: None,
+            requirements: None,
+        }
     }
 }
 
@@ -568,6 +627,7 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> PipelineResult {
         Ok(pair) => pair,
         Err(()) => return PipelineResult::bare(report(diags, Outcome::Rejected)),
     };
+    let requirements = runtime_contract::RuntimeRequirements::for_api(&api, &config.features);
 
     if matches!(mode, PipelineMode::Check) {
         return PipelineResult::bare(report(diags, Outcome::Clean));
@@ -585,6 +645,7 @@ fn run_pipeline(config: &Config, mode: PipelineMode) -> PipelineResult {
         PipelineMode::Preview => PipelineResult {
             report: report(diags, Outcome::Generated),
             plan: Some(plan),
+            requirements: Some(requirements),
         },
     }
 }

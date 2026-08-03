@@ -29,8 +29,8 @@ spargen_macro::generate_api!(
 ```toml
 [dependencies]
 spargen-macro = "0.2"
-# ...plus the crates the generated client uses at runtime (reqwest, serde, serde_json, bytes,
-# secrecy, and any optional uuid/time). No spargen crate appears at runtime.
+# ...plus the audited crates this generated client uses at runtime. No spargen crate appears at
+# runtime. See spargen's runtime dependency contract for the exact floors and conditional features.
 ```
 
 `spargen-macro` and `spargen` are **host/build-time only** — a proc-macro crate is never linked
@@ -64,7 +64,7 @@ under `-D warnings`. To opt in, declare it in your `Cargo.toml`:
 blocking = ["dep:tokio"]
 
 [dependencies]
-tokio = { version = "1", features = ["rt"], optional = true }
+tokio = { version = "1.53.1", features = ["rt"], optional = true }
 ```
 
 Licensed under MIT OR Apache-2.0.

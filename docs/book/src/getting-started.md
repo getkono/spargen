@@ -46,10 +46,33 @@ mod api {
 }
 ```
 
-Your `[dependencies]` provide the runtime set the generated code needs — `reqwest` (with the
-`json` feature), `serde` (with `derive`), `serde_json`, `bytes`, and `secrecy`. The
+Your `[dependencies]` provide the runtime set the generated code needs. The
 [petstore `Cargo.toml`](https://github.com/getkono/spargen/blob/master/examples/petstore/Cargo.toml)
 is a copyable template.
+
+### Runtime dependency contract
+
+Use these tested caret floors. You may choose a higher compatible floor; spargen rejects a
+requirement that could resolve below these versions or beyond the next semver breaking line.
+
+| Dependency | Required features | When required |
+| --- | --- | --- |
+| `bytes = "1.12.1"` | `serde` only when noted below | Always; `serde` only when a generated serialized aggregate contains bytes |
+| `reqwest = "0.12.28"` | `default-features = false`; `json` for JSON requests; `multipart` for multipart requests | Always; the two features are spec-derived |
+| `secrecy = "0.10.3"` | - | Always |
+| `serde = "1.0.229"` | `derive` | Always |
+| `serde_json = "1.0.151"` | - | Always |
+| `quick-xml = "0.41.0"` | `serialize` | Only for an API with XML bodies |
+| `uuid = "1.24.0"` | `serde` | Only when the enabled UUID mapping is actually emitted |
+| `time = "0.3.55"` | `serde`, `formatting`, `parsing` | Only when an enabled date/date-time mapping is actually emitted |
+| `tokio = "1.53.1"` | `rt`; optional and native-only | Only when your package declares the generated `blocking` feature |
+
+The audit happens during both `build.rs` and proc-macro expansion and fails compilation with
+`E023` before generated output is accepted. Cargo cannot add spec-derived features after it has
+resolved dependencies: build scripts and proc macros run later in the compilation. Spargen
+therefore checks the manifest, Cargo performs resolution, and rustc provides the final proof that
+the selected versions expose every API and trait the generated client uses. Extra application
+dependencies and features are allowed.
 
 ### Macro mode
 

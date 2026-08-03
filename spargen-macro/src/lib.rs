@@ -215,7 +215,16 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
 
     // Keep spargen's codegen (and the tokenization below) off the compiler bridge; restored on drop.
     let _fallback = FallbackGuard::force();
-    let preview = spargen::__private::preview(&config);
+    let manifest = std::env::var("CARGO_MANIFEST_PATH")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::Path::new(
+                &std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned()),
+            )
+            .join("Cargo.toml")
+        });
+    let manifest = manifest.to_string_lossy();
+    let preview = spargen::__private::preview_for_macro(&config, &manifest);
 
     let errors: Vec<&spargen::Diagnostic> = preview
         .report

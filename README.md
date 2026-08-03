@@ -86,8 +86,10 @@ the version it emits, and the idioms spargen handles.
 
 - **Freestanding output.** The runtime support code is embedded into the generated module; no
   spargen crate ever appears in a consumer's runtime dependency tree. Runtime dependencies are
-  exactly `reqwest` (no default features), `serde`, `serde_json`, `bytes`, `secrecy`, plus
-  opt-out `uuid`/`time` for `format` mappings.
+  exactly `reqwest` (no default features), `serde`, `serde_json`, `bytes`, and `secrecy`, plus only
+  the capabilities the compiled API uses. Generation audits the consumer manifest against the
+  tested floors and feature set before Cargo/rustc compile the emitted client; see the
+  [runtime dependency contract](docs/book/src/getting-started.md#runtime-dependency-contract).
 - **Deterministic.** Same spargen version + spec + config ⇒ byte-identical output, enforced by
   test. Item ordering never depends on input map ordering.
 - **Every construct has a disposition.** Supported, warned, or rejected — never a fourth, silent

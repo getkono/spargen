@@ -73,6 +73,9 @@ pub enum Code {
     /// pathologically nested inline schema), so lowering is stopped before it could exhaust the
     /// stack. Rejected rather than risk a crash on adversarial or machine-generated input.
     SchemaNestingTooDeep,
+    /// The consuming Cargo package does not declare the versions or features required by the
+    /// generated runtime.
+    RuntimeDependencyContract,
 }
 
 impl Code {
@@ -103,6 +106,7 @@ impl Code {
             Code::XmlHintIgnored => "W006",
             Code::Oas32ConstructIgnored => "W010",
             Code::SchemaNestingTooDeep => "E014",
+            Code::RuntimeDependencyContract => "E023",
         }
     }
 
@@ -142,6 +146,7 @@ impl Code {
             Code::XmlHintIgnored => "unsupported XML hint ignored",
             Code::Oas32ConstructIgnored => "non-sequential itemSchema ignored",
             Code::SchemaNestingTooDeep => "schema nesting is too deep to lower",
+            Code::RuntimeDependencyContract => "invalid generated-runtime dependency contract",
         }
     }
 
@@ -217,6 +222,9 @@ impl Code {
             Code::SchemaNestingTooDeep => {
                 "Lowering a schema into a Rust type is recursive: each nested object property, array item, `allOf`/`oneOf`/`anyOf` member, and `$ref` target descends one level. Spargen caps that descent so a pathologically deep composition — a very long chain of components that each `$ref` the next, or a deeply nested inline schema — is rejected with this error instead of being allowed to exhaust the call stack and abort the process. A genuine API surface never approaches the limit; hitting it almost always means the spec was machine-generated or adversarial. Flatten the offending chain, or omit that API segment with `spargen::omit!`."
             }
+            Code::RuntimeDependencyContract => {
+                "The generated module is freestanding, so its consuming Cargo package must declare the crates and dependency features referenced by that specific API. Spargen derives the exact requirement set after lowering and audits Cargo.toml during build.rs and proc-macro generation. Use the documented tested lower bounds (or a higher semver-compatible caret floor), keep reqwest default features disabled, and enable only the reqwest/bytes/XML/UUID/time capabilities named by the diagnostic. Cargo resolves the declared range; Rust compilation then verifies the selected crates expose the APIs and traits used by the generated client."
+            }
             Code::XmlHintIgnored => {
                 "XML request/response bodies honor the `xml.name` (element/attribute rename) and `xml.attribute` (serialize as an XML attribute via quick-xml's `@name` convention) hints on a field, but only for a schema used *exclusively* as an XML body. A serde `rename` is format-agnostic — it would also rewrite the JSON wire names — so `xml.name`/`xml.attribute` are NOT applied to a schema that is also reachable from a JSON/form/multipart/text body, a response, or a parameter (or that is not used as an XML body at all); the field keeps its normal wire name and this warning fires, so JSON is never corrupted. The `xml.namespace`, `xml.prefix`, and `xml.wrapped` (wrapped arrays) hints are never represented — quick-xml serde has no faithful mapping for them — so they are always ignored with this warning rather than silently honored or rejected."
             }
@@ -260,6 +268,7 @@ impl Code {
             Code::XmlHintIgnored,
             Code::Oas32ConstructIgnored,
             Code::SchemaNestingTooDeep,
+            Code::RuntimeDependencyContract,
         ];
         ALL
     }
