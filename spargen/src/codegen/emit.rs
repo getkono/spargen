@@ -127,6 +127,7 @@ pub(crate) fn emit_operation(
     let raw_query_binding = &bindings.raw_query;
     let url_binding = &bindings.url;
     let request_binding = &bindings.request;
+    let reconnect_request_binding = &bindings.reconnect_request;
     let cookies_binding = &bindings.cookies;
     let method_ident = names
         .operations
@@ -665,13 +666,26 @@ pub(crate) fn emit_operation(
             let framing_tokens = match framing {
                 crate::ir::Framing::Sse => quote! { support::Framing::Sse },
                 crate::ir::Framing::SseEvent => quote! { support::Framing::SseEvent },
+                crate::ir::Framing::SseJsonData => quote! { support::Framing::SseJsonData },
                 crate::ir::Framing::Ndjson => quote! { support::Framing::Ndjson },
                 crate::ir::Framing::JsonSequence => quote! { support::Framing::JsonSequence },
             };
-            quote! { Ok(support::EventStream::new(response, #framing_tokens)) }
+            quote! {
+                Ok(support::EventStream::new_reconnectable(
+                    response,
+                    #framing_tokens,
+                    self.core.clone(),
+                    #reconnect_request_binding,
+                ))
+            }
         }
         None => success_decode,
     };
+    let reconnect_request_init = stream_framing.map(|_| {
+        quote! {
+            let #reconnect_request_binding = #request_binding.try_clone();
+        }
+    });
     // The return type is shared with the blocking shim so both surfaces stay identical.
     let (return_ok_ty, _) = operation_return_ty(operation, names, options);
 
@@ -719,6 +733,7 @@ pub(crate) fn emit_operation(
             let #request_binding = #request_binding
                 .build()
                 .map_err(support::Error::request_construction)?;
+            #reconnect_request_init
             let response = support::send(&self.core, #request_binding)
                 .await
                 .map_err(support::Error::widen)?;
@@ -1471,7 +1486,7 @@ pub(crate) fn emit_error_enum(
 /// `#![forbid(unsafe_code)]`. When `uses_xml` is set (the API has an `application/xml` / `text/xml`
 /// body), the feature-gated XML codec module is embedded and its helpers re-exported; otherwise it
 /// is omitted entirely, so a non-XML output carries no `quick-xml` reference.
-pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
+pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
     let embed = |file: &crate::support::SupportFile| {
         let stem = file.name.trim_end_matches(".rs");
         let ident = format_ident!("{}", stem);
@@ -1494,6 +1509,14 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
         }
     };
     let modules = crate::support::runtime_files().iter().map(embed);
+    let stream_module = uses_streams.then(|| embed(&crate::support::stream_runtime_file()));
+    let stream_reexport = uses_streams.then(|| {
+        quote! {
+            pub use stream::{
+                EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
+            };
+        }
+    });
     // The XML codec module is embedded only when the API uses an XML body; the generated manifest
     // then carries the `quick-xml` dependency it needs. A non-XML output never references quick-xml.
     let xml_module = uses_xml.then(|| embed(&crate::support::xml_runtime_file()));
@@ -1522,6 +1545,7 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
         #[allow(dead_code, unexpected_cfgs, unused_imports, clippy::result_large_err)]
         mod support {
             #(#modules)*
+            #stream_module
             #xml_module
             #blocking_module
 
@@ -1534,9 +1558,9 @@ pub(crate) fn emit_support(uses_xml: bool) -> TokenStream {
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;
             pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
-            pub use stream::{EventStream, Framing};
             pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
             pub use wasm::{MaybeSend, MaybeSync};
+            #stream_reexport
             #xml_reexport
             #blocking_reexport
         }

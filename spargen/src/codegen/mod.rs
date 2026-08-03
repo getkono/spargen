@@ -66,7 +66,8 @@ pub fn generate(
     // Codegen emits no diagnostics of its own: multi-status responses are now lowered to typed
     // per-operation response enums rather than degraded (the retired W003).
     let _ = diags;
-    let support = emit::emit_support(api.uses_xml());
+    let uses_streams = api.uses_streams();
+    let support = emit::emit_support(api.uses_xml(), uses_streams);
     let models = emit::emit_models(api, names, options);
     let client = emit::emit_client(api, names, options);
     // The synchronous facade is always emitted, gated on the user-opt-in `blocking` feature; a
@@ -74,6 +75,14 @@ pub fn generate(
     let blocking = emit::emit_blocking_client(api, names, options);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
     // output unusable via `include!` from OUT_DIR, the build.rs consumption path.
+    let stream_exports = uses_streams.then(|| {
+        quote! {
+            #[allow(unused_imports)]
+            pub use support::{
+                EventStream, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
+            };
+        }
+    });
     let tokens = quote! {
         #[allow(unused_imports)]
         pub use support::{
@@ -82,6 +91,8 @@ pub fn generate(
             RetryOutcome, RetryPolicy, SecretString, TokenFuture, TokenProvider, TransportError,
             exponential_backoff, next_link,
         };
+
+        #stream_exports
 
         #support
         #models

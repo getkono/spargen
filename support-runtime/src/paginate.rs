@@ -2,8 +2,8 @@
 //!
 //! OpenAPI has no standard machine-readable pagination declaration, so per-operation
 //! auto-paginators cannot be synthesised from a spec. These helpers are instead *generic* runtime
-//! utilities that a caller drives explicitly, in the same futures-free, manual async-iterator style
-//! as [`crate::EventStream`] — no `futures` crate, no new dependencies.
+//! utilities that a caller drives explicitly through an inherent async method, with no additional
+//! stream-combinator dependency.
 //!
 //! # Link-header pagination (RFC 5988 / RFC 8288)
 //!

@@ -25,8 +25,9 @@ blocking = ["dep:tokio"]
 
 [dependencies]
 bytes = {{ version = "1.12.1", features = ["serde"] }}
+futures-core = "0.3.32"
 quick-xml = {{ version = "0.41.0", features = ["serialize"] }}
-reqwest = {{ version = "0.12.28", default-features = false, features = ["json", "multipart"] }}
+reqwest = {{ version = "0.12.28", default-features = false, features = ["json", "multipart", "stream"] }}
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
 serde_json = "1.0.151"
@@ -150,6 +151,7 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
     let packages = lock["package"].as_array().unwrap();
     for (name, expected) in [
         ("bytes", "1.12.1"),
+        ("futures-core", "0.3.32"),
         ("quick-xml", "0.41.0"),
         ("reqwest", "0.12.28"),
         ("secrecy", "0.10.3"),
@@ -1077,6 +1079,22 @@ fn generated_module_compiles_in_oas32_crate_with_query_method() {
         .iter()
         .all(|diagnostic| diagnostic.severity != spargen::Severity::Error));
 
+    let generated_path = out.join("src/lib.rs");
+    let mut generated = std::fs::read_to_string(&generated_path).unwrap();
+    generated.push_str(
+        r#"
+#[allow(dead_code)]
+fn assert_standard_stream<S: futures_core::Stream<Item = Result<types::AdminEvent, StreamError>>>() {}
+#[allow(dead_code)]
+fn assert_generated_stream_surface() {
+    assert_standard_stream::<EventStream<types::AdminEvent>>();
+}
+#[allow(dead_code)]
+fn assert_reconnect_policy_is_public<P: ReconnectPolicy>() {}
+"#,
+    );
+    std::fs::write(&generated_path, &generated).unwrap();
+
     let status = Command::new("cargo")
         .arg("check")
         .current_dir(&out)
@@ -1103,18 +1121,17 @@ fn generated_module_compiles_in_oas32_crate_with_query_method() {
         "QUERY method should be built from its token bytes"
     );
 
-    // The OpenAPI 3.2 streaming response typed its item via `itemSchema` (no `schema`): the operation
-    // must return `EventStream<Event>` — the item type is the typed struct, not dropped to a bodyless
-    // `()`. A regression that ignores `itemSchema` would collapse this to `-> ResponseValue<()>`.
+    // The OpenAPI 3.2 streaming response recognizes the standard SSE envelope annotation and types
+    // the stream as its JSON `data.contentSchema`, not as the envelope object.
     let flat: String = generated.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains("pub async fn stream_events"),
         "streaming operation should emit a client method"
     );
     assert!(
-        flat.contains("support :: EventStream < types :: Event >")
-            || flat.contains("support::EventStream<types::Event>"),
-        "itemSchema must type the EventStream item as the typed struct, not be dropped: {flat}"
+        flat.contains("support :: EventStream < types :: AdminEvent >")
+            || flat.contains("support::EventStream<types::AdminEvent>"),
+        "SSE contentSchema must type EventStream as the JSON payload: {flat}"
     );
 }
 
@@ -1783,7 +1800,7 @@ paths:
   # Streaming response (Issue #14): a `text/event-stream` success response lowers to a streaming
   # operation whose method returns `support::EventStream<ChatChunk>` instead of `ResponseValue<T>`.
   # Compile-verifies both the streaming method signature and the embedded runtime `EventStream`
-  # (framing + manual async `next`) — with reqwest's `.chunk()` needing no `stream` feature.
+  # (framing + standard Stream plus inherent async `next`) and conditional stream dependencies.
   /chat/stream:
     get:
       operationId: streamChat
@@ -2279,7 +2296,7 @@ paths:
           content:
             text/event-stream:
               itemSchema:
-                $ref: "#/components/schemas/Event"
+                $ref: "#/components/schemas/SseEnvelope"
 components:
   schemas:
     Record:
@@ -2292,12 +2309,23 @@ components:
       type: object
       properties:
         term: { type: string }
-    Event:
+    SseEnvelope:
       type: object
-      required: [seq]
+      required: [data]
       properties:
-        seq: { type: integer }
-        payload: { type: string }
+        data:
+          type: string
+          contentMediaType: application/json
+          contentSchema:
+            $ref: "#/components/schemas/AdminEvent"
+        id: { type: [string, "null"] }
+        retry: { type: [integer, "null"] }
+    AdminEvent:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+        resource: { type: [string, "null"] }
 "##;
 
 /// Whether the `wasm32-unknown-unknown` target's std is installed, so the wasm gate can run. When
@@ -2435,6 +2463,9 @@ serde_json = "1.0.151"
         "{:#?}",
         core.report
     );
+    let core_output = core.contents.expect("generated core-only module");
+    assert!(!core_output.contains("futures_core"), "{core_output}");
+    assert!(!core_output.contains("mod stream"), "{core_output}");
 
     std::fs::write(
         &spec,
@@ -2467,6 +2498,14 @@ paths:
           content:
             application/xml:
               schema: { $ref: "#/components/schemas/XmlBody" }
+  /events:
+    get:
+      responses:
+        "200":
+          description: events
+          content:
+            text/event-stream:
+              schema: { type: string }
 components:
   schemas:
     XmlBody:
@@ -2503,6 +2542,11 @@ components:
         "{messages}"
     );
     assert!(messages.contains("requires `quick-xml`"), "{messages}");
+    assert!(messages.contains("requires `futures-core`"), "{messages}");
+    assert!(
+        messages.contains("feature `stream` on `reqwest`"),
+        "{messages}"
+    );
     assert!(messages.contains("requires `uuid`"), "{messages}");
     assert!(messages.contains("requires `time`"), "{messages}");
     assert!(!messages.contains("multipart"), "{messages}");

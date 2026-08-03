@@ -6,8 +6,7 @@
 //! The seam is a `dyn`-able trait ([`HttpBackend`]) so the generated `Client` stays non-generic:
 //! [`crate::ClientCore`] holds an `Arc<dyn HttpBackend>` rather than a type parameter. The async
 //! method returns a manually boxed future (`Pin<Box<dyn Future + Send + '_>>`) instead of using
-//! `async-trait`, so the runtime's dependency set stays exactly reqwest/serde/serde_json/bytes/
-//! secrecy — std's `Future`/`Pin`/`Box` carry the abstraction.
+//! `async-trait`, so std's `Future`/`Pin`/`Box` carry the abstraction.
 //!
 //! The currency is reqwest's own types: the trait abstracts *how* a `reqwest::Request` runs, not a
 //! full re-typing of requests and responses. Failures are reported as a [`crate::TransportError`]

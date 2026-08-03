@@ -63,6 +63,14 @@ impl Api {
             request_xml || response_xml
         })
     }
+
+    /// Whether any operation returns a sequential response as a typed stream. Drives conditional
+    /// stream-runtime embedding and the `futures-core` / reqwest `stream` requirements.
+    pub fn uses_streams(&self) -> bool {
+        self.operations
+            .iter()
+            .any(|operation| operation.responses.stream_success().is_some())
+    }
 }
 
 /// API identity, lowered from `info`.

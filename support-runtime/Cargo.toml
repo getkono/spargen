@@ -10,12 +10,13 @@ description = "Freestanding runtime embedded into spargen-generated clients. Not
 publish = false
 
 # The runtime is embedded verbatim into generated output. Its dependency
-# surface is the fixed core set required by every generated client — no spargen crate, and
-# nothing project-specific. Generated models may additionally reference the separately audited
+# surface is the audited set used by generated clients — no spargen crate, and nothing
+# project-specific. The generator embeds stream.rs and requires futures-core only for sequential
+# APIs. Generated models may additionally reference the separately audited
 # `uuid` / `time` dependencies; this crate holds only the embedded runtime, not those models.
 # The `xml` feature adds an XML request/response body codec backed by `quick-xml`. It is OFF by
-# default, so the default dependency set stays exactly reqwest/serde/serde_json/bytes/secrecy; a
-# generated client turns it on only when its spec uses an `application/xml` / `text/xml` body.
+# default; a generated client turns it on only when its spec uses an `application/xml` / `text/xml`
+# body.
 # The `blocking` feature adds a synchronous client facade backed by a current-thread `tokio`
 # runtime. It is OFF by default (tokio is already in the graph transitively via reqwest, but stays
 # an *optional direct* dependency here); a consumer opts in to get the `BlockingClient`.
@@ -24,7 +25,8 @@ xml = ["dep:quick-xml"]
 blocking = ["dep:tokio"]
 
 [dependencies]
-reqwest.workspace = true
+reqwest = { workspace = true, features = ["stream"] }
+futures-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 bytes.workspace = true

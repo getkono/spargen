@@ -58,10 +58,11 @@ requirement that could resolve below these versions or beyond the next semver br
 | Dependency | Required features | When required |
 | --- | --- | --- |
 | `bytes = "1.12.1"` | `serde` only when noted below | Always; `serde` only when a generated serialized aggregate contains bytes |
-| `reqwest = "0.12.28"` | `default-features = false`; `json` for JSON requests; `multipart` for multipart requests | Always; the two features are spec-derived |
+| `reqwest = "0.12.28"` | `default-features = false`; `json` for JSON requests; `multipart` for multipart requests; `stream` for sequential responses | Always; the three features are spec-derived |
 | `secrecy = "0.10.3"` | - | Always |
 | `serde = "1.0.229"` | `derive` | Always |
 | `serde_json = "1.0.151"` | - | Always |
+| `futures-core = "0.3.32"` | - | Only for an API with sequential responses |
 | `quick-xml = "0.41.0"` | `serialize` | Only for an API with XML bodies |
 | `uuid = "1.24.0"` | `serde` | Only when the enabled UUID mapping is actually emitted |
 | `time = "0.3.55"` | `serde`, `formatting`, `parsing` | Only when an enabled date/date-time mapping is actually emitted |

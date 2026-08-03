@@ -62,10 +62,6 @@ pub fn runtime_files() -> &'static [SupportFile] {
             contents: include_str!("runtime/retry.rs"),
         },
         SupportFile {
-            name: "stream.rs",
-            contents: include_str!("runtime/stream.rs"),
-        },
-        SupportFile {
             name: "transport.rs",
             contents: include_str!("runtime/transport.rs"),
         },
@@ -75,6 +71,15 @@ pub fn runtime_files() -> &'static [SupportFile] {
         },
     ];
     FILES
+}
+
+/// The streaming runtime, embedded only when an operation has a sequential response. It carries
+/// the only references to `futures-core` and reqwest's `stream` capability.
+pub fn stream_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "stream.rs",
+        contents: include_str!("runtime/stream.rs"),
+    }
 }
 
 /// The XML codec runtime source, embedded only when an output uses an `application/xml` / `text/xml`

@@ -1,10 +1,11 @@
 # Runtime & Ergonomics
 
 The runtime support code is embedded verbatim into generated output — no spargen crate ever
-enters a consumer's dependency graph. Its default dependency set is fixed at
-`reqwest` / `serde` / `serde_json` / `bytes` / `secrecy`. Every capability below is built to
-preserve that set: no `tower`, no `futures`, no `async-trait`, and no async timer of its own.
-Std's `Future` / `Pin` / `Box` carry the abstractions.
+enters a consumer's dependency graph. Its core dependency set is fixed at
+`reqwest` / `serde` / `serde_json` / `bytes` / `secrecy`; sequential APIs additionally require
+`futures-core` and reqwest's `stream` feature. Every other capability below preserves that set:
+no `tower`, no `async-trait`, and no async timer of its own. Std's `Future` / `Pin` / `Box` carry
+the policy abstractions.
 
 The exact tested version floors and conditional Cargo features are the
 [runtime dependency contract](./getting-started.md#runtime-dependency-contract). Spargen derives
@@ -77,12 +78,23 @@ it has no operation context. To authenticate follow-up pages, inject a preconfig
 
 ## Streaming
 
-A streaming operation returns an `EventStream<T>` — a *manual* async iterator for response bodies
-delivered as Server-Sent Events (`text/event-stream`) or newline-delimited JSON
-(`application/x-ndjson`). It holds the live response and pulls bytes incrementally with
-`reqwest::Response::chunk` (no reqwest `stream` feature, no `futures` crate), framing complete
-items out of the buffer. Drive it with `while let Some(item) = stream.next().await`. On `wasm32`
-the body is read once and framed from memory; the API and yielded items are identical.
+A streaming operation returns an `EventStream<T>` for Server-Sent Events (`text/event-stream`),
+newline-delimited JSON, or JSON Text Sequences. It implements the standard
+`futures_core::Stream<Item = Result<T, StreamError>>` while retaining an inherent
+`next().await` convenience method, and pulls reqwest body chunks incrementally. Dropping it cancels
+the response through ordinary HTTP drop semantics.
+
+For OpenAPI 3.2 SSE, spargen parses the envelope fields first. A string `data` property annotated
+with `contentMediaType: application/json` and a typed `contentSchema` yields that JSON payload type
+directly. `last_event_id()` and `reconnect_delay()` expose the latest valid `id:` and `retry:`
+metadata, including metadata-only events.
+
+Automatic reconnect is explicit: call `with_reconnect(Arc<dyn ReconnectPolicy>)`. The caller's
+policy owns attempt limits and supplies the wait future, so the runtime introduces neither a timer
+nor a retry default. A replayable prepared request is cloned, its cookies and other headers are
+preserved, and the latest event ID is sent as `Last-Event-ID`. Declining a reconnect yields the
+original typed stream error unchanged. On `wasm32`, reqwest's fetch implementation may buffer the
+body internally; the stream API and framing remain the same.
 
 ## Blocking (feature `blocking`)
 
@@ -111,7 +123,7 @@ are vacuous. One set of source compiles on both.
 ## XML bodies (feature `xml`)
 
 An XML request/response body codec backed by `quick-xml`, mirroring the JSON paths. It is **off by
-default**, so the default dependency set stays exactly reqwest/serde/serde_json/bytes/secrecy; a
+default**, so it does not alter the API-derived dependency set; a
 generated client turns the `xml` feature on only when its spec uses an `application/xml` /
 `text/xml` body.
 

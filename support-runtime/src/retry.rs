@@ -4,8 +4,8 @@
 //!
 //! ## Bring-your-own timing (no async timer in the runtime)
 //!
-//! The runtime's dependency set is fixed at reqwest/serde/serde_json/bytes/secrecy — it has no
-//! async timer of its own and never pulls in `tokio`. So the *wait* between attempts is supplied by
+//! The runtime has no async timer of its own and never pulls in `tokio`. So the *wait* between
+//! attempts is supplied by
 //! the caller: [`RetryPolicy::retry`] returns the backoff as a boxed `Future` that the caller builds
 //! with their own runtime's timer (e.g. `tokio::time::sleep`). [`RetryBackend`] simply `.await`s
 //! that future; it never sleeps itself. A pure [`exponential_backoff`] helper computes the delay
