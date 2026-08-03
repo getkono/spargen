@@ -1,22 +1,219 @@
 use std::process::Command;
 
 use camino::Utf8PathBuf;
-use spargen::{Code, Config, Outcome, OutputTarget};
+use spargen::{Code, Config, Outcome};
+
+fn generate_fixture_crate(
+    spec: &std::path::Path,
+    out: &std::path::Path,
+    name: &str,
+) -> spargen::Report {
+    std::fs::create_dir_all(out.join("src")).unwrap();
+    std::fs::write(
+        out.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "{name}"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+default = ["uuid", "time"]
+uuid = ["dep:uuid"]
+time = ["dep:time"]
+blocking = ["dep:tokio"]
+
+[dependencies]
+bytes = {{ version = "1.12.1", features = ["serde"] }}
+quick-xml = {{ version = "0.41.0", features = ["serialize"] }}
+reqwest = {{ version = "0.12.28", default-features = false, features = ["json", "multipart"] }}
+secrecy = "0.10.3"
+serde = {{ version = "1.0.229", features = ["derive"] }}
+serde_json = "1.0.151"
+uuid = {{ version = "1.24.0", features = ["serde"], optional = true }}
+time = {{ version = "0.3.55", features = ["serde", "formatting", "parsing"], optional = true }}
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
+"#
+        ),
+    )
+    .unwrap();
+    spargen::generate(&Config::new(
+        Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap(),
+        Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap(),
+    ))
+}
 
 #[test]
-fn generates_standalone_crate_for_basic_oas31_api() {
+fn cargo_build_rejects_a_runtime_requirement_below_the_supported_floor() {
+    let temp = tempfile::tempdir().unwrap();
+    let crate_dir = temp.path().join("consumer");
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+    let spargen_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "unsupported-runtime-consumer"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1.12.0"
+reqwest = {{ version = "0.12.28", default-features = false }}
+secrecy = "0.10.3"
+serde = {{ version = "1.0.229", features = ["derive"] }}
+serde_json = "1.0.151"
+
+[build-dependencies]
+spargen = {{ path = {:?}, default-features = false }}
+
+[workspace]
+"#,
+            spargen_path
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("build.rs"),
+        r#"fn main() {
+    let config = spargen::Config::new("openapi.yaml", "src/generated.rs");
+    let report = spargen::generate(&config);
+    for diagnostic in &report.diagnostics {
+        eprintln!("{}: {}", diagnostic.code.as_str(), diagnostic.message);
+    }
+    assert_eq!(report.outcome, spargen::Outcome::Generated, "{report:#?}");
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("src/lib.rs"),
+        "include!(\"generated.rs\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("openapi.yaml"),
+        r#"openapi: 3.1.0
+info: { title: Minimal, version: 1.0.0 }
+paths: {}
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("cargo")
+        .arg("check")
+        .current_dir(&crate_dir)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "unsupported floor unexpectedly compiled"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E023"), "{stderr}");
+    assert!(stderr.contains(">=1.12.1, <2.0.0"), "{stderr}");
+    assert!(
+        !crate_dir.join("src/generated.rs").exists(),
+        "a rejected runtime contract must not write generated output"
+    );
+}
+
+#[test]
+#[ignore = "nightly direct-minimal-versions proof; run by the runtime-dependencies CI job"]
+fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let out = temp.path().join("minimum_runtime_client");
+    let report = generate_fixture_crate(&spec, &out, "minimum_runtime_client");
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let status = Command::new("cargo")
+        .args([
+            "+nightly",
+            "generate-lockfile",
+            "-Z",
+            "direct-minimal-versions",
+        ])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "direct-minimal lockfile generation failed"
+    );
+
+    let lock: toml::Value =
+        toml::from_str(&std::fs::read_to_string(out.join("Cargo.lock")).unwrap()).unwrap();
+    let packages = lock["package"].as_array().unwrap();
+    for (name, expected) in [
+        ("bytes", "1.12.1"),
+        ("quick-xml", "0.41.0"),
+        ("reqwest", "0.12.28"),
+        ("secrecy", "0.10.3"),
+        ("serde", "1.0.229"),
+        ("serde_json", "1.0.151"),
+        ("time", "0.3.55"),
+        ("tokio", "1.53.1"),
+        ("uuid", "1.24.0"),
+    ] {
+        assert!(
+            packages.iter().any(|package| {
+                package["name"].as_str() == Some(name)
+                    && package["version"].as_str() == Some(expected)
+            }),
+            "direct-minimal lock must select {name} {expected}"
+        );
+    }
+
+    let status = Command::new("cargo")
+        .args([
+            "clippy",
+            "--locked",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the declared runtime floors must compile natively"
+    );
+
+    if wasm32_target_installed() {
+        let status = Command::new("cargo")
+            .args([
+                "check",
+                "--locked",
+                "--all-features",
+                "--target",
+                "wasm32-unknown-unknown",
+            ])
+            .current_dir(&out)
+            .status()
+            .unwrap();
+        assert!(
+            status.success(),
+            "the declared runtime floors must compile for wasm"
+        );
+    }
+}
+
+#[test]
+fn generated_module_compiles_in_basic_oas31_crate() {
     let temp = tempfile::tempdir().unwrap();
     let spec = temp.path().join("openapi.yaml");
     std::fs::write(&spec, BASIC_SPEC).unwrap();
     let out = temp.path().join("client");
 
-    let report = spargen::generate(&Config::new(
-        Utf8PathBuf::from_path_buf(spec).unwrap(),
-        OutputTarget::Crate {
-            dir: Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
-            name: "basic_client".to_owned(),
-        },
-    ));
+    let report = generate_fixture_crate(&spec, &out, "basic_client");
 
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     assert!(report
@@ -46,16 +243,14 @@ fn generates_standalone_crate_for_basic_oas31_api() {
         .unwrap();
     assert!(status.success());
 
-    // Issue #19: the synchronous `BlockingClient` is USER-opt-in, so the generated manifest always
-    // DECLARES a `blocking` feature wired to an OPTIONAL tokio (`rt` only) — but the default feature
-    // set must not enable it, keeping the default dependency set unchanged (no tokio direct dep).
+    // The fixture manifest models the documented dependencies application developers provide.
     let manifest = std::fs::read_to_string(out.join("Cargo.toml")).unwrap();
     assert!(
         manifest.contains(r#"blocking = ["dep:tokio"]"#),
-        "manifest must declare the blocking feature: {manifest}"
+        "fixture manifest must declare the blocking feature: {manifest}"
     );
     assert!(
-        manifest.contains(r#"tokio = { version = "1", features = ["rt"], optional = true }"#),
+        manifest.contains(r#"tokio = { version = "1.53.1", features = ["rt"], optional = true }"#),
         "tokio must be an optional dependency: {manifest}"
     );
     assert!(
@@ -854,7 +1049,7 @@ fn rejects_openapi_30_without_conversion() {
 
     let report = spargen::check(&Config::new(
         Utf8PathBuf::from_path_buf(spec).unwrap(),
-        OutputTarget::Module(Utf8PathBuf::from("unused.rs")),
+        Utf8PathBuf::from("unused.rs"),
     ));
 
     assert_eq!(report.outcome, Outcome::Rejected);
@@ -865,22 +1060,16 @@ fn rejects_openapi_30_without_conversion() {
 }
 
 #[test]
-fn generates_standalone_crate_for_oas32_api_with_query_method() {
+fn generated_module_compiles_in_oas32_crate_with_query_method() {
     // OpenAPI 3.2 lowers through the same frontend. This spec exercises the new fixed `QUERY`
     // method (which must emit a real client method) alongside a plain `get`, and must produce a
-    // standalone crate that passes `cargo check` + `cargo clippy -D warnings`.
+    // module in an application-owned crate that passes `cargo check` + `cargo clippy -D warnings`.
     let temp = tempfile::tempdir().unwrap();
     let spec = temp.path().join("openapi.yaml");
     std::fs::write(&spec, OAS32_SPEC).unwrap();
     let out = temp.path().join("client");
 
-    let report = spargen::generate(&Config::new(
-        Utf8PathBuf::from_path_buf(spec).unwrap(),
-        OutputTarget::Crate {
-            dir: Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
-            name: "oas32_client".to_owned(),
-        },
-    ));
+    let report = generate_fixture_crate(&spec, &out, "oas32_client");
 
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     assert!(report
@@ -937,7 +1126,7 @@ fn omit_overlay_removes_unsupported_operation() {
     let out = temp.path().join("client.rs");
     let mut config = Config::new(
         Utf8PathBuf::from_path_buf(spec).unwrap(),
-        OutputTarget::Module(Utf8PathBuf::from_path_buf(out).unwrap()),
+        Utf8PathBuf::from_path_buf(out).unwrap(),
     );
     config.omit = spargen::omit! {
         operations {
@@ -954,7 +1143,7 @@ fn omit_overlay_removes_unsupported_operation() {
         .any(|diagnostic| diagnostic.code == Code::OmittedConstruct));
 }
 
-/// Issue #34 (layer A) — GENERATED-CODE property round-trip. Generate a standalone crate carrying
+/// Issue #34 (layer A) — GENERATED-CODE property round-trip. Generate a module in a fixture crate carrying
 /// the representative union/allOf types (a discriminated union, a structurally-disjoint
 /// string-vs-array union, a required-key-disjoint closed-object union, a nullable-variant union, and
 /// an `allOf`-merged struct), then add `proptest` as a dev-dependency OF THE HARNESS-SCAFFOLDED
@@ -965,8 +1154,8 @@ fn omit_overlay_removes_unsupported_operation() {
 /// variant (j2 would differ) and `allOf` field loss. A stronger per-variant assertion proves a value
 /// built as variant K deserializes back onto variant K (not misrouted).
 ///
-/// Confirms, before appending, that a normal `--as-crate` manifest carries NO `proptest`: the dep is
-/// scoped strictly to this throwaway test crate and never reaches a real consumer's Cargo.toml.
+/// Confirms, before appending, that the fixture manifest carries no `proptest`: the dependency is
+/// scoped strictly to this throwaway test crate.
 #[test]
 fn union_and_allof_roundtrip_under_proptest() {
     let temp = tempfile::tempdir().unwrap();
@@ -974,21 +1163,14 @@ fn union_and_allof_roundtrip_under_proptest() {
     std::fs::write(&spec, ROUNDTRIP_SPEC).unwrap();
     let out = temp.path().join("client");
 
-    let report = spargen::generate(&Config::new(
-        Utf8PathBuf::from_path_buf(spec).unwrap(),
-        OutputTarget::Crate {
-            dir: Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
-            name: "roundtrip_client".to_owned(),
-        },
-    ));
+    let report = generate_fixture_crate(&spec, &out, "roundtrip_client");
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
 
-    // A real `spargen generate --as-crate` must NOT inject proptest into a consumer's manifest — the
-    // property-test dependency is exclusively a scaffolding of THIS test harness's crate.
+    // The property-test dependency is exclusively scaffolding for this test harness's crate.
     let mut manifest = std::fs::read_to_string(out.join("Cargo.toml")).unwrap();
     assert!(
         !manifest.contains("proptest"),
-        "a real --as-crate manifest must not carry proptest: {manifest}"
+        "fixture manifest must not carry proptest: {manifest}"
     );
     manifest.push_str("\n[dev-dependencies]\nproptest = \"1\"\n");
     std::fs::write(out.join("Cargo.toml"), manifest).unwrap();
@@ -1731,6 +1913,12 @@ components:
       properties:
         id:
           type: string
+        external_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
         name:
           type: string
         tree:
@@ -2148,13 +2336,7 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
     std::fs::write(&spec, BASIC_SPEC).unwrap();
     let out = temp.path().join("wasm_client");
 
-    let report = spargen::generate(&Config::new(
-        Utf8PathBuf::from_path_buf(spec).unwrap(),
-        OutputTarget::Crate {
-            dir: Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
-            name: "wasm_client".to_owned(),
-        },
-    ));
+    let report = generate_fixture_crate(&spec, &out, "wasm_client");
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
 
     // Default features: the client, transport seam, middleware/retry helpers, auth token provider,
@@ -2189,43 +2371,142 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
     );
 }
 
-/// `preview()` renders the same bytes `generate()` writes — without touching the filesystem — and
-/// does so deterministically. This is the shared engine behind `spargen generate --out -` and the
-/// `generate_api!` proc-macro, so byte-parity with the on-disk path is the contract both rely on.
+/// The hidden proc-macro bridge renders deterministically without touching the output path.
 #[test]
-fn preview_matches_generated_output_and_is_deterministic() {
+fn macro_preview_is_deterministic() {
     let temp = tempfile::tempdir().unwrap();
     let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
     std::fs::write(&spec, BASIC_SPEC).unwrap();
     let out = Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap();
 
-    // Generate to disk, then preview the same config in memory.
-    let config = Config::new(spec, OutputTarget::Module(out.clone()));
-    let written = spargen::generate(&config);
-    assert_eq!(written.outcome, Outcome::Generated, "{written:#?}");
-    let on_disk = std::fs::read_to_string(&out).unwrap();
-
-    let preview = spargen::preview(&config);
+    let config = Config::new(spec, out.clone());
+    let preview = spargen::__private::preview(&config);
     assert_eq!(
         preview.report.outcome,
         Outcome::Generated,
         "{:#?}",
         preview.report
     );
-    // A module layout renders exactly one file, whose contents are byte-identical to the write.
-    assert_eq!(
-        preview.files.len(),
-        1,
-        "module layout renders a single file"
+    let contents = preview.contents.expect("generated module");
+    assert!(
+        !out.exists(),
+        "macro preview must not write the output path"
+    );
+    let again = spargen::__private::preview(&config);
+    assert_eq!(again.contents.as_deref(), Some(contents.as_str()));
+}
+
+#[test]
+fn macro_manifest_audit_derives_only_capabilities_referenced_by_the_api() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = temp.path().join("Cargo.toml");
+    std::fs::write(
+        &manifest,
+        r#"[package]
+name = "audit-consumer"
+version = "0.0.0"
+
+[dependencies]
+bytes = "1.12.1"
+reqwest = { version = "0.12.28", default-features = false }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+
+[workspace]
+"#,
+    )
+    .unwrap();
+    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+    let output = Utf8PathBuf::from_path_buf(temp.path().join("unused.rs")).unwrap();
+    std::fs::write(
+        &spec,
+        "openapi: 3.1.0\ninfo: { title: Core, version: 1.0.0 }\npaths: {}\n",
+    )
+    .unwrap();
+
+    let core = spargen::__private::preview_for_macro(
+        &Config::new(spec.clone(), output.clone()),
+        manifest.to_str().unwrap(),
     );
     assert_eq!(
-        preview.files[0].contents, on_disk,
-        "preview contents must equal the bytes generate() writes"
+        core.report.outcome,
+        Outcome::Generated,
+        "{:#?}",
+        core.report
     );
 
-    // Deterministic: a second preview yields identical bytes, and nothing was written to disk.
-    let again = spargen::preview(&config);
-    assert_eq!(again.files[0].contents, preview.files[0].contents);
+    std::fs::write(
+        &spec,
+        r##"openapi: 3.1.0
+info: { title: Conditional, version: 1.0.0 }
+paths:
+  /json:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { type: string }
+      responses:
+        "204": { description: ok }
+  /binary-array:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string, format: binary }
+  /xml:
+    get:
+      responses:
+        "200":
+          description: ok
+          content:
+            application/xml:
+              schema: { $ref: "#/components/schemas/XmlBody" }
+components:
+  schemas:
+    XmlBody:
+      type: object
+      properties:
+        value: { type: string }
+    Identifier: { type: string, format: uuid }
+    Timestamp: { type: string, format: date-time }
+"##,
+    )
+    .unwrap();
+
+    let conditional = spargen::__private::preview_for_macro(
+        &Config::new(spec, output),
+        manifest.to_str().unwrap(),
+    );
+    assert_eq!(conditional.report.outcome, Outcome::Rejected);
+    let messages = conditional
+        .report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            assert_eq!(diagnostic.code, Code::RuntimeDependencyContract);
+            diagnostic.message.as_str()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        messages.contains("feature `json` on `reqwest`"),
+        "{messages}"
+    );
+    assert!(
+        messages.contains("feature `serde` on `bytes`"),
+        "{messages}"
+    );
+    assert!(messages.contains("requires `quick-xml`"), "{messages}");
+    assert!(messages.contains("requires `uuid`"), "{messages}");
+    assert!(messages.contains("requires `time`"), "{messages}");
+    assert!(!messages.contains("multipart"), "{messages}");
+    assert!(!messages.contains("tokio"), "{messages}");
 }
 
 /// A preview of a spec that uses an unsupported construct rejects loudly (matching `generate`) and
@@ -2242,14 +2523,11 @@ fn preview_of_rejected_spec_has_no_files() {
     )
     .unwrap();
 
-    let preview = spargen::preview(&Config::new(
-        spec,
-        OutputTarget::Module(Utf8PathBuf::from("unused.rs")),
-    ));
+    let preview = spargen::__private::preview(&Config::new(spec, "unused.rs"));
     assert_eq!(preview.report.outcome, Outcome::Rejected);
     assert!(
-        preview.files.is_empty(),
-        "a rejected preview retains no files"
+        preview.contents.is_none(),
+        "a rejected preview retains no generated module"
     );
     assert!(preview
         .report

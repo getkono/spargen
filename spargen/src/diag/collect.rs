@@ -66,7 +66,7 @@ impl Diagnostics {
     }
 
     /// Collapse to `Ok(value)` when no errors were recorded, else `Err(`[`Aborted`]`)`.
-    pub fn into_result<T>(&self, value: T) -> Result<T, Aborted> {
+    pub fn result<T>(&self, value: T) -> Result<T, Aborted> {
         if self.has_errors() {
             Err(Aborted)
         } else {

@@ -49,16 +49,17 @@ Excluded by decision: HoneyHive, IOTA gas-station, and Redocly.
 Fast corpus smoke checks:
 
 ```bash
-cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json  # reject:E001
-cargo run -q -p spargen -- check corpus/github-api-3-1/api.github.com.json --format json --config <(printf '[features]\nbatch_cap = 100000\n')  # generate
-cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json  # expected: generates (W001 only)
-cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
-cargo run -q -p spargen -- check corpus/stripe/spec3.json --format json  # reject:E001 (3.0.0)
-cargo run -q -p spargen -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json  # reject:E001 (3.0.1)
-cargo run -q -p spargen -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json  # reject:E001 (3.0.0)
+cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json  # reject:E001
+cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config <(printf '[features]\nbatch_cap = 100000\n')  # clean
+cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json  # expected: generates (W001 only)
+cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
+cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json  # reject:E001 (3.0.0)
+cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json  # reject:E001 (3.0.1)
+cargo run -q -p spargen --features cli -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json  # reject:E001 (3.0.0)
 # meilisearch is 3.1.0: it clears the version gate, then fails strict official-schema validation.
-cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json  # reject:E011 (3.1.0)
+cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json  # reject:E011 (3.1.0)
 ```
 
 The full GitHub 3.1 pin is the large-corpus generation gate: strict generation must succeed, and
-the emitted standalone crate must pass native strict Clippy plus a wasm check.
+the generated module in its application-owned fixture crate must pass native strict Clippy plus a
+wasm check.

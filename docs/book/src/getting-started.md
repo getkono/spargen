@@ -7,51 +7,36 @@ drives every generated feature against a local mock server.
 
 ## Install
 
-Spargen builds from source with a stable Rust toolchain. Two ways to run it:
+Vendor the OpenAPI document and every local `$ref` target in your source tree, then choose one of
+two compilation-time paths:
 
-- **CLI, checked-in output (recommended):** install the binary and commit the generated file.
+- Add `spargen` under `[build-dependencies]` and call `spargen::generate` from `build.rs`.
+- Add `spargen-macro` under `[dependencies]` and invoke `generate_api!` in a Rust module.
 
-  ```bash
-  cargo install spargen --features cli
-  spargen generate api/openapi.yaml --out src/api.rs
-  ```
-
-  Spargen appears nowhere in your `Cargo.toml`. `spargen generate --check` fails CI when the
-  checked-in code drifts from the spec (`W004`).
-
-- **`build.rs`:** add `spargen` as a `[build-dependencies]` entry, generate into `OUT_DIR`, and
-  consume the result with `include!`. Nothing spargen-shaped is left in your runtime graph.
+Both crates are host/build-time only. The optional CLI provides analysis and vendoring tools; it
+does not generate clients.
 
 ## Generate a client
-
-### CLI mode
-
-```bash
-# Emit a module you check in and import with `mod api;`
-spargen generate api/openapi.yaml --out src/api.rs
-
-# Or a standalone, publishable crate
-spargen generate api/openapi.yaml --out crates/api --as-crate
-```
-
-See the [CLI Reference](./cli.md) for every subcommand and flag (`check`, `lock`, `explain`,
-`diff`, and generation flags like `--carve`, `--watch`, `--config`, and the `--omit-*` family).
 
 ### `build.rs` mode
 
 ```rust
 // build.rs
 fn main() {
-    println!("cargo:rerun-if-changed=api/openapi.yaml");
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let config = spargen::Config::new(
         "api/openapi.yaml",
-        spargen::OutputTarget::Module(format!("{out_dir}/api.rs").into()),
+        format!("{out_dir}/api.rs"),
     );
     let report = spargen::generate(&config);
     assert_eq!(report.outcome, spargen::Outcome::Generated, "{report:#?}");
 }
 ```
+
+`generate` emits Cargo dependency directives for the root schema, every transitive `$ref`, the
+lock file, and the output. It keeps a content-addressed cache under `OUT_DIR`, and regenerates if
+any input changes or if the output is missing or manually edited. To vendor the generated client,
+use `"src/api.rs"` as the output and commit that file; generation still happens during compilation.
 
 The generated file carries no crate-level inner attributes, so it drops straight in:
 
@@ -61,10 +46,44 @@ mod api {
 }
 ```
 
-Your `[dependencies]` provide the runtime set the generated code needs — `reqwest` (with the
-`json` feature), `serde` (with `derive`), `serde_json`, `bytes`, and `secrecy`. The
+Your `[dependencies]` provide the runtime set the generated code needs. The
 [petstore `Cargo.toml`](https://github.com/getkono/spargen/blob/master/examples/petstore/Cargo.toml)
 is a copyable template.
+
+### Runtime dependency contract
+
+Use these tested caret floors. You may choose a higher compatible floor; spargen rejects a
+requirement that could resolve below these versions or beyond the next semver breaking line.
+
+| Dependency | Required features | When required |
+| --- | --- | --- |
+| `bytes = "1.12.1"` | `serde` only when noted below | Always; `serde` only when a generated serialized aggregate contains bytes |
+| `reqwest = "0.12.28"` | `default-features = false`; `json` for JSON requests; `multipart` for multipart requests | Always; the two features are spec-derived |
+| `secrecy = "0.10.3"` | - | Always |
+| `serde = "1.0.229"` | `derive` | Always |
+| `serde_json = "1.0.151"` | - | Always |
+| `quick-xml = "0.41.0"` | `serialize` | Only for an API with XML bodies |
+| `uuid = "1.24.0"` | `serde` | Only when the enabled UUID mapping is actually emitted |
+| `time = "0.3.55"` | `serde`, `formatting`, `parsing` | Only when an enabled date/date-time mapping is actually emitted |
+| `tokio = "1.53.1"` | `rt`; optional and native-only | Only when your package declares the generated `blocking` feature |
+
+The audit happens during both `build.rs` and proc-macro expansion and fails compilation with
+`E023` before generated output is accepted. Cargo cannot add spec-derived features after it has
+resolved dependencies: build scripts and proc macros run later in the compilation. Spargen
+therefore checks the manifest, Cargo performs resolution, and rustc provides the final proof that
+the selected versions expose every API and trait the generated client uses. Extra application
+dependencies and features are allowed.
+
+### Macro mode
+
+```rust
+mod api {
+    spargen_macro::generate_api!(spec = "api/openapi.yaml");
+}
+```
+
+The macro supports the same feature, cap, carve, and omit controls as `Config`; see the
+[`spargen-macro` README](https://github.com/getkono/spargen/tree/master/spargen-macro).
 
 ## The generated client API
 

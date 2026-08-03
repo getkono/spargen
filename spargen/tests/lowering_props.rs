@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
-use spargen::{Code, Config, Outcome, OutputTarget, Report};
+use spargen::{Code, Config, Outcome, Report};
 
 /// Run `check` (frontend + lowering, no emit) on an inline spec written into a throwaway tempdir.
 fn check(spec: &str) -> Report {
@@ -23,7 +23,7 @@ fn check(spec: &str) -> Report {
     std::fs::write(&spec_path, spec).unwrap();
     spargen::check(&Config::new(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        OutputTarget::Module(Utf8PathBuf::from("unused.rs")),
+        Utf8PathBuf::from("unused.rs"),
     ))
 }
 
@@ -35,7 +35,7 @@ fn generate_module(spec: &str) -> (Report, String) {
     let out = temp.path().join("client.rs");
     let report = spargen::generate(&Config::new(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        OutputTarget::Module(Utf8PathBuf::from_path_buf(out.clone()).unwrap()),
+        Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
     let source = std::fs::read_to_string(&out).unwrap_or_default();
     (report, source)

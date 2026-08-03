@@ -28,24 +28,24 @@ rejected with a diagnostic, never converted.
 Spargen consumes an OpenAPI 3.1.x or 3.2.x document (JSON or YAML, plus local relative-file
 `$ref`s) at generation time and produces idiomatic, deterministic Rust: typed models, a `Client`,
 one method per operation, and typed errors. Generated code compiles or generation fails — with a
-diagnostic that names the exact spec construct, its JSON Pointer, and a remedy. Three ways to run
-it — all produce byte-identical output, so they are interchangeable:
+diagnostic that names the exact spec construct, its JSON Pointer, and a remedy. Schemas must be
+vendored into the source tree before compilation. There are exactly two supported generation paths:
 
-| Mode | How | Generated code | No CLI? |
-| --- | --- | --- | --- |
-| **CLI, checked-in** (recommended) | `spargen generate spec.yaml --out src/api.rs` | committed & reviewable | — |
-| **`build.rs`** | `spargen` in `[build-dependencies]`, `include!` from `OUT_DIR` | in `OUT_DIR` | ✓ |
-| **Macro** | [`spargen-macro`](spargen-macro): `generate_api!("spec.yaml")` | inline (use `--out -` to inspect) | ✓ |
+| Mode | How | Generated code |
+| --- | --- | --- |
+| **`build.rs`** | `spargen` in `[build-dependencies]` | write to `OUT_DIR` or a committed module path |
+| **Macro** | [`spargen-macro`](spargen-macro): `generate_api!("spec.yaml")` | inline (use `cargo expand` to inspect) |
 
-The CLI keeps spargen out of your `Cargo.toml` entirely and `spargen generate --check` fails CI on
-drift (`W004`). The `build.rs` and macro modes are zero-CLI; in both, spargen is host/build-time
-only and **never enters your runtime dependency tree**.
+Both modes run as part of Rust compilation. Spargen is host/build-time only and **never enters your
+runtime dependency tree**. The CLI is tooling for `lock`, `check`, `diff`, and `explain`; it cannot
+generate code, stream generated source, watch files, or scaffold a crate.
 
 ```rust
 // build.rs — spargen appears only in [build-dependencies].
+let out_dir = std::env::var("OUT_DIR").unwrap();
 let report = spargen::generate(&spargen::Config::new(
     "api/openapi.yaml",
-    spargen::OutputTarget::Module(format!("{out_dir}/api.rs").into()),
+    format!("{out_dir}/api.rs"),
 ));
 assert_eq!(report.outcome, spargen::Outcome::Generated);
 ```
@@ -59,8 +59,8 @@ mod api {
 
 See [`examples/petstore`](examples/petstore) (build.rs) and
 [`examples/petstore-macro`](examples/petstore-macro) (macro) for complete, runnable loops that drive
-every generated feature against a local mock server. Preview any spec without writing a file:
-`spargen generate spec.yaml --out -` streams the module to stdout (pipe it to `rustfmt`).
+every generated feature against a local mock server. Point the `build.rs` output at `src/api.rs`
+instead when the generated client should be reviewed and committed.
 
 Generating a client from a spec that a Rust server framework emits (utoipa, aide, poem-openapi)?
 The [framework round-trip recipes](docs/recipes.md) cover how each exports its OpenAPI document,
@@ -86,8 +86,10 @@ the version it emits, and the idioms spargen handles.
 
 - **Freestanding output.** The runtime support code is embedded into the generated module; no
   spargen crate ever appears in a consumer's runtime dependency tree. Runtime dependencies are
-  exactly `reqwest` (no default features), `serde`, `serde_json`, `bytes`, `secrecy`, plus
-  opt-out `uuid`/`time` for `format` mappings.
+  exactly `reqwest` (no default features), `serde`, `serde_json`, `bytes`, and `secrecy`, plus only
+  the capabilities the compiled API uses. Generation audits the consumer manifest against the
+  tested floors and feature set before Cargo/rustc compile the emitted client; see the
+  [runtime dependency contract](docs/book/src/getting-started.md#runtime-dependency-contract).
 - **Deterministic.** Same spargen version + spec + config ⇒ byte-identical output, enforced by
   test. Item ordering never depends on input map ordering.
 - **Every construct has a disposition.** Supported, warned, or rejected — never a fourth, silent
@@ -107,7 +109,7 @@ schemas, objects, arrays, tuples, maps, scalar primitives and `format` mappings,
 boxed), `allOf` merging, `oneOf`/`anyOf` unions, path/query/header/cookie parameters, JSON /
 form-urlencoded / octet-stream / text bodies, per-status responses (including multi-status
 success/error bodies lowered to typed per-operation response enums), auth attachment, and the
-complete diagnostics surface (`check` / `generate` / `explain`, `--format json`, stable codes,
+complete diagnostics surface (`check` / `explain`, `--format json`, stable codes,
 batch reporting). OpenAPI 3.2 adds canonical `$self` reference identity, `QUERY` and custom HTTP
 methods, whole-query-string and cookie-style parameters, reusable media types, typed SSE/JSON
 sequence streams, and expanded documentation metadata. See the concise
@@ -122,8 +124,9 @@ generating and intentionally rejecting real-world cases.
 ## Documentation
 
 The full documentation site is an [mdBook](https://rust-lang.github.io/mdBook/) under
-[`docs/book/`](docs/book) — an Introduction, Getting Started, and CLI/Runtime reference, wired
-together with the [OpenAPI 3.2 scope](docs/openapi-3.2.md), [support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
+[`docs/book/`](docs/book) — an Introduction, Getting Started, and generator/CLI/runtime references,
+wired together with the [generator API](docs/generator-api.md), [OpenAPI 3.2 scope](docs/openapi-3.2.md),
+[support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
 [compatibility](docs/compatibility.md), [recipes](docs/recipes.md), [corpus](docs/corpus.md),
 [benchmarks](docs/benchmarks.md), and [testing](docs/testing.md) docs (included, not duplicated).
 Build it locally:
@@ -154,7 +157,7 @@ mise run hooks        # install git hooks
 | `mise run check` | Type-check the workspace |
 | `mise run fmt` | Format the workspace |
 | `mise run lint` | Clippy with warnings denied |
-| `mise run test` | Full suite: unit, property, frontend-fixture, determinism, drift, and generated-code E2E tests |
+| `mise run test` | Full suite: unit, property, frontend-fixture, cache, determinism, and generated-code E2E tests |
 | `mise run corpus-smoke` | Fast checks against pinned real-world specs |
 | `mise run github-api` | Generate and compile the full pinned GitHub API client (native strict Clippy + wasm) |
 | `mise run example` | Run the end-to-end petstore example |

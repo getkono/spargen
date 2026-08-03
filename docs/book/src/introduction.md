@@ -41,10 +41,10 @@ input is **rejected** with a diagnostic (`E001`), never converted.
 
 The runtime support code is embedded into the generated module; **no spargen crate ever appears
 in a consumer's runtime dependency tree**. The default runtime dependencies are exactly
-`reqwest` (no default features), `serde`, `serde_json`, `bytes`, and `secrecy`, plus opt-out
-`uuid`/`time` for `format` mappings. Dependency hygiene is a first-class constraint, not an
-afterthought — see [Runtime & Ergonomics](./runtime.md) for the opt-in transport, retry,
-middleware, blocking, wasm, pagination, and streaming capabilities that keep that set intact.
+`reqwest` (no default features), `serde`, `serde_json`, `bytes`, and `secrecy`. XML codecs, format
+mappings, request-builder features, and blocking support are required only when the compiled API
+uses them. Spargen audits the consumer manifest against its tested
+[dependency contract](./getting-started.md#runtime-dependency-contract) during compilation.
 
 ## Design guarantees
 

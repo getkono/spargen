@@ -101,7 +101,7 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
         tags,
         provenance: provenance(&root_pointer, root),
     };
-    diags.into_result(document)
+    diags.result(document)
 }
 
 fn version_supported(value: &str) -> bool {

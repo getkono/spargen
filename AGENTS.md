@@ -12,7 +12,7 @@ changes.
   `support`, `codegen`, `emit`, `compat`, `cli`, and the `lib.rs` facade. Every subsystem
   `mod.rs` declares its allowed dependencies in a `//! layer-deps:` header — keep those honest.
 - `spargen-macro/` — the second published crate: a thin `proc-macro` shim exposing
-  `generate_api!`, a shim over `spargen::preview`. It depends on `spargen` (host-only); `spargen`
+  `generate_api!`, a shim over spargen's private in-memory renderer. It depends on `spargen` (host-only); `spargen`
   must **never** depend back on it (that would cycle). A proc-macro crate and everything it reaches
   are host/build-time only, so neither crate enters a consumer's runtime graph — the invariant
   below is unchanged. `examples/petstore-macro` is its end-to-end guard.
@@ -55,9 +55,9 @@ Tests live closest to what they pin; when you touch a subsystem, extend its suit
 | Subsystem | Suite | What to cover |
 | --- | --- | --- |
 | `oas31` (+ `source`) | `spargen/tests/frontend.rs` | One minimal inline-spec fixture per diagnostic code (rejections assert `Outcome::Rejected` + code; warnings assert the code fires and generation still succeeds). `check`/`generate` must stay in parity. |
-| `codegen` / `emit` | `spargen/tests/e2e.rs` | Generate a standalone crate and require `cargo check` + `cargo clippy -D warnings` on it; extend the inline spec when emitting new constructs so they are compile-verified. |
+| `codegen` / `emit` | `spargen/tests/e2e.rs` | Generate a module into an application-owned fixture crate and require `cargo check` + `cargo clippy -D warnings` on it; extend the inline spec when emitting new constructs so they are compile-verified. |
 | `codegen` (determinism) | `spargen/tests/determinism.rs` | Byte-identical double generation. |
-| `emit` (`--check`) | `spargen/tests/drift.rs` | Clean / drifted / missing contract and `W004`. |
+| build cache | `spargen/src/cache.rs` | Complete input fingerprints plus missing, stale, and manually edited output invalidation. |
 | `diag` | `spargen/src/diag/code.rs` tests | Code string round-trips; every code has title + explain text. |
 | `name` | in-module proptests | Determinism, injectivity in scope, valid identifiers, keyword escaping. |
 | `compat` | in-module + `e2e.rs` | Omit rules match/apply, fingerprint stability, `W009`/`E019`/`E020`. |

@@ -6,6 +6,11 @@ enters a consumer's dependency graph. Its default dependency set is fixed at
 preserve that set: no `tower`, no `futures`, no `async-trait`, and no async timer of its own.
 Std's `Future` / `Pin` / `Box` carry the abstractions.
 
+The exact tested version floors and conditional Cargo features are the
+[runtime dependency contract](./getting-started.md#runtime-dependency-contract). Spargen derives
+that contract from the lowered API and audits it during compilation; optional codec and mapping
+dependencies are required only when the emitted API references them.
+
 The capabilities are layered around a single seam so the generated `Client` stays non-generic and
 each capability is opt-in.
 
@@ -86,10 +91,9 @@ reactor, so `BlockingRuntime` owns a real current-thread `tokio` runtime and dri
 async operation futures to completion on it — the blocking client reuses every line of the async
 dispatch. Enabled by the `blocking` cargo feature, which pulls in `tokio` with just the `rt`
 feature; a client built without it carries no blocking client and no direct tokio dependency.
-Standalone-crate output declares this feature automatically. For `include!`/build.rs and macro
-output, the feature resolves against the consumer crate: leaving it undeclared cleanly compiles the
-facade out, while opting in requires the consumer to declare `blocking` and its optional Tokio
-dependency.
+For `include!`/build.rs and macro output, the feature resolves against the consumer crate: leaving
+it undeclared cleanly compiles the facade out, while opting in requires the consumer to declare
+`blocking = ["dep:tokio"]` and its native-only optional Tokio dependency.
 
 > A `BlockingRuntime` must not be constructed from inside another async runtime (tokio's
 > `block_on` panics within a runtime context). Drive one on a plain thread, or via
@@ -114,5 +118,6 @@ generated client turns the `xml` feature on only when its spec uses an `applicat
 ## Format mappings (`uuid` / `time`)
 
 `format: uuid` maps to the `uuid` crate and `format: date-time` / `date` to `time`, as opt-out
-mappings on the emitted crate. `spargen generate --no-uuid` / `--no-time` fall back to `String`.
-These live in the synthesized crate manifest, not the base runtime dependency set.
+mappings in generated code. Set `config.features.uuid` / `config.features.time` to `false` (or use
+the macro's `no_uuid` / `no_time`) to fall back to `String`. The corresponding dependency is
+required only when that mapping is enabled and actually occurs in the compiled API.

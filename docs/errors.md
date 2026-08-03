@@ -23,9 +23,9 @@ the library API.
 | `E020` | Error | omit profile created an invalid document |
 | `E021` | Error | vendored remote `$ref` drifted from lock |
 | `E022` | Error | duplicate object key |
+| `E023` | Error | invalid generated-runtime dependency contract |
 | `W001` | Warning | validation-only keyword ignored |
 | `W002` | Warning | server-initiated flow ignored |
-| `W004` | Warning | checked-in output drifted |
 | `W005` | Warning | schema default not applied |
 | `W006` | Warning | unsupported XML hint ignored |
 | `W009` | Warning | construct omitted |

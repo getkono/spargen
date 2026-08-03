@@ -294,7 +294,7 @@ pub fn lower(
         types: ctx.graph,
         security_schemes,
     };
-    ctx.diags.into_result(api)
+    ctx.diags.result(api)
 }
 
 fn append_text(target: &mut Option<String>, text: String) {

@@ -21,7 +21,7 @@
 //! reads local files (no network).
 
 use camino::Utf8PathBuf;
-use spargen::{Code, Config, Outcome, OutputTarget, Report};
+use spargen::{Code, Config, Outcome, Report};
 
 /// Absolute path to a vendored recipe spec (workspace root is one level up from this crate).
 fn recipe_path(name: &str) -> Utf8PathBuf {
@@ -36,7 +36,7 @@ fn recipe_path(name: &str) -> Utf8PathBuf {
 fn check(name: &str) -> Report {
     spargen::check(&Config::new(
         recipe_path(name),
-        OutputTarget::Module(Utf8PathBuf::from("unused.rs")),
+        Utf8PathBuf::from("unused.rs"),
     ))
 }
 
@@ -45,7 +45,7 @@ fn check(name: &str) -> Report {
 fn generate(name: &str, carve: bool) -> (Report, Option<String>) {
     let temp = tempfile::tempdir().unwrap();
     let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
-    let mut config = Config::new(recipe_path(name), OutputTarget::Module(out.clone()));
+    let mut config = Config::new(recipe_path(name), out.clone());
     config.carve = carve;
     let report = spargen::generate(&config);
     let text = std::fs::read_to_string(out).ok();

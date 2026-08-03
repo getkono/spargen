@@ -91,10 +91,10 @@ components:
       type: http
       scheme: bearer
   schemas:
-    Status:
+    Legacy:
       type: string
-      description: Sale status of a pet.
-      enum: [available, sold]
+    Status:
+      $ref: "schemas.yaml#/Status"
     Pet:
       type: object
       description: A pet in the store.

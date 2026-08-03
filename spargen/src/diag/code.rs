@@ -49,9 +49,6 @@ pub enum Code {
     /// types, conflicting `additionalProperties`, an object/scalar mix, incompatible scalars, or a
     /// direct recursive `$ref` member whose fields are not yet known (matrix: Schema shape).
     AllOfIrreconcilable,
-    /// `generate --check` found checked-in output that drifted from (or is missing against) the
-    /// spec.
-    OutputDrifted,
     /// The input could not be parsed or violates a required structural OpenAPI shape.
     InvalidInput,
     /// An object declares the same key twice; the duplicate makes the member ambiguous, so it is
@@ -76,10 +73,13 @@ pub enum Code {
     /// pathologically nested inline schema), so lowering is stopped before it could exhaust the
     /// stack. Rejected rather than risk a crash on adversarial or machine-generated input.
     SchemaNestingTooDeep,
+    /// The consuming Cargo package does not declare the versions or features required by the
+    /// generated runtime.
+    RuntimeDependencyContract,
 }
 
 impl Code {
-    /// The stable string form, e.g. `"E001"` or `"W004"`.
+    /// The stable string form, e.g. `"E001"` or `"W009"`.
     pub fn as_str(self) -> &'static str {
         match self {
             Code::UnsupportedOpenApiVersion => "E001",
@@ -99,7 +99,6 @@ impl Code {
             Code::DuplicateObjectKey => "E022",
             Code::UnknownSecurityScheme => "E012",
             Code::AllOfIrreconcilable => "E013",
-            Code::OutputDrifted => "W004",
             Code::OmittedConstruct => "W009",
             Code::InvalidOmitRule => "E019",
             Code::OmitCreatedInvalidDocument => "E020",
@@ -107,6 +106,7 @@ impl Code {
             Code::XmlHintIgnored => "W006",
             Code::Oas32ConstructIgnored => "W010",
             Code::SchemaNestingTooDeep => "E014",
+            Code::RuntimeDependencyContract => "E023",
         }
     }
 
@@ -139,7 +139,6 @@ impl Code {
             Code::DuplicateObjectKey => "duplicate object key",
             Code::UnknownSecurityScheme => "unknown security scheme",
             Code::AllOfIrreconcilable => "irreconcilable allOf composition",
-            Code::OutputDrifted => "checked-in output drifted",
             Code::InvalidOmitRule => "invalid omit rule",
             Code::OmittedConstruct => "construct omitted",
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
@@ -147,6 +146,7 @@ impl Code {
             Code::XmlHintIgnored => "unsupported XML hint ignored",
             Code::Oas32ConstructIgnored => "non-sequential itemSchema ignored",
             Code::SchemaNestingTooDeep => "schema nesting is too deep to lower",
+            Code::RuntimeDependencyContract => "invalid generated-runtime dependency contract",
         }
     }
 
@@ -204,9 +204,6 @@ impl Code {
             Code::AllOfIrreconcilable => {
                 "`allOf` members are intersected into one type: object members flatten into a single struct (union of properties; a property required by any member is required; repeated properties recursively retain their narrower compatible intersection; `additionalProperties` is intersected conservatively), while scalar members narrow compatible primitives, enums, arrays, objects, unions, and nullability. Examples include integer within number, enum within its scalar type, and a detailed object within a broader object; an empty array-item intersection becomes an uninhabited item type so the valid empty array remains representable. It is rejected only when the overall intersection is empty or cannot be represented faithfully: incompatible scalar categories, conflicting property/additional-value constraints, an object/scalar mix, or a direct recursive `$ref` member whose fields are not yet known. Restructure the composition or omit this API segment with `spargen::omit!`."
             }
-            Code::OutputDrifted => {
-                "The checked-in generated code no longer matches what this spec and spargen version produce. Re-run `spargen generate` and commit the result."
-            }
             Code::InvalidOmitRule => {
                 "A compatibility omit rule must match at least one exact path, operation, component, pointer, or file-local pointer and cannot omit the document root."
             }
@@ -224,6 +221,9 @@ impl Code {
             }
             Code::SchemaNestingTooDeep => {
                 "Lowering a schema into a Rust type is recursive: each nested object property, array item, `allOf`/`oneOf`/`anyOf` member, and `$ref` target descends one level. Spargen caps that descent so a pathologically deep composition — a very long chain of components that each `$ref` the next, or a deeply nested inline schema — is rejected with this error instead of being allowed to exhaust the call stack and abort the process. A genuine API surface never approaches the limit; hitting it almost always means the spec was machine-generated or adversarial. Flatten the offending chain, or omit that API segment with `spargen::omit!`."
+            }
+            Code::RuntimeDependencyContract => {
+                "The generated module is freestanding, so its consuming Cargo package must declare the crates and dependency features referenced by that specific API. Spargen derives the exact requirement set after lowering and audits Cargo.toml during build.rs and proc-macro generation. Use the documented tested lower bounds (or a higher semver-compatible caret floor), keep reqwest default features disabled, and enable only the reqwest/bytes/XML/UUID/time capabilities named by the diagnostic. Cargo resolves the declared range; Rust compilation then verifies the selected crates expose the APIs and traits used by the generated client."
             }
             Code::XmlHintIgnored => {
                 "XML request/response bodies honor the `xml.name` (element/attribute rename) and `xml.attribute` (serialize as an XML attribute via quick-xml's `@name` convention) hints on a field, but only for a schema used *exclusively* as an XML body. A serde `rename` is format-agnostic — it would also rewrite the JSON wire names — so `xml.name`/`xml.attribute` are NOT applied to a schema that is also reachable from a JSON/form/multipart/text body, a response, or a parameter (or that is not used as an XML body at all); the field keeps its normal wire name and this warning fires, so JSON is never corrupted. The `xml.namespace`, `xml.prefix`, and `xml.wrapped` (wrapped arrays) hints are never represented — quick-xml serde has no faithful mapping for them — so they are always ignored with this warning rather than silently honored or rejected."
@@ -263,12 +263,12 @@ impl Code {
             Code::OmitCreatedInvalidDocument,
             Code::ValidationKeywordIgnored,
             Code::ServerInitiatedFlowIgnored,
-            Code::OutputDrifted,
             Code::OmittedConstruct,
             Code::SchemaDefaultNotApplied,
             Code::XmlHintIgnored,
             Code::Oas32ConstructIgnored,
             Code::SchemaNestingTooDeep,
+            Code::RuntimeDependencyContract,
         ];
         ALL
     }

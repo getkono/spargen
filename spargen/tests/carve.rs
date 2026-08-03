@@ -1,16 +1,17 @@
 //! Integration coverage for omit-profile globbing (bulk omits) and auto-carve (Issue #24). These
-//! drive the real `spargen` binary end-to-end, proving that:
+//! drive the supported Rust generation API end-to-end, proving that:
 //!
-//! * a glob `--omit-path`/`[[omit]]` value removes EVERY matching construct (bulk), while exact
+//! * a glob omit-path value removes EVERY matching construct (bulk), while exact
 //!   rules are unchanged (that half is pinned by `tests/config.rs`);
-//! * `--carve` turns a spec that would REJECT into a generate-what-you-can outcome — dropping only
+//! * carve turns a spec that would REJECT into a generate-what-you-can outcome — dropping only
 //!   the unsupported islands, reporting each via `W009`, reaching a fixpoint (no infinite loop),
 //!   and staying byte-for-byte deterministic.
 //!
-//! The binary requires the `cli` feature (always on under `cargo test --all-features`).
-
 use std::path::Path;
 use std::process::{Command, Output};
+
+use camino::Utf8PathBuf;
+use spargen::{Code, Config, Outcome, Report};
 
 fn spargen(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_spargen"))
@@ -20,16 +21,11 @@ fn spargen(dir: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
-/// `generate <spec> --out <out> [extra…]`, returning the process output.
-fn generate(dir: &Path, spec: &Path, out: &Path, extra: &[&str]) -> Output {
-    let mut args = vec![
-        "generate",
-        spec.to_str().unwrap(),
-        "--out",
-        out.to_str().unwrap(),
-    ];
-    args.extend_from_slice(extra);
-    spargen(dir, &args)
+fn config(spec: &Path, out: &Path) -> Config {
+    Config::new(
+        Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap(),
+        Utf8PathBuf::from_path_buf(out.to_path_buf()).unwrap(),
+    )
 }
 
 fn write_spec(dir: &Path, name: &str, contents: &str) -> std::path::PathBuf {
@@ -38,9 +34,12 @@ fn write_spec(dir: &Path, name: &str, contents: &str) -> std::path::PathBuf {
     path
 }
 
-/// Count `W009` (construct omitted) diagnostics in a `--format json` report.
-fn w009_count(stdout: &str) -> usize {
-    stdout.matches("W009").count()
+fn w009_count(report: &Report) -> usize {
+    report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == Code::OmittedConstruct)
+        .count()
 }
 
 // --- (a) Glob / bulk omit -----------------------------------------------------------------------
@@ -69,13 +68,10 @@ fn glob_omit_path_removes_all_matching_operations() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", ADMIN_SPEC);
     let out = temp.path().join("client.rs");
-    let output = generate(
-        temp.path(),
-        &spec,
-        &out,
-        &["--omit-path", "/admin/**", "--format", "json"],
-    );
-    assert!(output.status.success(), "{output:?}");
+    let mut config = config(&spec, &out);
+    config.omit = spargen::omit! { paths { "/admin/**"; } };
+    let report = spargen::generate(&config);
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(&out).unwrap();
     assert!(
@@ -85,11 +81,10 @@ fn glob_omit_path_removes_all_matching_operations() {
     assert!(!generated.contains("fn delete_user"), "admin op removed");
     assert!(generated.contains("fn health"), "public op survives");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(
-        w009_count(&stdout),
+        w009_count(&report),
         2,
-        "one W009 per bulk-removed path: {stdout}"
+        "one W009 per bulk-removed path: {report:#?}"
     );
 }
 
@@ -100,13 +95,10 @@ fn exact_omit_path_still_removes_exactly_one() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", ADMIN_SPEC);
     let out = temp.path().join("client.rs");
-    let output = generate(
-        temp.path(),
-        &spec,
-        &out,
-        &["--omit-path", "/admin/users", "--format", "json"],
-    );
-    assert!(output.status.success(), "{output:?}");
+    let mut config = config(&spec, &out);
+    config.omit = spargen::omit! { paths { "/admin/users"; } };
+    let report = spargen::generate(&config);
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(&out).unwrap();
     assert!(!generated.contains("fn list_users"), "exact path removed");
     assert!(
@@ -114,8 +106,7 @@ fn exact_omit_path_still_removes_exactly_one() {
         "sibling path survives: {generated}"
     );
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert_eq!(w009_count(&stdout), 1, "exactly one W009: {stdout}");
+    assert_eq!(w009_count(&report), 1, "exactly one W009: {report:#?}");
 }
 
 // --- (b) Carve generates the rest ---------------------------------------------------------------
@@ -149,43 +140,49 @@ components: {}
 
 #[test]
 fn without_carve_a_rejecting_spec_fails() {
-    // Baseline: the same spec REJECTS (E006) without `--carve`, so carve is what changes the outcome.
+    // Baseline: the same spec REJECTS (E006) without carve, so carve changes the outcome.
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", ONE_BAD_OP);
     let out = temp.path().join("client.rs");
-    let output = generate(temp.path(), &spec, &out, &["--format", "json"]);
-    assert!(!output.status.success(), "rejects without carve");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"outcome\":\"Rejected\""), "{stdout}");
-    assert!(stdout.contains("E006"), "{stdout}");
+    let report = spargen::generate(&config(&spec, &out));
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == Code::DynamicRefRejected));
 }
 
 #[test]
 fn carve_generates_the_rest_and_reports_the_carved_operation() {
-    // (b) `--carve` on the rejecting spec generates the REST: the good operation is present, the
+    // (b) Carve on the rejecting spec generates the REST: the good operation is present, the
     // rejecting operation is absent, and it is reported via W009 (never silent). Outcome flips from
     // Rejected to Generated.
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", ONE_BAD_OP);
     let out = temp.path().join("client.rs");
-    let output = generate(temp.path(), &spec, &out, &["--carve", "--format", "json"]);
-    assert!(output.status.success(), "{output:?}");
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"outcome\":\"Generated\""), "{stdout}");
+    let mut config = config(&spec, &out);
+    config.carve = true;
+    let report = spargen::generate(&config);
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     assert_eq!(
-        w009_count(&stdout),
+        w009_count(&report),
         1,
-        "the carved op is reported once: {stdout}"
+        "the carved op is reported once: {report:#?}"
     );
     assert!(
-        stdout.contains("get /bad"),
-        "W009 names the carved operation: {stdout}"
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("get /bad")),
+        "W009 names the carved operation: {report:#?}"
     );
     // No un-carvable residual errors leaked as errors.
     assert!(
-        !stdout.contains("E006"),
-        "the rejection was carved, not left as an error: {stdout}"
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == Code::DynamicRefRejected),
+        "the rejection was carved, not left as an error: {report:#?}"
     );
 
     let generated = std::fs::read_to_string(&out).unwrap();
@@ -206,12 +203,15 @@ fn carve_output_is_deterministic() {
     let spec = write_spec(temp.path(), "openapi.yaml", ONE_BAD_OP);
     let first = temp.path().join("first.rs");
     let second = temp.path().join("second.rs");
-    assert!(generate(temp.path(), &spec, &first, &["--carve"])
-        .status
-        .success());
-    assert!(generate(temp.path(), &spec, &second, &["--carve"])
-        .status
-        .success());
+    let mut first_config = config(&spec, &first);
+    first_config.carve = true;
+    let mut second_config = config(&spec, &second);
+    second_config.carve = true;
+    assert_eq!(spargen::generate(&first_config).outcome, Outcome::Generated);
+    assert_eq!(
+        spargen::generate(&second_config).outcome,
+        Outcome::Generated
+    );
     assert_eq!(
         std::fs::read(&first).unwrap(),
         std::fs::read(&second).unwrap(),
@@ -275,30 +275,38 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", MIXED_REJECTIONS);
     let out = temp.path().join("client.rs");
-    let output = generate(temp.path(), &spec, &out, &["--carve", "--format", "json"]);
-    assert!(
-        output.status.success(),
-        "carve terminates and generates: {output:?}"
-    );
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"outcome\":\"Generated\""), "{stdout}");
+    let mut config = config(&spec, &out);
+    config.carve = true;
+    let report = spargen::generate(&config);
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     // The component `Bad` and the `$dynamicRef` operation are both carved and reported.
     assert!(
-        stdout.contains("component schemas Bad"),
-        "carved component reported: {stdout}"
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("component schemas Bad")),
+        "carved component reported: {report:#?}"
     );
     assert!(
-        stdout.contains("get /dynamic"),
-        "carved operation reported: {stdout}"
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.message.contains("get /dynamic")),
+        "carved operation reported: {report:#?}"
     );
     assert!(
-        !stdout.contains("E006"),
-        "the dynamic-ref rejection was carved: {stdout}"
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == Code::DynamicRefRejected),
+        "the dynamic-ref rejection was carved: {report:#?}"
     );
     assert!(
-        !stdout.contains("E013"),
-        "the intersection rejection was carved: {stdout}"
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == Code::AllOfIrreconcilable),
+        "the intersection rejection was carved: {report:#?}"
     );
 
     let generated = std::fs::read_to_string(&out).unwrap();
@@ -332,33 +340,35 @@ paths:
 
 #[test]
 fn carve_is_a_noop_on_a_spec_with_no_rejections() {
-    // (d) `--carve` on a spec that already generates cleanly changes nothing: it generates normally,
+    // (d) Carve on a spec that already generates cleanly changes nothing: it generates normally,
     // with no carve W009s.
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", CLEAN_SPEC);
     let carved = temp.path().join("carved.rs");
     let plain = temp.path().join("plain.rs");
 
-    let output = generate(
-        temp.path(),
-        &spec,
-        &carved,
-        &["--carve", "--format", "json"],
-    );
-    assert!(output.status.success(), "{output:?}");
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut carved_config = config(&spec, &carved);
+    carved_config.carve = true;
+    let report = spargen::generate(&carved_config);
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     assert_eq!(
-        w009_count(&stdout),
+        w009_count(&report),
         0,
-        "no constructs carved on a clean spec: {stdout}"
+        "no constructs carved on a clean spec: {report:#?}"
     );
 
     // The carved output is identical to a plain (non-carve) generate — carve added nothing.
-    assert!(generate(temp.path(), &spec, &plain, &[]).status.success());
     assert_eq!(
-        std::fs::read(&carved).unwrap(),
-        std::fs::read(&plain).unwrap(),
-        "carve on a clean spec equals a plain generate"
+        spargen::generate(&config(&spec, &plain)).outcome,
+        Outcome::Generated
+    );
+    let carved = std::fs::read_to_string(&carved).unwrap();
+    let plain = std::fs::read_to_string(&plain).unwrap();
+    let carved_body = carved.splitn(3, '\n').nth(2).unwrap();
+    let plain_body = plain.splitn(3, '\n').nth(2).unwrap();
+    assert_eq!(
+        carved_body, plain_body,
+        "carve on a clean spec generates the same module body"
     );
 }
 
@@ -382,7 +392,7 @@ fn check_command_supports_carve() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("\"outcome\":\"Clean\""), "{stdout}");
     assert_eq!(
-        w009_count(&stdout),
+        stdout.matches("W009").count(),
         1,
         "check reports the carved op: {stdout}"
     );

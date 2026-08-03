@@ -1,0 +1,4 @@
+Status:
+  type: string
+  description: Sale status of a pet.
+  enum: [available, sold]

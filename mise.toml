@@ -18,6 +18,10 @@ run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
 description = "Type-check the whole workspace"
 run = "cargo check --workspace --all-features"
 
+[tasks.runtime-dependencies]
+description = "Resolve generated-runtime dependencies at their declared floors and compile them"
+run = "cargo test -p spargen --test e2e runtime_dependency_floors_compile_with_direct_minimal_versions -- --exact --ignored --nocapture"
+
 [tasks.deny]
 description = "Supply-chain audit (licenses, advisories, bans)"
 run = "cargo deny check"
@@ -33,22 +37,25 @@ run = "cargo test --workspace --all-features"
 [tasks.corpus-smoke]
 description = "Run fast corpus smoke checks"
 run = [
-  "sh -c 'cargo run -q -p spargen -- check corpus/github-api-3-0/api.github.com.json --format json >/tmp/spargen-github-30.json || test $? -eq 1; grep -q E001 /tmp/spargen-github-30.json'",
-  "cargo run -q -p spargen -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml >/tmp/spargen-github-31.json",
-  "cargo run -q -p spargen -- check corpus/ollama/openapi.yaml --format json",
-  "cargo run -q -p spargen -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
+  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json >/tmp/spargen-github-30.json || test $? -eq 1; grep -q E001 /tmp/spargen-github-30.json'",
+  "cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml >/tmp/spargen-github-31.json",
+  "cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json",
+  "cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
   # 3.0.x/3.0.1/3.0.0 real-world APIs: rejected at the version gate (E001).
-  "sh -c 'cargo run -q -p spargen -- check corpus/stripe/spec3.json --format json >/tmp/spargen-stripe.json || test $? -eq 1; grep -q E001 /tmp/spargen-stripe.json'",
-  "sh -c 'cargo run -q -p spargen -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json >/tmp/spargen-twilio.json || test $? -eq 1; grep -q E001 /tmp/spargen-twilio.json'",
-  "sh -c 'cargo run -q -p spargen -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json >/tmp/spargen-k8s.json || test $? -eq 1; grep -q E001 /tmp/spargen-k8s.json'",
+  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json >/tmp/spargen-stripe.json || test $? -eq 1; grep -q E001 /tmp/spargen-stripe.json'",
+  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json >/tmp/spargen-twilio.json || test $? -eq 1; grep -q E001 /tmp/spargen-twilio.json'",
+  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json >/tmp/spargen-k8s.json || test $? -eq 1; grep -q E001 /tmp/spargen-k8s.json'",
   # meilisearch is 3.1.0 and clears the version gate, but its null externalDocs descriptions fail
   # the official 3.1 document schema before lowering.
-  "sh -c 'cargo run -q -p spargen -- check corpus/meilisearch/open-api.json --format json >/tmp/spargen-meili.json || test $? -eq 1; grep -q E011 /tmp/spargen-meili.json'",
+  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json >/tmp/spargen-meili.json || test $? -eq 1; grep -q E011 /tmp/spargen-meili.json'",
 ]
 
 [tasks.github-api]
 description = "Generate and compile the full pinned GitHub API client natively and for wasm"
-run = "scripts/check-github-api.sh"
+run = [
+  "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=1 cargo clippy --manifest-path examples/github-api/Cargo.toml --target-dir target/github-api-client --lib --all-features -- -D warnings -W clippy::expect-used",
+  "CARGO_INCREMENTAL=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=1 cargo check --manifest-path examples/github-api/Cargo.toml --target-dir target/github-api-client --lib --target wasm32-unknown-unknown --all-features",
+]
 
 [tasks.example]
 description = "Run the end-to-end petstore examples (build.rs + macro) against a local mock server"

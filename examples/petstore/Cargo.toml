@@ -14,13 +14,13 @@ publish = false
 [build-dependencies]
 spargen = { path = "../../spargen", default-features = false }
 
-# The runtime dependencies of generated output: the near-universal set, no spargen crate.
+# The audited runtime dependencies referenced by this generated API; no spargen crate.
 [dependencies]
-bytes = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
-secrecy = "0.10"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+bytes = "1.12.1"
+reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
 # `time` powers the bring-your-own retry wait (tokio::time::sleep) the example feeds RetryBackend;
 # the runtime itself never depends on tokio — timing is the caller's to supply.
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }

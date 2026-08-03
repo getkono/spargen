@@ -1,81 +1,14 @@
 //! # Subsystem: emit
 //! layer-deps: codegen, diag
 //!
-//! Output layout (module vs standalone crate), `Cargo.toml` synthesis, the provenance header, and
-//! `--check` drift diffing. Emit turns [`GeneratedCode`](crate::codegen::GeneratedCode)
-//! into a concrete on-disk [`EmitPlan`] that can be written or compared against checked-in output.
+//! Module assembly and provenance stamping. Emit turns
+//! [`GeneratedCode`](crate::codegen::GeneratedCode) into one deterministic module plan.
 
-mod check;
 mod header;
-mod manifest;
-
-use camino::Utf8PathBuf;
 
 use crate::codegen::{GeneratedCode, GeneratedFile};
 
-pub use check::{check_drift, DriftReport};
 pub use header::provenance_header;
-pub use manifest::synth_cargo_toml;
-
-/// Where and how generated code is written.
-#[derive(Debug, Clone)]
-pub enum OutputLayout {
-    /// A module (file or directory) checked into an existing crate.
-    Module {
-        /// The module path to write.
-        path: Utf8PathBuf,
-    },
-    /// A standalone, publishable crate.
-    Crate {
-        /// The crate directory to create.
-        dir: Utf8PathBuf,
-        /// Package identity for the synthesized `Cargo.toml`.
-        package: PackageMeta,
-    },
-}
-
-/// Identity of a synthesized standalone crate.
-#[derive(Debug, Clone)]
-pub struct PackageMeta {
-    /// Crate name.
-    pub name: String,
-    /// Crate version.
-    pub version: String,
-}
-
-/// The generated crate's feature set (default `uuid`+`time` on). `multipart`/`bytes_serde` are not
-/// user options — they are derived from the API (a `multipart/form-data` body, a `bytes::Bytes`
-/// struct field) so the synthesized manifest carries exactly the reqwest/bytes features the emitted
-/// code needs, deterministically.
-#[derive(Debug, Clone)]
-pub struct FeatureSet {
-    /// Enable the `uuid` mapping feature.
-    pub uuid: bool,
-    /// Enable the `time` mapping feature.
-    pub time: bool,
-    /// Enable reqwest's `multipart` feature — set when any operation has a `multipart/form-data`
-    /// request body, which the emitted code builds as a `reqwest::multipart::Form`.
-    pub multipart: bool,
-    /// Enable the `bytes` crate's `serde` feature — set when a generated struct has a `bytes::Bytes`
-    /// field (a `format: binary` / `contentEncoding: base64` property), so its derived
-    /// `Serialize`/`Deserialize` compiles.
-    pub bytes_serde: bool,
-    /// Pull in `quick-xml` — set when any operation has an `application/xml` / `text/xml` request or
-    /// response body, whose serialize/decode goes through the embedded XML runtime helpers.
-    pub xml: bool,
-}
-
-impl Default for FeatureSet {
-    fn default() -> Self {
-        Self {
-            uuid: true,
-            time: true,
-            multipart: false,
-            bytes_serde: false,
-            xml: false,
-        }
-    }
-}
 
 /// Identity of the source spec, stamped into the provenance header.
 #[derive(Debug, Clone)]
@@ -89,16 +22,11 @@ pub struct SpecMeta {
 /// Options for one emission.
 #[derive(Debug, Clone)]
 pub struct EmitOptions {
-    /// The output layout.
-    pub layout: OutputLayout,
-    /// The generated crate's features.
-    pub features: FeatureSet,
     /// Spec provenance to stamp.
     pub spec: SpecMeta,
 }
 
-/// A fully-rendered emission plan: every output file with its final on-disk contents (provenance
-/// header stamped, `Cargo.toml` synthesized), ready to [`write`] or [`check_drift`].
+/// A fully-rendered emission plan with its final on-disk contents and provenance header.
 #[derive(Debug, Clone, Default)]
 pub struct EmitPlan {
     /// The files to write, in deterministic order.
@@ -143,40 +71,11 @@ impl From<std::io::Error> for EmitError {
 pub fn plan(code: &GeneratedCode, options: &EmitOptions) -> Result<EmitPlan, EmitError> {
     let header = provenance_header(&options.spec);
     let mut files = Vec::new();
-    match &options.layout {
-        OutputLayout::Module { path } => {
-            let Some(file) = code.files.first() else {
-                return Err(EmitError::Layout("codegen produced no files".to_owned()));
-            };
-            files.push(GeneratedFile {
-                path: path.clone(),
-                contents: format!("{header}{}", file.contents),
-            });
-        }
-        OutputLayout::Crate { dir, package } => {
-            files.push(GeneratedFile {
-                path: dir.join("Cargo.toml"),
-                contents: synth_cargo_toml(package, &options.features),
-            });
-            for file in &code.files {
-                files.push(GeneratedFile {
-                    path: dir.join("src").join(&file.path),
-                    contents: format!("{header}{}", file.contents),
-                });
-            }
-        }
-    }
-    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let Some(file) = code.files.first() else {
+        return Err(EmitError::Layout("codegen produced no files".to_owned()));
+    };
+    files.push(GeneratedFile {
+        contents: format!("{header}{}", file.contents),
+    });
     Ok(EmitPlan { files })
-}
-
-/// Write a plan to disk.
-pub fn write(plan: &EmitPlan) -> Result<(), EmitError> {
-    for file in &plan.files {
-        if let Some(parent) = file.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&file.path, &file.contents)?;
-    }
-    Ok(())
 }

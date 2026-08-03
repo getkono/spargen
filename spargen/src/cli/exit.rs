@@ -9,8 +9,6 @@ pub enum ExitStatus {
     Ok = 0,
     /// One or more error-severity diagnostics were reported.
     Diagnostics = 1,
-    /// `generate --check` found the checked-in output had drifted.
-    Drift = 2,
     /// Invalid command-line usage.
     Usage = 3,
 }

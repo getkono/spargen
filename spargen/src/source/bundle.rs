@@ -4,30 +4,20 @@ use std::sync::Arc;
 use camino::{Utf8Path, Utf8PathBuf};
 use indexmap::IndexMap;
 
-use crate::diag::{
-    Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance, SourceSnippets,
-};
+use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance};
 
 use super::lock::{Lock, LOCK_FILE_NAME, VENDOR_DIR};
 use super::remote::{classify_ref, collect_refs, resolve_ref_url, split_fragment, RefTarget};
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
 
-/// A single loaded source file: its path and full text. The text is shared (`Arc<str>`) so
-/// rustc-style snippet rendering can borrow lines cheaply.
+/// A single loaded source file.
 #[derive(Debug, Clone)]
 pub struct SourceFile {
     /// Path as loaded (relative to the bundle root, or the vendored path for a remote document).
     pub path: Utf8PathBuf,
-    /// Full file contents.
-    pub text: Arc<str>,
-}
-
-impl SourceFile {
-    /// The text of the 1-based `line`, if present.
-    pub fn line_text(&self, line: u32) -> Option<&str> {
-        self.text.lines().nth(line.checked_sub(1)? as usize)
-    }
+    /// Exact bytes parsed from disk, retained for build-input fingerprinting.
+    pub bytes: Arc<[u8]>,
 }
 
 /// Where a loaded file came from — used to resolve refs that appear *inside* it. A relative ref in a
@@ -107,7 +97,7 @@ impl InputBundle {
             }
         }
 
-        diags.into_result(bundle)
+        diags.result(bundle)
     }
 
     /// The root document's value tree.
@@ -186,10 +176,17 @@ impl InputBundle {
     }
 
     /// The filesystem paths of every loaded document: the root spec, each relative-file `$ref`
-    /// target reachable from it, and each vendored remote copy. Used to compute the `--watch`
-    /// file set (a spec's full on-disk footprint). Order follows load order (root first).
+    /// target reachable from it, and each vendored remote copy. Used for build invalidation and
+    /// macro dependency tracking. Order follows load order (root first).
     pub fn source_paths(&self) -> impl Iterator<Item = &Utf8Path> {
         self.files.values().map(|file| file.path.as_path())
+    }
+
+    /// Every loaded document and the exact bytes used to parse it.
+    pub(crate) fn source_inputs(&self) -> impl Iterator<Item = (&Utf8Path, &[u8])> {
+        self.files
+            .values()
+            .map(|file| (file.path.as_path(), file.bytes.as_ref()))
     }
 
     /// Find a loaded file by its stored path, exact first and suffix second for ergonomic
@@ -203,16 +200,6 @@ impl InputBundle {
                     .iter()
                     .find_map(|(id, file)| file.path.as_str().ends_with(path).then_some(*id))
             })
-    }
-}
-
-impl SourceSnippets for InputBundle {
-    fn line_text(&self, file: FileId, line: u32) -> Option<&str> {
-        self.file(file)?.line_text(line)
-    }
-
-    fn path(&self, file: FileId) -> Option<&Utf8Path> {
-        self.file(file).map(|file| file.path.as_path())
     }
 }
 
@@ -236,7 +223,7 @@ impl InputBundle {
             id,
             SourceFile {
                 path: path.clone(),
-                text: Arc::<str>::from(text),
+                bytes: Arc::<[u8]>::from(text.as_bytes()),
             },
         );
         self.values.insert(id, parsed);
@@ -302,7 +289,7 @@ impl InputBundle {
             id,
             SourceFile {
                 path: vendored,
-                text: Arc::<str>::from(text),
+                bytes: Arc::<[u8]>::from(text.as_bytes()),
             },
         );
         self.values.insert(id, parsed);

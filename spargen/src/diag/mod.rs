@@ -2,30 +2,27 @@
 //! layer-deps:
 //!
 //! Diagnostic codes/severities, the JSON Pointer + span model, the `INT-###` interpretation
-//! registry, human/JSON renderers, and the S/W/R disposition table as data.
+//! registry, and the S/W/R disposition table as data.
 //! `diag` is the only vocabulary shared across pipeline stages, so it depends on nothing.
 //!
 //! Every diagnostic carries a severity, a stable [`Code`], the [`JsonPointer`] to the offending
 //! construct, a [`Span`] (`file:line:column`), a one-line message, and an optional remedy —
-//! rendered rustc-style for humans ([`render_human`]) or as stable JSON for CI ([`render_json`]).
 //! Generation collects all diagnostics into a capped [`Diagnostics`] batch rather than stopping
-//! at the first error.
+//! at the first error; presentation belongs to the optional binary.
 
 mod code;
 mod collect;
 mod interp;
 mod pointer;
 mod provenance;
-mod render;
 mod severity;
 mod span;
 
-pub use code::Code;
+pub use code::{Code, UnknownCode};
 pub use collect::{Aborted, Diagnostics};
 pub use interp::InterpId;
 pub use pointer::JsonPointer;
 pub use provenance::Provenance;
-pub use render::{render_human, render_json, SourceSnippets};
 pub use severity::Severity;
 pub use span::{FileId, Loc, Span};
 

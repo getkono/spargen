@@ -23,8 +23,9 @@ What it exercises:
 - **Error taxonomy** — a documented `404` arrives as the operation's typed error body; an
   undocumented `401` is preserved as `Error::UnexpectedStatus` and classified non-transient.
 
-The same client can be generated as checked-in code instead:
+To review and commit the generated client, change the `build.rs` output to `src/petstore.rs` and
+include it as a normal module. Generation remains a compilation-time step.
 
-```bash
-spargen generate petstore.yaml --out src/petstore.rs
+```rust
+let config = spargen::Config::new("petstore.yaml", "src/petstore.rs");
 ```

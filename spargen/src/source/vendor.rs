@@ -24,7 +24,7 @@ pub trait RemoteFetch {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, String>;
 }
 
-/// One vendored remote document, reported back from [`vendor`].
+/// One vendored remote document, reported back from [`crate::vendor`].
 #[derive(Debug, Clone)]
 pub struct VendoredRef {
     /// The absolute URL that was pinned.
@@ -35,7 +35,7 @@ pub struct VendoredRef {
     pub sha256: String,
 }
 
-/// The result of a successful [`vendor`] run.
+/// The result of a successful [`crate::vendor`] run.
 #[derive(Debug, Clone)]
 pub struct VendorReport {
     /// Every remote document that was fetched and pinned, in URL order.
@@ -194,7 +194,7 @@ pub fn vendor(
     })?;
 
     refs.sort_by(|a, b| a.url.cmp(&b.url));
-    diags.into_result(VendorReport {
+    diags.result(VendorReport {
         refs,
         lock_path,
         vendor_dir,
