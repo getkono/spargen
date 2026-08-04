@@ -17,6 +17,7 @@ mod lower;
 mod metaschema;
 mod resolve;
 mod schema;
+mod sse;
 
 pub use audit::audit;
 pub use deserialize::parse_document;

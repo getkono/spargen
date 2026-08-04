@@ -66,6 +66,8 @@ pub struct OperationBindings {
     pub url: Ident,
     /// Mutable request builder, then the built request.
     pub request: Ident,
+    /// Clone of a streaming request retained for opt-in SSE reconnects.
+    pub reconnect_request: Ident,
     /// Mutable cookie-fragment collection.
     pub cookies: Ident,
 }
@@ -136,6 +138,11 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                 raw_query: binding_scope.alloc("raw_query", IdentRole::Param, pointer),
                 url: binding_scope.alloc("url", IdentRole::Param, pointer),
                 request: binding_scope.alloc("request", IdentRole::Param, pointer),
+                reconnect_request: binding_scope.alloc(
+                    "reconnect_request",
+                    IdentRole::Param,
+                    pointer,
+                ),
                 cookies: binding_scope.alloc("cookies", IdentRole::Param, pointer),
             },
         );

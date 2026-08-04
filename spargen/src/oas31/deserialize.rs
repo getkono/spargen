@@ -648,6 +648,8 @@ fn boolean_schema(value: bool, provenance: Provenance) -> Schema {
         default: None,
         format: None,
         content_encoding: None,
+        content_media_type: None,
+        content_schema: None,
         xml: None,
         validation: ValidationKeywords::default(),
         deprecated: false,
@@ -778,6 +780,13 @@ fn parse_schema_or(
             .get("contentEncoding")
             .and_then(string)
             .map(str::to_owned),
+        content_media_type: map
+            .get("contentMediaType")
+            .and_then(string)
+            .map(str::to_owned),
+        content_schema: map.get("contentSchema").and_then(|value| {
+            parse_schema_or(value, &pointer.push("contentSchema"), diags).map(Box::new)
+        }),
         xml: map.get("xml").and_then(parse_xml),
         validation: parse_validation(map),
         deprecated: map
@@ -936,8 +945,6 @@ fn parse_validation(map: &SpannedMap) -> ValidationKeywords {
             "propertyNames",
             "unevaluatedProperties",
             "unevaluatedItems",
-            "contentMediaType",
-            "contentSchema",
         ]
         .iter()
         .any(|keyword| map.get(keyword).is_some()),
@@ -959,7 +966,6 @@ fn parse_validation_children(
         "propertyNames",
         "unevaluatedProperties",
         "unevaluatedItems",
-        "contentSchema",
     ] {
         if let Some(value) = map.get(keyword) {
             if let Some(schema) = parse_schema_or(value, &pointer.push(keyword), diags) {

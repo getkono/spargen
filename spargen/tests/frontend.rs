@@ -911,6 +911,97 @@ components:
 }
 
 #[test]
+fn oas32_sse_json_content_schema_types_the_payload() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      operationId: streamAdminEvents
+      responses:
+        '200':
+          description: ok
+          content:
+            text/event-stream:
+              itemSchema:
+                $ref: "#/components/schemas/SseEnvelope"
+components:
+  schemas:
+    SseEnvelope:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: string
+          contentMediaType: application/json
+          contentSchema:
+            $ref: "#/components/schemas/AdminEvent"
+        id: { type: string }
+        retry: { type: integer }
+    AdminEvent:
+      type: object
+      required: [kind, libraryId]
+      properties:
+        kind: { type: string, const: scanStarted }
+        libraryId: { type: string }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::ValidationKeywordIgnored),
+        "consumed SSE content annotations must not warn: {report:#?}"
+    );
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("EventStream < types :: AdminEvent >")
+            || flat.contains("EventStream<types::AdminEvent>"),
+        "contentSchema must become the stream payload type: {flat}"
+    );
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        !has_code(&checked, Code::ValidationKeywordIgnored),
+        "check/generate must agree that the SSE content annotations are consumed: {checked:#?}"
+    );
+}
+
+#[test]
+fn content_schema_outside_sse_remains_an_explicit_warning() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /value:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  encoded:
+                    type: string
+                    contentMediaType: application/json
+                    contentSchema: { type: object, properties: { id: { type: string } } }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+    let checked = check(spec);
+    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert!(
+        has_code(&checked, Code::ValidationKeywordIgnored),
+        "check/generate must report the same content annotation warning: {checked:#?}"
+    );
+}
+
+#[test]
 fn oas32_json_sequence_item_schema_generates_rfc7464_streaming() {
     let spec = r##"
 openapi: 3.2.0

@@ -50,6 +50,9 @@ pub enum Framing {
     Sse,
     /// Standards-compliant SSE events converted to JSON objects before schema deserialization.
     SseEvent,
+    /// OpenAPI 3.2 SSE whose envelope `data` string contains JSON described by `contentSchema`.
+    /// The runtime parses the envelope metadata but yields the decoded JSON payload directly.
+    SseJsonData,
     /// Newline-delimited JSON (`application/x-ndjson`).
     Ndjson,
     /// RFC 7464 records separated by ASCII RS (`0x1E`).

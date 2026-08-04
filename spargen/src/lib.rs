@@ -563,7 +563,7 @@ fn lower_frontend(
     let document = oas31::parse_document(&bundle, diags).map_err(|_| ())?;
 
     let resolver = oas31::Resolver::new(&document, &bundle);
-    oas31::audit(&document, diags);
+    oas31::audit(&document, &resolver, diags);
     if diags.has_errors() {
         return Err(());
     }

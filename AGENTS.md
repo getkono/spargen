@@ -18,7 +18,8 @@ changes.
   below is unchanged. `examples/petstore-macro` is its end-to-end guard.
 - `support-runtime/` — the freestanding runtime embedded verbatim into generated output.
   `publish = false`; its dependencies are exactly `reqwest` / `serde` / `serde_json` / `bytes` /
-  `secrecy`. No spargen crate may ever appear in a consumer's runtime graph. Each source file
+  `secrecy` / `futures-core` (the stream module and its dependency are emitted only for APIs with
+  sequential responses). No spargen crate may ever appear in a consumer's runtime graph. Each source file
   keeps its `#[cfg(test)]` module last — everything above that marker is embedded into generated
   code and must compile there.
 - `examples/petstore/` — the end-to-end example (own workspace); `mise run example` must stay

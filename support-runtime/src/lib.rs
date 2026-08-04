@@ -7,7 +7,7 @@
 //!
 //! No spargen crate ever appears in a consumer's runtime graph: this crate is `publish = false`
 //! and its only dependencies are the near-universal `reqwest` / `serde` / `serde_json` / `bytes`
-//! / `secrecy` set.
+//! / `secrecy` set plus `futures-core` for APIs that emit streaming operations.
 //!
 //! ## Fault-tolerance guarantees
 //!
@@ -24,7 +24,7 @@
 mod auth;
 // The blocking facade owns a current-thread tokio runtime, so it pulls in the optional `tokio`
 // dependency and is compiled only under the `blocking` feature. The default runtime dependency set
-// (reqwest/serde/serde_json/bytes/secrecy) stays unchanged; a generated client embeds this module
+// (reqwest/serde/serde_json/bytes/secrecy, plus conditional futures-core) stays unchanged; a generated client embeds this module
 // unconditionally but gates it on the same `blocking` feature, so nothing tokio-related is
 // referenced unless the consumer opts in.
 #[cfg(feature = "blocking")]
@@ -44,7 +44,8 @@ mod transport;
 // set of bounds that builds both natively and on the browser `fetch` backend.
 mod wasm;
 // The XML codec pulls in the optional `quick-xml` dependency, so it is compiled only under the
-// `xml` feature; the default runtime dependency set (reqwest/serde/serde_json/bytes/secrecy) stays
+// `xml` feature; the default runtime dependency set (reqwest/serde/serde_json/bytes/secrecy, plus
+// conditional futures-core) stays
 // unchanged. A generated client embeds this module only when its spec uses an XML body.
 #[cfg(feature = "xml")]
 mod xml;
@@ -67,7 +68,9 @@ pub use paginate::{next_link, LinkPaginator};
 pub use parameter::{serialize_form, serialize_simple, ParameterError};
 pub use response::ResponseValue;
 pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
-pub use stream::{EventStream, Framing};
+pub use stream::{
+    EventStream, Framing, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
+};
 pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
 pub use wasm::{MaybeSend, MaybeSync};
 #[cfg(feature = "xml")]

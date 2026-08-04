@@ -53,6 +53,11 @@ pub struct Schema {
     pub format: Option<String>,
     /// `contentEncoding` (e.g. `base64` → bytes).
     pub content_encoding: Option<String>,
+    /// `contentMediaType`, retained so OpenAPI 3.2 SSE `data` fields can declare embedded JSON.
+    pub content_media_type: Option<String>,
+    /// `contentSchema`, the schema of string-encoded content. It changes the generated payload
+    /// shape only for the recognized OpenAPI 3.2 SSE `data` position.
+    pub content_schema: Option<Box<SchemaOr>>,
     /// The OpenAPI `xml` object, if present — XML representation hints consumed only when the schema
     /// is used as an XML body.
     pub xml: Option<XmlHints>,

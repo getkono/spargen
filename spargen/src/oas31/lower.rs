@@ -737,6 +737,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         union.const_value = None;
         union.format = None;
         union.content_encoding = None;
+        union.content_media_type = None;
+        union.content_schema = None;
         union.xml = None;
         union.validation = ValidationKeywords::default();
         self.lower_union(&union, hint)
@@ -2395,14 +2397,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // apply to a stream, so `itemSchema` is preferred (falling back to `schema` for the
                 // pre-3.2 form where the item type was written as `schema`). On a non-streaming media
                 // `itemSchema` is meaningless: acknowledge it with `W010` and use `schema`.
-                let (schema_source, stream) = if let Some(framing) = media.stream_framing() {
+                let (ty, stream) = if let Some(framing) = media.stream_framing() {
                     if let Some(item_schema) = object.item_schema.as_ref() {
-                        let framing = if media == MediaType::EventStream && self.document.is_oas32 {
-                            crate::ir::Framing::SseEvent
+                        if media == MediaType::EventStream && self.document.is_oas32 {
+                            if let Some(json) = super::sse::json_data_schema(
+                                item_schema,
+                                self.resolver,
+                                self.diags,
+                            ) {
+                                let ty = self.lower_schema_or(&json.schema, "ResponseBody");
+                                self.warn_structural_default_or(
+                                    &json.schema,
+                                    "an SSE JSON data content schema",
+                                );
+                                (ty, Some(crate::ir::Framing::SseJsonData))
+                            } else {
+                                (
+                                    self.lower_schema_ref(item_schema, "ResponseBody"),
+                                    Some(crate::ir::Framing::SseEvent),
+                                )
+                            }
                         } else {
-                            framing
-                        };
-                        (Some(item_schema), Some(framing))
+                            (
+                                self.lower_schema_ref(item_schema, "ResponseBody"),
+                                Some(framing),
+                            )
+                        }
                     } else if self.document.is_oas32 && object.schema.is_some() {
                         Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
                             .message(
@@ -2413,7 +2433,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             .emit(self.diags);
                         return None;
                     } else {
-                        (object.schema.as_ref(), Some(framing))
+                        (
+                            object
+                                .schema
+                                .as_ref()
+                                .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody")),
+                            Some(framing),
+                        )
                     }
                 } else {
                     if object.item_schema.is_some() {
@@ -2427,11 +2453,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         )
                         .emit(self.diags);
                     }
-                    (object.schema.as_ref(), None)
+                    (
+                        object
+                            .schema
+                            .as_ref()
+                            .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody")),
+                        None,
+                    )
                 };
-                let ty =
-                    schema_source.and_then(|schema| self.lower_schema_ref(schema, "ResponseBody"));
-                if let Some(schema) = schema_source {
+                if let Some(schema) = object.item_schema.as_ref().filter(|_| stream.is_some()) {
+                    self.warn_structural_default_ref(schema, "a response body schema");
+                } else if let Some(schema) = object.schema.as_ref() {
                     self.warn_structural_default_ref(schema, "a response body schema");
                 }
                 if matches!(media, MediaType::FormUrlEncoded | MediaType::Multipart) {

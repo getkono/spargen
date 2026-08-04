@@ -1,30 +1,71 @@
 //! Typed streaming for response bodies delivered as Server-Sent Events (`text/event-stream`) or
 //! newline-delimited JSON (`application/x-ndjson`). A streaming operation returns an
-//! [`EventStream<T>`] — a *manual* async iterator that yields decoded items one at a time.
-//!
-//! The iterator is deliberately futures-free: it holds the live [`reqwest::Response`] and pulls
-//! bytes incrementally with [`reqwest::Response::chunk`] (which needs no reqwest `stream` feature
-//! and no `futures` crate), buffers them, and frames complete items out of the buffer. It does
-//! *not* implement `futures::Stream` — that would pull in `futures_core`, outside the runtime's
-//! fixed dependency set. Callers drive it with a plain `while let Some(item) = stream.next().await`.
-//!
-//! On `wasm32` (reqwest's browser `fetch` backend), `chunk()` is unavailable, so the buffer is
-//! filled by reading the whole body once with [`reqwest::Response::bytes`] and framing it from
-//! memory (the browser buffers the full response regardless). The `EventStream` API and yielded
-//! items are identical; only the delivery is non-incremental there.
+//! [`EventStream<T>`], a standard [`futures_core::Stream`] with a dependency-free inherent
+//! `next().await` convenience method. Reqwest's body stream keeps delivery incremental on native
+//! and browser targets; dropping `EventStream` drops that body stream and cancels the transfer.
 //!
 //! Framing is a pure function ([`next_frame`]) over an owned byte buffer, so the framing/decoding
-//! logic is unit-testable without any network IO or async runtime — [`EventStream::next`] is a thin
-//! await-chunk loop around it.
+//! logic is unit-testable without network IO or an async runtime.
 
 use std::convert::Infallible;
+use std::future::Future;
 use std::marker::PhantomData;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
-use reqwest::Response;
+use futures_core::Stream;
+use reqwest::{Request, Response};
 use serde::de::DeserializeOwned;
 
-use crate::Error;
+use crate::{send, unexpected_status, ClientCore, Error, MaybeSend, MaybeSync, TransportError};
+
+/// The failure yielded by a streaming response after its initial HTTP response was accepted.
+pub type StreamError = Error<Infallible>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>;
+#[cfg(target_arch = "wasm32")]
+type BodyStream = Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>>>>;
+
+/// The caller-provided wait before an automatic reconnect attempt.
+#[cfg(not(target_arch = "wasm32"))]
+pub type ReconnectWait = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
+/// The caller-provided wait before an automatic reconnect attempt (wasm variant).
+#[cfg(target_arch = "wasm32")]
+pub type ReconnectWait = Pin<Box<dyn Future<Output = ()> + 'static>>;
+
+#[cfg(not(target_arch = "wasm32"))]
+type ReconnectFuture = Pin<Box<dyn Future<Output = Result<Response, StreamError>> + Send>>;
+#[cfg(target_arch = "wasm32")]
+type ReconnectFuture = Pin<Box<dyn Future<Output = Result<Response, StreamError>>>>;
+
+/// Why an automatic SSE reconnect is being considered.
+#[derive(Debug)]
+pub enum ReconnectReason<'a> {
+    /// The server closed the response body cleanly.
+    EndOfStream,
+    /// Reading or re-establishing the stream failed.
+    Failure(&'a StreamError),
+}
+
+/// Opt-in automatic reconnect policy.
+///
+/// Returning a wait future requests another connection; returning `None` stops. The policy owns
+/// attempt limits and timing. `attempt` starts at zero, increases after each accepted reconnect,
+/// and resets after a successfully decoded item. `server_delay` is the latest valid SSE `retry:`
+/// value, when present.
+pub trait ReconnectPolicy: MaybeSend + MaybeSync {
+    /// Decide whether to reconnect and provide the future that waits until the next attempt.
+    fn reconnect(
+        &self,
+        attempt: u32,
+        reason: ReconnectReason<'_>,
+        server_delay: Option<Duration>,
+    ) -> Option<ReconnectWait>;
+}
 
 /// How a streaming response body is framed into individual items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +77,9 @@ pub enum Framing {
     /// Standards-compliant Server-Sent Events converted into JSON objects with `data`, `event`,
     /// `id`, and `retry` fields before deserializing the OpenAPI 3.2 `itemSchema` type.
     SseEvent,
+    /// OpenAPI 3.2 SSE whose `data` string contains JSON described by `contentSchema`; metadata is
+    /// retained on the stream while the decoded JSON payload is yielded directly.
+    SseJsonData,
     /// Newline-delimited JSON (`application/x-ndjson`): one JSON item per non-empty line.
     Ndjson,
     /// RFC 7464 JSON Text Sequences (`application/json-seq` / `application/*+json-seq`).
@@ -56,17 +100,37 @@ pub enum Framing {
 ///
 /// Dropping the stream is safe and cancels the underlying transfer (standard HTTP drop semantics).
 pub struct EventStream<T> {
-    /// The live response while bytes remain; `None` once the body is exhausted or terminated.
-    response: Option<Response>,
+    state: StreamState,
     /// Bytes read but not yet framed into a complete item. Partial frames live here between chunks.
     buffer: Vec<u8>,
     /// The framing mode for this body.
     framing: Framing,
-    /// Once set, the stream is finished and [`Self::next`] returns `None` without further IO.
-    done: bool,
-    /// `T` is produced, never consumed; the `fn() -> T` marker keeps `EventStream<T>: Send + Sync`
-    /// regardless of `T`.
+    last_event_id: Option<String>,
+    reconnect_delay: Option<Duration>,
+    reconnect: Option<ReconnectContext>,
+    /// `T` is produced, never consumed; the `fn() -> T` marker keeps `T` from imposing unrelated
+    /// auto-trait bounds on the stream.
     _marker: PhantomData<fn() -> T>,
+}
+
+enum StreamState {
+    Body(BodyStream),
+    Eof,
+    Waiting(ReconnectWait),
+    Connecting(ReconnectFuture),
+    Done,
+}
+
+enum OwnedReconnectReason {
+    EndOfStream,
+    Failure(StreamError),
+}
+
+struct ReconnectContext {
+    core: ClientCore,
+    request: Request,
+    policy: Option<Arc<dyn ReconnectPolicy>>,
+    attempt: u32,
 }
 
 impl<T> EventStream<T> {
@@ -74,91 +138,246 @@ impl<T> EventStream<T> {
     /// consumed lazily — no bytes are read until the first [`Self::next`] call.
     pub fn new(response: Response, framing: Framing) -> Self {
         Self {
-            response: Some(response),
+            state: StreamState::Body(Box::pin(response.bytes_stream())),
             buffer: Vec::new(),
             framing,
-            done: false,
+            last_event_id: None,
+            reconnect_delay: None,
+            reconnect: None,
             _marker: PhantomData,
         }
+    }
+
+    /// Build a stream that can opt into reconnecting the prepared request. Generated operation
+    /// methods use this constructor; ordinary callers use [`Self::with_reconnect`] to enable it.
+    pub fn new_reconnectable(
+        response: Response,
+        framing: Framing,
+        core: ClientCore,
+        request: Option<Request>,
+    ) -> Self {
+        let last_event_id = request.as_ref().and_then(|request| {
+            request
+                .headers()
+                .get("last-event-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        });
+        Self {
+            state: StreamState::Body(Box::pin(response.bytes_stream())),
+            buffer: Vec::new(),
+            framing,
+            last_event_id,
+            reconnect_delay: None,
+            reconnect: request.map(|request| ReconnectContext {
+                core,
+                request,
+                policy: None,
+                attempt: 0,
+            }),
+            _marker: PhantomData,
+        }
+    }
+
+    /// Enable automatic reconnects using a caller-owned policy and timer.
+    pub fn with_reconnect(mut self, policy: Arc<dyn ReconnectPolicy>) -> Result<Self, StreamError> {
+        let Some(reconnect) = self.reconnect.as_mut() else {
+            return Err(Error::request_message(
+                "this streaming request cannot be cloned safely for automatic reconnect",
+            ));
+        };
+        reconnect.policy = Some(policy);
+        Ok(self)
+    }
+
+    /// The latest SSE event ID, including an empty ID that resets replay state.
+    pub fn last_event_id(&self) -> Option<&str> {
+        self.last_event_id.as_deref()
+    }
+
+    /// The latest valid server-provided SSE `retry:` delay.
+    pub fn reconnect_delay(&self) -> Option<Duration> {
+        self.reconnect_delay
     }
 }
 
 impl<T: DeserializeOwned> EventStream<T> {
-    /// Yield the next decoded item, or `None` at end of stream. A mid-stream transport error
-    /// surfaces as `Some(Err(..))` and terminates the stream (subsequent calls return `None`). A
-    /// per-frame decode failure also surfaces as `Some(Err(Error::Decode { .. }))` rather than being
-    /// silently skipped, but does NOT terminate the stream — the next call resumes framing the
-    /// following items, so a single malformed event does not abandon the rest.
+    /// Yield the next decoded item, or `None` at end of stream. A mid-stream transport error that
+    /// is not accepted by an enabled reconnect policy surfaces as `Some(Err(..))` and terminates the
+    /// stream (subsequent calls return `None`). A per-frame decode failure also surfaces as
+    /// `Some(Err(Error::Decode { .. }))` rather than being silently skipped, but does NOT terminate
+    /// the stream — the next call resumes framing the following items, so a single malformed event
+    /// does not abandon the rest.
     ///
     /// The item type `T` is decoded per-frame with `serde_json::from_slice`.
-    pub async fn next(&mut self) -> Option<Result<T, Error<Infallible>>> {
-        if self.done {
-            return None;
-        }
+    pub async fn next(&mut self) -> Option<Result<T, StreamError>> {
+        std::future::poll_fn(|cx| Pin::new(&mut *self).poll_next(cx)).await
+    }
+}
+
+impl<T: DeserializeOwned> Stream for EventStream<T> {
+    type Item = Result<T, StreamError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
         loop {
-            let at_eof = self.response.is_none();
-            match next_frame(&mut self.buffer, self.framing, at_eof) {
-                FramePoll::Item(payload) => return Some(deserialize_item::<T>(&payload)),
-                FramePoll::Done => {
-                    self.done = true;
-                    self.response = None;
-                    self.buffer.clear();
-                    return None;
-                }
-                FramePoll::NeedMore => {
-                    if at_eof {
-                        // No complete frame and the body is exhausted: the stream is over.
-                        self.done = true;
-                        return None;
+            let at_eof = matches!(this.state, StreamState::Eof);
+            match next_frame(&mut this.buffer, this.framing, at_eof) {
+                FramePoll::Item { payload, metadata } => {
+                    this.apply_metadata(metadata);
+                    let item = deserialize_item::<T>(&payload);
+                    if item.is_ok() {
+                        if let Some(reconnect) = this.reconnect.as_mut() {
+                            reconnect.attempt = 0;
+                        }
                     }
-                    // Pull more bytes into the buffer (or reach EOF). A transport failure mid-stream
-                    // surfaces as `Some(Err(..))` and terminates the stream.
-                    if let Err(error) = self.pull().await {
-                        self.done = true;
-                        self.response = None;
-                        return Some(Err(error));
+                    return Poll::Ready(Some(item));
+                }
+                FramePoll::Metadata(metadata) => {
+                    this.apply_metadata(metadata);
+                    continue;
+                }
+                FramePoll::Done(metadata) => {
+                    this.apply_metadata(metadata);
+                    this.state = StreamState::Done;
+                    this.buffer.clear();
+                    return Poll::Ready(None);
+                }
+                FramePoll::NeedMore => {}
+            }
+
+            match std::mem::replace(&mut this.state, StreamState::Done) {
+                StreamState::Body(mut body) => match body.as_mut().poll_next(cx) {
+                    Poll::Pending => {
+                        this.state = StreamState::Body(body);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Some(Ok(chunk))) => {
+                        this.state = StreamState::Body(body);
+                        this.buffer.extend_from_slice(&chunk);
+                    }
+                    Poll::Ready(Some(Err(error))) => {
+                        let error = Error::InterruptedBody(TransportError::new(error));
+                        if let Some(error) =
+                            this.schedule_reconnect(OwnedReconnectReason::Failure(error))
+                        {
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                    }
+                    Poll::Ready(None) => this.state = StreamState::Eof,
+                },
+                StreamState::Eof => {
+                    let _ = this.schedule_reconnect(OwnedReconnectReason::EndOfStream);
+                    if matches!(this.state, StreamState::Done) {
+                        return Poll::Ready(None);
                     }
                 }
+                StreamState::Waiting(mut wait) => match wait.as_mut().poll(cx) {
+                    Poll::Pending => {
+                        this.state = StreamState::Waiting(wait);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(()) => {
+                        let Some(future) = this.reconnect_future() else {
+                            this.state = StreamState::Done;
+                            return Poll::Ready(Some(Err(Error::request_message(
+                                "streaming request could not be cloned for reconnect",
+                            ))));
+                        };
+                        this.state = StreamState::Connecting(future);
+                    }
+                },
+                StreamState::Connecting(mut future) => match future.as_mut().poll(cx) {
+                    Poll::Pending => {
+                        this.state = StreamState::Connecting(future);
+                        return Poll::Pending;
+                    }
+                    Poll::Ready(Ok(response)) => {
+                        this.state = StreamState::Body(Box::pin(response.bytes_stream()));
+                    }
+                    Poll::Ready(Err(error)) => {
+                        if let Some(error) =
+                            this.schedule_reconnect(OwnedReconnectReason::Failure(error))
+                        {
+                            return Poll::Ready(Some(Err(error)));
+                        }
+                    }
+                },
+                StreamState::Done => return Poll::Ready(None),
             }
         }
     }
+}
 
-    /// Read more bytes into `self.buffer`, or drop `self.response` at end of body so the next frame
-    /// pass runs with `at_eof`. On native the reqwest backend streams incrementally via
-    /// [`reqwest::Response::chunk`]. `chunk` is not available on reqwest's `wasm32` `fetch` backend,
-    /// which has no incremental read; see the wasm variant below.
-    #[cfg(not(target_arch = "wasm32"))]
-    async fn pull(&mut self) -> Result<(), Error<Infallible>> {
-        // `next` only calls `pull` when the response is present. Still handle an exhausted state
-        // explicitly: runtime state transitions must remain panic-free even if this helper is
-        // rearranged in the future.
-        let Some(response) = self.response.as_mut() else {
-            return Ok(());
-        };
-        match response.chunk().await {
-            Ok(Some(chunk)) => self.buffer.extend_from_slice(&chunk),
-            // Clean EOF: drop the response so the next loop reframes with `at_eof`, flushing any
-            // trailing complete frame.
-            Ok(None) => self.response = None,
-            Err(error) => return Err(Error::from_reqwest(error)),
+impl<T> EventStream<T> {
+    fn apply_metadata(&mut self, metadata: SseMetadata) {
+        if let Some(id) = metadata.id {
+            self.last_event_id = Some(id);
         }
-        Ok(())
+        if let Some(retry) = metadata.retry {
+            self.reconnect_delay = Some(Duration::from_millis(retry));
+        }
     }
 
-    /// The `wasm32` buffer fill: reqwest's browser `fetch` backend exposes no incremental `chunk()`,
-    /// so read the whole body once with [`reqwest::Response::bytes`] and frame it from memory. The
-    /// browser buffers the full response regardless, so the same items are yielded — just not
-    /// incrementally (a documented wasm limitation). Dropping the response signals EOF to the next
-    /// frame pass, which then flushes every buffered item.
-    #[cfg(target_arch = "wasm32")]
-    async fn pull(&mut self) -> Result<(), Error<Infallible>> {
-        // See the native variant: exhausted state is harmless and must never become a panic.
-        let Some(response) = self.response.take() else {
-            return Ok(());
+    /// Schedule a reconnect. `Some(error)` means the policy declined a failure and it must be
+    /// yielded; `None` means either reconnecting was scheduled or clean EOF terminated normally.
+    fn schedule_reconnect(&mut self, reason: OwnedReconnectReason) -> Option<StreamError> {
+        let Some(reconnect) = self.reconnect.as_mut() else {
+            self.state = StreamState::Done;
+            return match reason {
+                OwnedReconnectReason::EndOfStream => None,
+                OwnedReconnectReason::Failure(error) => Some(error),
+            };
         };
-        let bytes = response.bytes().await.map_err(Error::from_reqwest)?;
-        self.buffer.extend_from_slice(&bytes);
-        Ok(())
+        let Some(policy) = reconnect.policy.as_ref() else {
+            self.state = StreamState::Done;
+            return match reason {
+                OwnedReconnectReason::EndOfStream => None,
+                OwnedReconnectReason::Failure(error) => Some(error),
+            };
+        };
+        let reason_ref = match &reason {
+            OwnedReconnectReason::EndOfStream => ReconnectReason::EndOfStream,
+            OwnedReconnectReason::Failure(error) => ReconnectReason::Failure(error),
+        };
+        let Some(wait) = policy.reconnect(reconnect.attempt, reason_ref, self.reconnect_delay)
+        else {
+            self.state = StreamState::Done;
+            return match reason {
+                OwnedReconnectReason::EndOfStream => None,
+                OwnedReconnectReason::Failure(error) => Some(error),
+            };
+        };
+        reconnect.attempt = reconnect.attempt.saturating_add(1);
+        // A partial event belongs to the closed connection and must never be concatenated with the
+        // first bytes from the replay connection.
+        self.buffer.clear();
+        self.state = StreamState::Waiting(wait);
+        None
+    }
+
+    fn reconnect_future(&self) -> Option<ReconnectFuture> {
+        let reconnect = self.reconnect.as_ref()?;
+        let core = reconnect.core.clone();
+        let mut request = reconnect.request.try_clone()?;
+        match self.last_event_id.as_deref() {
+            Some("") => {
+                request.headers_mut().remove("last-event-id");
+            }
+            Some(id) => {
+                let value = reqwest::header::HeaderValue::from_str(id).ok()?;
+                request.headers_mut().insert("last-event-id", value);
+            }
+            None => {}
+        }
+        Some(Box::pin(async move {
+            let response = send(&core, request).await?;
+            if response.status().is_success() {
+                Ok(response)
+            } else {
+                Err(unexpected_status(&core, response).await)
+            }
+        }))
     }
 }
 
@@ -166,9 +385,14 @@ impl<T: DeserializeOwned> EventStream<T> {
 #[derive(Debug, PartialEq, Eq)]
 enum FramePoll {
     /// A complete JSON payload was framed and removed from the buffer.
-    Item(Vec<u8>),
+    Item {
+        payload: Vec<u8>,
+        metadata: SseMetadata,
+    },
+    /// An SSE event updated metadata without dispatching a data payload.
+    Metadata(SseMetadata),
     /// A terminator was reached (SSE `[DONE]` sentinel): the stream ends.
-    Done,
+    Done(SseMetadata),
     /// No complete frame is available yet; read more bytes (or, at EOF, the stream ends).
     NeedMore,
 }
@@ -179,8 +403,9 @@ enum FramePoll {
 fn next_frame(buffer: &mut Vec<u8>, framing: Framing, at_eof: bool) -> FramePoll {
     match framing {
         Framing::Ndjson => ndjson_next(buffer, at_eof),
-        Framing::Sse => sse_next(buffer, at_eof),
-        Framing::SseEvent => sse_event_next(buffer, at_eof),
+        Framing::Sse => sse_next(buffer, at_eof, SseOutput::LegacyData),
+        Framing::SseEvent => sse_next(buffer, at_eof, SseOutput::Envelope),
+        Framing::SseJsonData => sse_next(buffer, at_eof, SseOutput::JsonData),
         Framing::JsonSequence => json_sequence_next(buffer, at_eof),
     }
 }
@@ -199,7 +424,7 @@ fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
             if line.is_empty() {
                 continue;
             }
-            return FramePoll::Item(line);
+            return frame_item(line);
         }
         if at_eof {
             let mut end = buffer.len();
@@ -211,7 +436,7 @@ fn ndjson_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
             if line.is_empty() {
                 return FramePoll::NeedMore;
             }
-            return FramePoll::Item(line);
+            return frame_item(line);
         }
         return FramePoll::NeedMore;
     }
@@ -254,53 +479,21 @@ fn json_sequence_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
     if payload.is_empty() {
         FramePoll::NeedMore
     } else {
-        FramePoll::Item(payload)
+        frame_item(payload)
     }
 }
 
-/// SSE framing: accumulate lines until a blank line terminates an event, concatenating the event's
-/// `data:` field lines into one payload. Comment lines (`:`…) and non-`data` fields are ignored. A
-/// `data: [DONE]` payload ends the stream. At EOF a final event not closed by a blank line is
-/// flushed. Only a full event (or an EOF flush) consumes bytes, so a partial event is retained.
-fn sse_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
-    loop {
-        let mut pos = 0;
-        let mut data: Vec<u8> = Vec::new();
-        let mut saw_terminator = false;
-        while let Some((line, next)) = take_line(buffer, pos) {
-            pos = next;
-            if line.is_empty() {
-                saw_terminator = true;
-                break;
-            }
-            append_data_line(line, &mut data);
-        }
-        if !saw_terminator {
-            if at_eof {
-                // Flush a final event: fold any last line lacking a trailing newline into `data`.
-                if pos < buffer.len() {
-                    let mut line = &buffer[pos..];
-                    if line.last() == Some(&b'\r') {
-                        line = &line[..line.len() - 1];
-                    }
-                    if !line.is_empty() {
-                        append_data_line(line, &mut data);
-                    }
-                }
-                buffer.clear();
-                return finish_event(data);
-            }
-            // Wait for the blank-line terminator before consuming anything.
-            return FramePoll::NeedMore;
-        }
-        buffer.drain(..pos);
-        match finish_event(data) {
-            // An event with no `data:` field (e.g. only comments or a keep-alive) dispatches
-            // nothing; keep framing the next event rather than yielding an empty item.
-            FramePoll::NeedMore => continue,
-            other => return other,
-        }
+fn frame_item(payload: Vec<u8>) -> FramePoll {
+    FramePoll::Item {
+        payload,
+        metadata: SseMetadata::default(),
     }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SseMetadata {
+    id: Option<String>,
+    retry: Option<u64>,
 }
 
 #[derive(Default)]
@@ -311,10 +504,16 @@ struct SseFields {
     retry: Option<u64>,
 }
 
-/// OpenAPI 3.2 SSE framing. The event stream is parsed before Schema Object application, so each
-/// dispatched event becomes the JSON-equivalent object described by `itemSchema` rather than
-/// treating `data:` as an embedded JSON document.
-fn sse_event_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
+#[derive(Clone, Copy)]
+enum SseOutput {
+    LegacyData,
+    Envelope,
+    JsonData,
+}
+
+/// SSE framing. Events are parsed once, then rendered as the legacy JSON-in-`data` payload, the
+/// OpenAPI 3.2 event envelope, or the JSON payload described by `data.contentSchema`.
+fn sse_next(buffer: &mut Vec<u8>, at_eof: bool, output: SseOutput) -> FramePoll {
     loop {
         let mut pos = 0;
         let mut fields = SseFields::default();
@@ -342,7 +541,7 @@ fn sse_event_next(buffer: &mut Vec<u8>, at_eof: bool) -> FramePoll {
         } else {
             buffer.drain(..pos);
         }
-        match finish_sse_fields(fields) {
+        match finish_sse_fields(fields, output) {
             FramePoll::NeedMore if !buffer.is_empty() => continue,
             result => return result,
         }
@@ -353,7 +552,7 @@ fn append_sse_field(line: &[u8], fields: &mut SseFields) {
     if line.first() == Some(&b':') {
         return;
     }
-    let (field, value) = match line.iter().position(|byte| *byte == b':') {
+    let (field, value) = match line.iter().position(|&b| b == b':') {
         Some(colon) => {
             let mut value = &line[colon + 1..];
             if value.first() == Some(&b' ') {
@@ -370,7 +569,7 @@ fn append_sse_field(line: &[u8], fields: &mut SseFields) {
         }
         b"event" => fields.event = Some(value.to_vec()),
         b"id" if !value.contains(&0) => fields.id = Some(value.to_vec()),
-        b"retry" => {
+        b"retry" if !value.is_empty() && value.iter().all(u8::is_ascii_digit) => {
             fields.retry = std::str::from_utf8(value)
                 .ok()
                 .and_then(|value| value.parse().ok());
@@ -379,73 +578,55 @@ fn append_sse_field(line: &[u8], fields: &mut SseFields) {
     }
 }
 
-fn finish_sse_fields(mut fields: SseFields) -> FramePoll {
-    if fields.data.is_empty() {
-        return FramePoll::NeedMore;
-    }
-    if fields.data.last() == Some(&b'\n') {
-        fields.data.pop();
-    }
-    let mut object = serde_json::Map::new();
-    object.insert(
-        "data".to_owned(),
-        serde_json::Value::String(String::from_utf8_lossy(&fields.data).into_owned()),
-    );
-    if let Some(event) = fields.event {
-        object.insert(
-            "event".to_owned(),
-            serde_json::Value::String(String::from_utf8_lossy(&event).into_owned()),
-        );
-    }
-    if let Some(id) = fields.id {
-        object.insert(
-            "id".to_owned(),
-            serde_json::Value::String(String::from_utf8_lossy(&id).into_owned()),
-        );
-    }
-    if let Some(retry) = fields.retry {
-        object.insert("retry".to_owned(), serde_json::Value::from(retry));
-    }
-    FramePoll::Item(serde_json::Value::Object(object).to_string().into_bytes())
-}
-
-/// Turn an event's assembled `data` payload into a poll result: empty → nothing to dispatch, the
-/// `[DONE]` sentinel → end of stream, otherwise the payload (its single trailing `\n` stripped).
-fn finish_event(mut data: Vec<u8>) -> FramePoll {
-    if data.is_empty() {
-        return FramePoll::NeedMore;
-    }
-    if data.last() == Some(&b'\n') {
-        data.pop();
-    }
-    if data == b"[DONE]" {
-        return FramePoll::Done;
-    }
-    FramePoll::Item(data)
-}
-
-/// Append one SSE line's contribution to the event `data`. A comment line (leading `:`) or a
-/// non-`data` field (`event:`/`id:`/`retry:`/unknown) contributes nothing; a `data:` line appends
-/// its value (one optional leading space stripped) followed by a `\n`, per the SSE data model.
-fn append_data_line(line: &[u8], data: &mut Vec<u8>) {
-    if line.first() == Some(&b':') {
-        return;
-    }
-    let (field, value) = match line.iter().position(|&b| b == b':') {
-        Some(colon) => {
-            let mut value = &line[colon + 1..];
-            if value.first() == Some(&b' ') {
-                value = &value[1..];
-            }
-            (&line[..colon], value)
-        }
-        // A field name with no colon carries an empty value (per the SSE grammar).
-        None => (line, &b""[..]),
+fn finish_sse_fields(mut fields: SseFields, output: SseOutput) -> FramePoll {
+    let metadata = SseMetadata {
+        id: fields
+            .id
+            .as_deref()
+            .map(|id| String::from_utf8_lossy(id).into_owned()),
+        retry: fields.retry,
     };
-    if field == b"data" {
-        data.extend_from_slice(value);
-        data.push(b'\n');
+    if fields.data.is_empty() {
+        return if metadata == SseMetadata::default() {
+            FramePoll::NeedMore
+        } else {
+            FramePoll::Metadata(metadata)
+        };
     }
+    fields.data.pop();
+    let payload = match output {
+        SseOutput::LegacyData => {
+            if fields.data == b"[DONE]" {
+                return FramePoll::Done(metadata);
+            }
+            fields.data
+        }
+        SseOutput::JsonData => fields.data,
+        SseOutput::Envelope => {
+            let mut object = serde_json::Map::new();
+            object.insert(
+                "data".to_owned(),
+                serde_json::Value::String(String::from_utf8_lossy(&fields.data).into_owned()),
+            );
+            if let Some(event) = fields.event {
+                object.insert(
+                    "event".to_owned(),
+                    serde_json::Value::String(String::from_utf8_lossy(&event).into_owned()),
+                );
+            }
+            if let Some(id) = fields.id {
+                object.insert(
+                    "id".to_owned(),
+                    serde_json::Value::String(String::from_utf8_lossy(&id).into_owned()),
+                );
+            }
+            if let Some(retry) = fields.retry {
+                object.insert("retry".to_owned(), serde_json::Value::from(retry));
+            }
+            serde_json::Value::Object(object).to_string().into_bytes()
+        }
+    };
+    FramePoll::Item { payload, metadata }
 }
 
 /// If `buf[from..]` holds a complete `\n`-terminated line, return it (trailing `\r\n`/`\n` stripped)
@@ -472,8 +653,16 @@ fn deserialize_item<T: DeserializeOwned>(payload: &[u8]) -> Result<T, Error<Infa
 
 #[cfg(test)]
 mod tests {
-    use super::{next_frame, EventStream, FramePoll, Framing};
-    use crate::Error;
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    use reqwest::{Method, Request};
+
+    use super::{
+        next_frame, EventStream, FramePoll, Framing, ReconnectPolicy, ReconnectReason,
+        ReconnectWait,
+    };
+    use crate::{ClientCore, Error, ExecuteFuture, HttpBackend};
 
     /// Frame every item currently extractable from `buffer` under `framing`, stopping at the first
     /// `NeedMore` (partial frame retained) or `Done` (terminated). Returns the framed payloads as
@@ -482,8 +671,11 @@ mod tests {
         let mut items = Vec::new();
         loop {
             match next_frame(buffer, framing, at_eof) {
-                FramePoll::Item(payload) => items.push(String::from_utf8(payload).unwrap()),
-                FramePoll::Done => return (items, true),
+                FramePoll::Item { payload, .. } => {
+                    items.push(String::from_utf8(payload).unwrap());
+                }
+                FramePoll::Metadata(_) => continue,
+                FramePoll::Done(_) => return (items, true),
                 FramePoll::NeedMore => return (items, false),
             }
         }
@@ -580,6 +772,35 @@ mod tests {
     }
 
     #[test]
+    fn oas32_sse_json_data_yields_payload_and_retains_metadata() {
+        let mut buf = b"id: event-7\nretry: 1250\ndata: {\"kind\":\"ready\"}\n\n".to_vec();
+        let frame = next_frame(&mut buf, Framing::SseJsonData, false);
+        let FramePoll::Item { payload, metadata } = frame else {
+            panic!("expected one dispatched SSE event");
+        };
+        assert_eq!(payload, br#"{"kind":"ready"}"#);
+        assert_eq!(metadata.id.as_deref(), Some("event-7"));
+        assert_eq!(metadata.retry, Some(1_250));
+    }
+
+    #[test]
+    fn sse_metadata_only_event_is_observable_to_the_stream() {
+        let mut stream: EventStream<serde_json::Value> = EventStream::new(
+            response("id: checkpoint\nretry: 2500\n\ndata: {\"ok\":true}\n\n"),
+            Framing::SseJsonData,
+        );
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({"ok": true})
+        );
+        assert_eq!(stream.last_event_id(), Some("checkpoint"));
+        assert_eq!(
+            stream.reconnect_delay(),
+            Some(std::time::Duration::from_millis(2_500))
+        );
+    }
+
+    #[test]
     fn sse_strips_only_one_leading_space_after_colon() {
         let mut buf = b"data:  two-spaces\n\n".to_vec();
         let (items, _) = drain(&mut buf, Framing::Sse, false);
@@ -672,6 +893,154 @@ mod tests {
                 .body(body.to_owned())
                 .expect("valid synthetic response"),
         )
+    }
+
+    #[derive(Debug)]
+    struct SequenceBackend {
+        responses: Mutex<VecDeque<(u16, String)>>,
+        headers: Mutex<Vec<(Option<String>, Option<String>)>>,
+    }
+
+    impl SequenceBackend {
+        fn new(responses: impl IntoIterator<Item = (u16, &'static str)>) -> Self {
+            Self {
+                responses: Mutex::new(
+                    responses
+                        .into_iter()
+                        .map(|(status, body)| (status, body.to_owned()))
+                        .collect(),
+                ),
+                headers: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl HttpBackend for SequenceBackend {
+        fn execute(&self, request: Request) -> ExecuteFuture<'_> {
+            let last_event_id = request
+                .headers()
+                .get("last-event-id")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            let cookie = request
+                .headers()
+                .get(reqwest::header::COOKIE)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
+            self.headers.lock().unwrap().push((last_event_id, cookie));
+            let (status, body) = self.responses.lock().unwrap().pop_front().unwrap();
+            Box::pin(async move {
+                Ok(reqwest::Response::from(
+                    http::Response::builder()
+                        .status(status)
+                        .body(body)
+                        .expect("valid synthetic response"),
+                ))
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct ImmediateReconnect {
+        max_attempts: u32,
+        seen: Mutex<Vec<(u32, &'static str, Option<std::time::Duration>)>>,
+    }
+
+    impl ReconnectPolicy for ImmediateReconnect {
+        fn reconnect(
+            &self,
+            attempt: u32,
+            reason: ReconnectReason<'_>,
+            server_delay: Option<std::time::Duration>,
+        ) -> Option<ReconnectWait> {
+            let reason = match reason {
+                ReconnectReason::EndOfStream => "eof",
+                ReconnectReason::Failure(_) => "failure",
+            };
+            self.seen
+                .lock()
+                .unwrap()
+                .push((attempt, reason, server_delay));
+            (attempt < self.max_attempts).then(|| Box::pin(async {}) as ReconnectWait)
+        }
+    }
+
+    fn reconnectable_stream(
+        initial_body: &str,
+        backend: Arc<SequenceBackend>,
+        policy: Arc<ImmediateReconnect>,
+    ) -> EventStream<serde_json::Value> {
+        let core = ClientCore::with_backend(backend, "https://example.com").unwrap();
+        let request = core
+            .http()
+            .request(Method::GET, "https://example.com/events")
+            .header(reqwest::header::COOKIE, "session=secret")
+            .build()
+            .unwrap();
+        let stream = EventStream::new_reconnectable(
+            response(initial_body),
+            Framing::SseJsonData,
+            core,
+            Some(request),
+        );
+        match stream.with_reconnect(policy) {
+            Ok(stream) => stream,
+            Err(error) => panic!("reconnect should be available: {error}"),
+        }
+    }
+
+    #[test]
+    fn reconnect_replays_last_event_id_and_preserves_cookie_headers() {
+        let backend = Arc::new(SequenceBackend::new([(200, "data: {\"seq\":2}\n\n")]));
+        let policy = Arc::new(ImmediateReconnect {
+            max_attempts: 1,
+            ..ImmediateReconnect::default()
+        });
+        let mut stream = reconnectable_stream(
+            "id: evt-1\nretry: 750\ndata: {\"seq\":1}\n\n",
+            backend.clone(),
+            policy.clone(),
+        );
+
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({"seq": 1})
+        );
+        assert_eq!(
+            poll_ready(stream.next()).unwrap().unwrap(),
+            serde_json::json!({"seq": 2})
+        );
+        assert_eq!(
+            backend.headers.lock().unwrap().as_slice(),
+            &[(Some("evt-1".to_owned()), Some("session=secret".to_owned()))]
+        );
+        assert_eq!(
+            policy.seen.lock().unwrap().as_slice(),
+            &[(0, "eof", Some(std::time::Duration::from_millis(750)))]
+        );
+    }
+
+    #[test]
+    fn declined_reconnect_failure_preserves_the_original_error_variant() {
+        let backend = Arc::new(SequenceBackend::new([(503, "unavailable")]));
+        let policy = Arc::new(ImmediateReconnect {
+            max_attempts: 1,
+            ..ImmediateReconnect::default()
+        });
+        let mut stream = reconnectable_stream("", backend, policy.clone());
+
+        let error = poll_ready(stream.next()).unwrap().unwrap_err();
+        assert!(matches!(error, Error::UnexpectedStatus { .. }));
+        assert_eq!(
+            policy
+                .seen
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, reason, _)| *reason)
+                .collect::<Vec<_>>(),
+            vec!["eof", "failure"]
+        );
     }
 
     #[test]

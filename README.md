@@ -87,7 +87,8 @@ the version it emits, and the idioms spargen handles.
 - **Freestanding output.** The runtime support code is embedded into the generated module; no
   spargen crate ever appears in a consumer's runtime dependency tree. Runtime dependencies are
   exactly `reqwest` (no default features), `serde`, `serde_json`, `bytes`, and `secrecy`, plus only
-  the capabilities the compiled API uses. Generation audits the consumer manifest against the
+  the capabilities the compiled API uses (`futures-core` and reqwest's `stream` feature only for
+  sequential responses). Generation audits the consumer manifest against the
   tested floors and feature set before Cargo/rustc compile the emitted client; see the
   [runtime dependency contract](docs/book/src/getting-started.md#runtime-dependency-contract).
 - **Deterministic.** Same spargen version + spec + config ⇒ byte-identical output, enforced by
@@ -112,7 +113,8 @@ success/error bodies lowered to typed per-operation response enums), auth attach
 complete diagnostics surface (`check` / `explain`, `--format json`, stable codes,
 batch reporting). OpenAPI 3.2 adds canonical `$self` reference identity, `QUERY` and custom HTTP
 methods, whole-query-string and cookie-style parameters, reusable media types, typed SSE/JSON
-sequence streams, and expanded documentation metadata. See the concise
+sequence streams (including JSON typed by SSE `data.contentSchema`), and expanded documentation
+metadata. See the concise
 [OpenAPI 3.2 scope](docs/openapi-3.2.md) for the exact delta from 3.1.
 
 Anything outside the documented surface is rejected or warned loudly, never silent; see the

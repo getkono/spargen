@@ -14,6 +14,7 @@ use crate::ir::{Api, MediaType, Prim, TypeGraph, TypeId, TypeKind};
 use crate::{Code, Features, JsonPointer};
 
 const BYTES: Dependency = Dependency::stable("bytes", "1.12.1", 2);
+const FUTURES_CORE: Dependency = Dependency::unstable("futures-core", "0.3.32", 0, 4);
 const REQWEST: Dependency = Dependency::unstable("reqwest", "0.12.28", 0, 13);
 const SECRECY: Dependency = Dependency::unstable("secrecy", "0.10.3", 0, 11);
 const SERDE: Dependency = Dependency::stable("serde", "1.0.229", 2);
@@ -70,6 +71,7 @@ pub(crate) struct RuntimeRequirements {
     pub reqwest_json: bool,
     pub reqwest_multipart: bool,
     pub bytes_serde: bool,
+    pub streams: bool,
     pub xml: bool,
     pub uuid: bool,
     pub time: bool,
@@ -91,6 +93,7 @@ impl RuntimeRequirements {
                     .is_some_and(|body| body.media == MediaType::Multipart)
             }),
             bytes_serde: bytes_need_serde(api),
+            streams: api.uses_streams(),
             xml: api.uses_xml(),
             uuid: features.uuid
                 && api.types.iter().any(|(_, definition)| {
@@ -298,7 +301,13 @@ pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements
     if requirements.reqwest_multipart {
         reqwest_features.push("multipart");
     }
+    if requirements.streams {
+        reqwest_features.push("stream");
+    }
     check(REQWEST, &reqwest_features, true);
+    if requirements.streams {
+        check(FUTURES_CORE, &[], false);
+    }
     check(SECRECY, &[], false);
     check(SERDE, &["derive"], false);
     check(SERDE_JSON, &[], false);
@@ -584,7 +593,16 @@ serde_json = "1.0.151"
     #[test]
     fn exact_floors_and_higher_compatible_caret_requirements_are_supported() {
         for dependency in [
-            BYTES, REQWEST, SECRECY, SERDE, SERDE_JSON, QUICK_XML, UUID, TIME, TOKIO,
+            BYTES,
+            FUTURES_CORE,
+            REQWEST,
+            SECRECY,
+            SERDE,
+            SERDE_JSON,
+            QUICK_XML,
+            UUID,
+            TIME,
+            TOKIO,
         ] {
             assert!(supported_requirement(dependency.floor, dependency));
             let floor = dependency.floor_version();
@@ -619,6 +637,7 @@ serde_json = "1.0.151"
             reqwest_json: true,
             reqwest_multipart: true,
             bytes_serde: true,
+            streams: true,
             xml: true,
             uuid: true,
             time: true,
@@ -641,6 +660,11 @@ serde_json = "1.0.151"
             messages.contains("feature `serde` on `bytes`"),
             "{messages}"
         );
+        assert!(
+            messages.contains("feature `stream` on `reqwest`"),
+            "{messages}"
+        );
+        assert!(messages.contains("requires `futures-core`"), "{messages}");
         assert!(messages.contains("requires `quick-xml`"), "{messages}");
         assert!(messages.contains("requires `uuid`"), "{messages}");
         assert!(messages.contains("requires `time`"), "{messages}");

@@ -10,8 +10,7 @@
 //! [`HttpBackend`]. A middleware may inspect/modify the request before calling `run`, inspect the
 //! [`Response`] after, or return a response *without* calling `run` at all to short-circuit. This is
 //! the classic "onion" middleware shape, expressed with std's `Future`/`Pin`/`Box` — no
-//! `async-trait`, no `tower`, no `futures`, so the runtime's dependency set stays exactly
-//! reqwest/serde/serde_json/bytes/secrecy.
+//! `async-trait` and no `tower`, so middleware adds no dependency to the generated runtime.
 //!
 //! ### How the lifetimes work without `async-trait`
 //!
