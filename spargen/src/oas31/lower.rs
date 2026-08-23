@@ -15,8 +15,9 @@ use crate::name::synth_operation_id;
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
 use super::{
-    Document, EncodingObject, JsonType, MediaTypeObject, ParameterObject, RefOr, RequestBodyObject,
-    Resolver, ResponseObject, Schema, SchemaOr, SecurityRequirement, ValidationKeywords,
+    Document, EncodingObject, JsonType, MediaTypeObject, ParameterObject, PathItem, RefOr,
+    RequestBodyObject, Resolver, ResponseObject, Schema, SchemaOr, SecurityRequirement,
+    ValidationKeywords,
 };
 
 /// Maximum schema-lowering recursion depth. Each nested object property, array item,
@@ -35,7 +36,7 @@ pub fn lower(
     resolver: &Resolver,
     diags: &mut Diagnostics,
 ) -> Result<Api, Aborted> {
-    let security_schemes = lower_security_schemes(document);
+    let security_schemes = lower_security_schemes(document, diags);
     let mut ctx = LowerCtx {
         document,
         resolver,
@@ -57,6 +58,10 @@ pub fn lower(
     let mut operations = Vec::new();
     let mut operation_ids = HashSet::new();
     for (path, item) in &document.paths.items {
+        let Some(item) = resolve_path_item(item, resolver, ctx.diags) else {
+            continue;
+        };
+        let item = &item;
         for (method, operation) in &item.operations {
             let path_template = parse_path_template(path);
             let id = operation
@@ -663,6 +668,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ),
             Some(JsonType::Array) => {
                 if !schema.prefix_items.is_empty() {
+                    // `items` beside `prefixItems` is the 2020-12 rest-element schema. A Rust tuple
+                    // is fixed-length, so a typed remainder is not representable — except
+                    // `items: false`, which closes the array at the prefix and *is* a tuple.
+                    if let Some(rest) = &schema.items {
+                        if !matches!(rest.as_ref(), SchemaOr::Bool(false)) {
+                            Diagnostic::error(
+                                Code::TupleRestNotRepresentable,
+                                schema.provenance.clone(),
+                            )
+                            .message(
+                                "`items` beside `prefixItems` allows a typed variable-length \
+                                 remainder, which no single Rust type expresses",
+                            )
+                            .remedy(
+                                "use `items: false` to close the tuple, describe the whole array \
+                                 with `items`, or omit this API segment with spargen::omit!",
+                            )
+                            .emit(self.diags);
+                            return None;
+                        }
+                    }
                     let mut items = Vec::new();
                     for (index, child) in schema.prefix_items.iter().enumerate() {
                         items.push(self.lower_schema_or(child, &format!("{hint}Item{index}"))?);
@@ -830,7 +856,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     self.intersect_types(ty, sibling, &format!("{hint}Variant{index}Constrained"))
                 else {
                     // The sibling constraints make this branch impossible; JSON Schema simply
-                    // removes it from the union's accepted set.
+                    // removes it from the union's accepted set. Acknowledge it, because a variant
+                    // vanishing from the generated enum is otherwise invisible.
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, schema.provenance.clone())
+                        .message(format!(
+                            "union member {index} cannot satisfy the enclosing schema's own \
+                             constraints, so it is not a variant of the generated enum"
+                        ))
+                        .emit(self.diags);
                     continue;
                 };
                 ty = intersection;
@@ -2932,11 +2965,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     let Some(name) = reference.reference.strip_prefix("#/components/parameters/")
                     else {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "parameter",
+                        // Not a component alias: a multi-file description may reference a whole
+                        // file, which resolves through the input bundle like a schema `$ref`.
+                        let from = reference
+                            .provenance
+                            .span
+                            .map(|span| span.file)
+                            .unwrap_or(crate::diag::FileId(0));
+                        return match self.resolver.resolve_component(
                             &reference.reference,
-                        );
+                            from,
+                            super::deserialize::parse_parameter,
+                            self.diags,
+                        ) {
+                            Some(resolved) => Some(resolved),
+                            None => self.reject_component_alias(
+                                &reference.provenance,
+                                "parameter",
+                                &reference.reference,
+                            ),
+                        };
                     };
                     let Some(target) = self.document.components.parameters.get(name) else {
                         return self.reject_component_alias(
@@ -2972,11 +3020,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .reference
                         .strip_prefix("#/components/requestBodies/")
                     else {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "request body",
+                        // Not a component alias: a multi-file description may reference a whole
+                        // file, which resolves through the input bundle like a schema `$ref`.
+                        let from = reference
+                            .provenance
+                            .span
+                            .map(|span| span.file)
+                            .unwrap_or(crate::diag::FileId(0));
+                        return match self.resolver.resolve_component(
                             &reference.reference,
-                        );
+                            from,
+                            super::deserialize::parse_request_body,
+                            self.diags,
+                        ) {
+                            Some(resolved) => Some(resolved),
+                            None => self.reject_component_alias(
+                                &reference.provenance,
+                                "request body",
+                                &reference.reference,
+                            ),
+                        };
                     };
                     let Some(target) = self.document.components.request_bodies.get(name) else {
                         return self.reject_component_alias(
@@ -3007,11 +3070,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     let Some(name) = reference.reference.strip_prefix("#/components/responses/")
                     else {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "response",
+                        // Not a component alias: a multi-file description may reference a whole
+                        // file, which resolves through the input bundle like a schema `$ref`.
+                        let from = reference
+                            .provenance
+                            .span
+                            .map(|span| span.file)
+                            .unwrap_or(crate::diag::FileId(0));
+                        return match self.resolver.resolve_component(
                             &reference.reference,
-                        );
+                            from,
+                            super::deserialize::parse_response,
+                            self.diags,
+                        ) {
+                            Some(resolved) => Some(resolved),
+                            None => self.reject_component_alias(
+                                &reference.provenance,
+                                "response",
+                                &reference.reference,
+                            ),
+                        };
                     };
                     let Some(target) = self.document.components.responses.get(name) else {
                         return self.reject_component_alias(
@@ -3231,23 +3309,122 @@ fn lower_security_requirement(requirement: &SecurityRequirement) -> crate::ir::S
     )
 }
 
-fn lower_security_schemes(document: &Document) -> IndexMap<SchemeId, SecurityScheme> {
+/// Resolve a Path Item `$ref`.
+///
+/// Unlike a Reference Object, the specification leaves the behavior of fields declared *alongside*
+/// a Path Item `$ref` undefined. Guessing either way ships a client that calls a different set of
+/// endpoints than the document describes, so a structural sibling is rejected; `summary` and
+/// `description` are documentation and cannot change the wire, so they are allowed.
+fn resolve_path_item(
+    item: &PathItem,
+    resolver: &Resolver,
+    diags: &mut Diagnostics,
+) -> Option<PathItem> {
+    let Some(reference) = &item.reference else {
+        return Some(item.clone());
+    };
+    if let Some(sibling) = item.reference_siblings.first() {
+        Diagnostic::error(Code::SpecUndefinedBehavior, reference.provenance.clone())
+            .message(format!(
+                "a Path Item `$ref` declared alongside `{sibling}` has undefined behavior, so \
+                 there is no correct client to generate"
+            ))
+            .remedy("move the sibling fields into the referenced Path Item, or drop the `$ref`")
+            .emit(diags);
+        return None;
+    }
+    // Relative refs inside the referenced item resolve against the file that declared the `$ref`.
+    let from = reference
+        .provenance
+        .span
+        .map(|span| span.file)
+        .unwrap_or(crate::diag::FileId(0));
+    let target =
+        resolver.resolve_path_item(&reference.reference, from, &reference.provenance, diags)?;
+    // One level of indirection is what the specification requires implementations to support, and
+    // a chain would need its own cycle guard.
+    if target.reference.is_some() {
+        Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
+            .message(format!(
+                "Path Item `$ref` `{}` resolves to another Path Item `$ref`; chained Path Item \
+                 references are not resolved",
+                reference.reference
+            ))
+            .emit(diags);
+        return None;
+    }
+    Some(target)
+}
+
+/// Lower `components.securitySchemes`./// Lower `components.securitySchemes`.
+///
+/// Every declared scheme gets a disposition here rather than only when something references it: a
+/// scheme that silently vanished used to surface — if at all — as a confusing `E012` at the
+/// requirement site, naming a scheme the document plainly declares.
+fn lower_security_schemes(
+    document: &Document,
+    diags: &mut Diagnostics,
+) -> IndexMap<SchemeId, SecurityScheme> {
     let mut schemes = IndexMap::new();
     for (name, scheme) in &document.components.security_schemes {
-        let RefOr::Item(scheme) = scheme else {
-            continue;
+        let scheme = match scheme {
+            RefOr::Item(scheme) => scheme,
+            // A `$ref` to another scheme component resolves; anything else is unresolvable.
+            RefOr::Ref(reference) => {
+                let target = reference
+                    .reference
+                    .strip_prefix("#/components/securitySchemes/")
+                    .and_then(|target| document.components.security_schemes.get(target))
+                    .and_then(|target| match target {
+                        RefOr::Item(target) => Some(target),
+                        RefOr::Ref(_) => None,
+                    });
+                match target {
+                    Some(target) => target,
+                    None => {
+                        Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
+                            .message(format!(
+                                "unresolved security scheme reference `{}`",
+                                reference.reference
+                            ))
+                            .remedy(
+                                "reference a scheme declared under \
+                                 `#/components/securitySchemes/`",
+                            )
+                            .emit(diags);
+                        continue;
+                    }
+                }
+            }
         };
         let lowered = match scheme.scheme_type.as_str() {
             "http" => match scheme.scheme.as_deref() {
                 Some("bearer") => SecurityScheme::Http(HttpScheme::Bearer),
                 Some("basic") => SecurityScheme::Http(HttpScheme::Basic),
-                _ => continue,
+                other => {
+                    // `digest`, `negotiate`, and friends need a challenge/response exchange that a
+                    // statically-attached credential cannot perform.
+                    Diagnostic::error(Code::UnknownSecurityScheme, scheme.provenance.clone())
+                        .message(format!(
+                            "`http` security scheme `{}` uses authentication scheme `{}`, which \
+                             spargen cannot attach",
+                            name,
+                            other.unwrap_or("<missing>")
+                        ))
+                        .remedy(
+                            "use `bearer` or `basic`, or omit this API segment with \
+                             spargen::omit!",
+                        )
+                        .emit(diags);
+                    continue;
+                }
             },
             "apiKey" => {
                 let location = match scheme.location.as_deref() {
                     Some("header") => ApiKeyLoc::Header,
                     Some("query") => ApiKeyLoc::Query,
                     Some("cookie") => ApiKeyLoc::Cookie,
+                    // The document schema requires a valid `in` for `apiKey`.
                     _ => continue,
                 };
                 SecurityScheme::ApiKey {
@@ -3257,6 +3434,19 @@ fn lower_security_schemes(document: &Document) -> IndexMap<SchemeId, SecuritySch
             }
             "oauth2" => SecurityScheme::OAuth2,
             "openIdConnect" => SecurityScheme::OpenIdConnect,
+            "mutualTLS" => {
+                Diagnostic::warning(Code::DeclarationHasNoEffect, scheme.provenance.clone())
+                    .message(format!(
+                        "`mutualTLS` scheme `{name}` is satisfied by the client certificate on the \
+                         injected `reqwest::Client`, so no credential is registered for it"
+                    ))
+                    .remedy(
+                        "configure the certificate on the client passed to `Client::with_client`",
+                    )
+                    .emit(diags);
+                SecurityScheme::MutualTls
+            }
+            // The document schema closes the `type` enum.
             _ => continue,
         };
         schemes.insert(SchemeId(name.clone()), lowered);

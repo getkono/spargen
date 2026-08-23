@@ -82,6 +82,9 @@ pub enum AuthKind {
     ApiKeyQuery(&'static str),
     /// An `apiKey` sent as the named cookie.
     ApiKeyCookie(&'static str),
+    /// `mutualTLS`. Satisfied by the client certificate configured on the injected
+    /// `reqwest::Client`, so the request carries nothing extra and no credential is registered.
+    MutualTls,
 }
 
 /// One scheme reference inside an operation's security requirement: the `securitySchemes` key the

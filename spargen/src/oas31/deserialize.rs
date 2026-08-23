@@ -177,7 +177,7 @@ fn parse_paths(value: &SpannedValue, pointer: &JsonPointer, diags: &mut Diagnost
     paths
 }
 
-fn parse_path_item(
+pub(super) fn parse_path_item(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -208,7 +208,27 @@ fn parse_path_item(
         .get("parameters")
         .map(|value| parse_ref_array(value, &pointer.push("parameters"), diags, parse_parameter))
         .unwrap_or_default();
+    // `$ref` on a Path Item is not a Reference Object: the specification explicitly leaves the
+    // behavior of adjacent fields undefined. `summary`/`description` are documentation and cannot
+    // change the wire, so they are allowed to override; anything structural is refused.
+    let reference = value
+        .get("$ref")
+        .and_then(string)
+        .map(|reference| Reference {
+            reference: reference.to_owned(),
+            provenance: provenance(pointer, value),
+        });
+    let reference_siblings = if reference.is_some() {
+        map.iter()
+            .map(|(key, _)| key.name.clone())
+            .filter(|key| !matches!(key.as_str(), "$ref" | "summary" | "description"))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Some(PathItem {
+        reference,
+        reference_siblings,
         operations,
         parameters,
     })
@@ -270,7 +290,7 @@ fn parse_operation(
     })
 }
 
-fn parse_parameter(
+pub(super) fn parse_parameter(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -312,7 +332,7 @@ fn parse_parameter(
     })
 }
 
-fn parse_request_body(
+pub(super) fn parse_request_body(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -350,7 +370,7 @@ fn parse_responses(
     responses
 }
 
-fn parse_response(
+pub(super) fn parse_response(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -635,6 +655,20 @@ fn parse_components(
                 .collect()
         })
         .unwrap_or_default();
+    components.path_items = map
+        .get("pathItems")
+        .and_then(SpannedValue::as_object)
+        .map(|items| {
+            let items_pointer = pointer.push("pathItems");
+            items
+                .iter()
+                .filter_map(|(key, value)| {
+                    parse_path_item(value, &items_pointer.push(&key.name), diags)
+                        .map(|item| (key.name.clone(), item))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     components.security_schemes = parse_component_map(
         map.get("securitySchemes"),
         &pointer.push("securitySchemes"),
@@ -678,6 +712,7 @@ fn parse_security_scheme(
         scheme: value.get("scheme").and_then(string).map(str::to_owned),
         location: value.get("in").and_then(string).map(str::to_owned),
         name: value.get("name").and_then(string).map(str::to_owned),
+        provenance: provenance(pointer, value),
     })
 }
 

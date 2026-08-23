@@ -19,6 +19,8 @@ the library API.
 | `E012` | Error | unknown security scheme |
 | `E013` | Error | irreconcilable `allOf` composition |
 | `E014` | Error | schema nesting is too deep to lower |
+| `E015` | Error | variable-length tuple not representable |
+| `E016` | Error | specification-undefined construct |
 | `E019` | Error | invalid omit rule |
 | `E020` | Error | omit profile created an invalid document |
 | `E021` | Error | vendored remote `$ref` drifted from lock |

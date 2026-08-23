@@ -3738,3 +3738,194 @@ paths:
         "a required body is passed by reference: {code}"
     );
 }
+
+#[test]
+fn path_item_ref_resolves_into_operations() {
+    // Regression: a Path Item `$ref` was ignored outright, so the path contributed no operations
+    // and the client silently generated with fewer methods than the document describes.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    $ref: "#/components/pathItems/Pets"
+components:
+  pathItems:
+    Pets:
+      get:
+        operationId: listPets
+        responses:
+          "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("list_pets"),
+        "the referenced operation must be generated: {code}"
+    );
+}
+
+#[test]
+fn e016_path_item_ref_with_a_structural_sibling() {
+    // The specification leaves `$ref` plus adjacent fields undefined, so either guess would ship a
+    // client calling a different set of endpoints than the document describes.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    $ref: "#/components/pathItems/Pets"
+    post:
+      operationId: createPet
+      responses:
+        "204": { description: No Content }
+components:
+  pathItems:
+    Pets:
+      get:
+        operationId: listPets
+        responses:
+          "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::SpecUndefinedBehavior),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn path_item_ref_keeps_documentation_siblings() {
+    // `summary`/`description` cannot change the wire, so they are allowed beside a `$ref`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    $ref: "#/components/pathItems/Pets"
+    summary: Everything about pets
+components:
+  pathItems:
+    Pets:
+      get:
+        operationId: listPets
+        responses:
+          "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    }
+}
+
+#[test]
+fn e015_items_beside_prefix_items() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                prefixItems:
+                  - { type: string }
+                items: { type: integer }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::TupleRestNotRepresentable),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn items_false_beside_prefix_items_is_a_closed_tuple() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                prefixItems:
+                  - { type: string }
+                  - { type: integer }
+                items: false
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::TupleRestNotRepresentable),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e012_http_security_scheme_that_cannot_be_attached() {
+    // A `digest` scheme used to vanish silently, surfacing only as a confusing E012 at the
+    // requirement site naming a scheme the document plainly declares.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+components:
+  securitySchemes:
+    digestAuth:
+      type: http
+      scheme: digest
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::UnknownSecurityScheme),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_mutual_tls_is_satisfied_by_the_transport() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+security:
+  - mtls: []
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+components:
+  securitySchemes:
+    mtls:
+      type: mutualTLS
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}

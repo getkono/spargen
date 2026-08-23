@@ -76,6 +76,12 @@ pub enum Code {
     /// The consuming Cargo package does not declare the versions or features required by the
     /// generated runtime.
     RuntimeDependencyContract,
+    /// A construct whose behavior the OpenAPI specification explicitly leaves *undefined*, so no
+    /// generated client could be known to be correct.
+    SpecUndefinedBehavior,
+    /// `items` beside `prefixItems` describes a tuple with a typed variable-length rest, which no
+    /// Rust type expresses. `items: false` — a pure fixed-length tuple — is supported.
+    TupleRestNotRepresentable,
     /// A construct was declared that cannot change anything spargen generates or sends. It is
     /// acknowledged rather than dropped in silence, so the input never has an undocumented
     /// disposition.
@@ -111,6 +117,8 @@ impl Code {
             Code::Oas32ConstructIgnored => "W010",
             Code::SchemaNestingTooDeep => "E014",
             Code::RuntimeDependencyContract => "E023",
+            Code::SpecUndefinedBehavior => "E016",
+            Code::TupleRestNotRepresentable => "E015",
             Code::DeclarationHasNoEffect => "W011",
         }
     }
@@ -152,6 +160,8 @@ impl Code {
             Code::Oas32ConstructIgnored => "non-sequential itemSchema ignored",
             Code::SchemaNestingTooDeep => "schema nesting is too deep to lower",
             Code::RuntimeDependencyContract => "invalid generated-runtime dependency contract",
+            Code::SpecUndefinedBehavior => "specification-undefined construct",
+            Code::TupleRestNotRepresentable => "variable-length tuple not representable",
             Code::DeclarationHasNoEffect => "declared construct has no effect",
         }
     }
@@ -231,6 +241,12 @@ impl Code {
             Code::RuntimeDependencyContract => {
                 "The generated module is freestanding, so its consuming Cargo package must declare the crates and dependency features referenced by that specific API. Spargen derives the exact requirement set after lowering and audits Cargo.toml during build.rs and proc-macro generation. Use the documented tested lower bounds (or a higher semver-compatible caret floor), keep reqwest default features disabled, and enable only the reqwest/bytes/XML/UUID/time capabilities named by the diagnostic. Cargo resolves the declared range; Rust compilation then verifies the selected crates expose the APIs and traits used by the generated client."
             }
+            Code::SpecUndefinedBehavior => {
+                "The OpenAPI Specification marks some constructs' behavior as *undefined* rather than leaving them merely unsupported. Currently this fires for a Path Item `$ref` declared alongside structural fields (operations, `parameters`, `servers`): the specification says that when a field appears both in the referring Path Item and the referenced one, the behavior is undefined. Unlike a Reference Object, which requires adjacent properties to be ignored, there is no rule to follow — so either choice (the local fields winning, or the referenced ones) silently discards operations the author wrote, and produces a client that calls a different set of endpoints than the document describes. `summary` and `description` are exempt because they are documentation and cannot change the wire. Move the sibling fields into the referenced Path Item, or drop the `$ref` and declare the item inline."
+            }
+            Code::TupleRestNotRepresentable => {
+                "In JSON Schema 2020-12 `prefixItems` fixes the leading positions of an array and `items` describes every position after them. Spargen lowers `prefixItems` to a Rust tuple, which is fixed-length, so a schema that also allows a typed remainder describes a value no single Rust type expresses: a tuple cannot grow, and a `Vec` cannot hold the distinct per-position types. `items: false` closes the array at the prefix and is fully supported — that is exactly a tuple. To send a variable-length remainder, drop `prefixItems` and describe the whole array with `items`, split the fixed head into its own object properties, or omit this API segment with `spargen::omit!`."
+            }
             Code::DeclarationHasNoEffect => {
                 "The document declared something the specification permits here, but which cannot change any byte spargen generates or sends, so it is acknowledged rather than dropped in silence. It fires for: `allowReserved` on a parameter that is never percent-encoded (an `in: header` parameter, or `style: cookie`, both of which the specification sends verbatim); `encoding`, `prefixEncoding`, or `itemEncoding` on a media type that is neither `multipart` nor `application/x-www-form-urlencoded`, where the specification says those fields SHALL be ignored; an `encoding` entry naming a property the body schema does not declare; `encoding.headers` on a non-`multipart` media type; an `encoding.headers` Header Object that pins no `const`/`default` value, leaving a client nothing to send; `allowEmptyValue`, which is deprecated and cannot change what a typed client omits; a `mutualTLS` security scheme, which is satisfied by the transport's client certificate rather than by anything the client attaches; a response header named `Content-Type`, which the specification says SHALL be ignored; a `servers` entry past the first on a path item or operation, where the specification defines no client selection rule; and a union branch that the enclosing schema's own constraints have already made unsatisfiable. None of these is an error: the document is valid, and the construct simply has no reachable effect on this client."
             }
@@ -278,6 +294,8 @@ impl Code {
             Code::Oas32ConstructIgnored,
             Code::SchemaNestingTooDeep,
             Code::RuntimeDependencyContract,
+            Code::SpecUndefinedBehavior,
+            Code::TupleRestNotRepresentable,
             Code::DeclarationHasNoEffect,
         ];
         ALL

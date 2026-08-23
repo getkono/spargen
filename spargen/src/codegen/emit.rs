@@ -436,6 +436,8 @@ pub(crate) fn emit_operation(
                     | SecurityScheme::OAuth2
                     | SecurityScheme::OpenIdConnect => quote! { support::AuthKind::Bearer },
                     SecurityScheme::Http(HttpScheme::Basic) => quote! { support::AuthKind::Basic },
+                    // Satisfied by the transport's client certificate; nothing to attach.
+                    SecurityScheme::MutualTls => quote! { support::AuthKind::MutualTls },
                     SecurityScheme::ApiKey { location, name } => match location {
                         ApiKeyLoc::Header => quote! { support::AuthKind::ApiKeyHeader(#name) },
                         ApiKeyLoc::Query => quote! { support::AuthKind::ApiKeyQuery(#name) },

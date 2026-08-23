@@ -2,14 +2,40 @@
 source: spargen/tests/snapshot.rs
 expression: api_surface(&source)
 ---
-operations (0):
-types (9):
+operations (3):
+  create_pets
+  list_pets
+  show_pet_by_id
+types (32):
   BlockingClient
   Client
+  CreatePetsError
+  ListPetsError
+  ListPetsParams
+  ShowPetByIdError
   types::Error
   types::Errorcode
   types::Errormessage
+  types::Limit
   types::Pet
+  types::PetId
   types::Petid
   types::Petname
   types::Pettag
+  types::ResponseBody
+  types::ResponseBody84222325
+  types::ResponseBody842223252
+  types::ResponseBody842223253
+  types::ResponseBody842223254
+  types::ResponseBodycode
+  types::ResponseBodycode85369149
+  types::ResponseBodycode853691492
+  types::ResponseBodyid
+  types::ResponseBodyid5e361c21
+  types::ResponseBodymessage
+  types::ResponseBodymessageEbe67c6b
+  types::ResponseBodymessageEbe67c6b2
+  types::ResponseBodyname
+  types::ResponseBodyname602968a7
+  types::ResponseBodytag
+  types::ResponseBodytag73f04b64

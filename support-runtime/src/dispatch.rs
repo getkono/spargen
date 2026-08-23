@@ -130,9 +130,11 @@ pub async fn attach_auth(
         return Ok(request);
     }
     let Some(alternative) = requirements.iter().find(|alternative| {
-        alternative
-            .iter()
-            .all(|scheme| core.credential(scheme.name).is_some())
+        alternative.iter().all(|scheme| {
+            // `mutualTLS` is satisfied by the transport's client certificate, so it never needs a
+            // registered credential and never blocks an alternative from being chosen.
+            matches!(scheme.kind, AuthKind::MutualTls) || core.credential(scheme.name).is_some()
+        })
     }) else {
         let mut names: Vec<&str> = requirements
             .iter()
@@ -148,6 +150,9 @@ pub async fn attach_auth(
     };
     let mut request = request;
     for scheme in *alternative {
+        if matches!(scheme.kind, AuthKind::MutualTls) {
+            continue;
+        }
         // Present by construction: the alternative was selected because every scheme resolves.
         let Some(credential) = core.credential(scheme.name) else {
             continue;
@@ -189,6 +194,8 @@ async fn apply_credential(
             Some(token) => Ok(request.query(&[(name, token.expose_secret())])),
             None => Err(credential_mismatch(scheme.name, "apiKey")),
         },
+        // Satisfied by the transport; `attach_auth` never reaches this arm.
+        AuthKind::MutualTls => Ok(request),
         AuthKind::ApiKeyCookie(name) => match token {
             Some(token) => {
                 let cookie = format!("{name}={}", token.expose_secret());

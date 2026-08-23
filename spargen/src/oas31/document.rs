@@ -73,6 +73,11 @@ pub struct Paths {
 /// A `paths` entry: the per-method operations plus path-level shared parameters.
 #[derive(Debug, Clone)]
 pub struct PathItem {
+    /// A Path Item `$ref`, which replaces this item with the referenced one.
+    pub reference: Option<Reference>,
+    /// Structural fields declared alongside a `$ref`. The specification leaves their interaction
+    /// with the referenced item *undefined*, so they are rejected rather than guessed at.
+    pub reference_siblings: Vec<String>,
     /// Operations keyed by HTTP method.
     pub operations: IndexMap<Method, OperationObject>,
     /// Parameters shared across all operations on this path.
@@ -209,6 +214,8 @@ pub struct Components {
     pub request_bodies: IndexMap<String, RefOr<RequestBodyObject>>,
     pub media_types: IndexMap<String, MediaTypeObject>,
     pub security_schemes: IndexMap<String, RefOr<SecuritySchemeObject>>,
+    /// Reusable Path Items, referenced by a Path Item `$ref`.
+    pub path_items: IndexMap<String, PathItem>,
 }
 
 /// An OAS Security Scheme Object.
@@ -222,6 +229,7 @@ pub struct SecuritySchemeObject {
     pub location: Option<String>,
     /// `name` (for `apiKey`).
     pub name: Option<String>,
+    pub provenance: Provenance,
 }
 
 /// A `security` requirement: scheme name → required scopes.

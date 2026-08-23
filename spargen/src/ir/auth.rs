@@ -20,6 +20,9 @@ pub enum SecurityScheme {
     OAuth2,
     /// `openIdConnect` — the caller-supplied token attaches as a bearer credential.
     OpenIdConnect,
+    /// `mutualTLS` — satisfied by the client certificate on the injected `reqwest::Client`. The
+    /// requirement is always satisfiable and the request carries nothing extra.
+    MutualTls,
 }
 
 /// The `http` scheme kind.
