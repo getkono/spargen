@@ -157,11 +157,56 @@ pub(crate) fn rewrite_refs_to_absolute(value: &mut SpannedValue, base_url: &str)
     }
 }
 
-/// Collect every `$ref` string in a value tree, in document order.
+/// Collect every reference string in a value tree, in document order.
+///
+/// This is `$ref` plus one other place OpenAPI puts a reference without calling it one: OpenAPI
+/// 3.2 allows a Security Requirement Object's *key* to be the URI of a Security Scheme Object, so
+/// the file it names has to be loaded like any other reference target.
 pub(crate) fn collect_refs(value: &SpannedValue) -> Vec<String> {
     let mut refs = Vec::new();
     collect_refs_inner(value, &mut refs);
+    collect_security_requirement_refs(value, &mut refs);
     refs
+}
+
+/// Collect Security Requirement Object keys that name a scheme by URI rather than component name.
+fn collect_security_requirement_refs(value: &SpannedValue, refs: &mut Vec<String>) {
+    let Node::Object(root) = &value.node else {
+        return;
+    };
+    let mut visit = |requirements: &SpannedValue| {
+        let Node::Array(entries) = &requirements.node else {
+            return;
+        };
+        for entry in entries {
+            let Node::Object(map) = &entry.node else {
+                continue;
+            };
+            for (key, _) in map.iter() {
+                // A single-segment name is a component name unless `./` forces the URI reading.
+                if let Some(rest) = key.name.strip_prefix("./") {
+                    refs.push(rest.to_owned());
+                } else if key.name.contains('/') || key.name.contains('#') {
+                    refs.push(key.name.clone());
+                }
+            }
+        }
+    };
+    if let Some(security) = root.get("security") {
+        visit(security);
+    }
+    if let Some(Node::Object(paths)) = root.get("paths").map(|paths| &paths.node) {
+        for (_, item) in paths.iter() {
+            let Node::Object(item) = &item.node else {
+                continue;
+            };
+            for (_, operation) in item.iter() {
+                if let Some(security) = operation.get("security") {
+                    visit(security);
+                }
+            }
+        }
+    }
 }
 
 fn collect_refs_inner(value: &SpannedValue, refs: &mut Vec<String>) {

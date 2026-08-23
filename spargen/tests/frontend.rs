@@ -1239,7 +1239,7 @@ paths:
 }
 
 #[test]
-fn oas32_discriminator_default_mapping_is_rejected_explicitly() {
+fn oas32_discriminator_default_mapping_generates_a_fallback_branch() {
     let spec = r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
@@ -1256,9 +1256,37 @@ components:
     Cat: { type: object, properties: { kind: { const: cat } } }
     Dog: { type: object, properties: { kind: { type: string } } }
 "##;
-    let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    }
+}
+
+#[test]
+fn e007_discriminator_default_mapping_outside_the_union() {
+    // A fallback naming a schema that is not a member describes a branch the generated enum does
+    // not have, so it cannot be quietly downgraded to another dispatch strategy.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - { $ref: '#/components/schemas/Cat' }
+        - { $ref: '#/components/schemas/Dog' }
+      discriminator:
+        propertyName: kind
+        defaultMapping: Fish
+    Cat: { type: object, properties: { kind: { const: cat } } }
+    Dog: { type: object, properties: { kind: { type: string } } }
+    Fish: { type: object, properties: { kind: { const: fish } } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    }
 }
 
 #[test]
@@ -4172,4 +4200,42 @@ components:
             "{report:#?}"
         );
     }
+}
+
+#[test]
+fn oas32_security_requirement_uri_resolves() {
+    // OpenAPI 3.2 lets a requirement name a Security Scheme Object by URI. A component name always
+    // wins, per the specification, so only a name matching no component is resolved as a reference.
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("bearer.yaml"),
+        "type: http\nscheme: bearer\n",
+    )
+    .unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec_path,
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+security:
+  - "./bearer.yaml": []
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##,
+    )
+    .unwrap();
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&Config::new(
+        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
+        Utf8PathBuf::from_path_buf(out).unwrap(),
+    ));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnknownSecurityScheme),
+        "{report:#?}"
+    );
 }

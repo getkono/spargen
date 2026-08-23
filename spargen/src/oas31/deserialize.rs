@@ -829,7 +829,7 @@ fn parse_component_map<T>(
         .unwrap_or_default()
 }
 
-fn parse_security_scheme(
+pub(super) fn parse_security_scheme(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -1101,23 +1101,16 @@ fn parse_discriminator(
     diags: &mut Diagnostics,
 ) -> Option<Discriminator> {
     let _ = object(value, pointer, diags)?;
-    if let Some(default_mapping) = value.get("defaultMapping") {
-        Diagnostic::error(
-            Code::NonDisjointUnion,
-            provenance(&pointer.push("defaultMapping"), default_mapping),
-        )
-        .message(
-            "discriminator.defaultMapping requires a generated fallback branch for absent or \
-             unknown discriminator values, which is not yet representable",
-        )
-        .emit(diags);
-    }
     Some(Discriminator {
         property_name: value
             .get("propertyName")
             .and_then(string)
             .unwrap_or_default()
             .to_owned(),
+        default_mapping: value
+            .get("defaultMapping")
+            .and_then(string)
+            .map(str::to_owned),
         mapping: value
             .get("mapping")
             .and_then(SpannedValue::as_object)

@@ -2304,6 +2304,7 @@ fn emit_type_def(
                     tag_field,
                     tags,
                     categories,
+                    default_variant,
                 } => {
                     let variant_defs = union.variants.iter().map(|variant| {
                         let variant_ident = names
@@ -2381,6 +2382,28 @@ fn emit_type_def(
                         "tagged variant of union {} did not serialize as an object",
                         ident.as_str()
                     );
+                    // OpenAPI 3.2 `defaultMapping`: an absent or unrecognized tag falls back to a
+                    // named variant instead of failing.
+                    let fallback = default_variant.map(|index| {
+                        let variant = &union.variants[index];
+                        let variant_ident = names
+                            .variants
+                            .get(&(id, variant.name_hint.clone()))
+                            .expect("union variant name allocated");
+                        quote! {
+                            serde_json::from_value(value)
+                                .map(#ident::#variant_ident)
+                                .map_err(serde::de::Error::custom)
+                        }
+                    });
+                    let missing_tag_arm = match &fallback {
+                        Some(fallback) => fallback.clone(),
+                        None => quote! { Err(serde::de::Error::custom(#missing_tag)) },
+                    };
+                    let unknown_tag_arm = match &fallback {
+                        Some(fallback) => fallback.clone(),
+                        None => quote! { Err(serde::de::Error::custom(#unknown_tag)) },
+                    };
                     quote! {
                         #docs
                         #deprecated
@@ -2399,11 +2422,13 @@ fn emit_type_def(
                                 let tag = value
                                     .get(#tag_field)
                                     .and_then(serde_json::Value::as_str)
-                                    .map(std::borrow::ToOwned::to_owned)
-                                    .ok_or_else(|| serde::de::Error::custom(#missing_tag))?;
+                                    .map(std::borrow::ToOwned::to_owned);
+                                let Some(tag) = tag else {
+                                    return #missing_tag_arm;
+                                };
                                 match tag.as_str() {
                                     #(#de_arms)*
-                                    _ => Err(serde::de::Error::custom(#unknown_tag)),
+                                    _ => #unknown_tag_arm,
                                 }
                             }
                         }

@@ -134,6 +134,9 @@ pub struct Discriminator {
     pub property_name: String,
     /// `mapping`: discriminator value → schema name/`$ref`.
     pub mapping: IndexMap<String, String>,
+    /// OpenAPI 3.2 `defaultMapping`: the schema to use when the discriminating property is absent
+    /// or carries a value with no mapping.
+    pub default_mapping: Option<String>,
 }
 
 /// The validation-only JSON Schema keywords spargen retains but does not enforce at runtime

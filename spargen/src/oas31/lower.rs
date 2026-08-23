@@ -37,7 +37,13 @@ pub fn lower(
     resolver: &Resolver,
     diags: &mut Diagnostics,
 ) -> Result<Api, Aborted> {
-    let security_schemes = lower_security_schemes(document, diags);
+    let mut security_schemes = lower_security_schemes(document, diags);
+    // OpenAPI 3.2 lets a security requirement name a Security Scheme Object by URI instead of by
+    // component name. A component name always wins — the specification is explicit that name
+    // lookup takes precedence, and flags the resulting hijack risk — so only names that match no
+    // declared component are resolved as references. A leading `./` forces the URI reading for a
+    // single-segment name that would otherwise collide.
+    resolve_external_security_schemes(document, resolver, &mut security_schemes, diags);
     let mut ctx = LowerCtx {
         document,
         resolver,
@@ -907,6 +913,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         let strategy = if let Some(discriminator) = &schema.discriminator {
+            // A `defaultMapping` that names a schema outside this union describes a fallback
+            // branch the generated enum does not have, so it cannot be quietly downgraded to
+            // another dispatch strategy.
+            if let Some(target) = &discriminator.default_mapping {
+                let bare = target
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap_or(target);
+                if !ref_names.iter().any(|name| name.as_deref() == Some(bare)) {
+                    return self.reject_union(
+                        schema,
+                        &format!(
+                            "`discriminator.defaultMapping` names `{target}`, which is not one of \
+                             this union's members, so there is no branch to fall back to"
+                        ),
+                    );
+                }
+            }
             self.discriminated_strategy(&variants, &ref_names, discriminator)
                 .or_else(|| self.disjoint_strategy(&variants))
                 .unwrap_or_else(|| self.trial_strategy(&variants, mode))
@@ -1008,10 +1031,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             tags.push(Some(tag));
             categories.push(None);
         }
+        // 3.2 `defaultMapping` names the schema to fall back to when the tag is absent or
+        // unrecognized. It must name one of this union's own variants; anything else describes a
+        // branch that does not exist.
+        let default_variant = match &discriminator.default_mapping {
+            None => None,
+            Some(target) => {
+                let bare = target
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap_or(target);
+                // A fallback naming a non-member is rejected by the caller, which owns the
+                // union's provenance; here it simply means there is no discriminated strategy.
+                Some(
+                    ref_names
+                        .iter()
+                        .position(|name| name.as_deref() == Some(bare))?,
+                )
+            }
+        };
         Some(UnionStrategy::Discriminated {
             tag_field: discriminator.property_name.clone(),
             tags,
             categories,
+            default_variant,
         })
     }
 
@@ -1893,10 +1935,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 tag_field,
                 tags,
                 categories,
+                default_variant,
             } => UnionStrategy::Discriminated {
                 tag_field: tag_field.clone(),
                 tags: retained.iter().map(|index| tags[*index].clone()).collect(),
                 categories: retained.iter().map(|index| categories[*index]).collect(),
+                // The fallback variant's index moves with the retained set; if the fallback itself
+                // was dropped, the union simply has no fallback any more.
+                default_variant: default_variant
+                    .and_then(|target| retained.iter().position(|index| *index == target)),
             },
             UnionStrategy::Disjoint { features } => UnionStrategy::Disjoint {
                 features: retained
@@ -3614,7 +3661,63 @@ fn resolve_path_item(
     Some(target)
 }
 
-/// Lower `components.securitySchemes`./// Lower `components.securitySchemes`.
+/// Resolve security requirement names that are URIs rather than declared component names.
+fn resolve_external_security_schemes(
+    document: &Document,
+    resolver: &Resolver,
+    schemes: &mut IndexMap<SchemeId, SecurityScheme>,
+    diags: &mut Diagnostics,
+) {
+    let mut wanted: Vec<(String, crate::diag::Provenance)> = Vec::new();
+    let mut collect = |requirements: &[SecurityRequirement], at: &crate::diag::Provenance| {
+        for requirement in requirements {
+            for name in requirement.0.keys() {
+                wanted.push((name.clone(), at.clone()));
+            }
+        }
+    };
+    collect(&document.security, &document.provenance);
+    for item in document.paths.items.values() {
+        for operation in item.operations.values() {
+            if let Some(security) = &operation.security {
+                collect(security, &operation.provenance);
+            }
+        }
+    }
+    for (name, at) in wanted {
+        if schemes.contains_key(&SchemeId(name.clone())) {
+            continue;
+        }
+        // Only a name that looks like a reference is worth resolving; a plain unknown name is an
+        // ordinary undeclared-scheme error, reported at the requirement site.
+        let reference = match name.strip_prefix("./") {
+            Some(rest) => rest.to_owned(),
+            None if name.contains('/') || name.contains('#') || name.contains(':') => name.clone(),
+            None => continue,
+        };
+        let from = at
+            .span
+            .map(|span| span.file)
+            .unwrap_or(crate::diag::FileId(0));
+        let Some(object) = resolver.resolve_component(
+            &reference,
+            from,
+            super::deserialize::parse_security_scheme,
+            diags,
+        ) else {
+            continue;
+        };
+        let mut resolved = IndexMap::new();
+        resolved.insert(name.clone(), RefOr::Item(object));
+        let mut document = document.clone();
+        document.components.security_schemes = resolved;
+        for (id, scheme) in lower_security_schemes(&document, diags) {
+            schemes.insert(id, scheme);
+        }
+    }
+}
+
+/// Lower `components.securitySchemes`./// Lower `components.securitySchemes`./// Lower `components.securitySchemes`.
 ///
 /// Every declared scheme gets a disposition here rather than only when something references it: a
 /// scheme that silently vanished used to surface — if at all — as a confusing `E012` at the

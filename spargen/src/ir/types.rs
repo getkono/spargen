@@ -166,6 +166,9 @@ pub enum UnionStrategy {
         tags: Vec<Option<String>>,
         /// The JSON category per non-object variant, parallel to [`Union::variants`].
         categories: Vec<Option<JsonCategory>>,
+        /// OpenAPI 3.2 `defaultMapping`: the variant used when the tag is absent or unrecognized.
+        /// Without one, either case is a deserialization error.
+        default_variant: Option<usize>,
     },
     /// No discriminator, but the variants were proven statically disjoint → a custom
     /// content-inspecting `Deserialize`/`Serialize`. Each variant carries the feature that
