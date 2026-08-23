@@ -1149,13 +1149,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let is_required = required.contains(name);
             let default = self.field_default(child, ty, is_required);
             let xml = self.field_xml(child);
+            let (deprecated, read_only, write_only) = field_flags(child);
             fields.push(Field {
                 name: PropertyName { wire: name.clone() },
                 ty,
                 required: is_required,
-                deprecated: schema.deprecated,
-                read_only: schema.read_only,
-                write_only: schema.write_only,
+                deprecated,
+                read_only,
+                write_only,
                 default,
                 xml,
             });
@@ -2134,6 +2135,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return None;
             }
         };
+        // `Accept`, `Content-Type`, and `Authorization` header parameters "SHALL be ignored": the
+        // protocol layer owns those, and emitting a client argument for one would let a caller
+        // silently fight the codec or the auth attachment.
+        if location == ParamLoc::Header
+            && matches!(
+                parameter.name.to_ascii_lowercase().as_str(),
+                "accept" | "content-type" | "authorization"
+            )
+        {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
+                .message(format!(
+                    "header parameter `{}` is ignored: the specification reserves `Accept`, \
+                     `Content-Type`, and `Authorization` to the protocol layer",
+                    parameter.name
+                ))
+                .remedy(
+                    "remove the parameter; content types follow the operation's media types and \
+                     credentials are registered with `Client::with_credential`",
+                )
+                .emit(self.diags);
+            return None;
+        }
         if location == ParamLoc::QueryString {
             let Some((media_name, object)) = parameter.content.iter().next() else {
                 Diagnostic::error(
@@ -2258,7 +2281,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.remap_binary_param(ty, &parameter.name)
         } else if let Some((media, object)) = parameter.content.iter().next() {
             let object = self.resolve_media_object(object)?;
+            let media_name = media.clone();
             let media = lower_media_type(media, &parameter.provenance, self.diags)?;
+            // A `content` parameter is rendered by its media codec. Only JSON and raw text have a
+            // codec that produces a single parameter token; anything else would fall through to
+            // `simple` serialization and be sent in the wrong format.
+            if !matches!(media, MediaType::Json | MediaType::Text) {
+                Diagnostic::error(Code::UnsupportedMediaType, parameter.provenance.clone())
+                    .message(format!(
+                        "`content` parameter media type `{media_name}` has no single-token \
+                         serialization"
+                    ))
+                    .remedy(
+                        "use `application/json` or a `text/*` media type, or describe the \
+                         parameter with `schema` and a serialization style",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
             let ty = object
                 .schema
                 .as_ref()
@@ -3189,6 +3229,19 @@ fn classify_default(value: &SpannedValue) -> RawDefault {
 
 /// Decide whether a classified `default` is representable against the field's lowered type: a
 /// `Primitive` of the matching scalar kind, or a `ScalarEnum` value that is one of its variants.
+/// The `deprecated`/`readOnly`/`writeOnly` annotations of one *property* subschema.
+///
+/// These are per-property annotations. Reading them from the enclosing object would both ignore a
+/// property's own `deprecated: true` and mark every field of a deprecated object as deprecated;
+/// an object-level annotation belongs on the type, where it already is.
+fn field_flags(child: &SchemaOr) -> (bool, bool, bool) {
+    match child {
+        // A boolean schema carries no annotations.
+        SchemaOr::Bool(_) => (false, false, false),
+        SchemaOr::Schema(schema) => (schema.deprecated, schema.read_only, schema.write_only),
+    }
+}
+
 fn representable_default(raw: &RawDefault, kind: Option<&TypeKind>) -> Option<DefaultValue> {
     let kind = kind?;
     match (raw, kind) {

@@ -3399,3 +3399,132 @@ fn moderate_ref_chain_below_the_cap_still_lowers() {
         "a 32-deep chain must lower without E014: {report:#?}"
     );
 }
+
+#[test]
+fn property_annotations_come_from_the_property_not_the_object() {
+    // Regression: `deprecated`/`readOnly`/`writeOnly` were read from the enclosing object, so an
+    // object-level `deprecated: true` marked every field and a property-level one was ignored.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+components:
+  schemas:
+    Item:
+      type: object
+      deprecated: true
+      properties:
+        current: { type: string }
+        legacy: { type: string, deprecated: true }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("legacy"), "legacy field emitted: {code}");
+    assert!(code.contains("current"), "current field emitted: {code}");
+    // Exactly one item is deprecated — the property that says so — not every field of the
+    // deprecated object, and not zero.
+    assert_eq!(
+        code.matches("#[deprecated]").count(),
+        1,
+        "exactly one item is deprecated, not every field of a deprecated object: {code}"
+    );
+}
+
+#[test]
+fn percent_encoded_pointer_fragments_resolve() {
+    // A `$ref` pointer travels in a URI fragment, so `{`/`}` must be percent-encoded there. The
+    // token is percent-decoded before `~1`/`~0` are unescaped, so this addresses `/pets/{petId}`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets/{petId}:
+    get:
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/paths/~1pets~1%7BpetId%7D/get/responses/200/content/application~1json/schema"
+"##;
+    let report = generate(spec);
+    // The self-reference is a cycle, so it is rejected for being recursive — never for being
+    // unresolvable, which is what the missing percent-decoding used to report.
+    assert!(
+        !has_code(&report, Code::UnresolvedRef),
+        "the percent-encoded pointer must resolve: {report:#?}"
+    );
+}
+
+#[test]
+fn w011_reserved_header_parameters_are_ignored() {
+    // `Accept`, `Content-Type`, and `Authorization` belong to the protocol layer.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: Accept
+          in: header
+          schema: { type: string }
+        - name: authorization
+          in: header
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .count(),
+            2,
+            "one per reserved header, matched case-insensitively: {report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_content_parameter_with_an_unrenderable_media_type() {
+    // An XML `content` parameter used to fall through to `simple` serialization and be sent in the
+    // wrong format entirely.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          content:
+            application/xml:
+              schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
