@@ -2,7 +2,7 @@
 //! byte-identical output. Generating the same spec into two module paths must yield identical code.
 
 use camino::Utf8PathBuf;
-use spargen::{Config, Outcome};
+use spargen::{CargoIntegration, Outcome, Spec};
 
 const SPEC: &str = r##"
 openapi: 3.1.0
@@ -38,10 +38,11 @@ components:
 "##;
 
 fn generate_module(spec_path: &Utf8PathBuf, path: &std::path::Path) {
-    let report = spargen::generate(&Config::new(
-        spec_path.clone(),
-        Utf8PathBuf::from_path_buf(path.to_path_buf()).unwrap(),
-    ));
+    let report = spargen::generate(
+        &Spec::new(spec_path.clone())
+            .build(Utf8PathBuf::from_path_buf(path.to_path_buf()).unwrap())
+            .cargo(CargoIntegration::Off),
+    );
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
 }
 

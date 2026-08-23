@@ -2,20 +2,14 @@
 
 fn main() {
     let out = std::env::var("OUT_DIR").unwrap();
-    let config = spargen::Config::new(
-        concat!(env!("CARGO_MANIFEST_DIR"), "/petstore.yaml"),
-        format!("{out}/petstore.rs"),
-    );
-    let report = spargen::generate(&config);
-    for diagnostic in &report.diagnostics {
-        println!(
-            "cargo:warning=spargen {}: {}",
-            diagnostic.code, diagnostic.message
-        );
-    }
-    assert_eq!(
-        report.outcome,
-        spargen::Outcome::Generated,
-        "spargen failed: {report:#?}"
-    );
+    let build = spargen::Spec::new(concat!(env!("CARGO_MANIFEST_DIR"), "/petstore.yaml"))
+        .build(format!("{out}/petstore.rs"))
+        // This IS a build script, and generating without Cargo wired up would mean a silently
+        // stale client — so say it must be, and fail loudly if it ever is not.
+        .cargo(spargen::CargoIntegration::Required);
+    let report = spargen::generate(&build);
+    report.emit_cargo_warnings();
+    // Accepts a fresh render and a verified cache hit alike; panics with the full diagnostic list
+    // otherwise.
+    report.expect_success();
 }

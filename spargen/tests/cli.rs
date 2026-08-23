@@ -13,15 +13,24 @@ fn help_lists_only_non_generation_tools() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
-    for command in ["check", "lock", "diff", "explain"] {
+    for command in ["check", "deps", "lock", "diff", "explain"] {
         assert!(
             stdout.contains(command),
             "help must list {command}: {stdout}"
         );
     }
+    // The word may legitimately appear in a description ("the dependencies generated output
+    // needs"); what must not exist is a `generate` command, which is one of the listed commands.
+    let commands: Vec<&str> = stdout
+        .lines()
+        .skip_while(|line| !line.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|line| line.starts_with("  "))
+        .filter_map(|line| line.split_whitespace().next())
+        .collect();
     assert!(
-        !stdout.contains("generate"),
-        "help must not expose generation: {stdout}"
+        !commands.contains(&"generate"),
+        "help must not expose generation: {commands:?}"
     );
 }
 

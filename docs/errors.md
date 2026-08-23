@@ -26,6 +26,7 @@ the library API.
 | `E021` | Error | vendored remote `$ref` drifted from lock |
 | `E022` | Error | duplicate object key |
 | `E023` | Error | invalid generated-runtime dependency contract |
+| `E024` | Error | cargo integration required but unavailable |
 | `W001` | Warning | validation-only keyword ignored |
 | `W002` | Warning | server-initiated flow ignored |
 | `W005` | Warning | schema default not applied |
@@ -33,3 +34,5 @@ the library API.
 | `W009` | Warning | construct omitted |
 | `W010` | Warning | non-sequential `itemSchema` ignored |
 | `W011` | Warning | declared construct has no effect |
+| `W012` | Warning | runtime-dependency audit skipped |
+| `W013` | Warning | cargo integration degraded |

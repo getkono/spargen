@@ -3,7 +3,7 @@
 //! classification policy live in `spargen/src/surface/`.
 
 use camino::Utf8PathBuf;
-use spargen::{ChangeKind, Config, DiffReport, Impact};
+use spargen::{ChangeKind, DiffReport, Impact, Spec};
 
 /// Assemble a minimal, valid 3.1 spec from its variable parts:
 /// * `params` — the `get` operation's `parameters:` block (6-space indent), or `""` for none;
@@ -80,14 +80,8 @@ fn diff(old_spec: &str, new_spec: &str) -> DiffReport {
     let new_path = temp.path().join("new.yaml");
     std::fs::write(&old_path, old_spec).unwrap();
     std::fs::write(&new_path, new_spec).unwrap();
-    let old = Config::new(
-        Utf8PathBuf::from_path_buf(old_path).unwrap(),
-        "unused-old.rs",
-    );
-    let new = Config::new(
-        Utf8PathBuf::from_path_buf(new_path).unwrap(),
-        "unused-new.rs",
-    );
+    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap());
+    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap());
     spargen::diff(&old, &new).expect("both specs should lower")
 }
 
@@ -240,14 +234,8 @@ fn rejecting_spec_reports_cleanly_without_a_diff() {
     let new_path = temp.path().join("new.yaml");
     std::fs::write(&old_path, base()).unwrap();
     std::fs::write(&new_path, "not: a valid openapi document\n").unwrap();
-    let old = Config::new(
-        Utf8PathBuf::from_path_buf(old_path).unwrap(),
-        "unused-old.rs",
-    );
-    let new = Config::new(
-        Utf8PathBuf::from_path_buf(new_path).unwrap(),
-        "unused-new.rs",
-    );
+    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap());
+    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap());
     let outcome = spargen::diff(&old, &new);
     let rejection = outcome.expect_err("the new spec does not lower, so there is no diff");
     assert!(rejection.old_spec().is_none());

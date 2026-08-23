@@ -86,6 +86,14 @@ pub enum Code {
     /// acknowledged rather than dropped in silence, so the input never has an undocumented
     /// disposition.
     DeclarationHasNoEffect,
+    /// Generation ran without a consumer Cargo manifest, so the generated runtime's dependency
+    /// contract (`E023`) could not be audited.
+    RuntimeAuditSkipped,
+    /// Generation ran outside a Cargo build script, so no rebuild triggers were emitted and the
+    /// dependency audit was skipped.
+    CargoIntegrationDegraded,
+    /// Cargo integration was required by the caller but is not available in this process.
+    CargoIntegrationRequired,
 }
 
 impl Code {
@@ -120,6 +128,9 @@ impl Code {
             Code::SpecUndefinedBehavior => "E016",
             Code::TupleRestNotRepresentable => "E015",
             Code::DeclarationHasNoEffect => "W011",
+            Code::RuntimeAuditSkipped => "W012",
+            Code::CargoIntegrationDegraded => "W013",
+            Code::CargoIntegrationRequired => "E024",
         }
     }
 
@@ -163,6 +174,9 @@ impl Code {
             Code::SpecUndefinedBehavior => "specification-undefined construct",
             Code::TupleRestNotRepresentable => "variable-length tuple not representable",
             Code::DeclarationHasNoEffect => "declared construct has no effect",
+            Code::RuntimeAuditSkipped => "runtime-dependency audit skipped",
+            Code::CargoIntegrationDegraded => "cargo integration degraded",
+            Code::CargoIntegrationRequired => "cargo integration required but unavailable",
         }
     }
 
@@ -250,6 +264,15 @@ impl Code {
             Code::DeclarationHasNoEffect => {
                 "The document declared something the specification permits here, but which cannot change any byte spargen generates or sends, so it is acknowledged rather than dropped in silence. It fires for: `allowReserved` on a parameter that is never percent-encoded (an `in: header` parameter, or `style: cookie`, both of which the specification sends verbatim); `encoding`, `prefixEncoding`, or `itemEncoding` on a media type that is neither `multipart` nor `application/x-www-form-urlencoded`, where the specification says those fields SHALL be ignored; an `encoding` entry naming a property the body schema does not declare; `encoding.headers` on a non-`multipart` media type; an `encoding.headers` Header Object that pins no `const`/`default` value, leaving a client nothing to send; `allowEmptyValue`, which is deprecated and cannot change what a typed client omits; a `mutualTLS` security scheme, which is satisfied by the transport's client certificate rather than by anything the client attaches; a response header named `Content-Type`, which the specification says SHALL be ignored; a `servers` entry past the first on a path item or operation, where the specification defines no client selection rule; and a union branch that the enclosing schema's own constraints have already made unsatisfiable. None of these is an error: the document is valid, and the construct simply has no reachable effect on this client."
             }
+            Code::RuntimeAuditSkipped => {
+                "Generated output is freestanding: the consuming package must itself declare the crates and dependency features that specific API needs. Spargen audits the consumer's `Cargo.toml` for that contract and reports any gap as `E023` — but only when it can find the manifest, which in practice means a real `build.rs` process, where Cargo puts the package in the environment. Generating from a test, a wrapper binary, or a script leaves nothing to audit, so the contract is unverified and a missing dependency surfaces later as a compile error in the generated module instead of a spargen diagnostic. Run `spargen deps <spec>` to print the exact `[dependencies]` block that spec requires, or generate from a build script so the audit runs automatically. Set `CargoIntegration::Off` if this generation is deliberately not part of a Cargo build."
+            }
+            Code::CargoIntegrationDegraded => {
+                "`generate` was called outside a Cargo build-script process, so two things Cargo would otherwise do did not happen: no `cargo:rerun-if-changed` directives were emitted, meaning an edited spec will NOT trigger a rebuild and the checked-in module can silently go stale; and the consumer manifest could not be located, so the runtime-dependency audit (`E023`) was skipped. Neither is an error — generating outside a build script is a legitimate thing to do — but both are silent by nature, which is why they are reported. Call `generate` from a `build.rs` to get both, or declare the intent with `CargoIntegration::Off` to accept them silently."
+            }
+            Code::CargoIntegrationRequired => {
+                "The caller set `CargoIntegration::Required`, declaring that this generation must be wired into Cargo — rebuild triggers emitted, consumer manifest audited — and it is not: either the process is not a build script, or no consumer manifest could be found. This is an error rather than a warning purely because the caller asked for it: `Required` exists for builds where a missed rebuild trigger would ship a client generated from a stale spec. Move the call into a `build.rs`, or relax to `CargoIntegration::Auto` (degrade with `W013`/`W012`) or `CargoIntegration::Off` (degrade silently)."
+            }
             Code::XmlHintIgnored => {
                 "XML request/response bodies honor the `xml.name` (element/attribute rename) and `xml.attribute` (serialize as an XML attribute via quick-xml's `@name` convention) hints on a field, but only for a schema used *exclusively* as an XML body. A serde `rename` is format-agnostic — it would also rewrite the JSON wire names — so `xml.name`/`xml.attribute` are NOT applied to a schema that is also reachable from a JSON/form/multipart/text body, a response, or a parameter (or that is not used as an XML body at all); the field keeps its normal wire name and this warning fires, so JSON is never corrupted. The `xml.namespace`, `xml.prefix`, and `xml.wrapped` (wrapped arrays) hints are never represented — quick-xml serde has no faithful mapping for them — so they are always ignored with this warning rather than silently honored or rejected."
             }
@@ -297,6 +320,9 @@ impl Code {
             Code::SpecUndefinedBehavior,
             Code::TupleRestNotRepresentable,
             Code::DeclarationHasNoEffect,
+            Code::RuntimeAuditSkipped,
+            Code::CargoIntegrationDegraded,
+            Code::CargoIntegrationRequired,
         ];
         ALL
     }

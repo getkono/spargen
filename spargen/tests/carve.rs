@@ -11,7 +11,7 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use camino::Utf8PathBuf;
-use spargen::{Code, Config, Outcome, Report};
+use spargen::{Build, CargoIntegration, Code, Outcome, Report, Spec};
 
 fn spargen(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_spargen"))
@@ -21,11 +21,33 @@ fn spargen(dir: &Path, args: &[&str]) -> Output {
         .unwrap()
 }
 
-fn config(spec: &Path, out: &Path) -> Config {
-    Config::new(
-        Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap(),
-        Utf8PathBuf::from_path_buf(out.to_path_buf()).unwrap(),
+fn config(spec: &Path, out: &Path) -> Build {
+    build(
+        Spec::new(Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap()),
+        out,
     )
+}
+
+/// As [`config`], but with auto-carve on.
+fn carving(spec: &Path, out: &Path) -> Build {
+    build(
+        Spec::new(Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap()).carve(true),
+        out,
+    )
+}
+
+/// As [`config`], but with an explicit omit profile.
+fn omitting(spec: &Path, out: &Path, omit: spargen::Omit) -> Build {
+    build(
+        Spec::new(Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap()).omit(omit),
+        out,
+    )
+}
+
+fn build(spec: Spec, out: &Path) -> Build {
+    spec.build(Utf8PathBuf::from_path_buf(out.to_path_buf()).unwrap())
+        // Not a build script; keep `W013` out of the carve reports these tests assert on.
+        .cargo(CargoIntegration::Off)
 }
 
 fn write_spec(dir: &Path, name: &str, contents: &str) -> std::path::PathBuf {
@@ -68,8 +90,7 @@ fn glob_omit_path_removes_all_matching_operations() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", ADMIN_SPEC);
     let out = temp.path().join("client.rs");
-    let mut config = config(&spec, &out);
-    config.omit = spargen::omit! { paths { "/admin/**"; } };
+    let config = omitting(&spec, &out, spargen::omit! { paths { "/admin/**"; } });
     let report = spargen::generate(&config);
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
 
@@ -95,8 +116,7 @@ fn exact_omit_path_still_removes_exactly_one() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", ADMIN_SPEC);
     let out = temp.path().join("client.rs");
-    let mut config = config(&spec, &out);
-    config.omit = spargen::omit! { paths { "/admin/users"; } };
+    let config = omitting(&spec, &out, spargen::omit! { paths { "/admin/users"; } });
     let report = spargen::generate(&config);
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(&out).unwrap();
@@ -160,8 +180,7 @@ fn carve_generates_the_rest_and_reports_the_carved_operation() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", ONE_BAD_OP);
     let out = temp.path().join("client.rs");
-    let mut config = config(&spec, &out);
-    config.carve = true;
+    let config = carving(&spec, &out);
     let report = spargen::generate(&config);
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     assert_eq!(
@@ -203,10 +222,8 @@ fn carve_output_is_deterministic() {
     let spec = write_spec(temp.path(), "openapi.yaml", ONE_BAD_OP);
     let first = temp.path().join("first.rs");
     let second = temp.path().join("second.rs");
-    let mut first_config = config(&spec, &first);
-    first_config.carve = true;
-    let mut second_config = config(&spec, &second);
-    second_config.carve = true;
+    let first_config = carving(&spec, &first);
+    let second_config = carving(&spec, &second);
     assert_eq!(spargen::generate(&first_config).outcome, Outcome::Generated);
     assert_eq!(
         spargen::generate(&second_config).outcome,
@@ -275,8 +292,7 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(temp.path(), "openapi.yaml", MIXED_REJECTIONS);
     let out = temp.path().join("client.rs");
-    let mut config = config(&spec, &out);
-    config.carve = true;
+    let config = carving(&spec, &out);
     let report = spargen::generate(&config);
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     // The component `Bad` and the `$dynamicRef` operation are both carved and reported.
@@ -347,8 +363,7 @@ fn carve_is_a_noop_on_a_spec_with_no_rejections() {
     let carved = temp.path().join("carved.rs");
     let plain = temp.path().join("plain.rs");
 
-    let mut carved_config = config(&spec, &carved);
-    carved_config.carve = true;
+    let carved_config = carving(&spec, &carved);
     let report = spargen::generate(&carved_config);
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     assert_eq!(

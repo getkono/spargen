@@ -43,9 +43,8 @@ fn run(ext: &str, body: &[u8]) {
     drop(file);
 
     let spec = camino::Utf8PathBuf::from_path_buf(path).expect("utf8 temp path");
-    let out = camino::Utf8PathBuf::from("unused.rs");
     // The property: this returns a `Report` for every input, never panics/aborts.
-    let _report = spargen::check(&spargen::Config::new(spec, out));
+    let _report = spargen::check(&spargen::Spec::new(spec));
 }
 
 fuzz_target!(|data: &[u8]| {

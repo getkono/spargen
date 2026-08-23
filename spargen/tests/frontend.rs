@@ -3,16 +3,23 @@
 //! `generate`; the E013 case also proves `check` runs the same lowering (check/generate parity).
 
 use camino::Utf8PathBuf;
-use spargen::{Code, Config, Outcome, Report};
+use spargen::{Build, CargoIntegration, Code, Outcome, Report, Spec};
 
 /// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
 /// tempdir (and any written output) is discarded once the report — which owns its data — is built.
+/// A build for a fixture spec. These tests are not build scripts, so the Cargo integration is
+/// explicitly off: no rebuild triggers to emit, no consumer manifest to audit, and — the reason it
+/// matters here — no `W013` polluting the diagnostics a fixture is asserting on.
+fn build(spec: Utf8PathBuf, out: Utf8PathBuf) -> Build {
+    Spec::new(spec).build(out).cargo(CargoIntegration::Off)
+}
+
 fn generate(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
     let out = temp.path().join("client.rs");
-    spargen::generate(&Config::new(
+    spargen::generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out).unwrap(),
     ))
@@ -23,10 +30,7 @@ fn check(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
-    spargen::check(&Config::new(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from("unused.rs"),
-    ))
+    spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
 }
 
 fn generate_with_code(spec: &str) -> (Report, String) {
@@ -34,7 +38,7 @@ fn generate_with_code(spec: &str) -> (Report, String) {
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&Config::new(
+    let report = spargen::generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
@@ -217,7 +221,7 @@ Pet:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&Config::new(dir.join("openapi.yaml"), out.clone()));
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
@@ -294,7 +298,7 @@ Pet:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&Config::new(dir.join("openapi.yaml"), out.clone()));
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
@@ -355,11 +359,11 @@ mod remote {
             std::fs::write(&path, vendor).unwrap();
         }
         let out = dir.join("client.rs");
-        let config = spargen::Config::new(dir.join("openapi.yaml"), out.clone());
+        let spec = Spec::new(dir.join("openapi.yaml"));
         let report = if check_only {
-            spargen::check(&config)
+            spargen::check(&spec)
         } else {
-            spargen::generate(&config)
+            spargen::generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
         };
         (report, temp, out)
     }
@@ -448,11 +452,11 @@ mod remote {
             std::fs::write(&path, content).unwrap();
         }
         let out = dir.join("client.rs");
-        let config = spargen::Config::new(dir.join("openapi.yaml"), out.clone());
+        let spec = Spec::new(dir.join("openapi.yaml"));
         let report = if check_only {
-            spargen::check(&config)
+            spargen::check(&spec)
         } else {
-            spargen::generate(&config)
+            spargen::generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
         };
         (report, temp, out)
     }
@@ -3544,7 +3548,7 @@ components:
     )
     .unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&Config::new(
+    let report = spargen::generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
@@ -4229,7 +4233,7 @@ paths:
     )
     .unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&Config::new(
+    let report = spargen::generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out).unwrap(),
     ));

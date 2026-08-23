@@ -13,7 +13,7 @@ use std::hint::black_box;
 
 use camino::Utf8PathBuf;
 use criterion::{criterion_group, criterion_main, Criterion};
-use spargen::{Config, Outcome};
+use spargen::{CargoIntegration, Outcome, Spec};
 
 /// A minimal but non-trivial 3.1 spec: one operation, one parameter, one model. Serves as the
 /// fixed-cost floor for the pipeline (thread spawn, meta-schema validation, lowering, allocation).
@@ -75,8 +75,7 @@ fn bench_check(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("check");
     for (name, spec) in &cases {
-        // A dummy output target — `check` never writes, so the path is irrelevant.
-        let config = Config::new(spec.clone(), Utf8PathBuf::from("unused.rs"));
+        let config = Spec::new(spec.clone());
         group.bench_function(*name, |b| {
             b.iter(|| {
                 let report = spargen::check(black_box(&config));
@@ -104,11 +103,14 @@ fn bench_generate(c: &mut Criterion) {
         let out_dir = tempfile::tempdir().expect("create out tempdir");
         let out_path =
             Utf8PathBuf::from_path_buf(out_dir.path().join("api.rs")).expect("utf8 out path");
-        let config = Config::new(spec.clone(), out_path);
+        let config = Spec::new(spec.clone())
+            .build(out_path)
+            .cargo(CargoIntegration::Off);
         group.bench_function(*name, |b| {
             b.iter(|| {
                 let report = spargen::generate(black_box(&config));
-                assert_eq!(report.outcome, Outcome::Generated, "{name} must generate");
+                // `Generated` on the first iteration, `Cached` on the rest — both are success.
+                assert!(report.outcome.is_success(), "{name} must generate");
                 black_box(report);
             });
         });

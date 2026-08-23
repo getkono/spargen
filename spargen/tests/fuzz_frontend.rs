@@ -26,7 +26,7 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use proptest::test_runner::{Config as PtConfig, RngAlgorithm, TestRng, TestRunner};
 use serde_json::{Map, Value};
-use spargen::{check, Config};
+use spargen::{check, Spec};
 use tempfile::TempDir;
 
 /// Keys the frontend interprets — biasing generated objects toward these drives the fuzzer past the
@@ -128,8 +128,7 @@ fn deterministic_runner(cases: u32) -> TestRunner {
 fn exercise(dir: &TempDir, bytes: &[u8], ext: &str) {
     let spec = Utf8PathBuf::from_path_buf(dir.path().join(format!("spec.{ext}"))).unwrap();
     std::fs::write(&spec, bytes).unwrap();
-    let out = Utf8PathBuf::from("unused.rs");
-    let report = check(&Config::new(spec, out));
+    let report = check(&Spec::new(spec));
     // Touch the report so the optimizer cannot elide the call; also a cheap sanity walk.
     std::hint::black_box(report.outcome);
     std::hint::black_box(report.diagnostics.len());

@@ -37,16 +37,15 @@ vendored into the source tree before compilation. There are exactly two supporte
 | **Macro** | [`spargen-macro`](spargen-macro): `generate_api!("spec.yaml")` | inline (use `cargo expand` to inspect) |
 
 Both modes run as part of Rust compilation. Spargen is host/build-time only and **never enters your
-runtime dependency tree**. The CLI is tooling for `lock`, `check`, `diff`, and `explain`; it cannot
-generate code, stream generated source, watch files, or scaffold a crate.
+runtime dependency tree**. The CLI is tooling for `lock`, `check`, `deps`, `diff`, and
+`explain`; it cannot generate code, stream generated source, watch files, or scaffold a crate.
 
 ```rust
 // build.rs — spargen appears only in [build-dependencies].
 let out_dir = std::env::var("OUT_DIR").unwrap();
-let report = spargen::generate(&spargen::Config::new(
-    "api/openapi.yaml",
-    format!("{out_dir}/api.rs"),
-));
+let report = spargen::generate(
+    &spargen::Spec::new("api/openapi.yaml").build(format!("{out_dir}/api.rs")),
+);
 assert_eq!(report.outcome, spargen::Outcome::Generated);
 ```
 

@@ -14,17 +14,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
-use spargen::{Code, Config, Outcome, Report};
+use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
 
 /// Run `check` (frontend + lowering, no emit) on an inline spec written into a throwaway tempdir.
 fn check(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
-    spargen::check(&Config::new(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from("unused.rs"),
-    ))
+    spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
 }
 
 /// Run `generate` to a module and return the report plus the emitted source (when written).
@@ -33,10 +30,11 @@ fn generate_module(spec: &str) -> (Report, String) {
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&Config::new(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
-    ));
+    let report = spargen::generate(
+        &Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap())
+            .build(Utf8PathBuf::from_path_buf(out.clone()).unwrap())
+            .cargo(CargoIntegration::Off),
+    );
     let source = std::fs::read_to_string(&out).unwrap_or_default();
     (report, source)
 }

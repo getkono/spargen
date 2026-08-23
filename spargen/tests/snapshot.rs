@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8PathBuf;
-use spargen::{Config, Outcome, Report};
+use spargen::{Build, CargoIntegration, Outcome, Report, Spec};
 
 /// Absolute path to a corpus spec (relative to the workspace root, one level up from this crate).
 fn corpus_path(rel: &str) -> Utf8PathBuf {
@@ -30,11 +30,14 @@ fn corpus_path(rel: &str) -> Utf8PathBuf {
 /// A generation config for a corpus spec writing to a throwaway module, with the diagnostic batch
 /// uncapped so the WHOLE diagnostic set is captured (the default cap of 100 truncates the big
 /// specs, hiding both the terminal rejection code and the true warning counts).
-fn config_for(spec: Utf8PathBuf, out: Utf8PathBuf, carve: bool) -> Config {
-    let mut config = Config::new(spec, out);
-    config.batch_cap = usize::MAX;
-    config.carve = carve;
-    config
+fn config_for(spec: Utf8PathBuf, out: Utf8PathBuf, carve: bool) -> Build {
+    Spec::new(spec)
+        .batch_cap(usize::MAX)
+        .carve(carve)
+        .build(out)
+        // Not a build script: the snapshots record what the spec produced, not what the process
+        // happened to be.
+        .cargo(CargoIntegration::Off)
 }
 
 /// A deterministic, reviewable rendering of a run: the outcome plus a sorted `code: count`

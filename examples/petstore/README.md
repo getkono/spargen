@@ -27,5 +27,5 @@ To review and commit the generated client, change the `build.rs` output to `src/
 include it as a normal module. Generation remains a compilation-time step.
 
 ```rust
-let config = spargen::Config::new("petstore.yaml", "src/petstore.rs");
+let build = spargen::Spec::new("petstore.yaml").build("src/petstore.rs");
 ```

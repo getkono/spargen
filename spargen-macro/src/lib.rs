@@ -197,20 +197,29 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
     let raw = args.spec.value();
     let spec_path = resolve_spec_path(&raw);
 
-    let mut config = spargen::Config::new(
-        spec_path.clone(),
-        // Never written — the private preview bridge renders in memory.
-        "generated.rs",
-    );
-    config.features.uuid = !args.no_uuid;
-    config.features.time = !args.no_time;
-    config.carve = args.carve;
-    config.omit = args.omit.clone();
+    // The config file is discovered beside the spec, then macro arguments override it — the same
+    // precedence the CLI and `build.rs` use.
+    let mut config = match spargen::Spec::new(spec_path.clone()).discover_config_file() {
+        Ok(spec) => spec,
+        Err(error) => return Err(syn::Error::new(args.spec.span(), error.to_string())),
+    };
+    if args.no_uuid {
+        config = config.uuid(false);
+    }
+    if args.no_time {
+        config = config.time(false);
+    }
+    if args.carve {
+        config = config.carve(true);
+    }
+    for rule in &args.omit.rules {
+        config = config.omit_rule(rule.clone());
+    }
     if let Some(cap) = args.error_body_cap {
-        config.error_body_cap = cap;
+        config = config.error_body_cap(cap);
     }
     if let Some(cap) = args.batch_cap {
-        config.batch_cap = cap;
+        config = config.batch_cap(cap);
     }
 
     // Keep spargen's codegen (and the tokenization below) off the compiler bridge; restored on drop.

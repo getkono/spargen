@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::diag::Diagnostic;
 use crate::ir::{Api, MediaType, Prim, TypeGraph, TypeId, TypeKind};
-use crate::{Code, Features, JsonPointer};
+use crate::{Code, JsonPointer, Spec};
 
 const BYTES: Dependency = Dependency::stable("bytes", "1.12.1", 2);
 const FUTURES_CORE: Dependency = Dependency::unstable("futures-core", "0.3.32", 0, 4);
@@ -78,7 +78,7 @@ pub(crate) struct RuntimeRequirements {
 }
 
 impl RuntimeRequirements {
-    pub(crate) fn for_api(api: &Api, features: &Features) -> Self {
+    pub(crate) fn for_api(api: &Api, spec: &Spec) -> Self {
         Self {
             reqwest_json: api.operations.iter().any(|operation| {
                 operation
@@ -95,11 +95,11 @@ impl RuntimeRequirements {
             bytes_serde: bytes_need_serde(api),
             streams: api.uses_streams(),
             xml: api.uses_xml(),
-            uuid: features.uuid
+            uuid: spec.uuid
                 && api.types.iter().any(|(_, definition)| {
                     matches!(definition.kind, TypeKind::Primitive(Prim::Uuid))
                 }),
-            time: features.time
+            time: spec.time
                 && api.types.iter().any(|(_, definition)| {
                     matches!(
                         definition.kind,
@@ -212,13 +212,10 @@ fn contains_bytes(types: &TypeGraph, id: TypeId, visiting: &mut BTreeSet<TypeId>
     contains
 }
 
-/// Locate a consumer manifest only in an actual Cargo build-script process.
-pub(crate) fn build_script_manifest() -> Option<Utf8PathBuf> {
-    if std::env::var_os("OUT_DIR").is_none() || std::env::var_os("CARGO_CFG_TARGET_ARCH").is_none()
-    {
-        return None;
-    }
-    manifest_from_env()
+/// Whether this process is an actual Cargo build script. Only there do `cargo:` directives reach
+/// Cargo and does the environment name the consuming package.
+pub(crate) fn under_build_script() -> bool {
+    std::env::var_os("OUT_DIR").is_some() && std::env::var_os("CARGO_CFG_TARGET_ARCH").is_some()
 }
 
 pub(crate) fn manifest_from_env() -> Option<Utf8PathBuf> {
@@ -243,6 +240,215 @@ pub(crate) fn cargo_directives(manifests: &[Utf8PathBuf]) {
         if !manifest.as_str().contains(['\n', '\r']) {
             println!("cargo:rerun-if-changed={manifest}");
         }
+    }
+}
+
+/// One dependency the consuming package must declare, as spargen derived it from the lowered API.
+///
+/// This is the single source of truth behind both the audit (`E023`) and `spargen deps`: the two
+/// read the same table, so what the audit demands and what `deps` prints cannot drift.
+#[derive(Debug, Clone, Copy)]
+struct Requirement {
+    /// The manifest table it belongs in — `dependencies`, or a target-specific table.
+    table: &'static str,
+    dependency: Dependency,
+    features: &'static [&'static str],
+    /// `default-features = false` is part of the contract (reqwest's defaults pull in a TLS
+    /// stack the generated client does not choose).
+    no_default_features: bool,
+    /// Declared `optional = true` and wired to a Cargo feature of the consumer's own.
+    optional: bool,
+    /// Only required when the consumer opts in — currently the `blocking` Cargo feature.
+    conditional: Option<&'static str>,
+}
+
+/// The dependency table for one lowered API. `deps` renders it; `audit` checks the consumer
+/// manifest against it.
+fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requirement> {
+    const NONE: &[&str] = &[];
+    let mut table = Vec::new();
+    let mut push = |dependency: Dependency, features: &'static [&str], no_defaults: bool| {
+        table.push(Requirement {
+            table: "dependencies",
+            dependency,
+            features,
+            no_default_features: no_defaults,
+            optional: false,
+            conditional: None,
+        });
+    };
+
+    push(
+        BYTES,
+        if requirements.bytes_serde {
+            &["serde"]
+        } else {
+            NONE
+        },
+        false,
+    );
+    push(
+        REQWEST,
+        match (
+            requirements.reqwest_json,
+            requirements.reqwest_multipart,
+            requirements.streams,
+        ) {
+            (true, true, true) => &["json", "multipart", "stream"],
+            (true, true, false) => &["json", "multipart"],
+            (true, false, true) => &["json", "stream"],
+            (true, false, false) => &["json"],
+            (false, true, true) => &["multipart", "stream"],
+            (false, true, false) => &["multipart"],
+            (false, false, true) => &["stream"],
+            (false, false, false) => NONE,
+        },
+        true,
+    );
+    if requirements.streams {
+        push(FUTURES_CORE, NONE, false);
+    }
+    push(SECRECY, NONE, false);
+    push(SERDE, &["derive"], false);
+    push(SERDE_JSON, NONE, false);
+    if requirements.xml {
+        push(QUICK_XML, &["serialize"], false);
+    }
+    if requirements.uuid {
+        push(UUID, &["serde"], false);
+    }
+    if requirements.time {
+        push(TIME, &["serde", "formatting", "parsing"], false);
+    }
+    // The blocking client is opt-in: it is required only from a consumer that declares its own
+    // `blocking` Cargo feature, and then only off wasm, where no thread-blocking runtime exists.
+    table.push(Requirement {
+        table: "target.'cfg(not(target_arch = \"wasm32\"))'.dependencies",
+        dependency: TOKIO,
+        features: &["rt"],
+        no_default_features: false,
+        optional: true,
+        conditional: Some("blocking"),
+    });
+    table
+}
+
+/// One dependency the consuming package must declare for generated output to compile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RequiredDependency {
+    /// The crate name.
+    pub name: &'static str,
+    /// The version requirement to declare — the tested lower bound. A higher semver-compatible
+    /// caret requirement is equally acceptable to the audit.
+    pub version: &'static str,
+    /// Cargo features the generated code needs enabled.
+    pub features: Vec<&'static str>,
+    /// Whether `default-features = false` is part of the contract.
+    pub no_default_features: bool,
+    /// Whether the dependency must be declared `optional = true`.
+    pub optional: bool,
+    /// The manifest table it belongs in (`dependencies`, or a `target.'cfg(…)'` table).
+    pub table: &'static str,
+    /// The consumer Cargo feature that makes this dependency necessary, when it is opt-in.
+    pub required_by_feature: Option<&'static str>,
+}
+
+impl RequiredDependency {
+    /// The `name = { … }` line as it would appear in `Cargo.toml`.
+    pub fn manifest_line(&self) -> String {
+        let mut parts = vec![format!("version = \"{}\"", self.version)];
+        if self.no_default_features {
+            parts.push("default-features = false".to_owned());
+        }
+        if !self.features.is_empty() {
+            let features = self
+                .features
+                .iter()
+                .map(|feature| format!("\"{feature}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("features = [{features}]"));
+        }
+        if self.optional {
+            parts.push("optional = true".to_owned());
+        }
+        if parts.len() == 1 {
+            return format!("{} = \"{}\"", self.name, self.version);
+        }
+        format!("{} = {{ {} }}", self.name, parts.join(", "))
+    }
+}
+
+/// Every dependency generated output from one spec requires — what `spargen deps` prints and what
+/// the `E023` audit checks a consumer manifest against.
+///
+/// Both read [`requirement_table`], so the block printed here is exactly the block that passes the
+/// audit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Requirements {
+    /// The dependencies, in manifest order.
+    pub dependencies: Vec<RequiredDependency>,
+}
+
+impl Requirements {
+    pub(crate) fn new(requirements: &RuntimeRequirements) -> Self {
+        Self {
+            dependencies: requirement_table(requirements)
+                .into_iter()
+                .map(|required| RequiredDependency {
+                    name: required.dependency.name,
+                    version: required.dependency.floor,
+                    features: required.features.to_vec(),
+                    no_default_features: required.no_default_features,
+                    optional: required.optional,
+                    table: required.table,
+                    required_by_feature: required.conditional,
+                })
+                .collect(),
+        }
+    }
+
+    /// The `Cargo.toml` fragment to paste into the consuming package.
+    ///
+    /// Opt-in dependencies (currently the blocking client's `tokio`) are rendered commented out
+    /// under the feature that would require them — uncommenting is the whole opt-in.
+    pub fn manifest_block(&self) -> String {
+        let mut rendered = String::new();
+        let mut table: Option<&str> = None;
+        for dependency in self
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency.required_by_feature.is_none())
+        {
+            if table != Some(dependency.table) {
+                if table.is_some() {
+                    rendered.push('\n');
+                }
+                rendered.push_str(&format!("[{}]\n", dependency.table));
+                table = Some(dependency.table);
+            }
+            rendered.push_str(&dependency.manifest_line());
+            rendered.push('\n');
+        }
+        for dependency in self
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency.required_by_feature.is_some())
+        {
+            let feature = dependency.required_by_feature.expect("filtered above");
+            rendered.push_str(&format!(
+                "\n# Only if your package declares a `{feature}` Cargo feature:\n"
+            ));
+            rendered.push_str(&format!("# [{}]\n", dependency.table));
+            rendered.push_str(&format!("# {}\n", dependency.manifest_line()));
+        }
+        rendered
+    }
+}
+
+impl std::fmt::Display for Requirements {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.manifest_block().trim_end())
     }
 }
 
@@ -271,74 +477,27 @@ pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements
         }
     });
 
-    let mut check = |dependency: Dependency, features: &[&str], require_no_defaults: bool| {
+    for required in requirement_table(requirements) {
+        if let Some(feature) = required.conditional {
+            if !declares_feature(&manifest, feature) {
+                continue;
+            }
+        }
         check_dependency(
             &manifest,
             workspace.as_ref(),
             DependencyCheck {
-                table: "dependencies",
-                dependency,
-                features,
-                require_no_defaults,
-                require_optional: false,
+                table: required.table,
+                dependency: required.dependency,
+                features: required.features,
+                require_no_defaults: required.no_default_features,
+                require_optional: required.optional,
             },
             &mut diagnostics,
         );
-    };
-    check(
-        BYTES,
-        if requirements.bytes_serde {
-            &["serde"]
-        } else {
-            &[]
-        },
-        false,
-    );
-    let mut reqwest_features = Vec::new();
-    if requirements.reqwest_json {
-        reqwest_features.push("json");
-    }
-    if requirements.reqwest_multipart {
-        reqwest_features.push("multipart");
-    }
-    if requirements.streams {
-        reqwest_features.push("stream");
-    }
-    check(REQWEST, &reqwest_features, true);
-    if requirements.streams {
-        check(FUTURES_CORE, &[], false);
-    }
-    check(SECRECY, &[], false);
-    check(SERDE, &["derive"], false);
-    check(SERDE_JSON, &[], false);
-    if requirements.xml {
-        check(QUICK_XML, &["serialize"], false);
-    }
-    if requirements.uuid {
-        check(UUID, &["serde"], false);
-    }
-    if requirements.time {
-        check(TIME, &["serde", "formatting", "parsing"], false);
     }
 
-    if manifest
-        .get("features")
-        .and_then(|value| value.get("blocking"))
-        .is_some()
-    {
-        let target = "target.'cfg(not(target_arch = \"wasm32\"))'.dependencies";
-        check_dependency(
-            &manifest,
-            workspace.as_ref(),
-            DependencyCheck {
-                table: target,
-                dependency: TOKIO,
-                features: &["rt"],
-                require_no_defaults: false,
-                require_optional: true,
-            },
-            &mut diagnostics,
-        );
+    if declares_feature(&manifest, "blocking") {
         let wired = manifest
             .get("features")
             .and_then(|value| value.get("blocking"))
@@ -363,6 +522,14 @@ pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements
         diagnostics,
         manifests,
     }
+}
+
+/// Whether the consumer manifest declares a Cargo feature of its own by this name.
+fn declares_feature(manifest: &toml::Value, feature: &str) -> bool {
+    manifest
+        .get("features")
+        .and_then(|value| value.get(feature))
+        .is_some()
 }
 
 fn read_toml(path: &Utf8Path) -> Result<toml::Value, String> {
@@ -727,5 +894,46 @@ serde_json.workspace = true
         let result = audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         assert_eq!(result.manifests, vec![root, member]);
+    }
+
+    /// The anti-drift property: the block `spargen deps` prints must be exactly a block the audit
+    /// accepts. If the two ever diverge — a feature demanded but not printed, or printed with the
+    /// wrong floor — this fails.
+    #[test]
+    fn the_printed_dependency_block_passes_the_audit_it_describes() {
+        // Every capability on at once, so the table is exercised in full.
+        let requirements = RuntimeRequirements {
+            reqwest_json: true,
+            reqwest_multipart: true,
+            bytes_serde: true,
+            streams: true,
+            xml: true,
+            uuid: true,
+            time: true,
+        };
+        let block = Requirements::new(&requirements).manifest_block();
+        // `deps` renders the blocking dependency commented out, under the feature that requires
+        // it; a consumer that opts in uncomments both, which is what this reconstructs.
+        let opted_in = block
+            .replace("# [target", "[target")
+            .replace("# tokio", "tokio");
+        let manifest = format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n             [features]\nblocking = [\"dep:tokio\"]\n\n{opted_in}"
+        );
+
+        let diagnostics = audit_manifest(&manifest, requirements.clone());
+        assert!(
+            diagnostics.is_empty(),
+            "the block `spargen deps` prints must satisfy the audit:\n{manifest}\n{diagnostics:#?}"
+        );
+
+        // And with the feature absent, the commented-out block is genuinely not required.
+        let without_blocking =
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{block}");
+        let diagnostics = audit_manifest(&without_blocking, requirements);
+        assert!(
+            diagnostics.is_empty(),
+            "{without_blocking}\n{diagnostics:#?}"
+        );
     }
 }

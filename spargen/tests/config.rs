@@ -101,3 +101,119 @@ fn bad_omit_flag_syntax_errors_cleanly() {
     assert_eq!(output.status.code(), Some(3), "{output:?}");
     assert!(String::from_utf8_lossy(&output.stderr).contains("--omit-operation"));
 }
+
+#[test]
+fn the_removed_features_table_names_the_migration() {
+    // 0.2 nested these keys under `[features]`. `deny_unknown_fields` alone would only say
+    // "unknown field `features`", which does not tell an upgrading user what to do.
+    let (temp, spec) = workspace();
+    std::fs::write(
+        temp.path().join("spargen.toml"),
+        "[features]\ncarve = true\n",
+    )
+    .unwrap();
+    let output = check(temp.path(), &spec, &[]);
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("move its keys"), "{stderr}");
+}
+
+#[test]
+fn config_file_knobs_reach_the_library() {
+    // `carve` in the file must have the same effect as `--carve`: the unsupported operation is
+    // carved away (W009) instead of rejecting the run.
+    let (temp, spec) = workspace();
+    std::fs::write(
+        temp.path().join("spargen.toml"),
+        "carve = true\nbatch_cap = 7\nuuid = false\ntime = false\n",
+    )
+    .unwrap();
+    let output = check(temp.path(), &spec, &["--format", "json"]);
+    assert!(output.status.success(), "{output:?}");
+}
+
+fn deps(dir: &Path, spec: &Path, extra: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_spargen"))
+        .current_dir(dir)
+        .arg("deps")
+        .arg(spec)
+        .args(extra)
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn deps_prints_a_pasteable_dependency_block() {
+    let (temp, spec) = workspace();
+    let output = deps(temp.path(), &spec, &[]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("[dependencies]"), "{stdout}");
+    // reqwest's own defaults pull in a TLS stack the generated client does not choose, so
+    // `default-features = false` is part of the contract the audit enforces.
+    assert!(
+        stdout.contains(r#"reqwest = { version = ""#)
+            && stdout.contains("default-features = false"),
+        "{stdout}"
+    );
+    assert!(stdout.contains(r#"serde = { version = "#), "{stdout}");
+    // The blocking client is opt-in, so it is offered commented out under its feature.
+    assert!(stdout.contains("# tokio = {"), "{stdout}");
+    // This spec has no uuid/time formats, no XML, and no streams — none of those crates belong.
+    for absent in ["uuid", "quick-xml", "futures-core"] {
+        assert!(
+            !stdout.contains(absent),
+            "{absent} should be absent: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn deps_follows_the_spec_knobs() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        r##"
+openapi: 3.1.0
+info: { title: Ids, version: 1.0.0 }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: string, format: uuid }
+"##,
+    )
+    .unwrap();
+
+    let typed = deps(temp.path(), &spec, &[]);
+    assert!(typed.status.success(), "{typed:?}");
+    assert!(String::from_utf8_lossy(&typed.stdout).contains("uuid = {"));
+
+    // `--no-uuid` falls back to `String`, which needs no `uuid` dependency at all.
+    let untyped = deps(temp.path(), &spec, &["--no-uuid"]);
+    assert!(untyped.status.success(), "{untyped:?}");
+    assert!(!String::from_utf8_lossy(&untyped.stdout).contains("uuid = {"));
+}
+
+#[test]
+fn deps_reports_a_rejection_instead_of_a_block() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        "openapi: 3.0.3\ninfo: { title: Old, version: 1.0.0 }\npaths: {}\n",
+    )
+    .unwrap();
+    let output = deps(temp.path(), &spec, &[]);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("E001"),
+        "{output:?}"
+    );
+}

@@ -41,12 +41,9 @@ Choose an `OUT_DIR` path for ephemeral output or a source path for output you al
 ```rust
 // build.rs
 fn main() {
-    let config = spargen::Config::new(
-        "openapi.json",
-        "src/api.rs",
-    );
-    let report = spargen::generate(&config);
-    println!("cargo:warning=spargen outcome: {:?}", report.outcome);
+    let build = spargen::Spec::new("openapi.json").build("src/api.rs");
+    let report = spargen::generate(&build);
+    report.emit_cargo_warnings();
 }
 ```
 
@@ -196,14 +193,15 @@ Real framework output occasionally contains a construct spargen cannot faithfull
 example a JSON Schema `$dynamicRef`, which rejects with [`E006`](errors.md). By default one such
 island rejects the **whole** document.
 
-`Config::carve` is the escape hatch: it drops only the unrepresentable constructs (each reported once with
+`Spec::carve` is the escape hatch: it drops only the unrepresentable constructs (each reported once with
 `W009`), then generates everything else. It reaches a fixpoint (cascading through any components that
 referenced a carved schema) and stays deterministic.
 
 ```rust
-let mut config = spargen::Config::new("openapi.json", "src/api.rs");
-config.carve = true;
-let report = spargen::generate(&config);
+let build = spargen::Spec::new("openapi.json")
+    .carve(true)
+    .build("src/api.rs");
+let report = spargen::generate(&build);
 assert_eq!(report.outcome, spargen::Outcome::Generated);
 ```
 

@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use camino::Utf8PathBuf;
-use spargen::{Code, Config, Outcome};
+use spargen::{CargoIntegration, Code, Outcome, Spec};
 
 fn generate_fixture_crate(
     spec: &std::path::Path,
@@ -40,10 +40,13 @@ tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
         ),
     )
     .unwrap();
-    spargen::generate(&Config::new(
-        Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap(),
-        Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap(),
-    ))
+    spargen::generate(
+        &Spec::new(Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap())
+            .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
+            // This test process is not a build script; the fixture crate below is compiled by a
+            // real `cargo build`, which is where the manifest audit belongs.
+            .cargo(CargoIntegration::Off),
+    )
 }
 
 #[test]
@@ -79,8 +82,8 @@ spargen = {{ path = {:?}, default-features = false }}
     std::fs::write(
         crate_dir.join("build.rs"),
         r#"fn main() {
-    let config = spargen::Config::new("openapi.yaml", "src/generated.rs");
-    let report = spargen::generate(&config);
+    let build = spargen::Spec::new("openapi.yaml").build("src/generated.rs");
+    let report = spargen::generate(&build);
     for diagnostic in &report.diagnostics {
         eprintln!("{}: {}", diagnostic.code.as_str(), diagnostic.message);
     }
@@ -1051,10 +1054,7 @@ fn rejects_openapi_30_without_conversion() {
     )
     .unwrap();
 
-    let report = spargen::check(&Config::new(
-        Utf8PathBuf::from_path_buf(spec).unwrap(),
-        Utf8PathBuf::from("unused.rs"),
-    ));
+    let report = spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap()));
 
     assert_eq!(report.outcome, Outcome::Rejected);
     assert!(report
@@ -1143,15 +1143,14 @@ fn omit_overlay_removes_unsupported_operation() {
     let spec = temp.path().join("openapi.yaml");
     std::fs::write(&spec, SPEC_WITH_UNSUPPORTED_OPERATION).unwrap();
     let out = temp.path().join("client.rs");
-    let mut config = Config::new(
-        Utf8PathBuf::from_path_buf(spec).unwrap(),
-        Utf8PathBuf::from_path_buf(out).unwrap(),
-    );
-    config.omit = spargen::omit! {
-        operations {
-            post "/upload";
-        }
-    };
+    let config = Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap())
+        .omit(spargen::omit! {
+            operations {
+                post "/upload";
+            }
+        })
+        .build(Utf8PathBuf::from_path_buf(out).unwrap())
+        .cargo(CargoIntegration::Off);
 
     let report = spargen::generate(&config);
 
@@ -2412,7 +2411,7 @@ fn macro_preview_is_deterministic() {
     std::fs::write(&spec, BASIC_SPEC).unwrap();
     let out = Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap();
 
-    let config = Config::new(spec, out.clone());
+    let config = Spec::new(spec);
     let preview = spargen::__private::preview(&config);
     assert_eq!(
         preview.report.outcome,
@@ -2451,17 +2450,14 @@ serde_json = "1.0.151"
     )
     .unwrap();
     let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    let output = Utf8PathBuf::from_path_buf(temp.path().join("unused.rs")).unwrap();
     std::fs::write(
         &spec,
         "openapi: 3.1.0\ninfo: { title: Core, version: 1.0.0 }\npaths: {}\n",
     )
     .unwrap();
 
-    let core = spargen::__private::preview_for_macro(
-        &Config::new(spec.clone(), output.clone()),
-        manifest.to_str().unwrap(),
-    );
+    let core =
+        spargen::__private::preview_for_macro(&Spec::new(spec.clone()), manifest.to_str().unwrap());
     assert_eq!(
         core.report.outcome,
         Outcome::Generated,
@@ -2523,10 +2519,8 @@ components:
     )
     .unwrap();
 
-    let conditional = spargen::__private::preview_for_macro(
-        &Config::new(spec, output),
-        manifest.to_str().unwrap(),
-    );
+    let conditional =
+        spargen::__private::preview_for_macro(&Spec::new(spec), manifest.to_str().unwrap());
     assert_eq!(conditional.report.outcome, Outcome::Rejected);
     let messages = conditional
         .report
@@ -2572,7 +2566,7 @@ fn preview_of_rejected_spec_has_no_files() {
     )
     .unwrap();
 
-    let preview = spargen::__private::preview(&Config::new(spec, "unused.rs"));
+    let preview = spargen::__private::preview(&Spec::new(spec));
     assert_eq!(preview.report.outcome, Outcome::Rejected);
     assert!(
         preview.contents.is_none(),

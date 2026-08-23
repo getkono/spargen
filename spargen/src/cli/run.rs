@@ -1,9 +1,9 @@
 use std::process::ExitCode;
 
-use spargen::{check, explain, Config};
+use spargen::{check, explain, ConfigError, Spec};
 
 use super::args::{Cli, Command, Format};
-use super::config::{self, CliOverrides, ConfigError, OmitFlags, Settings};
+use super::config;
 use super::exit::ExitStatus;
 
 /// Execute a parsed CLI invocation and return the process exit code.
@@ -14,23 +14,11 @@ use super::exit::ExitStatus;
 pub(crate) fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::Check(args) => {
-            let flags = OmitFlags {
-                paths: args.omit_path,
-                operations: args.omit_operation,
-                components: args.omit_component,
-                pointers: args.omit_pointer,
+            let spec = match config::resolve(args.spec, &args.options) {
+                Ok(spec) => spec,
+                Err(error) => return config_error(error),
             };
-            let overrides = CliOverrides {
-                carve: args.carve.then_some(true),
-            };
-            let settings =
-                match config::resolve(&args.spec, args.config.as_deref(), &overrides, &flags) {
-                    Ok(settings) => settings,
-                    Err(error) => return config_error(error),
-                };
-            let mut config = Config::new(args.spec, "__spargen_check.rs");
-            apply_settings(&mut config, settings);
-            let report = check(&config);
+            let report = check(&spec);
             emit(&report, args.format, Stream::Stderr);
             if report.succeeded() {
                 ExitStatus::Ok.into()
@@ -38,9 +26,28 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
                 ExitStatus::Diagnostics.into()
             }
         }
+        Command::Deps(args) => {
+            let spec = match config::resolve(args.spec, &args.options) {
+                Ok(spec) => spec,
+                Err(error) => return config_error(error),
+            };
+            match spargen::requirements(&spec) {
+                Ok(requirements) => {
+                    emit(&requirements, args.format, Stream::Stdout);
+                    ExitStatus::Ok.into()
+                }
+                Err(report) => {
+                    emit(&report, args.format, Stream::Stderr);
+                    ExitStatus::Diagnostics.into()
+                }
+            }
+        }
         Command::Lock(args) => {
-            let config = Config::new(args.spec, "__spargen_lock.rs");
-            let outcome = spargen::vendor(&config);
+            let spec = match config::resolve(args.spec, &args.options) {
+                Ok(spec) => spec,
+                Err(error) => return config_error(error),
+            };
+            let outcome = spargen::vendor(&spec);
             emit(&outcome, args.format, Stream::Stdout);
             if outcome.succeeded() {
                 ExitStatus::Ok.into()
@@ -49,8 +56,10 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
             }
         }
         Command::Diff(args) => {
-            let old = Config::new(args.old, "__spargen_diff_old.rs");
-            let new = Config::new(args.new, "__spargen_diff_new.rs");
+            let (old, new) = match spec_pair(args.old, args.new, &args.options) {
+                Ok(pair) => pair,
+                Err(error) => return config_error(error),
+            };
             match spargen::diff(&old, &new) {
                 // A spec that fails to lower is a hard error regardless of `--exit-code`;
                 // a breaking diff fails only when the caller opted into the CI gate.
@@ -88,11 +97,17 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
     }
 }
 
-/// Fold resolved [`Settings`] into the library [`Config`].
-fn apply_settings(config: &mut Config, settings: Settings) {
-    config.batch_cap = settings.batch_cap;
-    config.omit = settings.omit;
-    config.carve = settings.carve;
+/// Resolve both sides of a diff. The shared options apply to each side, but config-file discovery
+/// is per spec — the two documents may well live in different directories.
+fn spec_pair(
+    old: camino::Utf8PathBuf,
+    new: camino::Utf8PathBuf,
+    options: &super::args::SpecArgs,
+) -> Result<(Spec, Spec), ConfigError> {
+    Ok((
+        config::resolve(old, options)?,
+        config::resolve(new, options)?,
+    ))
 }
 
 /// Render a config/flag error to stderr and exit with a usage status — never a panic.
