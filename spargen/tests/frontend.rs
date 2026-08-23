@@ -4115,3 +4115,61 @@ components:
         "a documented Content-Type header must not become a field: {code}"
     );
 }
+
+#[test]
+fn info_contact_license_and_external_docs_reach_the_client_docs() {
+    // All three were parsed away with no diagnostic and no rustdoc.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info:
+  title: T
+  version: 1.0.0
+  contact: { name: API Team, email: api@example.com, url: "https://example.com/support" }
+  license: { name: MIT, identifier: MIT }
+externalDocs:
+  description: Full guide
+  url: "https://example.com/docs"
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("API Team"), "{code}");
+    assert!(code.contains("License: MIT (MIT)"), "{code}");
+    assert!(code.contains("https://example.com/docs"), "{code}");
+}
+
+#[test]
+fn w011_reference_object_documentation_override() {
+    // A Reference Object's summary/description document the reference site, but spargen emits one
+    // shared item per component, so the override has nowhere to land.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+          description: How many to return on this endpoint.
+      responses:
+        "204": { description: No Content }
+components:
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}

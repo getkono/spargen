@@ -251,6 +251,15 @@ pub fn lower(
     if let Some(description) = &document.info.description {
         append_text(&mut api_description, description.clone());
     }
+    if let Some(contact) = &document.info.contact {
+        append_text(&mut api_description, format!("Contact: {contact}."));
+    }
+    if let Some(license) = &document.info.license {
+        append_text(&mut api_description, format!("License: {license}."));
+    }
+    if let Some(external_docs) = &document.info.external_docs {
+        append_text(&mut api_description, format!("See also: {external_docs}."));
+    }
     if !document.tags.is_empty() {
         let tags = document
             .tags
@@ -3081,6 +3090,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match current {
                 RefOr::Item(parameter) => return Some(parameter.clone()),
                 RefOr::Ref(reference) => {
+                    self.note_reference_docs(reference);
                     if !seen.insert(reference.reference.clone()) {
                         return self.reject_component_alias(
                             &reference.provenance,
@@ -3134,6 +3144,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match current {
                 RefOr::Item(body) => return Some(body.clone()),
                 RefOr::Ref(reference) => {
+                    self.note_reference_docs(reference);
                     if !seen.insert(reference.reference.clone()) {
                         return self.reject_component_alias(
                             &reference.provenance,
@@ -3186,6 +3197,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match current {
                 RefOr::Item(response) => return Some(response.clone()),
                 RefOr::Ref(reference) => {
+                    self.note_reference_docs(reference);
                     if !seen.insert(reference.reference.clone()) {
                         return self.reject_component_alias(
                             &reference.provenance,
@@ -3227,6 +3239,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }
+    }
+
+    /// Acknowledge a Reference Object `summary`/`description`.
+    ///
+    /// These document the *reference site*, not the target. Spargen emits one shared item per
+    /// component, so a per-site documentation override has nowhere to land without making two use
+    /// sites of the same component disagree. Reported rather than dropped.
+    fn note_reference_docs(&mut self, reference: &super::Reference) {
+        if reference.summary.is_none() && reference.description.is_none() {
+            return;
+        }
+        Diagnostic::warning(Code::DeclarationHasNoEffect, reference.provenance.clone())
+            .message(format!(
+                "the `summary`/`description` on the reference to `{}` documents this use site, \
+                 but the generated item is shared across every use, so the override is not applied",
+                reference.reference
+            ))
+            .remedy("document the referenced component itself")
+            .emit(self.diags);
     }
 
     fn reject_component_alias<T>(

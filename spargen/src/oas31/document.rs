@@ -43,6 +43,10 @@ pub enum RefOr<T> {
 pub struct Reference {
     /// The raw reference string.
     pub reference: String,
+    /// A Reference Object `summary`/`description`, which document the *reference site* rather than
+    /// the target. Retained so the override has a disposition instead of vanishing.
+    pub summary: Option<String>,
+    pub description: Option<String>,
     /// Where the reference occurred, including its source file.
     pub provenance: Provenance,
 }
@@ -54,6 +58,12 @@ pub struct Info {
     pub version: String,
     pub summary: Option<String>,
     pub description: Option<String>,
+    /// `contact.name`/`url`/`email`, flattened into one displayable line.
+    pub contact: Option<String>,
+    /// `license.name` plus its SPDX `identifier` or `url`.
+    pub license: Option<String>,
+    /// `externalDocs.url`, with its description when one is given.
+    pub external_docs: Option<String>,
 }
 
 /// A `servers` entry.

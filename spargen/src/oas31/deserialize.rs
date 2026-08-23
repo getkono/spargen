@@ -47,7 +47,7 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
         }
     }
 
-    let info = root
+    let mut info = root
         .get("info")
         .and_then(|value| parse_info(value, &root_pointer.push("info"), diags))
         .unwrap_or_else(|| Info {
@@ -55,7 +55,13 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
             version: "0.0.0".to_owned(),
             summary: None,
             description: None,
+            contact: None,
+            license: None,
+            external_docs: None,
         });
+    // Root-level `externalDocs` documents the API as a whole, so it belongs with the rest of the
+    // client-level identity rather than in its own field.
+    info.external_docs = root.get("externalDocs").and_then(external_docs_line);
 
     let servers = root
         .get("servers")
@@ -117,6 +123,47 @@ fn version_supported(value: &str) -> bool {
         && patch.parse::<u16>().is_ok()
 }
 
+/// Flatten a Contact Object into one displayable line.
+fn contact_line(value: &SpannedValue) -> Option<String> {
+    let name = value.get("name").and_then(string);
+    let url = value.get("url").and_then(string);
+    let email = value.get("email").and_then(string);
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(name) = name {
+        parts.push(name.to_owned());
+    }
+    if let Some(email) = email {
+        parts.push(format!("<{email}>"));
+    }
+    if let Some(url) = url {
+        parts.push(format!("({url})"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// Flatten a License Object into one displayable line. `identifier` and `url` are mutually
+/// exclusive, so at most one appears.
+fn license_line(value: &SpannedValue) -> Option<String> {
+    let name = value.get("name").and_then(string)?;
+    let detail = value
+        .get("identifier")
+        .and_then(string)
+        .or_else(|| value.get("url").and_then(string));
+    Some(match detail {
+        Some(detail) => format!("{name} ({detail})"),
+        None => name.to_owned(),
+    })
+}
+
+/// Flatten an External Documentation Object into one displayable line.
+fn external_docs_line(value: &SpannedValue) -> Option<String> {
+    let url = value.get("url").and_then(string)?;
+    Some(match value.get("description").and_then(string) {
+        Some(description) => format!("{description}: {url}"),
+        None => url.to_owned(),
+    })
+}
+
 fn parse_info(
     value: &SpannedValue,
     pointer: &JsonPointer,
@@ -136,6 +183,9 @@ fn parse_info(
             .to_owned(),
         summary: value.get("summary").and_then(string).map(str::to_owned),
         description: value.get("description").and_then(string).map(str::to_owned),
+        contact: value.get("contact").and_then(contact_line),
+        license: value.get("license").and_then(license_line),
+        external_docs: None,
     })
 }
 
@@ -250,6 +300,8 @@ pub(super) fn parse_path_item(
         .and_then(string)
         .map(|reference| Reference {
             reference: reference.to_owned(),
+            summary: value.get("summary").and_then(string).map(str::to_owned),
+            description: value.get("description").and_then(string).map(str::to_owned),
             provenance: provenance(pointer, value),
         });
     let reference_siblings = if reference.is_some() {
@@ -535,6 +587,8 @@ fn parse_media_type(
             .and_then(string)
             .map(|reference| Reference {
                 reference: reference.to_owned(),
+                summary: value.get("summary").and_then(string).map(str::to_owned),
+                description: value.get("description").and_then(string).map(str::to_owned),
                 provenance: provenance(pointer, value),
             }),
         schema: value
@@ -825,6 +879,8 @@ fn parse_schema_ref_or(
         }
         Some(RefOr::Ref(Reference {
             reference: reference.to_owned(),
+            summary: value.get("summary").and_then(string).map(str::to_owned),
+            description: value.get("description").and_then(string).map(str::to_owned),
             provenance: provenance(pointer, value),
         }))
     } else {
@@ -1230,6 +1286,8 @@ fn parse_ref_or<T>(
     if let Some(reference) = value.get("$ref").and_then(string) {
         Some(RefOr::Ref(Reference {
             reference: reference.to_owned(),
+            summary: value.get("summary").and_then(string).map(str::to_owned),
+            description: value.get("description").and_then(string).map(str::to_owned),
             provenance: provenance(pointer, value),
         }))
     } else {
