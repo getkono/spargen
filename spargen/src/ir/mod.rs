@@ -20,7 +20,8 @@ pub use media::{
     ErrorShape, Framing, MediaType, RequestBody, Response, Responses, StatusSpec, SuccessShape,
 };
 pub use operation::{
-    Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate,
+    Delimiter, Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment,
+    PathTemplate,
 };
 pub use types::{
     AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Prim,

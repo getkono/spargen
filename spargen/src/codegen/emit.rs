@@ -713,7 +713,7 @@ pub(crate) fn emit_operation(
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
             let mut #path_binding = #path_init.to_owned();
             #(#path_replacements)*
-            let mut #query_binding: Vec<(String, String)> = Vec::new();
+            let mut #query_binding: Vec<String> = Vec::new();
             #raw_query_init
             #(#required_query)*
             #(#optional_query)*
@@ -1057,49 +1057,129 @@ fn escaped_token(name: &str, role: crate::name::IdentRole) -> proc_macro2::Ident
     }
 }
 
+/// The percent-encoding set for one parameter, derived from its location, style, and
+/// `allowReserved`.
+///
+/// This is the single place that mapping exists. Headers and OpenAPI 3.2's `style: cookie` are
+/// sent verbatim — the specification says values there must not be percent-encoded, and that
+/// escaping is the caller's job. `in: cookie` with `style: form` *does* encode: Appendix D
+/// describes that pairing as the way to opt into automatic encoding, with `allowReserved` as its
+/// escape hatch.
+fn percent_encoding_tokens(param: &crate::ir::Parameter) -> TokenStream {
+    let variant = if param.location == ParamLoc::Header
+        || matches!(param.style, crate::ir::ParamStyle::Cookie)
+    {
+        "Passthrough"
+    } else if param.location == ParamLoc::Path {
+        if param.allow_reserved {
+            "ReservedPath"
+        } else {
+            "Unreserved"
+        }
+    } else if param.allow_reserved {
+        "Reserved"
+    } else {
+        "Form"
+    };
+    let ident = proc_macro2::Ident::new(variant, proc_macro2::Span::call_site());
+    quote! { support::PercentEncoding::#ident }
+}
+
+/// The runtime `Delimiter` for a non-RFC 6570 query style.
+fn delimiter_tokens(delimiter: crate::ir::Delimiter) -> TokenStream {
+    match delimiter {
+        crate::ir::Delimiter::Space => quote! { support::Delimiter::Space },
+        crate::ir::Delimiter::Pipe => quote! { support::Delimiter::Pipe },
+    }
+}
+
 /// Render a path/header parameter value from a borrowed expression. Schema-typed parameters use
-/// OpenAPI `simple` serialization; `content`-typed parameters retain their media codec.
+/// their declared OpenAPI style; `content`-typed parameters retain their media codec.
+///
+/// Path values are percent-encoded here, at serialization time. Splicing a raw value into the
+/// path template would let a value containing `/`, `?`, or `#` silently re-target the request.
 fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStream) -> TokenStream {
     if let crate::ir::ParamStyle::Content(media) = &param.style {
         return match media {
             MediaType::Json => quote! {
                 serde_json::to_string(#value).map_err(support::Error::request_construction)?
             },
+            // Text is the only other media a `content` parameter may carry; lowering rejects the
+            // rest, so this arm never sees a codec it cannot render.
             _ => quote! {
-                support::serialize_simple(#value, false)
+                support::serialize_simple(#value, false, support::PercentEncoding::Passthrough)
                     .map_err(support::Error::request_construction)?
             },
         };
     }
     let explode = param.explode;
-    quote! {
-        support::serialize_simple(#value, #explode)
-            .map_err(support::Error::request_construction)?
+    let encoding = percent_encoding_tokens(param);
+    let name = param.name.clone();
+    match &param.style {
+        crate::ir::ParamStyle::Matrix => quote! {
+            support::serialize_matrix(#name, #value, #explode, #encoding)
+                .map_err(support::Error::request_construction)?
+        },
+        crate::ir::ParamStyle::Label => quote! {
+            support::serialize_label(#value, #explode, #encoding)
+                .map_err(support::Error::request_construction)?
+        },
+        _ => quote! {
+            support::serialize_simple(#value, #explode, #encoding)
+                .map_err(support::Error::request_construction)?
+        },
     }
 }
 
-/// Emit serialization of one query parameter into the operation's `query` pair vector.
+/// Emit serialization of one query parameter into the operation's fragment vector.
+///
+/// Fragments arrive at `build_url` already percent-encoded, so the style's delimiters stay
+/// literal and remain distinguishable from the same character inside a value.
 fn query_param_tokens(
     param: &crate::ir::Parameter,
     name: &str,
     value: TokenStream,
     query_binding: &crate::name::Ident,
 ) -> TokenStream {
+    let encoding = percent_encoding_tokens(param);
     match &param.style {
         crate::ir::ParamStyle::Form | crate::ir::ParamStyle::Cookie => {
             let explode = param.explode;
             quote! {
                 #query_binding.extend(
-                    support::serialize_form(#name, #value, #explode)
+                    support::serialize_form(#name, #value, #explode, #encoding)
                         .map_err(support::Error::request_construction)?,
                 );
             }
         }
-        crate::ir::ParamStyle::Content(_) => {
-            let value = param_value_tokens(param, value);
-            quote! { #query_binding.push((#name.to_owned(), #value)); }
+        crate::ir::ParamStyle::Delimited(delimiter) => {
+            let delimiter = delimiter_tokens(*delimiter);
+            quote! {
+                #query_binding.extend(
+                    support::serialize_delimited(#name, #value, #delimiter, #encoding)
+                        .map_err(support::Error::request_construction)?,
+                );
+            }
         }
-        crate::ir::ParamStyle::Simple => quote! {},
+        crate::ir::ParamStyle::DeepObject => quote! {
+            #query_binding.extend(
+                support::serialize_deep_object(#name, #value, #encoding)
+                    .map_err(support::Error::request_construction)?,
+            );
+        },
+        crate::ir::ParamStyle::Content(_) => {
+            let rendered = param_value_tokens(param, value);
+            quote! {
+                #query_binding.push(format!(
+                    "{}={}",
+                    support::encode(#name, #encoding),
+                    support::encode(&#rendered, #encoding),
+                ));
+            }
+        }
+        crate::ir::ParamStyle::Simple
+        | crate::ir::ParamStyle::Matrix
+        | crate::ir::ParamStyle::Label => quote! {},
     }
 }
 
@@ -1110,15 +1190,17 @@ fn querystring_param_tokens(
     raw_query_binding: &crate::name::Ident,
 ) -> TokenStream {
     match &param.style {
+        // A JSON whole-query value is one opaque, fully-encoded token.
         crate::ir::ParamStyle::Content(MediaType::Json) => quote! {
-            #raw_query_binding = Some(
-                serde_json::to_string(#value)
+            #raw_query_binding = Some(support::encode(
+                &serde_json::to_string(#value)
                     .map_err(support::Error::request_construction)?,
-            );
+                support::PercentEncoding::Form,
+            ));
         },
         crate::ir::ParamStyle::Content(MediaType::FormUrlEncoded) => quote! {
             #query_binding.extend(
-                support::serialize_form("", #value, true)
+                support::serialize_form("", #value, true, support::PercentEncoding::Form)
                     .map_err(support::Error::request_construction)?,
             );
         },
@@ -1127,28 +1209,34 @@ fn querystring_param_tokens(
 }
 
 /// Emit serialization of one cookie parameter into the operation's cookie fragments.
+///
+/// `serialize_form` already returns `name=value` fragments; the caller joins them with `"; "`.
 fn cookie_param_tokens(
     param: &crate::ir::Parameter,
     name: &str,
     value: TokenStream,
     cookies_binding: &crate::name::Ident,
 ) -> TokenStream {
+    let encoding = percent_encoding_tokens(param);
     match &param.style {
         crate::ir::ParamStyle::Form | crate::ir::ParamStyle::Cookie => {
             let explode = param.explode;
             quote! {
-                for (name, value) in support::serialize_form(#name, #value, #explode)
-                    .map_err(support::Error::request_construction)?
-                {
-                    #cookies_binding.push(format!("{name}={value}"));
-                }
+                #cookies_binding.extend(
+                    support::serialize_form(#name, #value, #explode, #encoding)
+                        .map_err(support::Error::request_construction)?,
+                );
             }
         }
         crate::ir::ParamStyle::Content(_) => {
-            let value = param_value_tokens(param, value);
-            quote! { #cookies_binding.push(format!("{}={}", #name, #value)); }
+            let rendered = param_value_tokens(param, value);
+            quote! { #cookies_binding.push(format!("{}={}", #name, #rendered)); }
         }
-        crate::ir::ParamStyle::Simple => quote! {},
+        crate::ir::ParamStyle::Simple
+        | crate::ir::ParamStyle::Matrix
+        | crate::ir::ParamStyle::Label
+        | crate::ir::ParamStyle::Delimited(_)
+        | crate::ir::ParamStyle::DeepObject => quote! {},
     }
 }
 
@@ -1551,10 +1639,10 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
-            pub use dispatch::{attach_auth, build_url, build_url_with_query_string, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
+            pub use dispatch::{attach_auth, build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
-            pub use parameter::{serialize_form, serialize_simple, ParameterError};
+            pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_label, serialize_matrix, serialize_simple, Delimiter, ParameterError, PercentEncoding};
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;
             pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};

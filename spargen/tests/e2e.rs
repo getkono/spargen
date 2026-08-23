@@ -336,7 +336,9 @@ fn typed_parameters_follow_openapi_wire_rules() {
         assert!(request_line.starts_with("GET /params/1,2?"), "{request}");
         assert!(request_line.contains("workflow_id=build.yml"), "{request}");
         assert!(request_line.contains("labels=bug&labels=api"), "{request}");
-        assert!(request_line.contains("compact=one%2Ctwo"), "{request}");
+        // A non-exploded array joins with a literal `,`: the delimiter must stay distinguishable
+        // from a comma inside a value, which `%2C` would not be.
+        assert!(request_line.contains("compact=one,two"), "{request}");
         assert!(request.contains("x-flags: fast,safe\r\n"), "{request}");
         assert!(request.contains("cookie: session=a; session=b\r\n"), "{request}");
 

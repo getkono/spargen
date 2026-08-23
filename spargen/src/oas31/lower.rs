@@ -4,11 +4,12 @@ use indexmap::IndexMap;
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics};
 use crate::ir::{
-    AdditionalProps, Api, ApiKeyLoc, DefaultValue, DisjointFeature, Docs, Field, FieldDefault,
-    HttpScheme, Info, JsonCategory, MediaType, Operation, OperationId, ParamLoc, ParamStyle,
-    Parameter, PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response, Responses,
-    ScalarEnum, ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty,
-    TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
+    AdditionalProps, Api, ApiKeyLoc, DefaultValue, Delimiter, DisjointFeature, Docs, Field,
+    FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Operation, OperationId, ParamLoc,
+    ParamStyle, Parameter, PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response,
+    Responses, ScalarEnum, ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec,
+    Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy,
+    UnionVariant, XmlField,
 };
 use crate::name::synth_operation_id;
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
@@ -2187,6 +2188,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ty,
                 required: parameter.required,
                 style: ParamStyle::Content(media),
+                allow_reserved: false,
                 explode: true,
                 deprecated: parameter.deprecated,
                 default_display: self.param_default_display(object.schema.as_ref(), ty),
@@ -2197,9 +2199,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ParamLoc::Query | ParamLoc::Cookie => "form",
             ParamLoc::QueryString => unreachable!("querystring returned above"),
         });
+        // The legal `(style, in)` pairs are enforced by the official document schema before
+        // lowering (`E011`), so an unknown pairing here is a generator bug rather than user input.
+        // The arm is kept so a future schema relaxation cannot silently mis-serialize.
         let style = match (location, style_name) {
             (ParamLoc::Path | ParamLoc::Header, "simple") => ParamStyle::Simple,
+            (ParamLoc::Path, "matrix") => ParamStyle::Matrix,
+            (ParamLoc::Path, "label") => ParamStyle::Label,
             (ParamLoc::Query | ParamLoc::Cookie, "form") => ParamStyle::Form,
+            (ParamLoc::Query, "spaceDelimited") => ParamStyle::Delimited(Delimiter::Space),
+            (ParamLoc::Query, "pipeDelimited") => ParamStyle::Delimited(Delimiter::Pipe),
+            (ParamLoc::Query, "deepObject") => ParamStyle::DeepObject,
             (ParamLoc::Cookie, "cookie") => ParamStyle::Cookie,
             _ => {
                 Diagnostic::error(
@@ -2207,25 +2217,42 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     parameter.provenance.clone(),
                 )
                 .message(format!(
-                    "parameter style `{style_name}` is not supported for `{}` parameters",
+                    "parameter style `{style_name}` is not permitted for `{}` parameters",
                     parameter.location
                 ))
                 .emit(self.diags);
                 return None;
             }
         };
-        if parameter.allow_reserved {
+        // `deepObject` ignores `explode` entirely; every other style defaults per the
+        // specification (true only for `form` and 3.2's `cookie`).
+        let explode = parameter
+            .explode
+            .unwrap_or(matches!(style, ParamStyle::Form | ParamStyle::Cookie));
+        if matches!(style, ParamStyle::Delimited(_)) && parameter.explode == Some(true) {
             Diagnostic::error(
                 Code::UnsupportedParameterStyle,
                 parameter.provenance.clone(),
             )
-            .message("`allowReserved: true` parameter encoding is not supported")
+            .message(format!(
+                "`style: {style_name}` with `explode: true` has no defined serialization"
+            ))
+            .remedy("set `explode: false`, which is the default for this style")
             .emit(self.diags);
             return None;
         }
-        let explode = parameter
-            .explode
-            .unwrap_or(matches!(style, ParamStyle::Form | ParamStyle::Cookie));
+        // `allowReserved` only means anything where the location percent-encodes at all.
+        if parameter.allow_reserved
+            && (location == ParamLoc::Header || matches!(style, ParamStyle::Cookie))
+        {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
+                .message(
+                    "`allowReserved` has no effect here: this parameter is sent without \
+                     percent-encoding",
+                )
+                .remedy("remove `allowReserved`, or use `style: form` if encoding is wanted")
+                .emit(self.diags);
+        }
         let ty = if let Some(schema) = &parameter.schema {
             let ty = self.lower_schema_ref(schema, &parameter.name)?;
             self.remap_binary_param(ty, &parameter.name)
@@ -2244,6 +2271,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ty,
                 required: parameter.required || location == ParamLoc::Path,
                 style: ParamStyle::Content(media),
+                allow_reserved: false,
                 explode: false,
                 deprecated: parameter.deprecated,
                 default_display,
@@ -2274,6 +2302,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ty,
             required: parameter.required || location == ParamLoc::Path,
             style,
+            allow_reserved: parameter.allow_reserved,
             explode,
             deprecated: parameter.deprecated,
             default_display,

@@ -30,3 +30,4 @@ the library API.
 | `W006` | Warning | unsupported XML hint ignored |
 | `W009` | Warning | construct omitted |
 | `W010` | Warning | non-sequential `itemSchema` ignored |
+| `W011` | Warning | declared construct has no effect |

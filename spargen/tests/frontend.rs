@@ -2406,9 +2406,9 @@ paths:
 }
 
 #[test]
-fn e010_unsupported_parameter_style() {
-    let report = generate(
-        r##"
+fn deep_object_query_style_generates() {
+    // `style: deepObject` over an object of scalars is fully specified: `filter[key]=value`.
+    let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths:
@@ -2418,38 +2418,142 @@ paths:
         - name: filter
           in: query
           style: deepObject
-          schema: { type: object }
+          explode: true
+          schema:
+            type: object
+            additionalProperties: { type: string }
       responses:
         "204": { description: No Content }
-"##,
-    );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedParameterStyle),
+            "{report:#?}"
+        );
+    }
 }
 
 #[test]
-fn e010_allow_reserved_parameter_encoding() {
-    let report = generate(
-        r##"
+fn matrix_and_label_path_styles_generate() {
+    let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths:
-  /x:
+  /map/{position}/{ext}:
     get:
       parameters:
-        - name: expression
-          in: query
-          allowReserved: true
+        - name: position
+          in: path
+          required: true
+          style: matrix
+          schema:
+            type: array
+            items: { type: integer }
+        - name: ext
+          in: path
+          required: true
+          style: label
           schema: { type: string }
       responses:
         "204": { description: No Content }
-"##,
-    );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedParameterStyle),
+            "{report:#?}"
+        );
+    }
+}
 
-    let checked = check(
-        r##"
+#[test]
+fn delimited_query_styles_generate() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: spaced
+          in: query
+          style: spaceDelimited
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: piped
+          in: query
+          style: pipeDelimited
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    }
+}
+
+#[test]
+fn e010_delimited_style_with_explode_true() {
+    // The specification's own serialization table marks this combination n/a, so there is no
+    // correct wire form to emit.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: spaced
+          in: query
+          style: spaceDelimited
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedParameterStyle));
+    }
+}
+
+#[test]
+fn e011_parameter_style_illegal_for_location() {
+    // The official document schema enumerates the legal styles per location, so an illegal
+    // pairing is caught structurally before lowering ever sees it.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          style: label
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+#[test]
+fn allow_reserved_query_parameter_generates() {
+    // `allowReserved: true` selects RFC 6570 reserved expansion — a different encoding set, not an
+    // unrepresentable construct.
+    let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths:
@@ -2462,10 +2566,70 @@ paths:
           schema: { type: string }
       responses:
         "204": { description: No Content }
-"##,
-    );
-    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::UnsupportedParameterStyle));
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedParameterStyle),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_allow_reserved_has_no_effect_where_nothing_is_encoded() {
+    // OpenAPI 3.1 scopes `allowReserved` to `in: query`, so its metaschema rejects it elsewhere
+    // structurally. 3.2 broadens it to "wherever the location percent-encodes" — which makes it
+    // declarable, but still inert, on a header and on `style: cookie`.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: X-Expression
+          in: header
+          allowReserved: true
+          schema: { type: string }
+        - name: session
+          in: cookie
+          style: cookie
+          allowReserved: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e011_allow_reserved_on_a_3_1_header_is_structurally_invalid() {
+    // Pins the version difference above: 3.1 permits `allowReserved` only on a query parameter.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: X-Expression
+          in: header
+          allowReserved: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    }
 }
 
 #[test]
