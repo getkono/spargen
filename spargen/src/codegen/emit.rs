@@ -1325,7 +1325,16 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         });
 
         let pieces = server.segments.iter().map(|segment| match segment {
-            crate::ir::UrlSegment::Literal(text) => quote! { url.push_str(#text); },
+            // A one-character literal goes through `push`: `push_str` with a single-char literal
+            // trips `clippy::single_char_add_str`, and generated code must pass `-D warnings` in
+            // the consuming crate.
+            crate::ir::UrlSegment::Literal(text) => match text.chars().count() {
+                1 => {
+                    let character = text.chars().next().expect("one character");
+                    quote! { url.push(#character); }
+                }
+                _ => quote! { url.push_str(#text); },
+            },
             crate::ir::UrlSegment::Variable(name) => {
                 let field = names
                     .server_variable_fields

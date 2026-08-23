@@ -3,9 +3,17 @@ info:
   title: Petstore
   version: 1.0.0
   description: A small OpenAPI 3.1 surface exercising spargen end to end.
+# A templated server: spargen generates a typed builder whose variables default to a resolvable
+# URL. The example still dials the mock server's ephemeral address, so this exercises the typed
+# server surface without pinning a port.
 servers:
-  - url: http://127.0.0.1:0
+  - url: http://{host}:{port}
     description: Replaced at runtime by the example's mock server address.
+    variables:
+      host:
+        default: 127.0.0.1
+      port:
+        default: "0"
 security:
   - bearerAuth: []
 paths:
@@ -27,9 +35,22 @@ paths:
           in: header
           schema:
             type: string
+        # `deepObject`: each member becomes its own `filter[member]=value` query pair.
+        - name: filter
+          in: query
+          style: deepObject
+          explode: true
+          schema:
+            $ref: "#/components/schemas/PetFilter"
       responses:
         "200":
           description: The matching pets.
+          headers:
+            X-Total-Count:
+              required: true
+              description: Total pets matching the filter, ignoring `limit`.
+              schema:
+                type: integer
           content:
             application/json:
               schema:
@@ -85,6 +106,39 @@ paths:
       responses:
         "204":
           description: Deleted.
+  /pets/{petId}/photo:
+    post:
+      operationId: uploadPhoto
+      summary: Attach a photo to a pet.
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [photo, meta]
+              properties:
+                photo:
+                  type: string
+                  format: binary
+                meta:
+                  $ref: "#/components/schemas/PhotoMeta"
+            # Without this the object part would default to `application/json` anyway; declaring it
+            # pins the part's Content-Type explicitly, which is what a server validating parts sees.
+            encoding:
+              photo:
+                contentType: image/png
+              meta:
+                contentType: application/json
+      responses:
+        "204":
+          description: Stored.
 components:
   securitySchemes:
     bearerAuth:
@@ -120,6 +174,22 @@ components:
       type: array
       items:
         $ref: "#/components/schemas/Pet"
+    PetFilter:
+      type: object
+      description: A flat filter object; `deepObject` is only defined for flat objects.
+      properties:
+        name:
+          type: string
+        tag:
+          type: string
+    PhotoMeta:
+      type: object
+      required: [caption]
+      properties:
+        caption:
+          type: string
+        width:
+          type: integer
     Error:
       type: object
       required: [message]

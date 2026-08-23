@@ -17,7 +17,14 @@ What it exercises:
 - **Typed surface** — models (`Pet`, `NewPet`, a `Status` enum), one method per operation,
   positional required parameters, an optional-`Params` struct, `ResponseValue<T>` with status
   and headers.
-- **Wire behavior** — path/query/header parameters, a JSON request body, a `204` unit response.
+- **Wire behavior** — path/query/header parameters, a `deepObject` filter that travels as
+  `filter[name]=…` pairs, a JSON request body, a multipart body whose parts carry the
+  `Content-Type` the Encoding Object declares, and a `204` unit response. The mock server asserts
+  those bytes, so a serialization regression fails the example rather than passing silently.
+- **Typed servers** — the spec's server is templated (`http://{host}:{port}`), so spargen emits a
+  builder whose variables default to a resolvable URL.
+- **Typed response headers** — the documented `X-Total-Count` is read through a generated
+  accessor, as an explicit second step that cannot turn a successful call into a failure.
 - **Auth** — a bearer credential registered with `with_credential`; a missing credential fails
   before the request is sent.
 - **Error taxonomy** — a documented `404` arrives as the operation's typed error body; an

@@ -1703,6 +1703,16 @@ info:
   version: 1.0.0
 servers:
   - url: https://example.com/api
+  # A templated server whose URL splits into single-character literal segments (`:` and `/`).
+  # Rendering one of those with `push_str` trips `clippy::single_char_add_str`, and generated code
+  # must pass `-D warnings` in the consuming crate — which the clippy gate below enforces.
+  - url: https://{host}:{port}/{stage}
+    variables:
+      host: { default: api.example.com }
+      port: { default: "443" }
+      stage:
+        default: v1
+        enum: [v1, v2]
 paths:
   /files:
     get:
