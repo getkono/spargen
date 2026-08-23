@@ -2205,10 +2205,10 @@ components:
           xml: { name: "ReceiptCode" }
         note:
           type: string
-          xml: { namespace: "urn:example:receipt" }
     # JSON-only schema carrying `xml` metadata (Issue #13 regression guard): the same hint shapes as
     # `XmlOrder`, but reachable only from a JSON body — the rename must be suppressed so JSON is
-    # correct.
+    # correct. Its `xml.namespace` is also the W006 case: on a type never serialized as XML the
+    # hint genuinely has no effect, so it warns rather than rejecting.
     JsonMeta:
       type: object
       required: [id, sku]
@@ -2219,6 +2219,9 @@ components:
         sku:
           type: string
           xml: { name: "ProductSku" }
+        note:
+          type: string
+          xml: { namespace: "urn:example:receipt" }
 "##;
 
 const SPEC_WITH_UNSUPPORTED_OPERATION: &str = r#"

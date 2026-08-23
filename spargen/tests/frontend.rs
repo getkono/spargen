@@ -2193,10 +2193,9 @@ paths:
 }
 
 #[test]
-fn w006_unsupported_xml_hint_warns_but_generates() {
-    // Issue #13: an unsupported `xml` hint (namespace/prefix/wrapped) is acknowledged with W006 and
-    // generation still succeeds — never silently honored or dropped. The `xml.name`/`xml.attribute`
-    // hints on sibling fields are honored (no warning).
+fn e009_wire_changing_xml_hint_on_an_xml_body() {
+    // `wrapped`/`namespace` change the XML wire. Ignoring them on a type that IS serialized as XML
+    // would put structurally different bytes on the wire while reporting success, so they reject.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -2220,11 +2219,43 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
-    let checked = check(spec);
-    assert!(has_code(&checked, Code::XmlHintIgnored), "{checked:#?}");
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn w006_unsupported_xml_hint_on_a_non_xml_type_warns_but_generates() {
+    // The same hint on a type never serialized as XML genuinely has no effect, so it is
+    // acknowledged and the document is not refused for it.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+                  xml: { attribute: true, name: "Id" }
+                tags:
+                  type: array
+                  items: { type: string }
+                  xml: { wrapped: true, namespace: "urn:example" }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    }
 }
 
 #[test]
@@ -3920,6 +3951,32 @@ components:
   securitySchemes:
     mtls:
       type: mutualTLS
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_allow_empty_value_has_no_effect() {
+    // Deprecated in 3.2 and inert for a typed client: an omitted optional parameter is not sent.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: flag
+          in: query
+          allowEmptyValue: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
         assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");

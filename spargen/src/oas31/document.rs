@@ -110,6 +110,10 @@ pub struct ParameterObject {
     pub style: Option<String>,
     pub explode: Option<bool>,
     pub allow_reserved: bool,
+    /// `allowEmptyValue`. Deprecated in OpenAPI 3.2 and inert for a typed client: an absent
+    /// optional parameter is simply not sent, so there is no case where a client would choose to
+    /// send an empty string instead.
+    pub allow_empty_value: bool,
     /// A schema-typed parameter …
     pub schema: Option<RefOr<Schema>>,
     /// … or a `content`-typed one (media type → schema).

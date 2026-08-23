@@ -1216,10 +1216,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some((fields, additional))
     }
 
-    /// Lower a property's OpenAPI `xml` hints into the field's [`XmlField`]. Only `xml.name` and
-    /// `xml.attribute` are represented (applied as a serde rename at emit time); the unsupported
-    /// `xml.namespace`/`xml.prefix`/`xml.wrapped` hints are warned once as `W006` and otherwise
-    /// ignored — never silently honored. A `$ref` property carries no inline `xml` object here.
+    /// Lower a property's OpenAPI `xml` hints into the field's [`XmlField`].
+    ///
+    /// `xml.name` and `xml.attribute` are represented (applied as a serde rename at emit time).
+    /// The hints that change the XML wire without a faithful quick-xml mapping are recorded here
+    /// and dispositioned in [`gate_xml_field_renames`], once it is known whether the owning type is
+    /// ever serialized as XML at all. A `$ref` property carries no inline `xml` object here.
     fn field_xml(&mut self, child: &SchemaOr) -> XmlField {
         let SchemaOr::Schema(schema) = child else {
             return XmlField::default();
@@ -1227,35 +1229,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(hints) = &schema.xml else {
             return XmlField::default();
         };
-        let mut unsupported: Vec<&str> = Vec::new();
+        let mut unsupported: Vec<String> = Vec::new();
         if hints.namespace.is_some() {
-            unsupported.push("namespace");
+            unsupported.push("namespace".to_owned());
         }
         if hints.prefix.is_some() {
-            unsupported.push("prefix");
+            unsupported.push("prefix".to_owned());
         }
         if hints.wrapped {
-            unsupported.push("wrapped");
+            unsupported.push("wrapped".to_owned());
         }
         if matches!(hints.node_type.as_deref(), Some("text" | "cdata" | "none")) {
-            unsupported.push("nodeType");
-        }
-        if !unsupported.is_empty() {
-            Diagnostic::warning(Code::XmlHintIgnored, schema.provenance.clone())
-                .message(format!(
-                    "unsupported XML hint(s) `{}` ignored; only `xml.name` and `xml.attribute` are \
-                     honored",
-                    unsupported.join("`, `")
-                ))
-                .remedy(
-                    "remove the unsupported xml hint, or accept that the field serializes by its \
-                     local name without a namespace/prefix/array wrapper",
-                )
-                .emit(self.diags);
+            unsupported.push("nodeType".to_owned());
         }
         XmlField {
             name: hints.name.clone(),
             attribute: hints.attribute,
+            unsupported,
         }
     }
 
@@ -2296,6 +2286,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .remedy("set `explode: false`, which is the default for this style")
             .emit(self.diags);
             return None;
+        }
+        // Deprecated in 3.2, and inert for a typed client: an absent optional parameter is simply
+        // not sent, so there is never a case where the client would send an empty string instead.
+        if parameter.allow_empty_value {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
+                .message(
+                    "`allowEmptyValue` has no effect: an optional parameter the caller omits is \
+                     not sent at all",
+                )
+                .remedy("remove `allowEmptyValue`; it is deprecated in OpenAPI 3.2")
+                .emit(self.diags);
         }
         // `allowReserved` only means anything where the location percent-encodes at all.
         if parameter.allow_reserved
@@ -3471,7 +3472,11 @@ fn gate_xml_field_renames(
     // Cheap guard: nothing to gate (and nothing to warn) unless some field carries an XML hint.
     let any_hint = graph.iter().any(|(_, def)| {
         matches!(&def.kind, TypeKind::Struct(object)
-            if object.fields.iter().any(|field| field.xml.name.is_some() || field.xml.attribute))
+        if object.fields.iter().any(|field| {
+            field.xml.name.is_some()
+                || field.xml.attribute
+                || !field.xml.unsupported.is_empty()
+        }))
     });
     if !any_hint {
         return;
@@ -3511,6 +3516,53 @@ fn gate_xml_field_renames(
 
     let xml_reachable = reachable_types(graph, &xml_roots);
     let non_xml_reachable = reachable_types(graph, &non_xml_roots);
+
+    // A hint that changes the XML wire cannot be waved through on a type that is actually
+    // serialized as XML: ignoring `wrapped`, a namespace, or a text/cdata node emits structurally
+    // different XML while reporting success, which is exactly the silent fourth behavior the
+    // contract forbids. On a type never serialized as XML the same hint genuinely has no effect,
+    // so it stays a warning and the document is not refused for it.
+    let mut unsupported_reports: Vec<(bool, Provenance, String)> = Vec::new();
+    for (id, def) in graph.iter() {
+        let TypeKind::Struct(object) = &def.kind else {
+            continue;
+        };
+        for field in &object.fields {
+            if field.xml.unsupported.is_empty() {
+                continue;
+            }
+            unsupported_reports.push((
+                xml_reachable.contains(&id),
+                def.provenance.clone(),
+                format!(
+                    "`{}` on property `{}`",
+                    field.xml.unsupported.join("`, `"),
+                    field.name.wire
+                ),
+            ));
+        }
+    }
+    for (serialized_as_xml, provenance, what) in unsupported_reports {
+        if serialized_as_xml {
+            Diagnostic::error(Code::UnsupportedMediaType, provenance)
+                .message(format!(
+                    "unsupported XML hint(s) {what}: this type is serialized as XML, and ignoring \
+                     the hint would put structurally different XML on the wire"
+                ))
+                .remedy(
+                    "remove the hint, model the wrapper element explicitly as a nested object, or \
+                     omit this API segment with spargen::omit!",
+                )
+                .emit(diags);
+        } else {
+            Diagnostic::warning(Code::XmlHintIgnored, provenance)
+                .message(format!(
+                    "unsupported XML hint(s) {what} ignored; this type is never serialized as XML, \
+                     so the hint has no effect"
+                ))
+                .emit(diags);
+        }
+    }
 
     let to_suppress: Vec<TypeId> = graph
         .iter()

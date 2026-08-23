@@ -321,6 +321,10 @@ pub(super) fn parse_parameter(
             .get("allowReserved")
             .and_then(SpannedValue::as_bool)
             .unwrap_or(false),
+        allow_empty_value: value
+            .get("allowEmptyValue")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
         schema: value
             .get("schema")
             .and_then(|value| parse_schema_ref_or(value, &pointer.push("schema"), diags)),
