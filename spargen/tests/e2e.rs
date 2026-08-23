@@ -1812,6 +1812,26 @@ paths:
             text/event-stream:
               schema:
                 $ref: "#/components/schemas/ChatChunk"
+  # Documented response headers whose schemas are NAMED components. The generated header struct
+  # lives beside `Client`, not inside `types`, so an unqualified type path here does not resolve —
+  # a bug that only a named (non-primitive) header schema exposes, and only at compile time.
+  /documented-headers:
+    get:
+      operationId: documentedHeaders
+      responses:
+        "204":
+          description: No Content
+          headers:
+            X-Rate-Limit:
+              required: true
+              description: Requests remaining in the current window.
+              schema:
+                $ref: "#/components/schemas/WorkflowId"
+            X-Trace-Ids:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Mode"
 components:
   securitySchemes:
     bearer:

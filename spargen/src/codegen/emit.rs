@@ -1116,7 +1116,9 @@ fn emit_response_headers(
                 .get(&(operation.id.clone(), label.clone(), header.name.clone()))
                 .expect("response header field allocated");
             let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
-            let ty = ty_tokens(header.ty, names, options, false);
+            // Header structs live beside `Client`, not inside `types`, so the type path must be
+            // qualified — a header whose schema lowered to a named type would not resolve here.
+            let ty = ty_tokens(header.ty, names, options, true);
             // An optional header is absent-able; a required one is documented as always present.
             let ty = if header.required {
                 quote! { #ty }
@@ -1181,7 +1183,7 @@ fn emit_response_headers(
     quote! { #(#structs)* }
 }
 
-/// Emit the `servers` module/// Emit the `servers` module: one builder per declared server, plus the default base URL.
+/// Emit the `servers` module: one builder per declared server, plus the default base URL.
 ///
 /// A Server Variable `default` is sent when the caller supplies no alternative, so every server
 /// resolves to a concrete URL with no arguments; a variable that declares an `enum` gets a typed

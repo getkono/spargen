@@ -4132,7 +4132,7 @@ components:
     // A required header is a plain field; an optional one is an Option. Inline header schemas get
     // a synthesized named type, exactly as inline schemas elsewhere do.
     assert!(
-        code.contains("pub x_rate_limit_remaining: HeaderXRateLimitRemaining"),
+        code.contains("pub x_rate_limit_remaining: types::HeaderXRateLimitRemaining"),
         "{code}"
     );
     assert!(code.contains("pub x_next: Option<"), "{code}");
