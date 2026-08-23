@@ -79,7 +79,7 @@ impl InputSnapshot {
                 }
                 OmitRule::Pointer { file, pointer } => {
                     append(&mut fingerprint, b"pointer");
-                    append(&mut fingerprint, file.unwrap_or("").as_bytes());
+                    append(&mut fingerprint, file.as_deref().unwrap_or("").as_bytes());
                     append(&mut fingerprint, pointer.as_bytes());
                 }
             }

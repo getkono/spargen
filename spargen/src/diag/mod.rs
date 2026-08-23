@@ -27,7 +27,7 @@ pub use severity::Severity;
 pub use span::{FileId, Loc, Span};
 
 /// A single diagnostic emitted during parsing, validation, or codegen.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Diagnostic {
     /// The stable, documented code (`E###`/`W###`).
     pub code: Code,
@@ -43,6 +43,29 @@ pub struct Diagnostic {
     pub remedy: Option<String>,
     /// The governing interpretation, when this diagnostic's behavior depends on one.
     pub interpretation: Option<InterpId>,
+}
+
+impl std::fmt::Display for Diagnostic {
+    /// A rustc-shaped one-entry rendering: severity, code, message, then the source location and
+    /// remedy when known. Shared by the CLI's human renderer and by `Report`'s own `Display`, so
+    /// the two can never drift.
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let severity = match self.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+        write!(formatter, "{severity}[{}]: {}", self.code, self.message)?;
+        if let Some(span) = self.span {
+            write!(formatter, "\n  --> {}:{}", span.start.line, span.start.col)?;
+        }
+        if !self.pointer.as_str().is_empty() {
+            write!(formatter, "\n  at {}", self.pointer.as_str())?;
+        }
+        if let Some(remedy) = &self.remedy {
+            write!(formatter, "\n  help: {remedy}")?;
+        }
+        Ok(())
+    }
 }
 
 impl Diagnostic {

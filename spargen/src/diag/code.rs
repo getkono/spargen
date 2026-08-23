@@ -9,7 +9,7 @@ use super::{InterpId, Severity};
 /// enumerable via [`all`](Code::all) so the docs/behavior exhaustiveness test can iterate it and
 /// fail the build if code and docs diverge. `#[non_exhaustive]` keeps adding a code a non-breaking
 /// change for external matchers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Code {
     /// The `openapi` field declares an unsupported version (e.g. 3.0.x); no conversion is
@@ -299,6 +299,14 @@ impl Code {
             Code::DeclarationHasNoEffect,
         ];
         ALL
+    }
+}
+
+impl Serialize for Code {
+    /// Serializes as the stable `E###`/`W###` string, not the Rust variant name: the code string
+    /// is the documented product surface, and the variant name is an implementation detail.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 

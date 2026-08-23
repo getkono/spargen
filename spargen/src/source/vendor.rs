@@ -25,7 +25,7 @@ pub trait RemoteFetch {
 }
 
 /// One vendored remote document, reported back from [`crate::vendor`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct VendoredRef {
     /// The absolute URL that was pinned.
     pub url: String,
@@ -36,14 +36,25 @@ pub struct VendoredRef {
 }
 
 /// The result of a successful [`crate::vendor`] run.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct VendorReport {
     /// Every remote document that was fetched and pinned, in URL order.
     pub refs: Vec<VendoredRef>,
     /// Where the lock was written.
+    #[serde(serialize_with = "serialize_path")]
     pub lock_path: Utf8PathBuf,
     /// The vendor directory the copies were written under.
+    #[serde(serialize_with = "serialize_path")]
     pub vendor_dir: Utf8PathBuf,
+}
+
+/// `camino` does not implement `serde` without its optional feature, and the runtime dependency
+/// set is closed, so paths serialize through their `Display` form.
+fn serialize_path<S: serde::Serializer>(
+    path: &Utf8PathBuf,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(path.as_str())
 }
 
 enum Base {

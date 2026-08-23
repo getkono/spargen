@@ -88,14 +88,7 @@ fn diff(old_spec: &str, new_spec: &str) -> DiffReport {
         Utf8PathBuf::from_path_buf(new_path).unwrap(),
         "unused-new.rs",
     );
-    let outcome = spargen::diff(&old, &new);
-    assert!(
-        outcome.old_rejection.is_none() && outcome.new_rejection.is_none(),
-        "both specs should lower; old_rejection={:?} new_rejection={:?}",
-        outcome.old_rejection,
-        outcome.new_rejection
-    );
-    outcome.report.expect("both specs lowered => a report")
+    spargen::diff(&old, &new).expect("both specs should lower")
 }
 
 /// The kinds present in a report, for order-independent membership assertions.
@@ -256,7 +249,7 @@ fn rejecting_spec_reports_cleanly_without_a_diff() {
         "unused-new.rs",
     );
     let outcome = spargen::diff(&old, &new);
-    assert!(outcome.report.is_none());
-    assert!(outcome.old_rejection.is_none());
-    assert!(outcome.new_rejection.is_some());
+    let rejection = outcome.expect_err("the new spec does not lower, so there is no diff");
+    assert!(rejection.old_spec().is_none());
+    assert!(rejection.new_spec().is_some());
 }

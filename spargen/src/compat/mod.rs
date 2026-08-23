@@ -18,6 +18,8 @@
 //!   the rest. The fixpoint driver lives in the facade (it must re-run the pipeline); this module
 //!   supplies only the pure pointer→construct mapping.
 
+use std::borrow::Cow;
+
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
 
@@ -196,6 +198,7 @@ impl Omit {
                     return None;
                 }
                 let Some(file_id) = file
+                    .as_deref()
                     .map(|path| bundle.file_id_for_path(path))
                     .unwrap_or_else(|| Some(bundle.root_id()))
                 else {
@@ -217,7 +220,7 @@ impl Omit {
                 } else {
                     RuleMatch::Exact {
                         file: file_id,
-                        pointer: JsonPointer::from(*pointer),
+                        pointer: JsonPointer::from(pointer.to_string()),
                     }
                 }
             }
@@ -391,34 +394,149 @@ fn glob_match_at(
 }
 
 /// One exact compatibility omission.
+/// Strings are `Cow` so a rule can be written as a literal in [`omit!`] with no allocation and
+/// still be built from data at runtime — the CLI, the config file, and the carve driver all derive
+/// rules dynamically, and each previously leaked a `String` to fake a `&'static str`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum OmitRule {
     /// Remove a path item and every operation beneath it.
-    Path { path: &'static str },
+    Path {
+        /// OAS path template.
+        path: Cow<'static, str>,
+    },
     /// Remove a single operation.
     Operation {
         /// HTTP method.
         method: OmitMethod,
         /// OAS path template.
-        path: &'static str,
+        path: Cow<'static, str>,
     },
     /// Remove a named component.
     Component {
         /// Component map.
         kind: ComponentKind,
         /// Component name.
-        name: &'static str,
+        name: Cow<'static, str>,
     },
     /// Remove an arbitrary JSON Pointer, optionally file-local.
     Pointer {
         /// Optional file path/suffix in the input bundle.
-        file: Option<&'static str>,
+        file: Option<Cow<'static, str>>,
         /// RFC 6901 pointer.
-        pointer: &'static str,
+        pointer: Cow<'static, str>,
     },
 }
 
-/// The maximum number of carve rounds. Each round adds at least one omit rule (or stops), and a
+impl OmitRule {
+    /// Remove a path item and every operation beneath it.
+    pub fn path(path: impl Into<Cow<'static, str>>) -> Self {
+        Self::Path { path: path.into() }
+    }
+
+    /// Remove a single operation.
+    pub fn operation(method: OmitMethod, path: impl Into<Cow<'static, str>>) -> Self {
+        Self::Operation {
+            method,
+            path: path.into(),
+        }
+    }
+
+    /// Remove a named component.
+    pub fn component(kind: ComponentKind, name: impl Into<Cow<'static, str>>) -> Self {
+        Self::Component {
+            kind,
+            name: name.into(),
+        }
+    }
+
+    /// Remove an arbitrary JSON Pointer, optionally scoped to one file of the bundle.
+    pub fn pointer(file: Option<Cow<'static, str>>, pointer: impl Into<Cow<'static, str>>) -> Self {
+        Self::Pointer {
+            file,
+            pointer: pointer.into(),
+        }
+    }
+}
+
+/// A string that names no known omit component kind or HTTP method.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownOmitToken {
+    token: String,
+    expected: &'static str,
+}
+
+impl std::fmt::Display for UnknownOmitToken {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "unknown {}: `{}`", self.expected, self.token)
+    }
+}
+
+impl std::error::Error for UnknownOmitToken {}
+
+impl std::str::FromStr for ComponentKind {
+    type Err = UnknownOmitToken;
+
+    /// Accepts the canonical snake_case plural spelling used by [`omit!`], plus the singular and
+    /// the camelCase OAS key, so a rule reads the same whether it was written in Rust, on the
+    /// command line, or in `spargen.toml`.
+    fn from_str(token: &str) -> Result<Self, Self::Err> {
+        Ok(match token {
+            "schema" | "schemas" => ComponentKind::Schemas,
+            "response" | "responses" => ComponentKind::Responses,
+            "parameter" | "parameters" => ComponentKind::Parameters,
+            "request_body" | "request_bodies" | "requestBody" | "requestBodies" => {
+                ComponentKind::RequestBodies
+            }
+            "header" | "headers" => ComponentKind::Headers,
+            "security_scheme" | "security_schemes" | "securityScheme" | "securitySchemes" => {
+                ComponentKind::SecuritySchemes
+            }
+            _ => {
+                return Err(UnknownOmitToken {
+                    token: token.to_owned(),
+                    expected: "component kind",
+                })
+            }
+        })
+    }
+}
+
+impl std::fmt::Display for ComponentKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_oas_key())
+    }
+}
+
+impl std::str::FromStr for OmitMethod {
+    type Err = UnknownOmitToken;
+
+    fn from_str(token: &str) -> Result<Self, Self::Err> {
+        Ok(match token.to_ascii_lowercase().as_str() {
+            "get" => OmitMethod::Get,
+            "put" => OmitMethod::Put,
+            "post" => OmitMethod::Post,
+            "delete" => OmitMethod::Delete,
+            "options" => OmitMethod::Options,
+            "head" => OmitMethod::Head,
+            "patch" => OmitMethod::Patch,
+            "trace" => OmitMethod::Trace,
+            _ => {
+                return Err(UnknownOmitToken {
+                    token: token.to_owned(),
+                    expected: "HTTP method",
+                })
+            }
+        })
+    }
+}
+
+impl std::fmt::Display for OmitMethod {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_oas_key())
+    }
+}
+
+/// The maximum number of carve rounds./// The maximum number of carve rounds. Each round adds at least one omit rule (or stops), and a
 /// spec has finitely many constructs, so any spec terminates; this cap is a belt-and-suspenders
 /// bound that also keeps a pathological ref cascade from re-parsing without end.
 pub(crate) const MAX_CARVE_ROUNDS: usize = 64;
@@ -458,16 +576,18 @@ fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
     let tokens = pointer_tokens(pointer);
     match tokens.first()?.as_str() {
         "paths" => {
-            let path = leak(tokens.get(1)?.clone());
-            match tokens.get(2).and_then(|token| parse_method(token)) {
-                Some(method) => Some(OmitRule::Operation { method, path }),
-                None => Some(OmitRule::Path { path }),
+            let path = tokens.get(1)?.clone();
+            match tokens
+                .get(2)
+                .and_then(|token| token.parse::<OmitMethod>().ok())
+            {
+                Some(method) => Some(OmitRule::operation(method, path)),
+                None => Some(OmitRule::path(path)),
             }
         }
         "components" => {
-            let kind = parse_component_kind(tokens.get(1)?)?;
-            let name = leak(tokens.get(2)?.clone());
-            Some(OmitRule::Component { kind, name })
+            let kind = tokens.get(1)?.parse::<ComponentKind>().ok()?;
+            Some(OmitRule::component(kind, tokens.get(2)?.clone()))
         }
         _ => None,
     }
@@ -484,41 +604,6 @@ fn pointer_tokens(pointer: &JsonPointer) -> Vec<String> {
         .split('/')
         .map(|token| token.replace("~1", "/").replace("~0", "~"))
         .collect()
-}
-
-fn parse_method(token: &str) -> Option<OmitMethod> {
-    Some(match token {
-        "get" => OmitMethod::Get,
-        "put" => OmitMethod::Put,
-        "post" => OmitMethod::Post,
-        "delete" => OmitMethod::Delete,
-        "options" => OmitMethod::Options,
-        "head" => OmitMethod::Head,
-        "patch" => OmitMethod::Patch,
-        "trace" => OmitMethod::Trace,
-        _ => return None,
-    })
-}
-
-fn parse_component_kind(token: &str) -> Option<ComponentKind> {
-    Some(match token {
-        "schemas" => ComponentKind::Schemas,
-        "responses" => ComponentKind::Responses,
-        "parameters" => ComponentKind::Parameters,
-        "requestBodies" => ComponentKind::RequestBodies,
-        "headers" => ComponentKind::Headers,
-        "securitySchemes" => ComponentKind::SecuritySchemes,
-        _ => return None,
-    })
-}
-
-/// Leak an owned string to `&'static str`. Carve derives omit rules dynamically from diagnostics,
-/// but [`OmitRule`] borrows `'static` (it is designed for the compile-time [`omit!`] macro). A run
-/// carves a bounded number of constructs and the process is short-lived, so leaking these small,
-/// bounded strings for the duration of the run is acceptable — the same tactic the CLI uses for
-/// config-derived rules.
-fn leak(value: String) -> &'static str {
-    Box::leak(value.into_boxed_str())
 }
 
 impl OmitRule {
@@ -549,7 +634,8 @@ pub enum OmitMethod {
 }
 
 impl OmitMethod {
-    fn as_oas_key(self) -> &'static str {
+    /// The Path Item field this method names in an OpenAPI document.
+    pub fn as_oas_key(self) -> &'static str {
         match self {
             OmitMethod::Get => "get",
             OmitMethod::Put => "put",
@@ -575,7 +661,8 @@ pub enum ComponentKind {
 }
 
 impl ComponentKind {
-    fn as_oas_key(self) -> &'static str {
+    /// The `components` map key this kind names in an OpenAPI document.
+    pub fn as_oas_key(self) -> &'static str {
         match self {
             ComponentKind::Schemas => "schemas",
             ComponentKind::Responses => "responses",
@@ -665,45 +752,45 @@ macro_rules! omit {
         $crate::omit!(@parse $omit; $($rest)*);
     }};
     (@parse $omit:ident; file($file:literal) { pointers { $($body:tt)* } } $($rest:tt)*) => {{
-        $crate::omit!(@pointers $omit; Some($file); $($body)*);
+        $crate::omit!(@pointers $omit; Some(::std::borrow::Cow::Borrowed($file)); $($body)*);
         $crate::omit!(@parse $omit; $($rest)*);
     }};
     (@operations $omit:ident;) => {};
     (@operations $omit:ident; get $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Get, path: $path });
+        $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Get, $path));
         $crate::omit!(@operations $omit; $($rest)*);
     }};
     (@operations $omit:ident; put $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Put, path: $path });
+        $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Put, $path));
         $crate::omit!(@operations $omit; $($rest)*);
     }};
     (@operations $omit:ident; post $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Post, path: $path });
+        $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Post, $path));
         $crate::omit!(@operations $omit; $($rest)*);
     }};
     (@operations $omit:ident; delete $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Delete, path: $path });
+        $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Delete, $path));
         $crate::omit!(@operations $omit; $($rest)*);
     }};
     (@operations $omit:ident; options $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Options, path: $path });
+        $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Options, $path));
         $crate::omit!(@operations $omit; $($rest)*);
     }};
     (@operations $omit:ident; head $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Head, path: $path });
+        $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Head, $path));
         $crate::omit!(@operations $omit; $($rest)*);
     }};
     (@operations $omit:ident; patch $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Patch, path: $path });
+        $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Patch, $path));
         $crate::omit!(@operations $omit; $($rest)*);
     }};
     (@operations $omit:ident; trace $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Operation { method: $crate::OmitMethod::Trace, path: $path });
+        $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Trace, $path));
         $crate::omit!(@operations $omit; $($rest)*);
     }};
     (@paths $omit:ident;) => {};
     (@paths $omit:ident; $path:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Path { path: $path });
+        $omit.rules.push($crate::OmitRule::path($path));
         $crate::omit!(@paths $omit; $($rest)*);
     }};
     (@components $omit:ident;) => {};
@@ -733,12 +820,12 @@ macro_rules! omit {
     }};
     (@component_names $omit:ident; $kind:expr;) => {};
     (@component_names $omit:ident; $kind:expr; $name:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Component { kind: $kind, name: $name });
+        $omit.rules.push($crate::OmitRule::component($kind, $name));
         $crate::omit!(@component_names $omit; $kind; $($rest)*);
     }};
     (@pointers $omit:ident; $file:expr;) => {};
     (@pointers $omit:ident; $file:expr; $pointer:literal; $($rest:tt)*) => {{
-        $omit.rules.push($crate::OmitRule::Pointer { file: $file, pointer: $pointer });
+        $omit.rules.push($crate::OmitRule::pointer($file, $pointer));
         $crate::omit!(@pointers $omit; $file; $($rest)*);
     }};
     ($($tokens:tt)*) => {{
@@ -825,7 +912,7 @@ components:
         let mut bundle = bundle_of(MULTI_SPEC);
         let mut diags = Diagnostics::default();
         let omit = Omit {
-            rules: vec![OmitRule::Path { path: "/admin/**" }],
+            rules: vec![OmitRule::path("/admin/**")],
         };
         omit.apply(&mut bundle, &mut diags).unwrap();
         let paths = keys_under(&bundle, "paths", None);
@@ -848,10 +935,7 @@ components:
         let mut bundle = bundle_of(MULTI_SPEC);
         let mut diags = Diagnostics::default();
         let omit = Omit {
-            rules: vec![OmitRule::Component {
-                kind: ComponentKind::Schemas,
-                name: "Legacy*",
-            }],
+            rules: vec![OmitRule::component(ComponentKind::Schemas, "Legacy*")],
         };
         omit.apply(&mut bundle, &mut diags).unwrap();
         let schemas = keys_under(&bundle, "components", Some("schemas"));
@@ -864,9 +948,7 @@ components:
         let mut bundle = bundle_of(MULTI_SPEC);
         let mut diags = Diagnostics::default();
         let omit = Omit {
-            rules: vec![OmitRule::Path {
-                path: "/admin/users",
-            }],
+            rules: vec![OmitRule::path("/admin/users")],
         };
         omit.apply(&mut bundle, &mut diags).unwrap();
         let paths = keys_under(&bundle, "paths", None);
@@ -888,10 +970,7 @@ components:
         let mut bundle = bundle_of(MULTI_SPEC);
         let mut diags = Diagnostics::default();
         let omit = Omit {
-            rules: vec![OmitRule::Operation {
-                method: OmitMethod::Get,
-                path: "/admin/**",
-            }],
+            rules: vec![OmitRule::operation(OmitMethod::Get, "/admin/**")],
         };
         omit.apply(&mut bundle, &mut diags).unwrap();
         // The two admin `get` operations are gone; the `delete` and the public `get` remain.
@@ -920,7 +999,7 @@ components:
         let mut bundle = bundle_of(MULTI_SPEC);
         let mut diags = Diagnostics::default();
         let omit = Omit {
-            rules: vec![OmitRule::Path { path: "/nope/**" }],
+            rules: vec![OmitRule::path("/nope/**")],
         };
         assert!(omit.apply(&mut bundle, &mut diags).is_err());
         assert!(diags
@@ -936,25 +1015,19 @@ components:
             omittable_enclosing(&JsonPointer::from(
                 "/paths/~1pets~1{id}/get/responses/200".to_owned()
             )),
-            Some(OmitRule::Operation {
-                method: OmitMethod::Get,
-                path: "/pets/{id}"
-            })
+            Some(OmitRule::operation(OmitMethod::Get, "/pets/{id}"))
         );
         // Path-item-level pointer (not into a method) → path.
         assert_eq!(
             omittable_enclosing(&JsonPointer::from("/paths/~1pets/parameters/0".to_owned())),
-            Some(OmitRule::Path { path: "/pets" })
+            Some(OmitRule::path("/pets"))
         );
         // Component pointer → component.
         assert_eq!(
             omittable_enclosing(&JsonPointer::from(
                 "/components/schemas/Bad/oneOf/0".to_owned()
             )),
-            Some(OmitRule::Component {
-                kind: ComponentKind::Schemas,
-                name: "Bad"
-            })
+            Some(OmitRule::component(ComponentKind::Schemas, "Bad"))
         );
         // Root / unmodelled ⇒ not carvable.
         assert_eq!(omittable_enclosing(&JsonPointer::root()), None);
@@ -990,14 +1063,8 @@ components:
         assert_eq!(
             rules,
             vec![
-                OmitRule::Operation {
-                    method: OmitMethod::Get,
-                    path: "/a"
-                },
-                OmitRule::Operation {
-                    method: OmitMethod::Get,
-                    path: "/b"
-                },
+                OmitRule::operation(OmitMethod::Get, "/a"),
+                OmitRule::operation(OmitMethod::Get, "/b"),
             ]
         );
     }
@@ -1029,17 +1096,11 @@ components:
         assert_eq!(omit.rules.len(), 7);
         assert_eq!(
             omit.rules[0],
-            OmitRule::Operation {
-                method: OmitMethod::Get,
-                path: "/markdown"
-            }
+            OmitRule::operation(OmitMethod::Get, "/markdown")
         );
         assert_eq!(
             omit.rules[3],
-            OmitRule::Component {
-                kind: ComponentKind::Schemas,
-                name: "legacy"
-            }
+            OmitRule::component(ComponentKind::Schemas, "legacy")
         );
         assert!(omit.fingerprint().len() == 16);
     }

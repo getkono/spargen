@@ -132,7 +132,7 @@ pub fn resolve(
     // CLI omit flags are unioned with the config-file rules.
     for path in &flags.paths {
         rules.push(OmitRule::Path {
-            path: leak(path.clone()),
+            path: path.clone().into(),
         });
     }
     for spec in &flags.operations {
@@ -199,7 +199,7 @@ fn parse_operation_flag(value: &str) -> Result<OmitRule, ConfigError> {
     }
     Ok(OmitRule::Operation {
         method: parse_method(method)?,
-        path: leak(path.to_owned()),
+        path: path.to_owned().into(),
     })
 }
 
@@ -218,7 +218,7 @@ fn parse_component_flag(value: &str) -> Result<OmitRule, ConfigError> {
     }
     Ok(OmitRule::Component {
         kind: parse_component_kind(kind.trim())?,
-        name: leak(name.to_owned()),
+        name: name.to_owned().into(),
     })
 }
 
@@ -227,61 +227,39 @@ fn parse_component_flag(value: &str) -> Result<OmitRule, ConfigError> {
 fn parse_pointer_flag(value: &str) -> OmitRule {
     match value.split_once('#') {
         Some((file, pointer)) if !file.is_empty() => OmitRule::Pointer {
-            file: Some(leak(file.to_owned())),
-            pointer: leak(pointer.to_owned()),
+            file: Some(file.to_owned().into()),
+            pointer: pointer.to_owned().into(),
         },
         // `#/pointer` (empty file) or a bare `/pointer` both target the root document.
         Some((_, pointer)) => OmitRule::Pointer {
             file: None,
-            pointer: leak(pointer.to_owned()),
+            pointer: pointer.to_owned().into(),
         },
         None => OmitRule::Pointer {
             file: None,
-            pointer: leak(value.to_owned()),
+            pointer: value.to_owned().into(),
         },
     }
 }
 
+/// Parse an omit HTTP method, mapping the shared `FromStr` error into a CLI-shaped one.
 fn parse_method(method: &str) -> Result<OmitMethod, ConfigError> {
-    Ok(match method.to_ascii_lowercase().as_str() {
-        "get" => OmitMethod::Get,
-        "put" => OmitMethod::Put,
-        "post" => OmitMethod::Post,
-        "delete" => OmitMethod::Delete,
-        "options" => OmitMethod::Options,
-        "head" => OmitMethod::Head,
-        "patch" => OmitMethod::Patch,
-        "trace" => OmitMethod::Trace,
-        other => {
-            return Err(ConfigError::new(format!(
-                "unknown HTTP method `{other}`; expected one of get/put/post/delete/options/head/patch/trace"
-            )))
-        }
+    method.parse().map_err(|error| {
+        ConfigError::new(format!(
+            "{error}; expected one of get/put/post/delete/options/head/patch/trace"
+        ))
     })
 }
 
+/// Parse an omit component kind. Snake_case is canonical (it is what `omit!` writes), and the
+/// singular and camelCase OAS spellings are accepted so one rule reads the same everywhere.
 fn parse_component_kind(kind: &str) -> Result<ComponentKind, ConfigError> {
-    Ok(match kind {
-        "schema" | "schemas" => ComponentKind::Schemas,
-        "response" | "responses" => ComponentKind::Responses,
-        "parameter" | "parameters" => ComponentKind::Parameters,
-        "requestBody" | "requestBodies" => ComponentKind::RequestBodies,
-        "header" | "headers" => ComponentKind::Headers,
-        "securityScheme" | "securitySchemes" => ComponentKind::SecuritySchemes,
-        other => {
-            return Err(ConfigError::new(format!(
-                "unknown component kind `{other}`; expected one of \
-                 schema/response/parameter/requestBody/header/securityScheme"
-            )))
-        }
+    kind.parse().map_err(|error| {
+        ConfigError::new(format!(
+            "{error}; expected one of \
+             schemas/responses/parameters/request_bodies/headers/security_schemes"
+        ))
     })
-}
-
-/// Leak an owned string to `&'static str`. The library omit-rule types borrow `'static` (they are
-/// designed for the compile-time `omit!` macro), and the CLI process is short-lived, so leaking a
-/// bounded number of small config-derived strings for the duration of the run is acceptable.
-fn leak(value: String) -> &'static str {
-    Box::leak(value.into_boxed_str())
 }
 
 // --- TOML DTOs ---------------------------------------------------------------------------------
@@ -322,25 +300,25 @@ impl OmitToml {
                 return Err("`pointer` cannot be combined with path/method/component".to_owned());
             }
             return Ok(OmitRule::Pointer {
-                file: self.file.clone().map(leak),
-                pointer: leak(pointer.clone()),
+                file: self.file.clone().map(Into::into),
+                pointer: pointer.clone().into(),
             });
         }
         if let Some(component) = &self.component {
             let name = self.name.as_ref().ok_or("`component` requires a `name`")?;
             return Ok(OmitRule::Component {
                 kind: parse_component_kind(component).map_err(|error| error.message)?,
-                name: leak(name.clone()),
+                name: name.clone().into(),
             });
         }
         if let Some(path) = &self.path {
             return match &self.method {
                 Some(method) => Ok(OmitRule::Operation {
                     method: parse_method(method).map_err(|error| error.message)?,
-                    path: leak(path.clone()),
+                    path: path.clone().into(),
                 }),
                 None => Ok(OmitRule::Path {
-                    path: leak(path.clone()),
+                    path: path.clone().into(),
                 }),
             };
         }
@@ -356,31 +334,19 @@ mod tests {
     fn parses_each_omit_flag_kind() {
         assert_eq!(
             parse_operation_flag("get /pets").unwrap(),
-            OmitRule::Operation {
-                method: OmitMethod::Get,
-                path: "/pets"
-            }
+            OmitRule::operation(OmitMethod::Get, "/pets")
         );
         assert_eq!(
             parse_component_flag("schema:LegacyPet").unwrap(),
-            OmitRule::Component {
-                kind: ComponentKind::Schemas,
-                name: "LegacyPet"
-            }
+            OmitRule::component(ComponentKind::Schemas, "LegacyPet")
         );
         assert_eq!(
             parse_pointer_flag("extra.yaml#/components/schemas/X"),
-            OmitRule::Pointer {
-                file: Some("extra.yaml"),
-                pointer: "/components/schemas/X"
-            }
+            OmitRule::pointer(Some("extra.yaml".into()), "/components/schemas/X")
         );
         assert_eq!(
             parse_pointer_flag("/paths/~1legacy"),
-            OmitRule::Pointer {
-                file: None,
-                pointer: "/paths/~1legacy"
-            }
+            OmitRule::pointer(None, "/paths/~1legacy")
         );
     }
 
@@ -419,27 +385,15 @@ mod tests {
         let features = file.features.unwrap();
         assert_eq!(features.batch_cap, Some(7));
         let rules: Vec<OmitRule> = file.omit.iter().map(|e| e.to_rule().unwrap()).collect();
-        assert_eq!(rules[0], OmitRule::Path { path: "/pets/{id}" });
-        assert_eq!(
-            rules[1],
-            OmitRule::Operation {
-                method: OmitMethod::Post,
-                path: "/pets"
-            }
-        );
+        assert_eq!(rules[0], OmitRule::path("/pets/{id}"));
+        assert_eq!(rules[1], OmitRule::operation(OmitMethod::Post, "/pets"));
         assert_eq!(
             rules[2],
-            OmitRule::Component {
-                kind: ComponentKind::Schemas,
-                name: "LegacyPet"
-            }
+            OmitRule::component(ComponentKind::Schemas, "LegacyPet")
         );
         assert_eq!(
             rules[3],
-            OmitRule::Pointer {
-                file: Some("extra.yaml"),
-                pointer: "/components/schemas/X"
-            }
+            OmitRule::pointer(Some("extra.yaml".into()), "/components/schemas/X")
         );
     }
 

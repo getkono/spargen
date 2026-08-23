@@ -47,7 +47,7 @@ use std::str::FromStr;
 
 use camino::{Utf8Path, Utf8PathBuf};
 
-pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule};
+pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule, UnknownOmitToken};
 pub use diag::{Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, Severity, Span, UnknownCode};
 #[cfg(feature = "remote-fetch")]
 pub use source::{VendorReport, VendoredRef};
@@ -112,24 +112,116 @@ impl Config {
 }
 
 /// The outcome of a pipeline run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Outcome {
-    /// The generated module is ready, either freshly rendered or verified from the build cache.
+    /// The generated module was freshly rendered and written.
     Generated,
+    /// The generated module was already up to date and was verified from the build cache.
+    Cached,
     /// The support audit completed without a rejection.
     Clean,
     /// The spec used an R-class construct; generation failed loudly.
     Rejected,
 }
 
+impl Outcome {
+    /// The stable lowercase string form, used by the `--format json` renderer.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Generated => "generated",
+            Outcome::Cached => "cached",
+            Outcome::Clean => "clean",
+            Outcome::Rejected => "rejected",
+        }
+    }
+
+    /// Whether the run got as far as it was asked to.
+    pub fn is_success(self) -> bool {
+        !matches!(self, Outcome::Rejected)
+    }
+
+    /// Whether this run actually rewrote the output file. A cache hit did not.
+    pub fn wrote_output(self) -> bool {
+        matches!(self, Outcome::Generated)
+    }
+}
+
+impl std::fmt::Display for Outcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Report {
     /// Every diagnostic emitted during the run (batch reporting).
     pub diagnostics: Vec<Diagnostic>,
     /// What happened.
     pub outcome: Outcome,
 }
+
+impl Report {
+    /// Every error-severity diagnostic.
+    pub fn errors(&self) -> impl Iterator<Item = &Diagnostic> + '_ {
+        self.diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Error)
+    }
+
+    /// Every warning-severity diagnostic.
+    pub fn warnings(&self) -> impl Iterator<Item = &Diagnostic> + '_ {
+        self.diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.severity == Severity::Warning)
+    }
+
+    /// Whether any error-severity diagnostic was emitted.
+    pub fn has_errors(&self) -> bool {
+        self.errors().next().is_some()
+    }
+
+    /// Whether the run succeeded with no errors — the single check a build script wants.
+    pub fn succeeded(&self) -> bool {
+        self.outcome.is_success() && !self.has_errors()
+    }
+
+    /// Turn the report into a `Result`, so a build script can use `?`.
+    pub fn into_result(self) -> Result<Self, Self> {
+        if self.succeeded() {
+            Ok(self)
+        } else {
+            Err(self)
+        }
+    }
+
+    /// Print every diagnostic as a `cargo:warning=` line, so they surface in a build's output.
+    pub fn emit_cargo_warnings(&self) {
+        for diagnostic in &self.diagnostics {
+            println!("cargo:warning={diagnostic}");
+        }
+    }
+
+    /// Panic with the rendered report unless the run succeeded. The build-script one-liner.
+    #[must_use]
+    pub fn expect_success(self) -> Self {
+        assert!(self.succeeded(), "{self}");
+        self
+    }
+}
+
+impl std::fmt::Display for Report {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(formatter, "spargen: {}", self.outcome)?;
+        for diagnostic in &self.diagnostics {
+            writeln!(formatter, "{diagnostic}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for Report {}
 
 /// Run the full pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`. The
 /// primary `build.rs` entry point.
@@ -194,9 +286,11 @@ fn generate_with_cache_dir(
                         };
                     }
                 }
+                // A verified cache hit did not rewrite anything, and saying `Generated` made
+                // `wrote_output` a lie.
                 return Report {
                     diagnostics: cached.diagnostics,
-                    outcome: Outcome::Generated,
+                    outcome: Outcome::Cached,
                 };
             }
         }
@@ -346,13 +440,71 @@ where
 /// construct, failed validation, …), its diagnostics are surfaced in `old_rejection` / `new_rejection`
 /// and no diff is produced — the surfaces are simply not comparable. `diff` never panics on a bad spec.
 #[derive(Debug, Clone)]
-pub struct DiffOutcome {
-    /// The semver-impact diff, present iff both specs lowered successfully.
-    pub report: Option<DiffReport>,
+pub struct DiffRejection {
+    old: Option<Report>,
+    new: Option<Report>,
+}
+
+/// Which side of a diff a rejection came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// The old (baseline) spec.
+    Old,
+    /// The new spec.
+    New,
+}
+
+impl Side {
+    /// The stable lowercase label.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Side::Old => "old",
+            Side::New => "new",
+        }
+    }
+}
+
+impl DiffRejection {
     /// The old spec's rejection report, if it failed to lower.
-    pub old_rejection: Option<Report>,
+    pub fn old_spec(&self) -> Option<&Report> {
+        self.old.as_ref()
+    }
+
     /// The new spec's rejection report, if it failed to lower.
-    pub new_rejection: Option<Report>,
+    pub fn new_spec(&self) -> Option<&Report> {
+        self.new.as_ref()
+    }
+
+    /// Every side that failed to lower, with its report.
+    pub fn rejections(&self) -> impl Iterator<Item = (Side, &Report)> + '_ {
+        self.old
+            .iter()
+            .map(|report| (Side::Old, report))
+            .chain(self.new.iter().map(|report| (Side::New, report)))
+    }
+}
+
+impl std::fmt::Display for DiffRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (side, report) in self.rejections() {
+            writeln!(formatter, "{} spec rejected:", side.as_str())?;
+            write!(formatter, "{report}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for DiffRejection {}
+
+impl serde::Serialize for DiffRejection {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        for (side, report) in self.rejections() {
+            map.serialize_entry(side.as_str(), report)?;
+        }
+        map.end()
+    }
 }
 
 /// Diff the **public API surface** of the client that would be generated from `old` versus `new`,
@@ -363,11 +515,11 @@ pub struct DiffOutcome {
 /// generated client sees (operations, their params/body/return types, and the public model types),
 /// and reports every difference with its impact. A pure analysis step — it never writes output nor
 /// touches the runtime. Deterministic: the same pair of specs yields a byte-identical report.
-pub fn diff(old: &Config, new: &Config) -> DiffOutcome {
+pub fn diff(old: &Config, new: &Config) -> Result<DiffReport, DiffRejection> {
     run_on_frontend_stack(|| diff_inner(old, new))
 }
 
-fn diff_inner(old: &Config, new: &Config) -> DiffOutcome {
+fn diff_inner(old: &Config, new: &Config) -> Result<DiffReport, DiffRejection> {
     let mut old_diags = diag::Diagnostics::new(old.batch_cap);
     let mut new_diags = diag::Diagnostics::new(new.batch_cap);
     let old_lowered = lower_frontend(old, &mut old_diags);
@@ -377,21 +529,17 @@ fn diff_inner(old: &Config, new: &Config) -> DiffOutcome {
         (Ok((old_api, old_names)), Ok((new_api, new_names))) => {
             let old_surface = surface::build(&old_api, &old_names);
             let new_surface = surface::build(&new_api, &new_names);
-            DiffOutcome {
-                report: Some(surface::diff(&old_surface, &new_surface)),
-                old_rejection: None,
-                new_rejection: None,
-            }
+            Ok(surface::diff(&old_surface, &new_surface))
         }
-        (old_lowered, new_lowered) => DiffOutcome {
-            report: None,
-            old_rejection: old_lowered
+        // A spec that failed to lower has no surface, so the two are simply not comparable.
+        (old_lowered, new_lowered) => Err(DiffRejection {
+            old: old_lowered
                 .is_err()
                 .then(|| report(old_diags, Outcome::Rejected)),
-            new_rejection: new_lowered
+            new: new_lowered
                 .is_err()
                 .then(|| report(new_diags, Outcome::Rejected)),
-        },
+        }),
     }
 }
 
@@ -480,18 +628,59 @@ pub mod __private {
 
 /// Extended documentation for a stable diagnostic code, backing `spargen explain E###` and the
 /// published errors index.
-pub fn explain(code: &str) -> Option<&'static str> {
-    Code::from_str(code).ok().map(Code::explain)
+pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
+    Code::from_str(code).map(Code::explain)
 }
 
 /// The outcome of a [`vendor`] run: the report (present on success) and any diagnostics.
 #[cfg(feature = "remote-fetch")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct VendorOutcome {
     /// The vendored-refs report, or `None` if vendoring failed.
     pub report: Option<VendorReport>,
     /// Diagnostics emitted while vendoring (fetch failures, unfetchable schemes, …).
     pub diagnostics: Vec<Diagnostic>,
+}
+
+#[cfg(feature = "remote-fetch")]
+impl VendorOutcome {
+    /// Whether vendoring completed and wrote a lock file.
+    pub fn succeeded(&self) -> bool {
+        self.report.is_some()
+            && !self
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.severity == Severity::Error)
+    }
+}
+
+#[cfg(feature = "remote-fetch")]
+impl std::fmt::Display for VendorOutcome {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for diagnostic in &self.diagnostics {
+            writeln!(formatter, "{diagnostic}")?;
+        }
+        let Some(report) = &self.report else {
+            return Ok(());
+        };
+        if report.refs.is_empty() {
+            return write!(
+                formatter,
+                "no remote $refs found; wrote {}",
+                report.lock_path
+            );
+        }
+        writeln!(
+            formatter,
+            "vendored {} remote document(s) under {}:",
+            report.refs.len(),
+            report.vendor_dir
+        )?;
+        for vendored in &report.refs {
+            writeln!(formatter, "  {} -> {}", vendored.url, vendored.path)?;
+        }
+        write!(formatter, "wrote {}", report.lock_path)
+    }
 }
 
 /// Fetch, vendor, and hash-pin every remote (`http`/`https`) `$ref` reachable from `config.spec`,

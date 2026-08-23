@@ -390,7 +390,7 @@ fn check_command_supports_carve() {
     );
     assert!(output.status.success(), "{output:?}");
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("\"outcome\":\"Clean\""), "{stdout}");
+    assert!(stdout.contains("\"outcome\":\"clean\""), "{stdout}");
     assert_eq!(
         stdout.matches("W009").count(),
         1,

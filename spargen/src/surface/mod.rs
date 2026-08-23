@@ -104,7 +104,7 @@ struct FieldSurface {
 
 /// The semver impact of one change (and of a whole diff, taken as the max over its changes). The
 /// ordering `Patch < Minor < Major` is load-bearing: the overall bump is the maximum impact.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
 pub enum Impact {
     /// No consumer-visible surface change (docs-only / internal).
     Patch,
@@ -127,7 +127,7 @@ impl Impact {
 
 /// The kind of a single surface change. Each kind maps to a fixed [`Impact`] and a stable
 /// machine-readable code; the mapping is the documented classification policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ChangeKind {
     /// A new operation (client method) appeared. **Minor** — additive.
     OperationAdded,
@@ -243,7 +243,7 @@ impl ChangeKind {
 }
 
 /// A single classified difference between two surfaces.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Change {
     /// What kind of change this is.
     pub kind: ChangeKind,
@@ -268,12 +268,35 @@ impl Change {
 
 /// The result of diffing two surfaces: every classified change (deterministically ordered) and the
 /// overall recommended semver bump (the max impact, or `Patch` when there are no changes).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct DiffReport {
     /// Every change, sorted most-severe-first then by location and code (deterministic).
     pub changes: Vec<Change>,
     /// The overall recommended bump: the maximum impact across `changes`, or `Patch` if empty.
     pub bump: Impact,
+}
+
+impl std::fmt::Display for Change {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{:>5} [{}] {}: {}",
+            self.impact.as_str(),
+            self.kind.code(),
+            self.location,
+            self.detail
+        )
+    }
+}
+
+impl std::fmt::Display for DiffReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for change in &self.changes {
+            writeln!(formatter, "{change}")?;
+        }
+        writeln!(formatter, "{}", self.summary())?;
+        write!(formatter, "recommended bump: {}", self.bump.as_str())
+    }
 }
 
 impl DiffReport {
