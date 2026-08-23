@@ -1046,7 +1046,9 @@ paths:
 }
 
 #[test]
-fn explicit_media_encoding_is_rejected_instead_of_ignored() {
+fn explicit_media_encoding_generates() {
+    // The Encoding Object's RFC 6570 mode: an explicit `style`/`explode` selects query-style
+    // serialization for that property and makes `contentType` inert.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -1064,9 +1066,176 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn multipart_encoding_content_type_generates() {
+    // The Encoding Object's media-type mode: each part is sent as its declared `contentType`.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                sdp: { type: string }
+                session: { type: object, properties: { id: { type: string } } }
+            encoding:
+              sdp: { contentType: application/sdp }
+              session: { contentType: application/json }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_encoding_on_a_json_body_has_no_effect() {
+    // `encoding` applies only to form and multipart content; elsewhere the specification says it
+    // SHALL be ignored, so it is acknowledged rather than rejected.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { a: { type: string } } }
+            encoding:
+              a: { contentType: text/plain }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_encoding_entry_without_a_property_has_no_effect() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /form:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties: { a: { type: string } }
+            encoding:
+              missing: { contentType: text/plain }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_nested_encoding_object() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties: { part: { type: object, properties: { a: { type: string } } } }
+            encoding:
+              part:
+                contentType: multipart/mixed
+                encoding:
+                  a: { contentType: text/plain }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_wildcard_encoding_content_type() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties: { image: { type: string, contentEncoding: base64 } }
+            encoding:
+              image: { contentType: "image/*" }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_form_urlencoded_body_requires_an_object_schema() {
+    // A non-object form body used to compile and then fail at runtime inside the form encoder.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /form:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: string }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
 }
 
 #[test]
@@ -3527,4 +3696,45 @@ paths:
         assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
+}
+
+#[test]
+fn optional_request_bodies_take_an_option_argument() {
+    // `requestBody.required` was dropped entirely, so an optional body was indistinguishable from
+    // a required one and the caller had to invent a value.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /required:
+    post:
+      operationId: postRequired
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { a: { type: string } } }
+      responses:
+        "204": { description: No Content }
+  /optional:
+    post:
+      operationId: postOptional
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { a: { type: string } } }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("body: Option<&"),
+        "an optional body is passed as an Option: {code}"
+    );
+    assert!(
+        code.contains("body: &"),
+        "a required body is passed by reference: {code}"
+    );
 }

@@ -427,6 +427,128 @@ pub fn serialize_deep_object<T: Serialize>(
     }
 }
 
+/// The resolved wire encoding of one property of a form or multipart request body.
+///
+/// Codegen emits these as a `&'static [FormProperty]` const, fully resolved — the Encoding
+/// Object's defaulting rules run at generation time, so the runtime never has to infer anything.
+#[derive(Debug, Clone, Copy)]
+pub struct FormProperty {
+    /// The wire property name: the form field name, or the multipart part name.
+    pub name: &'static str,
+    /// How the value is rendered.
+    pub mode: FormMode,
+}
+
+/// How one form or multipart property is rendered.
+#[derive(Debug, Clone, Copy)]
+pub enum FormMode {
+    /// The scalar rendered as-is.
+    Text,
+    /// The value rendered as JSON.
+    Json,
+    /// RFC 6570 query-style serialization.
+    Style {
+        /// The form style in use.
+        style: FormStyle,
+        explode: bool,
+        encoding: PercentEncoding,
+    },
+}
+
+/// The subset of parameter styles an Encoding Object may select.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormStyle {
+    /// `style: form`.
+    Form,
+    /// `style: spaceDelimited` / `pipeDelimited`.
+    Delimited(Delimiter),
+    /// `style: deepObject`.
+    DeepObject,
+}
+
+/// Serialize a whole `application/x-www-form-urlencoded` request body.
+///
+/// `value` must serialize to a JSON object. Each property is rendered by its own resolved
+/// `FormProperty`, in the order codegen emitted them, so output is deterministic. A property whose
+/// value is JSON `null` is omitted entirely rather than sent empty.
+pub fn serialize_form_body<T: Serialize>(
+    value: &T,
+    properties: &[FormProperty],
+) -> Result<String, ParameterError> {
+    let Value::Object(members) = serde_json::to_value(value)? else {
+        return Err(ParameterError::ExpectedObject);
+    };
+    let mut fragments: Vec<String> = Vec::new();
+    for property in properties {
+        let Some(member) = members.get(property.name) else {
+            continue;
+        };
+        if member.is_null() {
+            continue;
+        }
+        match property.mode {
+            FormMode::Text => fragments.push(format!(
+                "{}={}",
+                encode(property.name, PercentEncoding::Form),
+                scalar(member, PercentEncoding::Form)?
+            )),
+            FormMode::Json => fragments.push(format!(
+                "{}={}",
+                encode(property.name, PercentEncoding::Form),
+                encode(&serde_json::to_string(member)?, PercentEncoding::Form)
+            )),
+            FormMode::Style {
+                style,
+                explode,
+                encoding,
+            } => fragments.extend(style_fragments(
+                property.name,
+                member,
+                style,
+                explode,
+                encoding,
+            )?),
+        }
+    }
+    Ok(fragments.join("&"))
+}
+
+/// The per-part values for one RFC 6570-mode `multipart/form-data` property.
+///
+/// An array yields one value per item, all sent under the same part name; any other shape yields
+/// one. Multipart values are never percent-encoded, so the encoding is always passthrough.
+pub fn serialize_multipart_values<T: Serialize>(
+    value: &T,
+    style: FormStyle,
+    explode: bool,
+) -> Result<Vec<String>, ParameterError> {
+    let value = serde_json::to_value(value)?;
+    let fragments = style_fragments("", &value, style, explode, PercentEncoding::Passthrough)?;
+    // The part name lives in `Content-Disposition`, so strip the `name=` prefix each fragment
+    // carries for query use.
+    Ok(fragments
+        .into_iter()
+        .map(|fragment| match fragment.split_once('=') {
+            Some((_, rest)) => rest.to_owned(),
+            None => fragment,
+        })
+        .collect())
+}
+
+fn style_fragments(
+    name: &str,
+    value: &Value,
+    style: FormStyle,
+    explode: bool,
+    encoding: PercentEncoding,
+) -> Result<Vec<String>, ParameterError> {
+    match style {
+        FormStyle::Form => serialize_form(name, value, explode, encoding),
+        FormStyle::Delimited(delimiter) => serialize_delimited(name, value, delimiter, encoding),
+        FormStyle::DeepObject => serialize_deep_object(name, value, encoding),
+    }
+}
+
 fn join_scalars<'a>(
     values: impl Iterator<Item = &'a Value>,
     separator: &str,
@@ -756,6 +878,98 @@ mod tests {
     fn multibyte_values_encode_per_utf8_byte() {
         assert_eq!(encode("é", PercentEncoding::Unreserved), "%C3%A9");
         assert_eq!(encode("🦀", PercentEncoding::Form), "%F0%9F%A6%80");
+    }
+
+    #[test]
+    fn serialize_form_body_covers_both_encoding_modes() {
+        // Media-type mode renders each property by its resolved content type; style mode uses
+        // query-style serialization. Both appear in one body here.
+        let body = serde_json::json!({
+            "id": "f81d4fae",
+            "address": { "city": "Somewhere", "zip": "99999+1234" },
+            "tags": ["a", "b"]
+        });
+        let properties = [
+            FormProperty {
+                name: "id",
+                mode: FormMode::Text,
+            },
+            FormProperty {
+                name: "address",
+                mode: FormMode::Json,
+            },
+            FormProperty {
+                name: "tags",
+                mode: FormMode::Style {
+                    style: FormStyle::Form,
+                    explode: true,
+                    encoding: PercentEncoding::Form,
+                },
+            },
+        ];
+        assert_eq!(
+            serialize_form_body(&body, &properties).unwrap(),
+            "id=f81d4fae\
+             &address=%7B%22city%22%3A%22Somewhere%22%2C%22zip%22%3A%2299999%2B1234%22%7D\
+             &tags=a&tags=b"
+        );
+    }
+
+    #[test]
+    fn form_body_omits_null_properties() {
+        let body = serde_json::json!({ "a": "x", "b": null });
+        let properties = [
+            FormProperty {
+                name: "a",
+                mode: FormMode::Text,
+            },
+            FormProperty {
+                name: "b",
+                mode: FormMode::Text,
+            },
+        ];
+        assert_eq!(serialize_form_body(&body, &properties).unwrap(), "a=x");
+    }
+
+    #[test]
+    fn form_body_emits_properties_in_the_declared_order() {
+        // Order is codegen's, not the JSON object's, so output stays deterministic.
+        let body = serde_json::json!({ "a": "1", "b": "2" });
+        let properties = [
+            FormProperty {
+                name: "b",
+                mode: FormMode::Text,
+            },
+            FormProperty {
+                name: "a",
+                mode: FormMode::Text,
+            },
+        ];
+        assert_eq!(serialize_form_body(&body, &properties).unwrap(), "b=2&a=1");
+    }
+
+    #[test]
+    fn form_body_rejects_a_non_object() {
+        let properties: [FormProperty; 0] = [];
+        assert!(matches!(
+            serialize_form_body(&serde_json::json!("scalar"), &properties),
+            Err(ParameterError::ExpectedObject)
+        ));
+    }
+
+    #[test]
+    fn serialize_multipart_values_yields_one_value_per_array_item() {
+        // The part name travels in `Content-Disposition`, so the values carry no `name=` prefix,
+        // and multipart values are never percent-encoded.
+        let values = serde_json::json!(["a b", "c,d"]);
+        assert_eq!(
+            serialize_multipart_values(&values, FormStyle::Form, true).unwrap(),
+            ["a b", "c,d"]
+        );
+        assert_eq!(
+            serialize_multipart_values(&serde_json::json!("solo"), FormStyle::Form, false).unwrap(),
+            ["solo"]
+        );
     }
 
     #[test]

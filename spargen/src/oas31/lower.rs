@@ -2,21 +2,21 @@ use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 
-use crate::diag::{Aborted, Code, Diagnostic, Diagnostics};
+use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
-    AdditionalProps, Api, ApiKeyLoc, DefaultValue, Delimiter, DisjointFeature, Docs, Field,
-    FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Operation, OperationId, ParamLoc,
-    ParamStyle, Parameter, PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response,
-    Responses, ScalarEnum, ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec,
-    Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy,
-    UnionVariant, XmlField,
+    AdditionalProps, Api, ApiKeyLoc, BodyEncoding, DefaultValue, Delimiter, DisjointFeature, Docs,
+    EncodingMode, Field, FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Operation,
+    OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
+    PropertyEncoding, PropertyName, RequestBody, Response, Responses, ScalarEnum, ScalarRepr,
+    ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef, TypeGraph,
+    TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
 };
 use crate::name::synth_operation_id;
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
 use super::{
-    Document, JsonType, ParameterObject, RefOr, RequestBodyObject, Resolver, ResponseObject,
-    Schema, SchemaOr, SecurityRequirement, ValidationKeywords,
+    Document, EncodingObject, JsonType, MediaTypeObject, ParameterObject, RefOr, RequestBodyObject,
+    Resolver, ResponseObject, Schema, SchemaOr, SecurityRequirement, ValidationKeywords,
 };
 
 /// Maximum schema-lowering recursion depth. Each nested object property, array item,
@@ -2429,11 +2429,350 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return None;
             }
         }
+        // A form-urlencoded body is rendered property by property, so it needs properties. Without
+        // this gate a non-object body compiled and then failed at runtime inside the form encoder.
+        if media == MediaType::FormUrlEncoded {
+            let is_struct = matches!(
+                ty.and_then(|ty| self.graph.get(ty.id)).map(|def| &def.kind),
+                Some(TypeKind::Struct(_))
+            );
+            let schema_failed_to_lower = object.schema.is_some() && ty.is_none();
+            if !is_struct && !schema_failed_to_lower {
+                Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                    .message(
+                        "an `application/x-www-form-urlencoded` request body must be an object \
+                         schema; its properties are the form fields",
+                    )
+                    .remedy(
+                        "give the body an object schema with a property per form field, or omit \
+                         this API segment with spargen::omit!",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+        }
+        let encoding = self.lower_body_encoding(media, media_name, ty, &object)?;
         Some(RequestBody {
             media,
             content_type: media_essence(media_name).to_owned(),
             ty,
+            required: body.required,
+            encoding,
         })
+    }
+
+    /// Resolve the Encoding Objects of a form or multipart request body into a fully-populated
+    /// [`BodyEncoding`] — one entry per body property, so the emitted code never has to infer a
+    /// default at runtime.
+    ///
+    /// Returns `None` only when the body is unrepresentable; an encoding that simply has no effect
+    /// here is reported as `W011` and dropped.
+    fn lower_body_encoding(
+        &mut self,
+        media: MediaType,
+        media_name: &str,
+        ty: Option<Ty>,
+        object: &MediaTypeObject,
+    ) -> Option<BodyEncoding> {
+        // Encoding diagnostics point at the Media Type Object that declares them, not at the whole
+        // request body.
+        let at = &object.provenance;
+        let declares_encoding = !object.encoding.is_empty()
+            || !object.prefix_encoding.is_empty()
+            || object.item_encoding.is_some();
+        // Encoding applies only to form and multipart content. The specification says it SHALL be
+        // ignored elsewhere, so this is a warning rather than a rejection.
+        if !matches!(media, MediaType::FormUrlEncoded | MediaType::Multipart) {
+            if declares_encoding {
+                Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
+                    .message(format!(
+                        "`encoding` has no effect on `{media_name}`: it applies only to \
+                         `multipart` and `application/x-www-form-urlencoded` content"
+                    ))
+                    .emit(self.diags);
+            }
+            return Some(BodyEncoding::default());
+        }
+        // Positional encoding describes an array-shaped multipart body. Spargen generates
+        // multipart only from an object schema, so there are no positions to encode.
+        let positional = object
+            .prefix_encoding
+            .first()
+            .map(|(_, at)| ("prefixEncoding", at.clone()))
+            .or_else(|| {
+                object
+                    .item_encoding
+                    .as_ref()
+                    .map(|(_, at)| ("itemEncoding", at.clone()))
+            });
+        if let Some((field, at)) = positional {
+            Diagnostic::error(Code::UnsupportedMediaType, at)
+                .message(format!(
+                    "`{field}` describes positional parts of an array-shaped multipart body; \
+                     spargen generates `multipart/form-data` from an object schema, which has no \
+                     positions"
+                ))
+                .remedy(
+                    "use `encoding` keyed by property name, or omit this API segment with \
+                     spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        let Some(TypeKind::Struct(structure)) =
+            ty.and_then(|ty| self.graph.get(ty.id)).map(|def| &def.kind)
+        else {
+            // The body already failed its own shape gate above; don't pile on.
+            return Some(BodyEncoding::default());
+        };
+        let fields: Vec<(String, Ty)> = structure
+            .fields
+            .iter()
+            .map(|field| (field.name.wire.clone(), field.ty))
+            .collect();
+        // Nested encoding describes nested multipart parts (`multipart/mixed` inside a part).
+        // Spargen generates one flat level, so a nested field is rejected rather than dropped.
+        for (name, encoding) in &object.encoding {
+            if let Some((field, at)) = encoding.nested.first() {
+                Diagnostic::error(Code::UnsupportedMediaType, at.clone())
+                    .message(format!(
+                        "`encoding.{name}.{field}` describes a nested multipart part, which \
+                         spargen does not generate"
+                    ))
+                    .remedy("flatten the body, or omit this API segment with spargen::omit!")
+                    .emit(self.diags);
+                return None;
+            }
+        }
+        // An `encoding` key naming no property has nothing to apply to.
+        for name in object.encoding.keys() {
+            if !fields.iter().any(|(wire, _)| wire == name) {
+                Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
+                    .message(format!(
+                        "`encoding` entry `{name}` names no property of the body schema, so it is \
+                         ignored"
+                    ))
+                    .emit(self.diags);
+            }
+        }
+        let mut properties = Vec::with_capacity(fields.len());
+        for (name, field_ty) in fields {
+            let declared = object.encoding.get(&name);
+            let mode = self.encoding_mode(declared, field_ty, media, &name, at)?;
+            let headers = self.encoding_headers(declared, media, &name, at);
+            properties.push(PropertyEncoding {
+                name,
+                mode,
+                headers,
+            });
+        }
+        Some(BodyEncoding { properties })
+    }
+
+    /// Apply the Encoding Object's mode switch for one property.
+    fn encoding_mode(
+        &mut self,
+        declared: Option<&EncodingObject>,
+        field_ty: Ty,
+        media: MediaType,
+        name: &str,
+        at: &Provenance,
+    ) -> Option<EncodingMode> {
+        // Presence of any RFC 6570 field selects query-style serialization outright, and makes
+        // `contentType` inert — the specification is explicit that it is then ignored.
+        if let Some(encoding) = declared {
+            if encoding.style.is_some()
+                || encoding.explode.is_some()
+                || encoding.allow_reserved.is_some()
+            {
+                let style_name = encoding.style.as_deref().unwrap_or("form");
+                let style = match style_name {
+                    "form" => ParamStyle::Form,
+                    "spaceDelimited" => ParamStyle::Delimited(Delimiter::Space),
+                    "pipeDelimited" => ParamStyle::Delimited(Delimiter::Pipe),
+                    "deepObject" => ParamStyle::DeepObject,
+                    // The document schema enumerates these four, so this is unreachable for a
+                    // validated document.
+                    _ => {
+                        Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                            .message(format!(
+                                "`encoding.{name}.style: {style_name}` is not a form style"
+                            ))
+                            .emit(self.diags);
+                        return None;
+                    }
+                };
+                let explode = encoding
+                    .explode
+                    .unwrap_or(matches!(style, ParamStyle::Form));
+                // Multipart part values are never percent-encoded, so `allowReserved` is inert.
+                let allow_reserved = encoding.allow_reserved.unwrap_or(false);
+                if allow_reserved && media == MediaType::Multipart {
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
+                        .message(
+                            "`allowReserved` has no effect on `multipart/form-data`: part values \
+                             are not percent-encoded",
+                        )
+                        .emit(self.diags);
+                }
+                return Some(EncodingMode::Style {
+                    style,
+                    explode,
+                    allow_reserved: allow_reserved && media != MediaType::Multipart,
+                });
+            }
+        }
+        let explicit = declared.and_then(|encoding| encoding.content_type.as_deref());
+        let content_type = match explicit {
+            // `contentType` is a comma-separated list of acceptable types, but a client sends
+            // exactly one, so the first element wins.
+            Some(list) => {
+                let first = list.split(',').next().unwrap_or(list).trim().to_owned();
+                if first.contains('*') {
+                    Diagnostic::error(
+                        Code::UnsupportedMediaType,
+                        declared
+                            .map(|encoding| encoding.provenance.clone())
+                            .unwrap_or_else(|| at.clone()),
+                    )
+                    .message(format!(
+                        "`encoding.{name}.contentType: {first}` is a wildcard; a client must send \
+                         one concrete media type"
+                    ))
+                    .remedy("name a concrete media type such as `image/png`")
+                    .emit(self.diags);
+                    return None;
+                }
+                first
+            }
+            None => self.default_content_type(field_ty),
+        };
+        // The declared `contentType` is a wire *header*; how the value is rendered into bytes is
+        // decided by the property's own lowered type. That is what lets a part declare
+        // `application/sdp` (which spargen has no codec for) over a string property and still be
+        // sent correctly, with the declared header attached.
+        let codec = match classify_media(media_essence(&content_type)).map(|(codec, _)| codec) {
+            Some(codec @ (MediaType::Json | MediaType::Text | MediaType::OctetStream)) => codec,
+            _ => self.natural_codec(field_ty),
+        };
+        // A form field is a single URL-encoded string; raw bytes have no representation there.
+        if media == MediaType::FormUrlEncoded && codec == MediaType::OctetStream {
+            Diagnostic::error(
+                Code::UnsupportedMediaType,
+                declared
+                    .map(|encoding| encoding.provenance.clone())
+                    .unwrap_or_else(|| at.clone()),
+            )
+            .message(format!(
+                "property `{name}` is binary, which has no `application/x-www-form-urlencoded` \
+                 representation"
+            ))
+            .remedy("send the body as `multipart/form-data`, or encode the value as text")
+            .emit(self.diags);
+            return None;
+        }
+        Some(EncodingMode::Media {
+            content_type,
+            codec,
+        })
+    }
+
+    /// How a property's value is rendered into bytes, from its lowered type alone.
+    fn natural_codec(&self, ty: Ty) -> MediaType {
+        match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Bytes) => MediaType::OctetStream,
+            Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => MediaType::Text,
+            _ => MediaType::Json,
+        }
+    }
+
+    /// The Encoding Object's default `contentType` for a property, from its lowered type.
+    fn default_content_type(&self, ty: Ty) -> String {
+        match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Bytes) => "application/octet-stream".to_owned(),
+            Some(TypeKind::Struct(_)) | Some(TypeKind::Union(_)) | Some(TypeKind::Any) => {
+                "application/json".to_owned()
+            }
+            // In 3.1 an array's default follows its item type; 3.2 simplified this to JSON. Both
+            // agree that an array of objects is JSON, and spargen sends any array as JSON, which
+            // is the 3.2 rule and the only self-consistent reading for a nested array.
+            Some(TypeKind::Array(_)) | Some(TypeKind::Tuple(_)) => "application/json".to_owned(),
+            Some(TypeKind::Primitive(_)) | Some(TypeKind::Enum(_)) => "text/plain".to_owned(),
+            _ => "application/octet-stream".to_owned(),
+        }
+    }
+
+    /// The literal extra part headers of one multipart property.
+    ///
+    /// A Header Object *describes* a header; it carries no value. Only a schema that pins one —
+    /// through `const`, or `default` in its absence — gives a client something to send.
+    fn encoding_headers(
+        &mut self,
+        declared: Option<&EncodingObject>,
+        media: MediaType,
+        name: &str,
+        at: &Provenance,
+    ) -> Vec<(String, String)> {
+        let Some(encoding) = declared else {
+            return Vec::new();
+        };
+        if encoding.headers.is_empty() {
+            return Vec::new();
+        }
+        if media != MediaType::Multipart {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
+                .message(format!(
+                    "`encoding.{name}.headers` applies only to `multipart` content"
+                ))
+                .emit(self.diags);
+            return Vec::new();
+        }
+        let _ = at;
+        let mut headers = Vec::new();
+        for (header_name, header) in &encoding.headers {
+            // `Content-Type` is described by `contentType`, not here.
+            if header_name.eq_ignore_ascii_case("content-type") {
+                continue;
+            }
+            let literal = match header {
+                RefOr::Item(header) => header
+                    .schema
+                    .as_ref()
+                    .and_then(|schema| self.literal_header_value(schema)),
+                RefOr::Ref(_) => None,
+            };
+            match literal {
+                Some(value) => headers.push((header_name.clone(), value)),
+                None => {
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.headers.{header_name}` pins no value, so there is \
+                             nothing for the client to send"
+                        ))
+                        .remedy("give the header schema a `const` (or a `default`) value")
+                        .emit(self.diags);
+                }
+            }
+        }
+        headers
+    }
+
+    /// The literal value a header schema pins, if any.
+    fn literal_header_value(&self, schema: &RefOr<Schema>) -> Option<String> {
+        let RefOr::Item(schema) = schema else {
+            return None;
+        };
+        let value = schema.const_value.as_ref().or(schema.default.as_ref())?;
+        match &value.node {
+            crate::source::Node::String(text) => Some(text.clone()),
+            crate::source::Node::Bool(value) => Some(value.to_string()),
+            crate::source::Node::Number(number) => Some(match number {
+                crate::source::Number::Int(value) => value.to_string(),
+                crate::source::Number::UInt(value) => value.to_string(),
+                crate::source::Number::Float(value) => value.to_string(),
+            }),
+            _ => None,
+        }
     }
 
     fn lower_responses(&mut self, responses: &super::ResponsesObject) -> Responses {
@@ -2729,19 +3068,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
             current = target.clone();
         }
-        if let Some((field, provenance)) = current.explicit_encodings.first() {
-            Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
-                .message(format!(
-                    "explicit Media Type Object `{field}` is not representable by spargen's wire \
-                     encoder"
-                ))
-                .remedy(
-                    "use the media type's default property encoding, or omit this API segment with \
-                     spargen::omit!",
-                )
-                .emit(self.diags);
-            return None;
-        }
+        // Encoding fields are validated where the body's media type and schema are known
+        // (`lower_body_encoding`); the specification says they are simply ignored on any other
+        // media, so rejecting them here would refuse valid documents.
         Some(current)
     }
 

@@ -67,8 +67,9 @@ pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, 
 pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use paginate::{next_link, LinkPaginator};
 pub use parameter::{
-    encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_label,
-    serialize_matrix, serialize_simple, Delimiter, ParameterError, PercentEncoding,
+    encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body,
+    serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter,
+    FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding,
 };
 pub use response::ResponseValue;
 pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};

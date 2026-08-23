@@ -1,4 +1,4 @@
-use super::Ty;
+use super::{ParamStyle, Ty};
 
 /// The wire codec selected for a supported request/response media type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +68,54 @@ pub struct RequestBody {
     pub content_type: String,
     /// The body's type, or `None` for an untyped/byte body.
     pub ty: Option<Ty>,
+    /// Whether the body is `required`. A required body is a plain argument; an optional one is
+    /// passed as `Option<&T>` and omitted from the request when absent.
+    pub required: bool,
+    /// Per-property wire encoding for a form or multipart body. Always fully resolved — one entry
+    /// per body property, in field order — so the runtime never has to infer a default.
+    pub encoding: BodyEncoding,
+}
+
+/// Per-property wire encoding for an `application/x-www-form-urlencoded` or
+/// `multipart/form-data` request body (matrix: Media → Encoding Object).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BodyEncoding {
+    /// One entry per body-schema property, in the body struct's field order.
+    pub properties: Vec<PropertyEncoding>,
+}
+
+/// How one property of a form or multipart body is rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyEncoding {
+    /// The wire property name — the form field name, or the multipart part name.
+    pub name: String,
+    pub mode: EncodingMode,
+    /// Literal extra part headers (multipart only), with `Content-Type` already removed because
+    /// the specification describes it separately.
+    pub headers: Vec<(String, String)>,
+}
+
+/// The Encoding Object's mode switch.
+///
+/// The specification keys this on *presence*: any explicit `style`/`explode`/`allowReserved`
+/// selects RFC 6570 query-style serialization and makes `contentType` inert, while all three
+/// absent selects media-type serialization under `contentType` (explicit or defaulted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncodingMode {
+    /// Media-type mode: the value is rendered in `content_type` by `codec`.
+    Media {
+        /// The single concrete media type this property is sent as.
+        content_type: String,
+        /// The codec that renders it.
+        codec: MediaType,
+    },
+    /// RFC 6570 query-style mode.
+    Style {
+        /// Restricted by the document schema to form/spaceDelimited/pipeDelimited/deepObject.
+        style: ParamStyle,
+        explode: bool,
+        allow_reserved: bool,
+    },
 }
 
 /// A response status selector (matrix: Responses).

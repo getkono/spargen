@@ -17,7 +17,8 @@ use indexmap::IndexMap;
 pub use auth::{ApiKeyLoc, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme};
 pub use invariant::check_invariants;
 pub use media::{
-    ErrorShape, Framing, MediaType, RequestBody, Response, Responses, StatusSpec, SuccessShape,
+    BodyEncoding, EncodingMode, ErrorShape, Framing, MediaType, PropertyEncoding, RequestBody,
+    Response, Responses, StatusSpec, SuccessShape,
 };
 pub use operation::{
     Delimiter, Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment,

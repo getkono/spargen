@@ -323,10 +323,18 @@ pub(crate) fn emit_operation(
             }
         }
     });
-    let body_send = if let Some((ty, media)) = operation
+    // A body the specification marks `required: false` arrives as `Option<&T>`, so the whole send
+    // block runs only when the caller supplied one. Only a body that lowered to a type takes an
+    // argument at all, so an untyped body is never wrapped.
+    let optional_body_binding = operation
         .request_body
         .as_ref()
-        .and_then(|body| body.ty.map(|ty| (ty, body.media)))
+        .filter(|body| !body.required && body.ty.is_some())
+        .and(bindings.body.as_ref());
+    let body_send = if let Some((ty, media, encoding)) = operation
+        .request_body
+        .as_ref()
+        .and_then(|body| body.ty.map(|ty| (ty, body.media, body.encoding.clone())))
     {
         let body_binding = bindings
             .body
@@ -366,7 +374,24 @@ pub(crate) fn emit_operation(
                         .body(#body_binding);
                 },
                 MediaType::FormUrlEncoded => {
-                    quote! { #request_binding = #request_binding.form(#body_binding); }
+                    // Rendered property by property through the resolved Encoding Object rather
+                    // than `RequestBuilder::form`, whose encoder rejects arrays and objects at
+                    // runtime and cannot express a per-property content type.
+                    let properties = form_properties_tokens(&encoding);
+                    quote! {
+                        const FORM_PROPERTIES: &[support::FormProperty] = &[#(#properties),*];
+                        let #body_binding = support::serialize_form_body(
+                            #body_binding,
+                            FORM_PROPERTIES,
+                        )
+                        .map_err(support::Error::request_construction)?;
+                        #request_binding = #request_binding
+                            .header(
+                                reqwest::header::CONTENT_TYPE,
+                                "application/x-www-form-urlencoded",
+                            )
+                            .body(#body_binding);
+                    }
                 }
                 MediaType::Text => quote! {
                     #request_binding = #request_binding
@@ -377,7 +402,7 @@ pub(crate) fn emit_operation(
                     quote! { #request_binding = #request_binding.body(#body_binding.clone()); }
                 }
                 MediaType::Multipart => {
-                    emit_multipart_body(ty, api, names, request_binding, body_binding)
+                    emit_multipart_body(ty, api, names, request_binding, body_binding, &encoding)
                 }
                 // Streaming media are response-only; a streaming request body is rejected during
                 // lowering (narrowed `E009`), so this arm is unreachable for any emitted operation.
@@ -386,6 +411,14 @@ pub(crate) fn emit_operation(
         }
     } else {
         quote! {}
+    };
+    let body_send = match optional_body_binding {
+        None => body_send,
+        Some(body_binding) => quote! {
+            if let Some(#body_binding) = #body_binding {
+                #body_send
+            }
+        },
     };
     let attach_auth = if operation.security.is_empty() {
         quote! {}
@@ -774,16 +807,21 @@ fn operation_args(
         args.push(quote! { #params_binding: Option<#params_ident> });
         forwards.push(quote! { #params_binding });
     }
-    if let Some(ty) = operation
-        .request_body
-        .as_ref()
-        .and_then(|body| body.ty.map(|ty| ty_tokens(ty, names, options, true)))
-    {
+    if let Some((ty, required)) = operation.request_body.as_ref().and_then(|body| {
+        body.ty
+            .map(|ty| (ty_tokens(ty, names, options, true), body.required))
+    }) {
         let body_binding = bindings
             .body
             .as_ref()
             .expect("request body argument allocated");
-        args.push(quote! { #body_binding: &#ty });
+        // A body the specification marks `required: false` may legitimately be omitted, so the
+        // caller says so in the type rather than inventing an empty value.
+        if required {
+            args.push(quote! { #body_binding: &#ty });
+        } else {
+            args.push(quote! { #body_binding: Option<&#ty> });
+        }
         forwards.push(quote! { #body_binding });
     }
     (args, forwards)
@@ -970,12 +1008,68 @@ fn emit_blocking_operation(
 /// `Display`; an object/array/union becomes a JSON-encoded text part. Optional fields (`Option<T>`)
 /// only add their part when `Some`. Lowering guarantees a multipart body is an object schema, so a
 /// non-struct body cannot reach here (it is rejected as `E009`); the fallback stays a no-op.
+/// Render one resolved [`BodyEncoding`] as `support::FormProperty` const entries.
+fn form_properties_tokens(encoding: &crate::ir::BodyEncoding) -> Vec<TokenStream> {
+    encoding
+        .properties
+        .iter()
+        .map(|property| {
+            let name = property.name.clone();
+            let mode = form_mode_tokens(&property.mode);
+            quote! { support::FormProperty { name: #name, mode: #mode } }
+        })
+        .collect()
+}
+
+/// Render one property's encoding mode.
+fn form_mode_tokens(mode: &crate::ir::EncodingMode) -> TokenStream {
+    match mode {
+        crate::ir::EncodingMode::Media { codec, .. } => match codec {
+            MediaType::Json => quote! { support::FormMode::Json },
+            _ => quote! { support::FormMode::Text },
+        },
+        crate::ir::EncodingMode::Style {
+            style,
+            explode,
+            allow_reserved,
+        } => {
+            let style = match style {
+                crate::ir::ParamStyle::Delimited(delimiter) => {
+                    let delimiter = delimiter_tokens(*delimiter);
+                    quote! { support::FormStyle::Delimited(#delimiter) }
+                }
+                crate::ir::ParamStyle::DeepObject => quote! { support::FormStyle::DeepObject },
+                _ => quote! { support::FormStyle::Form },
+            };
+            let encoding = if *allow_reserved {
+                quote! { support::PercentEncoding::Reserved }
+            } else {
+                quote! { support::PercentEncoding::Form }
+            };
+            quote! {
+                support::FormMode::Style {
+                    style: #style,
+                    explode: #explode,
+                    encoding: #encoding,
+                }
+            }
+        }
+    }
+}
+
+/// Emit a `multipart/form-data` body.
+///
+/// Every part carries the Content-Type its Encoding Object resolves to — explicit, or defaulted
+/// from the property's type by the specification's table — and any header the Encoding Object pins
+/// to a literal value. How the value is turned into bytes follows the property's own lowered type,
+/// which is the only thing the generator can know for a media type it has no codec for.
 fn emit_multipart_body(
     ty: Ty,
     api: &Api,
     names: &Names,
     request_binding: &crate::name::Ident,
     body_binding: &crate::name::Ident,
+    encoding: &crate::ir::BodyEncoding,
 ) -> TokenStream {
     let Some(TypeKind::Struct(object)) = api.types.get(ty.id).map(|def| &def.kind) else {
         return quote! {};
@@ -990,25 +1084,99 @@ fn emit_multipart_body(
         // schema itself is nullable (`ty_tokens` already wrapped it) — mirroring `emit_field`.
         let optional = !field.required || field.ty.nullable;
         let kind = api.types.get(field.ty.id).map(|def| &def.kind);
+        let property = encoding
+            .properties
+            .iter()
+            .find(|property| property.name == field.name.wire);
+        let headers = property
+            .map(|property| property.headers.as_slice())
+            .unwrap_or(&[]);
+        let extra_headers = (!headers.is_empty()).then(|| {
+            let inserts = headers.iter().map(|(name, value)| {
+                quote! {
+                    if let (Ok(name), Ok(value)) = (
+                        reqwest::header::HeaderName::try_from(#name),
+                        reqwest::header::HeaderValue::try_from(#value),
+                    ) {
+                        part_headers.insert(name, value);
+                    }
+                }
+            });
+            quote! {
+                let mut part_headers = reqwest::header::HeaderMap::new();
+                #(#inserts)*
+                part = part.headers(part_headers);
+            }
+        });
         // `receiver` is the value for method calls (`.to_vec()`/`.to_string()` auto-ref); `reference`
         // is an explicit `&value` for `serde_json::to_string`, which takes `&T`. Splitting them keeps
         // the emitted code free of `clippy::needless_borrow` on the method-call receivers.
-        let add_part = |receiver: &TokenStream, reference: &TokenStream| match kind {
-            // A binary/bytes property → a file/bytes part carrying the raw bytes.
-            Some(TypeKind::Bytes) => quote! {
-                form = form.part(#wire, reqwest::multipart::Part::bytes(#receiver.to_vec()));
-            },
-            // A scalar property → a text part rendered through `Display`.
-            Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {
-                form = form.text(#wire, #receiver.to_string());
-            },
-            // Any composite (object/array/tuple/union/untyped) property → a JSON-encoded text part.
-            _ => quote! {
-                form = form.text(
-                    #wire,
-                    serde_json::to_string(#reference).map_err(support::Error::request_construction)?,
-                );
-            },
+        let add_part = |receiver: &TokenStream, reference: &TokenStream| {
+            let build = match &property.map(|property| &property.mode) {
+                // RFC 6570 mode: the part value is style-serialized, and an array becomes one part
+                // per item under the same name. `contentType` is inert in this mode.
+                Some(crate::ir::EncodingMode::Style {
+                    style,
+                    explode,
+                    ..
+                }) => {
+                    let style = match style {
+                        crate::ir::ParamStyle::Delimited(delimiter) => {
+                            let delimiter = delimiter_tokens(*delimiter);
+                            quote! { support::FormStyle::Delimited(#delimiter) }
+                        }
+                        crate::ir::ParamStyle::DeepObject => {
+                            quote! { support::FormStyle::DeepObject }
+                        }
+                        _ => quote! { support::FormStyle::Form },
+                    };
+                    return quote! {
+                        for value in support::serialize_multipart_values(#reference, #style, #explode)
+                            .map_err(support::Error::request_construction)?
+                        {
+                            form = form.part(#wire, reqwest::multipart::Part::text(value));
+                        }
+                    };
+                }
+                _ => match kind {
+                    // A binary/bytes property → a file/bytes part carrying the raw bytes.
+                    Some(TypeKind::Bytes) => quote! {
+                        let mut part = reqwest::multipart::Part::bytes(#receiver.to_vec());
+                    },
+                    // A scalar property → a text part rendered through `Display`.
+                    Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {
+                        let mut part = reqwest::multipart::Part::text(#receiver.to_string());
+                    },
+                    // Any composite property → a JSON-encoded text part.
+                    _ => quote! {
+                        let mut part = reqwest::multipart::Part::text(
+                            serde_json::to_string(#reference)
+                                .map_err(support::Error::request_construction)?,
+                        );
+                    },
+                },
+            };
+            let content_type = match property.map(|property| &property.mode) {
+                Some(crate::ir::EncodingMode::Media { content_type, .. }) => {
+                    Some(content_type.clone())
+                }
+                _ => None,
+            };
+            // `mime_str` consumes the part, so a malformed content type from the spec surfaces as
+            // a request-construction error rather than being silently dropped.
+            let set_type = content_type.map(|content_type| {
+                quote! {
+                    part = part
+                        .mime_str(#content_type)
+                        .map_err(support::Error::request_construction)?;
+                }
+            });
+            quote! {
+                #build
+                #set_type
+                #extra_headers
+                form = form.part(#wire, part);
+            }
         };
         if optional {
             // `value` is already `&T` from the `if let Some(value) = &body.field` binding.
@@ -1642,7 +1810,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
             pub use dispatch::{attach_auth, build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
-            pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_label, serialize_matrix, serialize_simple, Delimiter, ParameterError, PercentEncoding};
+            pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;
             pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};

@@ -4,7 +4,7 @@ expression: summary(&report)
 ---
 outcome: Rejected
 diagnostics (code: count):
-  E009: 2
+  E009: 1
   W001: 262
   W002: 1
   W005: 64

@@ -5,10 +5,10 @@ use crate::ir::Method;
 use crate::source::{InputBundle, Node, Number, SpannedMap, SpannedValue};
 
 use super::{
-    Components, Discriminator, Document, Info, JsonType, MediaTypeObject, OperationObject,
-    ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject, ResponseObject,
-    ResponsesObject, Schema, SchemaOr, SecurityRequirement, SecuritySchemeObject, Server, Tag,
-    TypeSet, ValidationKeywords, XmlHints,
+    Components, Discriminator, Document, EncodingObject, HeaderObject, Info, JsonType,
+    MediaTypeObject, OperationObject, ParameterObject, PathItem, Paths, RefOr, Reference,
+    RequestBodyObject, ResponseObject, ResponsesObject, Schema, SchemaOr, SecurityRequirement,
+    SecuritySchemeObject, Server, Tag, TypeSet, ValidationKeywords, XmlHints,
 };
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
@@ -323,6 +323,10 @@ fn parse_request_body(
             .get("content")
             .map(|value| parse_media_map(value, &pointer.push("content"), diags))
             .unwrap_or_default(),
+        required: value
+            .get("required")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
         provenance: provenance(pointer, value),
     })
 }
@@ -462,15 +466,115 @@ fn parse_media_type(
         item_schema: value
             .get("itemSchema")
             .and_then(|schema| parse_schema_ref_or(schema, &pointer.push("itemSchema"), diags)),
-        explicit_encodings: ["encoding", "prefixEncoding", "itemEncoding"]
+        encoding: value
+            .get("encoding")
+            .and_then(SpannedValue::as_object)
+            .map(|map| {
+                let encoding_pointer = pointer.push("encoding");
+                map.iter()
+                    .map(|(key, value)| {
+                        (
+                            key.name.clone(),
+                            parse_encoding(value, &encoding_pointer.push(&key.name), diags),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        prefix_encoding: value
+            .get("prefixEncoding")
+            .and_then(SpannedValue::as_array)
+            .map(|items| {
+                let prefix_pointer = pointer.push("prefixEncoding");
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        let at = prefix_pointer.index(index);
+                        let encoding = parse_encoding(item, &at, diags);
+                        let where_ = provenance(&at, item);
+                        (encoding, where_)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        item_encoding: value.get("itemEncoding").map(|item| {
+            let at = pointer.push("itemEncoding");
+            let encoding = parse_encoding(item, &at, diags);
+            let where_ = provenance(&at, item);
+            (encoding, where_)
+        }),
+        provenance: provenance(pointer, value),
+    }
+}
+
+/// Parse one Encoding Object. The RFC 6570 fields stay `Option` because the specification's mode
+/// switch keys on their presence rather than their value.
+fn parse_encoding(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> EncodingObject {
+    let Some(map) = object(value, pointer, diags) else {
+        return empty_encoding(provenance(pointer, value));
+    };
+    EncodingObject {
+        content_type: map.get("contentType").and_then(string).map(str::to_owned),
+        headers: map
+            .get("headers")
+            .and_then(SpannedValue::as_object)
+            .map(|headers| {
+                let headers_pointer = pointer.push("headers");
+                headers
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        let at = headers_pointer.push(&key.name);
+                        parse_ref_or(value, &at, diags, parse_header_object)
+                            .map(|header| (key.name.clone(), header))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        style: map.get("style").and_then(string).map(str::to_owned),
+        explode: map.get("explode").and_then(SpannedValue::as_bool),
+        allow_reserved: map.get("allowReserved").and_then(SpannedValue::as_bool),
+        nested: ["encoding", "prefixEncoding", "itemEncoding"]
             .into_iter()
             .filter_map(|field| {
-                value
-                    .get(field)
+                map.get(field)
                     .map(|value| (field.to_owned(), provenance(&pointer.push(field), value)))
             })
             .collect(),
+        provenance: provenance(pointer, value),
     }
+}
+
+/// An Encoding Object that declares nothing, used when the node is not an object (already
+/// reported) so parsing can continue and collect the rest of the document's diagnostics.
+fn empty_encoding(provenance: Provenance) -> EncodingObject {
+    EncodingObject {
+        content_type: None,
+        headers: IndexMap::new(),
+        style: None,
+        explode: None,
+        allow_reserved: None,
+        nested: Vec::new(),
+        provenance,
+    }
+}
+
+/// Parse one Header Object — the Parameter Object shape without `name`/`in`.
+fn parse_header_object(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<HeaderObject> {
+    let map = object(value, pointer, diags)?;
+    Some(HeaderObject {
+        schema: map
+            .get("schema")
+            .and_then(|schema| parse_schema_ref_or(schema, &pointer.push("schema"), diags)),
+    })
 }
 
 fn parse_components(
