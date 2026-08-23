@@ -66,8 +66,9 @@ impl From<std::io::Error> for EmitError {
     }
 }
 
-/// Build the on-disk emission plan from generated code and options: stamp the provenance header,
-/// synthesize `Cargo.toml` for crate layout, and resolve module paths.
+/// Build the on-disk emission plan from generated code and options: stamp the provenance header
+/// onto the single generated module. Spargen writes one `include!`-safe file and nothing else —
+/// the consuming package owns its own `Cargo.toml`.
 pub fn plan(code: &GeneratedCode, options: &EmitOptions) -> Result<EmitPlan, EmitError> {
     let header = provenance_header(&options.spec);
     let mut files = Vec::new();

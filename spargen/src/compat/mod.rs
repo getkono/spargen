@@ -36,7 +36,6 @@ pub struct Omit {
 }
 
 impl Omit {
-    /// Construct a profile from exact rules.
     /// Whether the profile contains no rules.
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()

@@ -2122,8 +2122,8 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
             };
         }
     });
-    // The XML codec module is embedded only when the API uses an XML body; the generated manifest
-    // then carries the `quick-xml` dependency it needs. A non-XML output never references quick-xml.
+    // The XML codec module is embedded only when the API uses an XML body, and only then does the
+    // dependency audit require `quick-xml` of the consumer. A non-XML output never references it.
     let xml_module = uses_xml.then(|| embed(&crate::support::xml_runtime_file()));
     let xml_reexport = uses_xml.then(|| {
         quote! { pub use xml::{classify_error_xml, decode_success_xml, to_xml}; }
@@ -2132,8 +2132,9 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
     // `blocking` feature AND `not(target_arch = "wasm32")` at the module level: the tokio-dependent
     // code compiles only when a consumer opts in on a native target, so a default build carries no
     // tokio reference and a wasm build never pulls tokio even with the feature on (tokio's blocking
-    // runtime cannot run on the single-threaded browser). The generated manifest always declares the
-    // (user-facing) `blocking` feature wired to an optional, non-wasm tokio dependency.
+    // runtime cannot run on the single-threaded browser). A consumer opts in by declaring its own
+    // `blocking` feature wired to an optional, non-wasm tokio dependency — which is what
+    // `spargen deps` prints, commented out, and what the audit then requires.
     let blocking_inner = embed(&crate::support::blocking_runtime_file());
     let blocking_module = quote! {
         #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
