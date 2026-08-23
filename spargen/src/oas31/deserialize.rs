@@ -429,6 +429,25 @@ pub(super) fn parse_response(
             .get("content")
             .map(|value| parse_media_map(value, &pointer.push("content"), diags))
             .unwrap_or_default(),
+        headers: value
+            .get("headers")
+            .and_then(SpannedValue::as_object)
+            .map(|headers| {
+                let headers_pointer = pointer.push("headers");
+                headers
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        parse_ref_or(
+                            value,
+                            &headers_pointer.push(&key.name),
+                            diags,
+                            parse_header_object,
+                        )
+                        .map(|header| (key.name.clone(), header))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         provenance: provenance(pointer, value),
     })
 }
@@ -629,9 +648,24 @@ fn parse_header_object(
 ) -> Option<HeaderObject> {
     let map = object(value, pointer, diags)?;
     Some(HeaderObject {
+        description: map.get("description").and_then(string).map(str::to_owned),
+        required: map
+            .get("required")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
+        deprecated: map
+            .get("deprecated")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
+        explode: map.get("explode").and_then(SpannedValue::as_bool),
         schema: map
             .get("schema")
             .and_then(|schema| parse_schema_ref_or(schema, &pointer.push("schema"), diags)),
+        content: map
+            .get("content")
+            .map(|content| parse_media_map(content, &pointer.push("content"), diags))
+            .unwrap_or_default(),
+        provenance: provenance(pointer, value),
     })
 }
 
@@ -707,6 +741,12 @@ fn parse_components(
                 .collect()
         })
         .unwrap_or_default();
+    components.headers = parse_component_map(
+        map.get("headers"),
+        &pointer.push("headers"),
+        diags,
+        parse_header_object,
+    );
     components.security_schemes = parse_component_map(
         map.get("securitySchemes"),
         &pointer.push("securitySchemes"),

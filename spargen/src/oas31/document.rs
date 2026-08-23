@@ -161,6 +161,8 @@ pub struct ResponseObject {
     pub description: Option<String>,
     /// Media type → schema.
     pub content: IndexMap<String, MediaTypeObject>,
+    /// Documented response headers, keyed by header name.
+    pub headers: IndexMap<String, RefOr<HeaderObject>>,
     pub provenance: Provenance,
 }
 
@@ -221,7 +223,16 @@ pub struct EncodingObject {
 /// one — through `const`, or `default` in its absence — gives a client something to send.
 #[derive(Debug, Clone)]
 pub struct HeaderObject {
+    pub description: Option<String>,
+    pub required: bool,
+    pub deprecated: bool,
+    /// `explode` for the `simple` style. A Header Object may only use `simple`, which the
+    /// document schema already enforces, so the style itself is not modeled.
+    pub explode: Option<bool>,
     pub schema: Option<RefOr<Schema>>,
+    /// A `content`-typed header, as an alternative to `schema`.
+    pub content: IndexMap<String, MediaTypeObject>,
+    pub provenance: Provenance,
 }
 
 /// `components`. Only the maps spargen consumes are modeled.
@@ -235,6 +246,8 @@ pub struct Components {
     pub security_schemes: IndexMap<String, RefOr<SecuritySchemeObject>>,
     /// Reusable Path Items, referenced by a Path Item `$ref`.
     pub path_items: IndexMap<String, PathItem>,
+    /// Reusable Header Objects, referenced from `response.headers` and `encoding.headers`.
+    pub headers: IndexMap<String, RefOr<HeaderObject>>,
 }
 
 /// An OAS Security Scheme Object.

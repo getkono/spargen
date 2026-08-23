@@ -50,6 +50,10 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
         .operations
         .iter()
         .map(|operation| emit_operation(operation, api, names, options));
+    let response_headers = api
+        .operations
+        .iter()
+        .map(|operation| emit_response_headers(operation, api, names, options));
     let client_docs = client_doc_tokens(api);
     let error_body_cap = options.error_body_cap;
     let servers = emit_servers(api, names);
@@ -66,6 +70,7 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
         #(#params)*
         #(#errors)*
         #(#response_enums)*
+        #(#response_headers)*
         #servers
 
         #client_docs
@@ -1072,7 +1077,111 @@ fn form_mode_tokens(mode: &crate::ir::EncodingMode) -> TokenStream {
     }
 }
 
-/// Emit the `servers` module: one builder per declared server, plus the default base URL.
+/// Emit one typed header struct per documented status that declares response headers.
+///
+/// Reading headers is an explicitly-called second step rather than part of the return type: the
+/// body has already been decoded and handed back before a caller opts in, so a malformed or absent
+/// header can never turn a successful call into a failed one. Every header also stays reachable
+/// raw through `ResponseValue::headers`.
+fn emit_response_headers(
+    operation: &Operation,
+    api: &Api,
+    names: &Names,
+    options: &CodegenOptions,
+) -> TokenStream {
+    let _ = api;
+    let responses = operation
+        .responses
+        .by_status
+        .iter()
+        .map(|(spec, response)| (crate::name::status_label(Some(*spec)), response))
+        .chain(
+            operation
+                .responses
+                .default
+                .as_ref()
+                .map(|response| (crate::name::status_label(None), response)),
+        );
+    let structs = responses.filter_map(|(label, response)| {
+        if response.headers.is_empty() {
+            return None;
+        }
+        let ident = names
+            .response_header_structs
+            .get(&(operation.id.clone(), label.clone()))?;
+        let ident = proc_macro2::Ident::new(ident.as_str(), proc_macro2::Span::call_site());
+        let fields = response.headers.iter().map(|header| {
+            let field = names
+                .response_header_fields
+                .get(&(operation.id.clone(), label.clone(), header.name.clone()))
+                .expect("response header field allocated");
+            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+            let ty = ty_tokens(header.ty, names, options, false);
+            // An optional header is absent-able; a required one is documented as always present.
+            let ty = if header.required {
+                quote! { #ty }
+            } else {
+                quote! { Option<#ty> }
+            };
+            let docs = doc_tokens(&header.docs);
+            let deprecated = header.deprecated.then(|| quote! { #[deprecated] });
+            quote! { #docs #deprecated pub #field: #ty }
+        });
+        let reads = response.headers.iter().map(|header| {
+            let field = names
+                .response_header_fields
+                .get(&(operation.id.clone(), label.clone(), header.name.clone()))
+                .expect("response header field allocated");
+            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+            let name = header.name.clone();
+            let shape = match header.shape {
+                crate::ir::HeaderShape::Scalar => quote! { support::HeaderShape::Scalar },
+                crate::ir::HeaderShape::Array => quote! { support::HeaderShape::Array },
+                crate::ir::HeaderShape::Object => quote! { support::HeaderShape::Object },
+                crate::ir::HeaderShape::Json => quote! { support::HeaderShape::Json },
+            };
+            let explode = header.explode;
+            let call = if header.required {
+                quote! { support::require_header(headers, #name, #shape, #explode)? }
+            } else {
+                quote! { support::parse_header(headers, #name, #shape, #explode)? }
+            };
+            quote! { #field: #call }
+        });
+        let doc = format!(
+            "Documented response headers for `{}` `{label}`.",
+            operation.id.0
+        );
+        Some(quote! {
+            #[doc = #doc]
+            #[allow(dead_code)]
+            #[derive(Debug, Clone)]
+            pub struct #ident {
+                #(#fields),*
+            }
+
+            #[allow(dead_code, deprecated)]
+            impl #ident {
+                /// Read the documented headers out of a raw header map.
+                pub fn from_headers(
+                    headers: &reqwest::header::HeaderMap,
+                ) -> Result<Self, support::HeaderError> {
+                    Ok(Self { #(#reads),* })
+                }
+
+                /// Read the documented headers out of a returned response value.
+                pub fn from_response<T>(
+                    response: &support::ResponseValue<T>,
+                ) -> Result<Self, support::HeaderError> {
+                    Self::from_headers(response.headers())
+                }
+            }
+        })
+    });
+    quote! { #(#structs)* }
+}
+
+/// Emit the `servers` module/// Emit the `servers` module: one builder per declared server, plus the default base URL.
 ///
 /// A Server Variable `default` is sent when the caller supplies no alternative, so every server
 /// resolves to a concrete URL with no arguments; a variable that declares an `enum` gets a typed
@@ -2048,6 +2157,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
             pub use dispatch::{attach_auth, build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
+            pub use header::{parse_header, require_header, HeaderError, HeaderShape};
             pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;

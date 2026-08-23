@@ -55,6 +55,10 @@ pub struct Names {
     pub server_variable_variants: HashMap<(usize, String, String), Ident>,
     /// Setter/field name per `(server index, variable name)`.
     pub server_variable_fields: HashMap<(usize, String), Ident>,
+    /// Header-struct type name per `(operation, status label)`.
+    pub response_header_structs: HashMap<(OperationId, String), Ident>,
+    /// Field name per `(operation, status label, header name)`.
+    pub response_header_fields: HashMap<(OperationId, String, String), Ident>,
 }
 
 /// Generator-owned bindings emitted inside one operation method.
@@ -132,6 +136,41 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             id,
             type_scope.alloc(&def.name_hint, IdentRole::Type, &def.provenance.pointer),
         );
+    }
+
+    // Response-header structs live in the same scope as the other per-operation types, so a
+    // documented header can never collide with a generated model.
+    for operation in &api.operations {
+        let responses = operation
+            .responses
+            .by_status
+            .iter()
+            .map(|(spec, response)| (status_label(Some(*spec)), response))
+            .chain(
+                operation
+                    .responses
+                    .default
+                    .as_ref()
+                    .map(|response| (status_label(None), response)),
+            );
+        for (label, response) in responses {
+            if response.headers.is_empty() {
+                continue;
+            }
+            let hint = format!("{} {label} headers", operation.id.0);
+            let pointer = crate::diag::JsonPointer::root();
+            names.response_header_structs.insert(
+                (operation.id.clone(), label.clone()),
+                type_scope.alloc(&hint, IdentRole::Type, &pointer),
+            );
+            let mut field_scope = Scope::default();
+            for header in &response.headers {
+                names.response_header_fields.insert(
+                    (operation.id.clone(), label.clone(), header.name.clone()),
+                    field_scope.alloc(&header.name, IdentRole::Field, &pointer),
+                );
+            }
+        }
     }
 
     let mut operation_scope = Scope::default();
@@ -251,4 +290,14 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     }
 
     names
+}
+
+/// The stable label for one documented status, shared by naming and codegen so a header struct and
+/// its response variant always agree.
+pub fn status_label(spec: Option<crate::ir::StatusSpec>) -> String {
+    match spec {
+        Some(crate::ir::StatusSpec::Exact(code)) => format!("Status{code}"),
+        Some(crate::ir::StatusSpec::Range(0)) | None => "Default".to_owned(),
+        Some(crate::ir::StatusSpec::Range(prefix)) => format!("Status{prefix}xx"),
+    }
 }

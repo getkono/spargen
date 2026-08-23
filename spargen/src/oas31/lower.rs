@@ -7,9 +7,10 @@ use crate::ir::{
     AdditionalProps, Api, ApiKeyLoc, BodyEncoding, DefaultValue, Delimiter, DisjointFeature, Docs,
     EncodingMode, Field, FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Operation,
     OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
-    PropertyEncoding, PropertyName, RequestBody, Response, Responses, ScalarEnum, ScalarRepr,
-    ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef, TypeGraph,
-    TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, UrlSegment, XmlField,
+    PropertyEncoding, PropertyName, RequestBody, Response, ResponseHeader, Responses, ScalarEnum,
+    ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef,
+    TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, UrlSegment,
+    XmlField,
 };
 use crate::name::synth_operation_id;
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
@@ -2935,11 +2936,142 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // framing; the body is then the streamed item type `T`. A whole-body response has no
         // framing. Streaming only takes effect when this is the operation's single success body
         // (see `Responses::stream_success`).
+        let headers = self.lower_response_headers(response);
         Some(Response {
             media: body.map(|(media, _, _)| media),
             body: body.and_then(|(_, ty, _)| ty),
             stream: body.and_then(|(_, _, stream)| stream),
+            headers,
         })
+    }
+
+    /// Lower a response's documented headers into typed accessors.
+    ///
+    /// A header that cannot be represented is skipped with a diagnostic rather than failing the
+    /// whole operation: the body is what the call returns, and refusing an otherwise-generatable
+    /// operation over an unreadable header would be a poor trade.
+    fn lower_response_headers(&mut self, response: &ResponseObject) -> Vec<ResponseHeader> {
+        let mut headers = Vec::new();
+        for (name, header) in &response.headers {
+            // The specification says a documented `Content-Type` header SHALL be ignored: the
+            // media type is already the operation's, and a second source would only disagree.
+            if name.eq_ignore_ascii_case("content-type") {
+                Diagnostic::warning(Code::DeclarationHasNoEffect, response.provenance.clone())
+                    .message(
+                        "a documented `Content-Type` response header is ignored; the operation's \
+                         media type already determines it",
+                    )
+                    .emit(self.diags);
+                continue;
+            }
+            let Some(header) = self.resolve_header(header) else {
+                continue;
+            };
+            let header = &header;
+            // A Header Object may only use `simple`; the document schema already enforces that.
+            let (ty, shape) = if let Some(schema) = &header.schema {
+                let Some(ty) = self.lower_schema_ref(schema, &format!("Header{name}")) else {
+                    continue;
+                };
+                let Some(shape) = self.header_shape(ty) else {
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
+                        .message(format!(
+                            "response header `{name}` has a shape `simple` serialization cannot \
+                             express, so no typed accessor is generated"
+                        ))
+                        .emit(self.diags);
+                    continue;
+                };
+                (ty, shape)
+            } else if let Some((media, object)) = header.content.iter().next() {
+                let Some(media) = lower_media_type(media, &header.provenance, self.diags) else {
+                    continue;
+                };
+                if media != MediaType::Json {
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
+                        .message(format!(
+                            "response header `{name}` uses a `content` media type spargen cannot \
+                             decode, so no typed accessor is generated"
+                        ))
+                        .emit(self.diags);
+                    continue;
+                }
+                let Some(ty) = object
+                    .schema
+                    .as_ref()
+                    .and_then(|schema| self.lower_schema_ref(schema, &format!("Header{name}")))
+                else {
+                    continue;
+                };
+                (ty, crate::ir::HeaderShape::Json)
+            } else {
+                continue;
+            };
+            headers.push(ResponseHeader {
+                name: name.clone(),
+                ty,
+                required: header.required,
+                explode: header.explode.unwrap_or(false),
+                shape,
+                deprecated: header.deprecated,
+                docs: Docs {
+                    description: header.description.clone(),
+                    ..Docs::default()
+                },
+            });
+        }
+        headers
+    }
+
+    /// Resolve a Header Object that may be a `$ref` into `#/components/headers/`.
+    fn resolve_header(
+        &mut self,
+        header: &RefOr<super::HeaderObject>,
+    ) -> Option<super::HeaderObject> {
+        let mut current = header.clone();
+        let mut seen = HashSet::new();
+        loop {
+            match current {
+                RefOr::Item(header) => return Some(header),
+                RefOr::Ref(reference) => {
+                    if !seen.insert(reference.reference.clone()) {
+                        Diagnostic::error(Code::UnresolvedRef, reference.provenance)
+                            .message("header reference cycle cannot be resolved")
+                            .emit(self.diags);
+                        return None;
+                    }
+                    let target = reference
+                        .reference
+                        .strip_prefix("#/components/headers/")
+                        .and_then(|name| self.document.components.headers.get(name))
+                        .cloned();
+                    match target {
+                        Some(target) => current = target,
+                        None => {
+                            Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
+                                .message(format!(
+                                    "unresolved header reference `{}`",
+                                    reference.reference
+                                ))
+                                .emit(self.diags);
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The `simple` wire shape of a lowered header type, or `None` when it has none.
+    fn header_shape(&self, ty: Ty) -> Option<crate::ir::HeaderShape> {
+        match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Null) => {
+                Some(crate::ir::HeaderShape::Scalar)
+            }
+            Some(TypeKind::Array(_)) => Some(crate::ir::HeaderShape::Array),
+            Some(TypeKind::Struct(_)) => Some(crate::ir::HeaderShape::Object),
+            _ => None,
+        }
     }
 
     fn resolve_parameter(&mut self, parameter: &RefOr<ParameterObject>) -> Option<ParameterObject> {

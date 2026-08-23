@@ -6,17 +6,19 @@ operations (3):
   create_pets
   list_pets
   show_pet_by_id
-types (33):
+types (35):
   BlockingClient
   Client
   CreatePetsError
   ListPetsError
   ListPetsParams
+  ListPetsStatus200Headers
   ShowPetByIdError
   servers::Server0
   types::Error
   types::Errorcode
   types::Errormessage
+  types::HeaderxNext
   types::Limit
   types::Pet
   types::PetId

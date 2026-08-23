@@ -4062,3 +4062,56 @@ paths:
         assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
     }
 }
+
+#[test]
+fn documented_response_headers_get_typed_accessors() {
+    // Regression: `response.headers` was dropped entirely, with no diagnostic.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-RateLimit-Remaining:
+              required: true
+              schema: { type: integer }
+            X-Next:
+              $ref: "#/components/headers/Next"
+            Content-Type:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { type: array, items: { type: string } }
+components:
+  headers:
+    Next:
+      description: The cursor for the next page.
+      schema: { type: string }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("ListPetsStatus200Headers"), "{code}");
+    // A required header is a plain field; an optional one is an Option. Inline header schemas get
+    // a synthesized named type, exactly as inline schemas elsewhere do.
+    assert!(
+        code.contains("pub x_rate_limit_remaining: HeaderXRateLimitRemaining"),
+        "{code}"
+    );
+    assert!(code.contains("pub x_next: Option<"), "{code}");
+    assert!(code.contains("from_response"), "{code}");
+    // A documented `Content-Type` is ignored per the specification, and said so.
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
+    assert!(
+        !code.contains("content_type:"),
+        "a documented Content-Type header must not become a field: {code}"
+    );
+}

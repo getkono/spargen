@@ -32,6 +32,7 @@ mod blocking;
 mod client;
 mod dispatch;
 mod error;
+mod header;
 mod middleware;
 mod paginate;
 mod parameter;
@@ -64,6 +65,7 @@ pub use dispatch::{
     read_success_body, send, unexpected_status, StatusSpec,
 };
 pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
+pub use header::{parse_header, require_header, HeaderError, HeaderShape};
 pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use paginate::{next_link, LinkPaginator};
 pub use parameter::{

@@ -42,6 +42,10 @@ pub fn runtime_files() -> &'static [SupportFile] {
             contents: include_str!("runtime/error.rs"),
         },
         SupportFile {
+            name: "header.rs",
+            contents: include_str!("runtime/header.rs"),
+        },
+        SupportFile {
             name: "middleware.rs",
             contents: include_str!("runtime/middleware.rs"),
         },

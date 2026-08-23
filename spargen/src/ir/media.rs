@@ -137,8 +137,8 @@ impl StatusSpec {
     }
 }
 
-/// A typed response for one status selector. Response headers stay reachable through
-/// `ResponseValue::headers`; typed header accessors are not generated.
+/// A typed response for one status selector. Documented headers get typed accessors; every header
+/// stays reachable raw through `ResponseValue::headers`.
 #[derive(Debug, Clone)]
 pub struct Response {
     /// The response body type, if any.
@@ -150,6 +150,42 @@ pub struct Response {
     /// framing of the streamed items; `None` for a whole-body response. The `body` is the item
     /// type `T` when this is `Some`.
     pub stream: Option<Framing>,
+    /// Documented response headers, in source order. A `Content-Type` entry is dropped during
+    /// lowering, because the specification says it is ignored.
+    pub headers: Vec<ResponseHeader>,
+}
+
+/// One documented response header.
+#[derive(Debug, Clone)]
+pub struct ResponseHeader {
+    /// The header name, as declared.
+    pub name: String,
+    /// The value type.
+    pub ty: Ty,
+    /// Whether the header is documented as always present.
+    pub required: bool,
+    /// `explode` for the `simple` style; the default is `false`.
+    pub explode: bool,
+    /// The wire shape, derived from `ty` — `simple` is lossy, so the shape cannot be recovered
+    /// from the text and must travel with it.
+    pub shape: HeaderShape,
+    /// `deprecated` → `#[deprecated]` on the accessor field.
+    pub deprecated: bool,
+    /// Documentation carried onto the generated field.
+    pub docs: super::Docs,
+}
+
+/// The wire shape of a documented header value. Mirrors the runtime enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderShape {
+    /// A single scalar.
+    Scalar,
+    /// A comma-separated list.
+    Array,
+    /// Alternating `key,value` pairs, or `key=value` when exploded.
+    Object,
+    /// A `content`-typed header carrying JSON.
+    Json,
 }
 
 /// The full set of responses for an operation: per-status entries plus an optional `default`.
@@ -393,6 +429,7 @@ mod tests {
             media: body.map(|_| super::MediaType::Json),
             body: body.map(ty),
             stream: None,
+            headers: Vec::new(),
         }
     }
 
