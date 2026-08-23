@@ -62,6 +62,21 @@ pub struct Server {
     pub name: Option<String>,
     pub url: String,
     pub description: Option<String>,
+    /// `variables`: substitutions for the `{braces}` in `url`. Unlike a Schema Object `default`,
+    /// a Server Variable `default` genuinely changes the wire — the specification says it SHALL be
+    /// sent when the caller supplies no alternative.
+    pub variables: IndexMap<String, ServerVariable>,
+    pub provenance: Provenance,
+}
+
+/// An OAS Server Variable Object.
+#[derive(Debug, Clone)]
+pub struct ServerVariable {
+    /// The value sent when the caller supplies none. Required by the document schema.
+    pub default: String,
+    /// The closed set of permitted values, if the document declares one.
+    pub enum_values: Vec<String>,
+    pub description: Option<String>,
 }
 
 /// `paths`: a map from path template to its item.

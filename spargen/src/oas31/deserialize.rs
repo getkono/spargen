@@ -8,7 +8,7 @@ use super::{
     Components, Discriminator, Document, EncodingObject, HeaderObject, Info, JsonType,
     MediaTypeObject, OperationObject, ParameterObject, PathItem, Paths, RefOr, Reference,
     RequestBodyObject, ResponseObject, ResponsesObject, Schema, SchemaOr, SecurityRequirement,
-    SecuritySchemeObject, Server, Tag, TypeSet, ValidationKeywords, XmlHints,
+    SecuritySchemeObject, Server, ServerVariable, Tag, TypeSet, ValidationKeywords, XmlHints,
 };
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
@@ -161,6 +161,40 @@ fn parse_server(
     Some(Server {
         name: value.get("name").and_then(string).map(str::to_owned),
         url: value.get("url").and_then(string).unwrap_or("/").to_owned(),
+        description: value.get("description").and_then(string).map(str::to_owned),
+        variables: value
+            .get("variables")
+            .and_then(SpannedValue::as_object)
+            .map(|variables| {
+                variables
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        parse_server_variable(value).map(|variable| (key.name.clone(), variable))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        provenance: provenance(pointer, value),
+    })
+}
+
+/// Parse one Server Variable Object. `default` is required by the document schema, so a variable
+/// without one cannot reach here in a validated document.
+fn parse_server_variable(value: &SpannedValue) -> Option<ServerVariable> {
+    let _ = value.as_object()?;
+    Some(ServerVariable {
+        default: value.get("default").and_then(string)?.to_owned(),
+        enum_values: value
+            .get("enum")
+            .and_then(SpannedValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(string)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
         description: value.get("description").and_then(string).map(str::to_owned),
     })
 }

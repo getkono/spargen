@@ -9,7 +9,7 @@ use crate::ir::{
     OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
     PropertyEncoding, PropertyName, RequestBody, Response, Responses, ScalarEnum, ScalarRepr,
     ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef, TypeGraph,
-    TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
+    TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, UrlSegment, XmlField,
 };
 use crate::name::synth_operation_id;
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
@@ -276,26 +276,18 @@ pub fn lower(
             .join("; ");
         append_text(&mut api_description, format!("Tags: {tags}."));
     }
+    let servers = document
+        .servers
+        .iter()
+        .filter_map(|server| lower_server(server, ctx.diags))
+        .collect();
     let api = Api {
         info: Info {
             title: document.info.title.clone(),
             version: document.info.version.clone(),
             description: api_description,
         },
-        servers: document
-            .servers
-            .iter()
-            .map(|server| Server {
-                url: server.url.clone(),
-                description: {
-                    let mut docs = server.name.as_ref().map(|name| format!("Server `{name}`."));
-                    if let Some(description) = &server.description {
-                        append_text(&mut docs, description.clone());
-                    }
-                    docs
-                },
-            })
-            .collect(),
+        servers,
         operations,
         types: ctx.graph,
         security_schemes,
@@ -3310,7 +3302,109 @@ fn lower_security_requirement(requirement: &SecurityRequirement) -> crate::ir::S
     )
 }
 
-/// Resolve a Path Item `$ref`.
+/// Lower one Server Object, parsing its URL template and validating its variables.
+///
+/// A Server Variable `default` is unlike a Schema Object `default`: the specification says it is
+/// actually sent when the caller supplies no alternative, so it changes the wire and must be
+/// modeled rather than documented.
+fn lower_server(server: &super::Server, diags: &mut Diagnostics) -> Option<Server> {
+    let segments = parse_url_template(&server.url);
+    let mut seen: HashSet<&str> = HashSet::new();
+    for segment in &segments {
+        let UrlSegment::Variable(name) = segment else {
+            continue;
+        };
+        if !seen.insert(name.as_str()) {
+            Diagnostic::error(Code::InvalidInput, server.provenance.clone())
+                .message(format!(
+                    "server variable `{name}` appears more than once in `{}`",
+                    server.url
+                ))
+                .emit(diags);
+            return None;
+        }
+        if !server.variables.contains_key(name) {
+            Diagnostic::error(Code::InvalidInput, server.provenance.clone())
+                .message(format!(
+                    "server URL `{}` references undeclared variable `{name}`",
+                    server.url
+                ))
+                .remedy("declare it under the server's `variables`")
+                .emit(diags);
+            return None;
+        }
+    }
+    for (name, variable) in &server.variables {
+        // A default outside its own `enum` would make the no-argument path send an illegal value.
+        if !variable.enum_values.is_empty() && !variable.enum_values.contains(&variable.default) {
+            Diagnostic::error(Code::InvalidInput, server.provenance.clone())
+                .message(format!(
+                    "server variable `{name}` has default `{}`, which is not one of its declared \
+                     `enum` values",
+                    variable.default
+                ))
+                .emit(diags);
+            return None;
+        }
+        if !seen.contains(name.as_str()) {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, server.provenance.clone())
+                .message(format!(
+                    "server variable `{name}` is declared but does not appear in `{}`",
+                    server.url
+                ))
+                .emit(diags);
+        }
+    }
+    let mut docs = server.name.as_ref().map(|name| format!("Server `{name}`."));
+    if let Some(description) = &server.description {
+        append_text(&mut docs, description.clone());
+    }
+    Some(Server {
+        name: server.name.clone(),
+        url: server.url.clone(),
+        segments,
+        variables: server
+            .variables
+            .iter()
+            .map(|(name, variable)| {
+                (
+                    name.clone(),
+                    crate::ir::ServerVariable {
+                        default: variable.default.clone(),
+                        enum_values: variable.enum_values.clone(),
+                        description: variable.description.clone(),
+                    },
+                )
+            })
+            .collect(),
+        description: docs,
+    })
+}
+
+/// Split a server URL template into literals and `{variable}` references.
+///
+/// An unmatched `{` is kept as literal text: the document schema constrains the template shape, so
+/// there is nothing useful to diagnose here that it has not already refused.
+fn parse_url_template(url: &str) -> Vec<UrlSegment> {
+    let mut segments = Vec::new();
+    let mut rest = url;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}').map(|at| open + at) else {
+            break;
+        };
+        if open > 0 {
+            segments.push(UrlSegment::Literal(rest[..open].to_owned()));
+        }
+        segments.push(UrlSegment::Variable(rest[open + 1..close].to_owned()));
+        rest = &rest[close + 1..];
+    }
+    if !rest.is_empty() {
+        segments.push(UrlSegment::Literal(rest.to_owned()));
+    }
+    segments
+}
+
+/// Resolve a Path Item `$ref`./// Resolve a Path Item `$ref`.
 ///
 /// Unlike a Reference Object, the specification leaves the behavior of fields declared *alongside*
 /// a Path Item `$ref` undefined. Guessing either way ships a client that calls a different set of

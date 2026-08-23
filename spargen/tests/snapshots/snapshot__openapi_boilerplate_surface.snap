@@ -6,13 +6,14 @@ operations (3):
   create_pets
   list_pets
   show_pet_by_id
-types (32):
+types (33):
   BlockingClient
   Client
   CreatePetsError
   ListPetsError
   ListPetsParams
   ShowPetByIdError
+  servers::Server0
   types::Error
   types::Errorcode
   types::Errormessage

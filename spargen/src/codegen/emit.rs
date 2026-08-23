@@ -52,10 +52,21 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
         .map(|operation| emit_operation(operation, api, names, options));
     let client_docs = client_doc_tokens(api);
     let error_body_cap = options.error_body_cap;
+    let servers = emit_servers(api, names);
+    let default_server = (!api.servers.is_empty()).then(|| {
+        quote! {
+            /// Build a client on the first server the specification declares, with every server
+            /// variable at its declared default.
+            pub fn with_default_server() -> Result<Self, support::Error<std::convert::Infallible>> {
+                Self::new(&servers::default_url())
+            }
+        }
+    });
     quote! {
         #(#params)*
         #(#errors)*
         #(#response_enums)*
+        #servers
 
         #client_docs
         #[allow(dead_code)]
@@ -69,6 +80,8 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
                 Self::with_client(reqwest::Client::new(), base_url)
             }
+
+            #default_server
 
             pub fn with_client(
                 client: reqwest::Client,
@@ -1059,7 +1072,230 @@ fn form_mode_tokens(mode: &crate::ir::EncodingMode) -> TokenStream {
     }
 }
 
-/// Emit a `multipart/form-data` body.
+/// Emit the `servers` module: one builder per declared server, plus the default base URL.
+///
+/// A Server Variable `default` is sent when the caller supplies no alternative, so every server
+/// resolves to a concrete URL with no arguments; a variable that declares an `enum` gets a typed
+/// enum so an illegal value cannot be constructed at all.
+fn emit_servers(api: &Api, names: &Names) -> TokenStream {
+    if api.servers.is_empty() {
+        return quote! {};
+    }
+    let builders = api.servers.iter().enumerate().map(|(index, server)| {
+        let ident = names
+            .servers
+            .get(index)
+            .expect("server name allocated")
+            .clone();
+        let ident = proc_macro2::Ident::new(ident.as_str(), proc_macro2::Span::call_site());
+        let mut docs = vec![format!("Server `{}`.", server.url)];
+        if let Some(description) = &server.description {
+            docs.push(description.clone());
+        }
+        let doc_attrs = docs.iter().map(|line| quote! { #[doc = #line] });
+
+        let variable_enums = server.variables.iter().filter_map(|(name, variable)| {
+            let enum_ident = names.server_variable_enums.get(&(index, name.clone()))?;
+            let enum_ident =
+                proc_macro2::Ident::new(enum_ident.as_str(), proc_macro2::Span::call_site());
+            let variants = variable.enum_values.iter().map(|value| {
+                let variant = names
+                    .server_variable_variants
+                    .get(&(index, name.clone(), value.clone()))
+                    .expect("server variable variant allocated");
+                let variant =
+                    proc_macro2::Ident::new(variant.as_str(), proc_macro2::Span::call_site());
+                let default = (value == &variable.default).then(|| quote! { #[default] });
+                quote! { #default #variant }
+            });
+            let arms = variable.enum_values.iter().map(|value| {
+                let variant = names
+                    .server_variable_variants
+                    .get(&(index, name.clone(), value.clone()))
+                    .expect("server variable variant allocated");
+                let variant =
+                    proc_macro2::Ident::new(variant.as_str(), proc_macro2::Span::call_site());
+                quote! { Self::#variant => #value }
+            });
+            let doc = format!("Permitted values of the `{name}` server variable.");
+            Some(quote! {
+                #[doc = #doc]
+                #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+                pub enum #enum_ident {
+                    #(#variants),*
+                }
+
+                impl #enum_ident {
+                    /// The value substituted into the server URL.
+                    pub fn as_str(self) -> &'static str {
+                        match self {
+                            #(#arms),*
+                        }
+                    }
+                }
+            })
+        });
+
+        let fields = server.variables.keys().map(|name| {
+            let field = names
+                .server_variable_fields
+                .get(&(index, name.clone()))
+                .expect("server variable field allocated");
+            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+            match names.server_variable_enums.get(&(index, name.clone())) {
+                Some(enum_ident) => {
+                    let enum_ident = proc_macro2::Ident::new(
+                        enum_ident.as_str(),
+                        proc_macro2::Span::call_site(),
+                    );
+                    quote! { #field: #enum_ident }
+                }
+                None => quote! { #field: String },
+            }
+        });
+
+        let defaults = server.variables.iter().map(|(name, variable)| {
+            let field = names
+                .server_variable_fields
+                .get(&(index, name.clone()))
+                .expect("server variable field allocated");
+            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+            match names.server_variable_enums.get(&(index, name.clone())) {
+                // The `#[default]` variant is the declared default, so `Default` is exact.
+                Some(enum_ident) => {
+                    let enum_ident = proc_macro2::Ident::new(
+                        enum_ident.as_str(),
+                        proc_macro2::Span::call_site(),
+                    );
+                    quote! { #field: <#enum_ident as Default>::default() }
+                }
+                None => {
+                    let default = variable.default.clone();
+                    quote! { #field: #default.to_owned() }
+                }
+            }
+        });
+
+        let setters = server.variables.iter().map(|(name, variable)| {
+            let field = names
+                .server_variable_fields
+                .get(&(index, name.clone()))
+                .expect("server variable field allocated");
+            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+            let mut doc = format!("Set the `{name}` server variable.");
+            if let Some(description) = &variable.description {
+                doc.push(' ');
+                doc.push_str(description);
+            }
+            match names.server_variable_enums.get(&(index, name.clone())) {
+                Some(enum_ident) => {
+                    let enum_ident = proc_macro2::Ident::new(
+                        enum_ident.as_str(),
+                        proc_macro2::Span::call_site(),
+                    );
+                    quote! {
+                        #[doc = #doc]
+                        #[must_use]
+                        pub fn #field(mut self, value: #enum_ident) -> Self {
+                            self.#field = value;
+                            self
+                        }
+                    }
+                }
+                None => quote! {
+                    #[doc = #doc]
+                    #[must_use]
+                    pub fn #field(mut self, value: impl Into<String>) -> Self {
+                        self.#field = value.into();
+                        self
+                    }
+                },
+            }
+        });
+
+        let pieces = server.segments.iter().map(|segment| match segment {
+            crate::ir::UrlSegment::Literal(text) => quote! { url.push_str(#text); },
+            crate::ir::UrlSegment::Variable(name) => {
+                let field = names
+                    .server_variable_fields
+                    .get(&(index, name.clone()))
+                    .expect("server variable field allocated");
+                let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+                match names.server_variable_enums.get(&(index, name.clone())) {
+                    Some(_) => quote! { url.push_str(self.#field.as_str()); },
+                    None => quote! { url.push_str(&self.#field); },
+                }
+            }
+        });
+
+        // `Default` is derivable exactly when every field's declared default is what the derive
+        // would produce: an enum variable pins its default with `#[default]`, and a server with no
+        // variables has nothing to default. A free-form variable carries a spec-declared string,
+        // which the derive would replace with `""`.
+        let derivable_default = server.variables.iter().all(|(name, _)| {
+            names
+                .server_variable_enums
+                .contains_key(&(index, name.clone()))
+        });
+        let (derive_default, default_impl) = if derivable_default {
+            (quote! { , Default }, quote! {})
+        } else {
+            (
+                quote! {},
+                quote! {
+                    impl Default for #ident {
+                        fn default() -> Self {
+                            Self { #(#defaults),* }
+                        }
+                    }
+                },
+            )
+        };
+        quote! {
+            #(#variable_enums)*
+
+            #(#doc_attrs)*
+            #[derive(Debug, Clone #derive_default)]
+            pub struct #ident {
+                #(#fields),*
+            }
+
+            #default_impl
+
+            impl #ident {
+                /// Every server variable at its declared default.
+                pub fn new() -> Self {
+                    Self::default()
+                }
+
+                #(#setters)*
+
+                /// The server URL with every variable substituted.
+                pub fn url(&self) -> String {
+                    let mut url = String::new();
+                    #(#pieces)*
+                    url
+                }
+            }
+        }
+    });
+    let first = names.servers.first().expect("at least one server").clone();
+    let first = proc_macro2::Ident::new(first.as_str(), proc_macro2::Span::call_site());
+    quote! {
+        /// Base URLs declared by the API description.
+        #[allow(dead_code)]
+        pub mod servers {
+            #(#builders)*
+
+            /// The first declared server, with every server variable at its declared default.
+            pub fn default_url() -> String {
+                #first::new().url()
+            }
+        }
+    }
+}
+
+/// Emit a `multipart/form-data` body./// Emit a `multipart/form-data` body.
 ///
 /// Every part carries the Content-Type its Encoding Object resolves to — explicit, or defaulted
 /// from the property's type by the specification's table — and any header the Encoding Object pins

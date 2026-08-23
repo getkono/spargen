@@ -3986,3 +3986,79 @@ paths:
         );
     }
 }
+
+#[test]
+fn server_variables_generate_a_typed_builder() {
+    // Regression: `servers[].variables` was dropped entirely, so a templated URL reached rustdoc
+    // with its `{braces}` intact and no way to fill them.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - name: regional
+    url: "https://{region}.example.com/{basePath}"
+    variables:
+      region:
+        default: us
+        enum: [us, eu]
+      basePath:
+        default: v2
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("pub mod servers"), "{code}");
+    assert!(code.contains("pub fn default_url()"), "{code}");
+    // The `enum` variable becomes a closed type, so an illegal region cannot be constructed.
+    assert!(code.contains("pub enum RegionalRegion"), "{code}");
+    assert!(code.contains("with_default_server"), "{code}");
+}
+
+#[test]
+fn e011_server_variable_default_outside_its_enum() {
+    // The default is actually sent, so a default outside its own `enum` would make the
+    // no-argument path put an illegal value on the wire.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: "https://{region}.example.com"
+    variables:
+      region:
+        default: apac
+        enum: [us, eu]
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+#[test]
+fn e011_server_url_references_an_undeclared_variable() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: "https://{region}.example.com"
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    }
+}

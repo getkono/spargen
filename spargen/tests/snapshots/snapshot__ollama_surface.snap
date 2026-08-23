@@ -15,7 +15,7 @@ operations (12):
   push
   show
   version
-types (257):
+types (258):
   BlockingClient
   ChatError
   Client
@@ -30,6 +30,7 @@ types (257):
   PushError
   ShowError
   VersionError
+  servers::Server0
   types::ChatMessage
   types::ChatMessagecontent
   types::ChatMessageimages

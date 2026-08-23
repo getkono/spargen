@@ -47,6 +47,14 @@ pub struct Names {
     pub struct_overflow: HashMap<TypeId, Ident>,
     /// Variant name per `(type, wire variant value)`.
     pub variants: HashMap<(TypeId, String), Ident>,
+    /// Builder type name per declared server, by index.
+    pub servers: Vec<Ident>,
+    /// Enum type name per `(server index, variable name)`, for a variable with a closed `enum`.
+    pub server_variable_enums: HashMap<(usize, String), Ident>,
+    /// Enum variant name per `(server index, variable name, value)`.
+    pub server_variable_variants: HashMap<(usize, String, String), Ident>,
+    /// Setter/field name per `(server index, variable name)`.
+    pub server_variable_fields: HashMap<(usize, String), Ident>,
 }
 
 /// Generator-owned bindings emitted inside one operation method.
@@ -77,6 +85,46 @@ pub struct OperationBindings {
 pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     let _ = diags;
     let mut names = Names::default();
+
+    // Servers live in their own module, so they get their own scopes and can never collide with a
+    // generated model or operation name.
+    let mut server_scope = Scope::default();
+    let mut server_enum_scope = Scope::default();
+    for (index, server) in api.servers.iter().enumerate() {
+        let hint = server
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("server{index}"));
+        let pointer = crate::diag::JsonPointer::root();
+        names
+            .servers
+            .push(server_scope.alloc(&hint, IdentRole::Type, &pointer));
+        let mut field_scope = Scope::default();
+        for (variable_name, variable) in &server.variables {
+            names.server_variable_fields.insert(
+                (index, variable_name.clone()),
+                field_scope.alloc(variable_name, IdentRole::Field, &pointer),
+            );
+            if variable.enum_values.is_empty() {
+                continue;
+            }
+            names.server_variable_enums.insert(
+                (index, variable_name.clone()),
+                server_enum_scope.alloc(
+                    &format!("{hint} {variable_name}"),
+                    IdentRole::Type,
+                    &pointer,
+                ),
+            );
+            let mut variant_scope = Scope::default();
+            for value in &variable.enum_values {
+                names.server_variable_variants.insert(
+                    (index, variable_name.clone(), value.clone()),
+                    variant_scope.alloc(value, IdentRole::Variant, &pointer),
+                );
+            }
+        }
+    }
 
     let mut type_scope = Scope::default();
     for (id, def) in api.types.iter() {
