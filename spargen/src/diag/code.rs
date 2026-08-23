@@ -373,6 +373,63 @@ mod tests {
 
     use super::Code;
 
+    /// Every code must appear in the published index, with the same title, and nothing may appear
+    /// there that is not a real code. The index is product surface — `spargen explain` and
+    /// `docs/errors.md` are the same contract — and without this the two drift silently.
+    #[test]
+    fn the_published_index_lists_exactly_the_declared_codes() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/errors.md");
+        let Ok(index) = std::fs::read_to_string(path) else {
+            // Absent when the crate is tested from a packaged `.crate`, which carries no docs
+            // directory. In the repository — where the invariant matters — it is always there.
+            eprintln!("skipping: {path} is not present");
+            return;
+        };
+        let rows: Vec<(String, String)> = index
+            .lines()
+            .filter(|line| line.starts_with("| `E") || line.starts_with("| `W"))
+            .map(|line| {
+                let mut cells = line.split('|').map(str::trim);
+                cells.next();
+                let code = cells
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches('`')
+                    .to_owned();
+                let _severity = cells.next();
+                let title = cells.next().unwrap_or_default().to_owned();
+                (code, title)
+            })
+            .collect();
+
+        for code in Code::all() {
+            let row = rows
+                .iter()
+                .find(|(listed, _)| listed == code.as_str())
+                .unwrap_or_else(|| panic!("{} is missing from docs/errors.md", code.as_str()));
+            // The index may elaborate ("… (3.1.x and 3.2.x are supported)") and may add markdown
+            // code spans, but it must not describe a different thing than `spargen explain` does.
+            assert!(
+                row.1.replace('`', "").contains(code.title()),
+                "docs/errors.md describes {} as `{}`, but its title is `{}`",
+                code.as_str(),
+                row.1,
+                code.title()
+            );
+            assert!(
+                !code.explain().is_empty(),
+                "{} has no explain text",
+                code.as_str()
+            );
+        }
+        for (listed, _) in &rows {
+            assert!(
+                Code::all().iter().any(|code| code.as_str() == listed),
+                "docs/errors.md lists `{listed}`, which is not a declared code"
+            );
+        }
+    }
+
     #[test]
     fn all_codes_round_trip_from_stable_strings() {
         for code in Code::all() {
