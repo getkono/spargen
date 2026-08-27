@@ -19,14 +19,20 @@ the library API.
 | `E012` | Error | unknown security scheme |
 | `E013` | Error | irreconcilable `allOf` composition |
 | `E014` | Error | schema nesting is too deep to lower |
+| `E015` | Error | variable-length tuple not representable |
+| `E016` | Error | specification-undefined construct |
 | `E019` | Error | invalid omit rule |
 | `E020` | Error | omit profile created an invalid document |
 | `E021` | Error | vendored remote `$ref` drifted from lock |
 | `E022` | Error | duplicate object key |
 | `E023` | Error | invalid generated-runtime dependency contract |
+| `E024` | Error | cargo integration required but unavailable |
 | `W001` | Warning | validation-only keyword ignored |
 | `W002` | Warning | server-initiated flow ignored |
 | `W005` | Warning | schema default not applied |
 | `W006` | Warning | unsupported XML hint ignored |
 | `W009` | Warning | construct omitted |
 | `W010` | Warning | non-sequential `itemSchema` ignored |
+| `W011` | Warning | declared construct has no effect |
+| `W012` | Warning | runtime-dependency audit skipped |
+| `W013` | Warning | cargo integration degraded |

@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
-use crate::source::{rewrite_refs_absolute, InputBundle};
+use crate::source::{rewrite_refs_absolute, InputBundle, SpannedValue};
 
 use super::{deserialize::parse_schema, Document, Schema};
 
@@ -62,6 +62,54 @@ impl<'doc> Resolver<'doc> {
     /// nested remote/relative refs resolve against the vendored doc's own URL, then parsed to a
     /// [`Schema`]. If the vendored doc is absent the bundle load already rejected it (`E003`/`E021`)
     /// and aborted; this only re-checks defensively.
+    /// Resolve a Path Item `$ref` into a parsed Path Item.
+    ///
+    /// Path Item references are ordinary bundle references: they may address a
+    /// `#/components/pathItems/` entry, a pointer inside any loaded file, or a whole relative
+    /// file — the shape the multi-file layouts in the wild actually use.
+    pub fn resolve_path_item(
+        &self,
+        reference: &str,
+        from: crate::diag::FileId,
+        at: &Provenance,
+        diags: &mut Diagnostics,
+    ) -> Option<super::PathItem> {
+        let Some((file, pointer)) = self.bundle.reference_target(reference, from) else {
+            Diagnostic::error(Code::UnresolvedRef, at.clone())
+                .message(format!(
+                    "unsupported or unresolved Path Item `$ref` `{reference}`"
+                ))
+                .emit(diags);
+            return None;
+        };
+        let Some(node) = self.bundle.value_at(file).pointer(&pointer) else {
+            Diagnostic::error(Code::UnresolvedRef, at.clone())
+                .message(format!(
+                    "Path Item `$ref` target `{reference}` was not found in the input bundle"
+                ))
+                .emit(diags);
+            return None;
+        };
+        super::deserialize::parse_path_item(&node.clone(), &pointer, diags)
+    }
+
+    /// Resolve any non-component `$ref` into the parsed object at its target.
+    ///
+    /// Multi-file API descriptions commonly reference a whole file — `../responses/Error.yaml` —
+    /// rather than a `#/components/...` entry, so component aliases fall back to the bundle the
+    /// same way schema references already do.
+    pub fn resolve_component<T>(
+        &self,
+        reference: &str,
+        from: crate::diag::FileId,
+        parse: impl Fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
+        diags: &mut Diagnostics,
+    ) -> Option<T> {
+        let (file, pointer) = self.bundle.reference_target(reference, from)?;
+        let node = self.bundle.value_at(file).pointer(&pointer)?;
+        parse(&node.clone(), &pointer, diags)
+    }
+
     fn resolve_bundle(
         &self,
         reference: &str,

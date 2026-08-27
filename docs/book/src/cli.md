@@ -10,10 +10,16 @@ Usage: spargen <COMMAND>
 
 Commands:
   check    Audit a spec's feature support without generating code
+  deps     Print the [dependencies] block generated output from this spec requires
   lock     Fetch, vendor, and hash-pin remote $refs into spargen.lock (the only networked step)
   explain  Show extended documentation for a diagnostic code
   diff     Report the semver impact of regenerating the client from a newer spec
 ```
+
+`check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, `--carve`,
+`--no-uuid`, `--no-time`, `--error-body-cap`, `--batch-cap`, and the repeatable `--omit-path`,
+`--omit-operation`, `--omit-component`, `--omit-pointer` — which is exactly the setter list on
+`spargen::Spec`, so the CLI, `build.rs`, `generate_api!`, and `spargen.toml` cannot drift.
 
 ## `spargen check`
 
@@ -23,9 +29,25 @@ Audit a vendored spec with the same frontend used during generation, without emi
 spargen check <SPEC> [OPTIONS]
 ```
 
-It accepts `--format <human|json>`, `--config`, `--carve`, and repeatable `--omit-path`,
-`--omit-operation`, `--omit-component`, and `--omit-pointer` flags. These are analysis controls;
-put generation controls in `Config` or `generate_api!` for the compile-time path.
+It accepts `--format <human|json>` plus the shared spec options above. Run from a build script it
+also audits the consuming package's `Cargo.toml` (`E023`); elsewhere there is no consuming package,
+and `spargen deps` covers that ground instead.
+
+## `spargen deps`
+
+Print the exact `[dependencies]` block generated output from this spec needs. Generated output is
+freestanding, so the consuming package declares its own runtime dependencies — and which ones
+depends on the API: multipart bodies pull in a `reqwest` feature, `format: uuid` pulls in `uuid`,
+sequential responses pull in `futures-core`. This answers that up front rather than one `E023` at a
+time.
+
+```bash
+spargen deps <SPEC> [OPTIONS]
+```
+
+The block it prints is the block the audit accepts — both read one table, and a test pins that they
+agree. Opt-in dependencies (the blocking client's `tokio`) are printed commented out under the
+Cargo feature that would require them. `--format json` emits the same set structurally.
 
 ## `spargen lock`
 

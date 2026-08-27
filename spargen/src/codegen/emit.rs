@@ -50,12 +50,28 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
         .operations
         .iter()
         .map(|operation| emit_operation(operation, api, names, options));
+    let response_headers = api
+        .operations
+        .iter()
+        .map(|operation| emit_response_headers(operation, api, names, options));
     let client_docs = client_doc_tokens(api);
     let error_body_cap = options.error_body_cap;
+    let servers = emit_servers(api, names);
+    let default_server = (!api.servers.is_empty()).then(|| {
+        quote! {
+            /// Build a client on the first server the specification declares, with every server
+            /// variable at its declared default.
+            pub fn with_default_server() -> Result<Self, support::Error<std::convert::Infallible>> {
+                Self::new(&servers::default_url())
+            }
+        }
+    });
     quote! {
         #(#params)*
         #(#errors)*
         #(#response_enums)*
+        #(#response_headers)*
+        #servers
 
         #client_docs
         #[allow(dead_code)]
@@ -69,6 +85,8 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
             pub fn new(base_url: &str) -> Result<Self, support::Error<std::convert::Infallible>> {
                 Self::with_client(reqwest::Client::new(), base_url)
             }
+
+            #default_server
 
             pub fn with_client(
                 client: reqwest::Client,
@@ -323,10 +341,18 @@ pub(crate) fn emit_operation(
             }
         }
     });
-    let body_send = if let Some((ty, media)) = operation
+    // A body the specification marks `required: false` arrives as `Option<&T>`, so the whole send
+    // block runs only when the caller supplied one. Only a body that lowered to a type takes an
+    // argument at all, so an untyped body is never wrapped.
+    let optional_body_binding = operation
         .request_body
         .as_ref()
-        .and_then(|body| body.ty.map(|ty| (ty, body.media)))
+        .filter(|body| !body.required && body.ty.is_some())
+        .and(bindings.body.as_ref());
+    let body_send = if let Some((ty, media, encoding)) = operation
+        .request_body
+        .as_ref()
+        .and_then(|body| body.ty.map(|ty| (ty, body.media, body.encoding.clone())))
     {
         let body_binding = bindings
             .body
@@ -366,7 +392,24 @@ pub(crate) fn emit_operation(
                         .body(#body_binding);
                 },
                 MediaType::FormUrlEncoded => {
-                    quote! { #request_binding = #request_binding.form(#body_binding); }
+                    // Rendered property by property through the resolved Encoding Object rather
+                    // than `RequestBuilder::form`, whose encoder rejects arrays and objects at
+                    // runtime and cannot express a per-property content type.
+                    let properties = form_properties_tokens(&encoding);
+                    quote! {
+                        const FORM_PROPERTIES: &[support::FormProperty] = &[#(#properties),*];
+                        let #body_binding = support::serialize_form_body(
+                            #body_binding,
+                            FORM_PROPERTIES,
+                        )
+                        .map_err(support::Error::request_construction)?;
+                        #request_binding = #request_binding
+                            .header(
+                                reqwest::header::CONTENT_TYPE,
+                                "application/x-www-form-urlencoded",
+                            )
+                            .body(#body_binding);
+                    }
                 }
                 MediaType::Text => quote! {
                     #request_binding = #request_binding
@@ -377,7 +420,7 @@ pub(crate) fn emit_operation(
                     quote! { #request_binding = #request_binding.body(#body_binding.clone()); }
                 }
                 MediaType::Multipart => {
-                    emit_multipart_body(ty, api, names, request_binding, body_binding)
+                    emit_multipart_body(ty, api, names, request_binding, body_binding, &encoding)
                 }
                 // Streaming media are response-only; a streaming request body is rejected during
                 // lowering (narrowed `E009`), so this arm is unreachable for any emitted operation.
@@ -386,6 +429,14 @@ pub(crate) fn emit_operation(
         }
     } else {
         quote! {}
+    };
+    let body_send = match optional_body_binding {
+        None => body_send,
+        Some(body_binding) => quote! {
+            if let Some(#body_binding) = #body_binding {
+                #body_send
+            }
+        },
     };
     let attach_auth = if operation.security.is_empty() {
         quote! {}
@@ -403,6 +454,8 @@ pub(crate) fn emit_operation(
                     | SecurityScheme::OAuth2
                     | SecurityScheme::OpenIdConnect => quote! { support::AuthKind::Bearer },
                     SecurityScheme::Http(HttpScheme::Basic) => quote! { support::AuthKind::Basic },
+                    // Satisfied by the transport's client certificate; nothing to attach.
+                    SecurityScheme::MutualTls => quote! { support::AuthKind::MutualTls },
                     SecurityScheme::ApiKey { location, name } => match location {
                         ApiKeyLoc::Header => quote! { support::AuthKind::ApiKeyHeader(#name) },
                         ApiKeyLoc::Query => quote! { support::AuthKind::ApiKeyQuery(#name) },
@@ -713,7 +766,7 @@ pub(crate) fn emit_operation(
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
             let mut #path_binding = #path_init.to_owned();
             #(#path_replacements)*
-            let mut #query_binding: Vec<(String, String)> = Vec::new();
+            let mut #query_binding: Vec<String> = Vec::new();
             #raw_query_init
             #(#required_query)*
             #(#optional_query)*
@@ -774,16 +827,21 @@ fn operation_args(
         args.push(quote! { #params_binding: Option<#params_ident> });
         forwards.push(quote! { #params_binding });
     }
-    if let Some(ty) = operation
-        .request_body
-        .as_ref()
-        .and_then(|body| body.ty.map(|ty| ty_tokens(ty, names, options, true)))
-    {
+    if let Some((ty, required)) = operation.request_body.as_ref().and_then(|body| {
+        body.ty
+            .map(|ty| (ty_tokens(ty, names, options, true), body.required))
+    }) {
         let body_binding = bindings
             .body
             .as_ref()
             .expect("request body argument allocated");
-        args.push(quote! { #body_binding: &#ty });
+        // A body the specification marks `required: false` may legitimately be omitted, so the
+        // caller says so in the type rather than inventing an empty value.
+        if required {
+            args.push(quote! { #body_binding: &#ty });
+        } else {
+            args.push(quote! { #body_binding: Option<&#ty> });
+        }
         forwards.push(quote! { #body_binding });
     }
     (args, forwards)
@@ -970,12 +1028,406 @@ fn emit_blocking_operation(
 /// `Display`; an object/array/union becomes a JSON-encoded text part. Optional fields (`Option<T>`)
 /// only add their part when `Some`. Lowering guarantees a multipart body is an object schema, so a
 /// non-struct body cannot reach here (it is rejected as `E009`); the fallback stays a no-op.
+/// Render one resolved [`BodyEncoding`] as `support::FormProperty` const entries.
+fn form_properties_tokens(encoding: &crate::ir::BodyEncoding) -> Vec<TokenStream> {
+    encoding
+        .properties
+        .iter()
+        .map(|property| {
+            let name = property.name.clone();
+            let mode = form_mode_tokens(&property.mode);
+            quote! { support::FormProperty { name: #name, mode: #mode } }
+        })
+        .collect()
+}
+
+/// Render one property's encoding mode.
+fn form_mode_tokens(mode: &crate::ir::EncodingMode) -> TokenStream {
+    match mode {
+        crate::ir::EncodingMode::Media { codec, .. } => match codec {
+            MediaType::Json => quote! { support::FormMode::Json },
+            _ => quote! { support::FormMode::Text },
+        },
+        crate::ir::EncodingMode::Style {
+            style,
+            explode,
+            allow_reserved,
+        } => {
+            let style = match style {
+                crate::ir::ParamStyle::Delimited(delimiter) => {
+                    let delimiter = delimiter_tokens(*delimiter);
+                    quote! { support::FormStyle::Delimited(#delimiter) }
+                }
+                crate::ir::ParamStyle::DeepObject => quote! { support::FormStyle::DeepObject },
+                _ => quote! { support::FormStyle::Form },
+            };
+            let encoding = if *allow_reserved {
+                quote! { support::PercentEncoding::Reserved }
+            } else {
+                quote! { support::PercentEncoding::Form }
+            };
+            quote! {
+                support::FormMode::Style {
+                    style: #style,
+                    explode: #explode,
+                    encoding: #encoding,
+                }
+            }
+        }
+    }
+}
+
+/// Emit one typed header struct per documented status that declares response headers.
+///
+/// Reading headers is an explicitly-called second step rather than part of the return type: the
+/// body has already been decoded and handed back before a caller opts in, so a malformed or absent
+/// header can never turn a successful call into a failed one. Every header also stays reachable
+/// raw through `ResponseValue::headers`.
+fn emit_response_headers(
+    operation: &Operation,
+    api: &Api,
+    names: &Names,
+    options: &CodegenOptions,
+) -> TokenStream {
+    let _ = api;
+    let responses = operation
+        .responses
+        .by_status
+        .iter()
+        .map(|(spec, response)| (crate::name::status_label(Some(*spec)), response))
+        .chain(
+            operation
+                .responses
+                .default
+                .as_ref()
+                .map(|response| (crate::name::status_label(None), response)),
+        );
+    let structs = responses.filter_map(|(label, response)| {
+        if response.headers.is_empty() {
+            return None;
+        }
+        let ident = names
+            .response_header_structs
+            .get(&(operation.id.clone(), label.clone()))?;
+        let ident = proc_macro2::Ident::new(ident.as_str(), proc_macro2::Span::call_site());
+        let fields = response.headers.iter().map(|header| {
+            let field = names
+                .response_header_fields
+                .get(&(operation.id.clone(), label.clone(), header.name.clone()))
+                .expect("response header field allocated");
+            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+            // Header structs live beside `Client`, not inside `types`, so the type path must be
+            // qualified — a header whose schema lowered to a named type would not resolve here.
+            let ty = ty_tokens(header.ty, names, options, true);
+            // An optional header is absent-able; a required one is documented as always present.
+            let ty = if header.required {
+                quote! { #ty }
+            } else {
+                quote! { Option<#ty> }
+            };
+            let docs = doc_tokens(&header.docs);
+            let deprecated = header.deprecated.then(|| quote! { #[deprecated] });
+            quote! { #docs #deprecated pub #field: #ty }
+        });
+        let reads = response.headers.iter().map(|header| {
+            let field = names
+                .response_header_fields
+                .get(&(operation.id.clone(), label.clone(), header.name.clone()))
+                .expect("response header field allocated");
+            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+            let name = header.name.clone();
+            let shape = match header.shape {
+                crate::ir::HeaderShape::Scalar => quote! { support::HeaderShape::Scalar },
+                crate::ir::HeaderShape::Array => quote! { support::HeaderShape::Array },
+                crate::ir::HeaderShape::Object => quote! { support::HeaderShape::Object },
+                crate::ir::HeaderShape::Json => quote! { support::HeaderShape::Json },
+            };
+            let explode = header.explode;
+            let call = if header.required {
+                quote! { support::require_header(headers, #name, #shape, #explode)? }
+            } else {
+                quote! { support::parse_header(headers, #name, #shape, #explode)? }
+            };
+            quote! { #field: #call }
+        });
+        let doc = format!(
+            "Documented response headers for `{}` `{label}`.",
+            operation.id.0
+        );
+        Some(quote! {
+            #[doc = #doc]
+            #[allow(dead_code)]
+            #[derive(Debug, Clone)]
+            pub struct #ident {
+                #(#fields),*
+            }
+
+            #[allow(dead_code, deprecated)]
+            impl #ident {
+                /// Read the documented headers out of a raw header map.
+                pub fn from_headers(
+                    headers: &reqwest::header::HeaderMap,
+                ) -> Result<Self, support::HeaderError> {
+                    Ok(Self { #(#reads),* })
+                }
+
+                /// Read the documented headers out of a returned response value.
+                pub fn from_response<T>(
+                    response: &support::ResponseValue<T>,
+                ) -> Result<Self, support::HeaderError> {
+                    Self::from_headers(response.headers())
+                }
+            }
+        })
+    });
+    quote! { #(#structs)* }
+}
+
+/// Emit the `servers` module: one builder per declared server, plus the default base URL.
+///
+/// A Server Variable `default` is sent when the caller supplies no alternative, so every server
+/// resolves to a concrete URL with no arguments; a variable that declares an `enum` gets a typed
+/// enum so an illegal value cannot be constructed at all.
+fn emit_servers(api: &Api, names: &Names) -> TokenStream {
+    if api.servers.is_empty() {
+        return quote! {};
+    }
+    let builders = api.servers.iter().enumerate().map(|(index, server)| {
+        let ident = names
+            .servers
+            .get(index)
+            .expect("server name allocated")
+            .clone();
+        let ident = proc_macro2::Ident::new(ident.as_str(), proc_macro2::Span::call_site());
+        let mut docs = vec![format!("Server `{}`.", server.url)];
+        if let Some(description) = &server.description {
+            docs.push(description.clone());
+        }
+        let doc_attrs = docs.iter().map(|line| quote! { #[doc = #line] });
+
+        let variable_enums = server.variables.iter().filter_map(|(name, variable)| {
+            let enum_ident = names.server_variable_enums.get(&(index, name.clone()))?;
+            let enum_ident =
+                proc_macro2::Ident::new(enum_ident.as_str(), proc_macro2::Span::call_site());
+            let variants = variable.enum_values.iter().map(|value| {
+                let variant = names
+                    .server_variable_variants
+                    .get(&(index, name.clone(), value.clone()))
+                    .expect("server variable variant allocated");
+                let variant =
+                    proc_macro2::Ident::new(variant.as_str(), proc_macro2::Span::call_site());
+                let default = (value == &variable.default).then(|| quote! { #[default] });
+                quote! { #default #variant }
+            });
+            let arms = variable.enum_values.iter().map(|value| {
+                let variant = names
+                    .server_variable_variants
+                    .get(&(index, name.clone(), value.clone()))
+                    .expect("server variable variant allocated");
+                let variant =
+                    proc_macro2::Ident::new(variant.as_str(), proc_macro2::Span::call_site());
+                quote! { Self::#variant => #value }
+            });
+            let doc = format!("Permitted values of the `{name}` server variable.");
+            Some(quote! {
+                #[doc = #doc]
+                #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+                pub enum #enum_ident {
+                    #(#variants),*
+                }
+
+                impl #enum_ident {
+                    /// The value substituted into the server URL.
+                    pub fn as_str(self) -> &'static str {
+                        match self {
+                            #(#arms),*
+                        }
+                    }
+                }
+            })
+        });
+
+        let fields = server.variables.keys().map(|name| {
+            let field = names
+                .server_variable_fields
+                .get(&(index, name.clone()))
+                .expect("server variable field allocated");
+            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+            match names.server_variable_enums.get(&(index, name.clone())) {
+                Some(enum_ident) => {
+                    let enum_ident = proc_macro2::Ident::new(
+                        enum_ident.as_str(),
+                        proc_macro2::Span::call_site(),
+                    );
+                    quote! { #field: #enum_ident }
+                }
+                None => quote! { #field: String },
+            }
+        });
+
+        let defaults = server.variables.iter().map(|(name, variable)| {
+            let field = names
+                .server_variable_fields
+                .get(&(index, name.clone()))
+                .expect("server variable field allocated");
+            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+            match names.server_variable_enums.get(&(index, name.clone())) {
+                // The `#[default]` variant is the declared default, so `Default` is exact.
+                Some(enum_ident) => {
+                    let enum_ident = proc_macro2::Ident::new(
+                        enum_ident.as_str(),
+                        proc_macro2::Span::call_site(),
+                    );
+                    quote! { #field: <#enum_ident as Default>::default() }
+                }
+                None => {
+                    let default = variable.default.clone();
+                    quote! { #field: #default.to_owned() }
+                }
+            }
+        });
+
+        let setters = server.variables.iter().map(|(name, variable)| {
+            let field = names
+                .server_variable_fields
+                .get(&(index, name.clone()))
+                .expect("server variable field allocated");
+            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+            let mut doc = format!("Set the `{name}` server variable.");
+            if let Some(description) = &variable.description {
+                doc.push(' ');
+                doc.push_str(description);
+            }
+            match names.server_variable_enums.get(&(index, name.clone())) {
+                Some(enum_ident) => {
+                    let enum_ident = proc_macro2::Ident::new(
+                        enum_ident.as_str(),
+                        proc_macro2::Span::call_site(),
+                    );
+                    quote! {
+                        #[doc = #doc]
+                        #[must_use]
+                        pub fn #field(mut self, value: #enum_ident) -> Self {
+                            self.#field = value;
+                            self
+                        }
+                    }
+                }
+                None => quote! {
+                    #[doc = #doc]
+                    #[must_use]
+                    pub fn #field(mut self, value: impl Into<String>) -> Self {
+                        self.#field = value.into();
+                        self
+                    }
+                },
+            }
+        });
+
+        let pieces = server.segments.iter().map(|segment| match segment {
+            // A one-character literal goes through `push`: `push_str` with a single-char literal
+            // trips `clippy::single_char_add_str`, and generated code must pass `-D warnings` in
+            // the consuming crate.
+            crate::ir::UrlSegment::Literal(text) => match text.chars().count() {
+                1 => {
+                    let character = text.chars().next().expect("one character");
+                    quote! { url.push(#character); }
+                }
+                _ => quote! { url.push_str(#text); },
+            },
+            crate::ir::UrlSegment::Variable(name) => {
+                let field = names
+                    .server_variable_fields
+                    .get(&(index, name.clone()))
+                    .expect("server variable field allocated");
+                let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
+                match names.server_variable_enums.get(&(index, name.clone())) {
+                    Some(_) => quote! { url.push_str(self.#field.as_str()); },
+                    None => quote! { url.push_str(&self.#field); },
+                }
+            }
+        });
+
+        // `Default` is derivable exactly when every field's declared default is what the derive
+        // would produce: an enum variable pins its default with `#[default]`, and a server with no
+        // variables has nothing to default. A free-form variable carries a spec-declared string,
+        // which the derive would replace with `""`.
+        let derivable_default = server.variables.iter().all(|(name, _)| {
+            names
+                .server_variable_enums
+                .contains_key(&(index, name.clone()))
+        });
+        let (derive_default, default_impl) = if derivable_default {
+            (quote! { , Default }, quote! {})
+        } else {
+            (
+                quote! {},
+                quote! {
+                    impl Default for #ident {
+                        fn default() -> Self {
+                            Self { #(#defaults),* }
+                        }
+                    }
+                },
+            )
+        };
+        quote! {
+            #(#variable_enums)*
+
+            #(#doc_attrs)*
+            #[derive(Debug, Clone #derive_default)]
+            pub struct #ident {
+                #(#fields),*
+            }
+
+            #default_impl
+
+            impl #ident {
+                /// Every server variable at its declared default.
+                pub fn new() -> Self {
+                    Self::default()
+                }
+
+                #(#setters)*
+
+                /// The server URL with every variable substituted.
+                pub fn url(&self) -> String {
+                    let mut url = String::new();
+                    #(#pieces)*
+                    url
+                }
+            }
+        }
+    });
+    let first = names.servers.first().expect("at least one server").clone();
+    let first = proc_macro2::Ident::new(first.as_str(), proc_macro2::Span::call_site());
+    quote! {
+        /// Base URLs declared by the API description.
+        #[allow(dead_code)]
+        pub mod servers {
+            #(#builders)*
+
+            /// The first declared server, with every server variable at its declared default.
+            pub fn default_url() -> String {
+                #first::new().url()
+            }
+        }
+    }
+}
+
+/// Emit a `multipart/form-data` body./// Emit a `multipart/form-data` body.
+///
+/// Every part carries the Content-Type its Encoding Object resolves to — explicit, or defaulted
+/// from the property's type by the specification's table — and any header the Encoding Object pins
+/// to a literal value. How the value is turned into bytes follows the property's own lowered type,
+/// which is the only thing the generator can know for a media type it has no codec for.
 fn emit_multipart_body(
     ty: Ty,
     api: &Api,
     names: &Names,
     request_binding: &crate::name::Ident,
     body_binding: &crate::name::Ident,
+    encoding: &crate::ir::BodyEncoding,
 ) -> TokenStream {
     let Some(TypeKind::Struct(object)) = api.types.get(ty.id).map(|def| &def.kind) else {
         return quote! {};
@@ -990,25 +1442,99 @@ fn emit_multipart_body(
         // schema itself is nullable (`ty_tokens` already wrapped it) — mirroring `emit_field`.
         let optional = !field.required || field.ty.nullable;
         let kind = api.types.get(field.ty.id).map(|def| &def.kind);
+        let property = encoding
+            .properties
+            .iter()
+            .find(|property| property.name == field.name.wire);
+        let headers = property
+            .map(|property| property.headers.as_slice())
+            .unwrap_or(&[]);
+        let extra_headers = (!headers.is_empty()).then(|| {
+            let inserts = headers.iter().map(|(name, value)| {
+                quote! {
+                    if let (Ok(name), Ok(value)) = (
+                        reqwest::header::HeaderName::try_from(#name),
+                        reqwest::header::HeaderValue::try_from(#value),
+                    ) {
+                        part_headers.insert(name, value);
+                    }
+                }
+            });
+            quote! {
+                let mut part_headers = reqwest::header::HeaderMap::new();
+                #(#inserts)*
+                part = part.headers(part_headers);
+            }
+        });
         // `receiver` is the value for method calls (`.to_vec()`/`.to_string()` auto-ref); `reference`
         // is an explicit `&value` for `serde_json::to_string`, which takes `&T`. Splitting them keeps
         // the emitted code free of `clippy::needless_borrow` on the method-call receivers.
-        let add_part = |receiver: &TokenStream, reference: &TokenStream| match kind {
-            // A binary/bytes property → a file/bytes part carrying the raw bytes.
-            Some(TypeKind::Bytes) => quote! {
-                form = form.part(#wire, reqwest::multipart::Part::bytes(#receiver.to_vec()));
-            },
-            // A scalar property → a text part rendered through `Display`.
-            Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {
-                form = form.text(#wire, #receiver.to_string());
-            },
-            // Any composite (object/array/tuple/union/untyped) property → a JSON-encoded text part.
-            _ => quote! {
-                form = form.text(
-                    #wire,
-                    serde_json::to_string(#reference).map_err(support::Error::request_construction)?,
-                );
-            },
+        let add_part = |receiver: &TokenStream, reference: &TokenStream| {
+            let build = match &property.map(|property| &property.mode) {
+                // RFC 6570 mode: the part value is style-serialized, and an array becomes one part
+                // per item under the same name. `contentType` is inert in this mode.
+                Some(crate::ir::EncodingMode::Style {
+                    style,
+                    explode,
+                    ..
+                }) => {
+                    let style = match style {
+                        crate::ir::ParamStyle::Delimited(delimiter) => {
+                            let delimiter = delimiter_tokens(*delimiter);
+                            quote! { support::FormStyle::Delimited(#delimiter) }
+                        }
+                        crate::ir::ParamStyle::DeepObject => {
+                            quote! { support::FormStyle::DeepObject }
+                        }
+                        _ => quote! { support::FormStyle::Form },
+                    };
+                    return quote! {
+                        for value in support::serialize_multipart_values(#reference, #style, #explode)
+                            .map_err(support::Error::request_construction)?
+                        {
+                            form = form.part(#wire, reqwest::multipart::Part::text(value));
+                        }
+                    };
+                }
+                _ => match kind {
+                    // A binary/bytes property → a file/bytes part carrying the raw bytes.
+                    Some(TypeKind::Bytes) => quote! {
+                        let mut part = reqwest::multipart::Part::bytes(#receiver.to_vec());
+                    },
+                    // A scalar property → a text part rendered through `Display`.
+                    Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {
+                        let mut part = reqwest::multipart::Part::text(#receiver.to_string());
+                    },
+                    // Any composite property → a JSON-encoded text part.
+                    _ => quote! {
+                        let mut part = reqwest::multipart::Part::text(
+                            serde_json::to_string(#reference)
+                                .map_err(support::Error::request_construction)?,
+                        );
+                    },
+                },
+            };
+            let content_type = match property.map(|property| &property.mode) {
+                Some(crate::ir::EncodingMode::Media { content_type, .. }) => {
+                    Some(content_type.clone())
+                }
+                _ => None,
+            };
+            // `mime_str` consumes the part, so a malformed content type from the spec surfaces as
+            // a request-construction error rather than being silently dropped.
+            let set_type = content_type.map(|content_type| {
+                quote! {
+                    part = part
+                        .mime_str(#content_type)
+                        .map_err(support::Error::request_construction)?;
+                }
+            });
+            quote! {
+                #build
+                #set_type
+                #extra_headers
+                form = form.part(#wire, part);
+            }
         };
         if optional {
             // `value` is already `&T` from the `if let Some(value) = &body.field` binding.
@@ -1057,49 +1583,129 @@ fn escaped_token(name: &str, role: crate::name::IdentRole) -> proc_macro2::Ident
     }
 }
 
+/// The percent-encoding set for one parameter, derived from its location, style, and
+/// `allowReserved`.
+///
+/// This is the single place that mapping exists. Headers and OpenAPI 3.2's `style: cookie` are
+/// sent verbatim — the specification says values there must not be percent-encoded, and that
+/// escaping is the caller's job. `in: cookie` with `style: form` *does* encode: Appendix D
+/// describes that pairing as the way to opt into automatic encoding, with `allowReserved` as its
+/// escape hatch.
+fn percent_encoding_tokens(param: &crate::ir::Parameter) -> TokenStream {
+    let variant = if param.location == ParamLoc::Header
+        || matches!(param.style, crate::ir::ParamStyle::Cookie)
+    {
+        "Passthrough"
+    } else if param.location == ParamLoc::Path {
+        if param.allow_reserved {
+            "ReservedPath"
+        } else {
+            "Unreserved"
+        }
+    } else if param.allow_reserved {
+        "Reserved"
+    } else {
+        "Form"
+    };
+    let ident = proc_macro2::Ident::new(variant, proc_macro2::Span::call_site());
+    quote! { support::PercentEncoding::#ident }
+}
+
+/// The runtime `Delimiter` for a non-RFC 6570 query style.
+fn delimiter_tokens(delimiter: crate::ir::Delimiter) -> TokenStream {
+    match delimiter {
+        crate::ir::Delimiter::Space => quote! { support::Delimiter::Space },
+        crate::ir::Delimiter::Pipe => quote! { support::Delimiter::Pipe },
+    }
+}
+
 /// Render a path/header parameter value from a borrowed expression. Schema-typed parameters use
-/// OpenAPI `simple` serialization; `content`-typed parameters retain their media codec.
+/// their declared OpenAPI style; `content`-typed parameters retain their media codec.
+///
+/// Path values are percent-encoded here, at serialization time. Splicing a raw value into the
+/// path template would let a value containing `/`, `?`, or `#` silently re-target the request.
 fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStream) -> TokenStream {
     if let crate::ir::ParamStyle::Content(media) = &param.style {
         return match media {
             MediaType::Json => quote! {
                 serde_json::to_string(#value).map_err(support::Error::request_construction)?
             },
+            // Text is the only other media a `content` parameter may carry; lowering rejects the
+            // rest, so this arm never sees a codec it cannot render.
             _ => quote! {
-                support::serialize_simple(#value, false)
+                support::serialize_simple(#value, false, support::PercentEncoding::Passthrough)
                     .map_err(support::Error::request_construction)?
             },
         };
     }
     let explode = param.explode;
-    quote! {
-        support::serialize_simple(#value, #explode)
-            .map_err(support::Error::request_construction)?
+    let encoding = percent_encoding_tokens(param);
+    let name = param.name.clone();
+    match &param.style {
+        crate::ir::ParamStyle::Matrix => quote! {
+            support::serialize_matrix(#name, #value, #explode, #encoding)
+                .map_err(support::Error::request_construction)?
+        },
+        crate::ir::ParamStyle::Label => quote! {
+            support::serialize_label(#value, #explode, #encoding)
+                .map_err(support::Error::request_construction)?
+        },
+        _ => quote! {
+            support::serialize_simple(#value, #explode, #encoding)
+                .map_err(support::Error::request_construction)?
+        },
     }
 }
 
-/// Emit serialization of one query parameter into the operation's `query` pair vector.
+/// Emit serialization of one query parameter into the operation's fragment vector.
+///
+/// Fragments arrive at `build_url` already percent-encoded, so the style's delimiters stay
+/// literal and remain distinguishable from the same character inside a value.
 fn query_param_tokens(
     param: &crate::ir::Parameter,
     name: &str,
     value: TokenStream,
     query_binding: &crate::name::Ident,
 ) -> TokenStream {
+    let encoding = percent_encoding_tokens(param);
     match &param.style {
         crate::ir::ParamStyle::Form | crate::ir::ParamStyle::Cookie => {
             let explode = param.explode;
             quote! {
                 #query_binding.extend(
-                    support::serialize_form(#name, #value, #explode)
+                    support::serialize_form(#name, #value, #explode, #encoding)
                         .map_err(support::Error::request_construction)?,
                 );
             }
         }
-        crate::ir::ParamStyle::Content(_) => {
-            let value = param_value_tokens(param, value);
-            quote! { #query_binding.push((#name.to_owned(), #value)); }
+        crate::ir::ParamStyle::Delimited(delimiter) => {
+            let delimiter = delimiter_tokens(*delimiter);
+            quote! {
+                #query_binding.extend(
+                    support::serialize_delimited(#name, #value, #delimiter, #encoding)
+                        .map_err(support::Error::request_construction)?,
+                );
+            }
         }
-        crate::ir::ParamStyle::Simple => quote! {},
+        crate::ir::ParamStyle::DeepObject => quote! {
+            #query_binding.extend(
+                support::serialize_deep_object(#name, #value, #encoding)
+                    .map_err(support::Error::request_construction)?,
+            );
+        },
+        crate::ir::ParamStyle::Content(_) => {
+            let rendered = param_value_tokens(param, value);
+            quote! {
+                #query_binding.push(format!(
+                    "{}={}",
+                    support::encode(#name, #encoding),
+                    support::encode(&#rendered, #encoding),
+                ));
+            }
+        }
+        crate::ir::ParamStyle::Simple
+        | crate::ir::ParamStyle::Matrix
+        | crate::ir::ParamStyle::Label => quote! {},
     }
 }
 
@@ -1110,15 +1716,17 @@ fn querystring_param_tokens(
     raw_query_binding: &crate::name::Ident,
 ) -> TokenStream {
     match &param.style {
+        // A JSON whole-query value is one opaque, fully-encoded token.
         crate::ir::ParamStyle::Content(MediaType::Json) => quote! {
-            #raw_query_binding = Some(
-                serde_json::to_string(#value)
+            #raw_query_binding = Some(support::encode(
+                &serde_json::to_string(#value)
                     .map_err(support::Error::request_construction)?,
-            );
+                support::PercentEncoding::Form,
+            ));
         },
         crate::ir::ParamStyle::Content(MediaType::FormUrlEncoded) => quote! {
             #query_binding.extend(
-                support::serialize_form("", #value, true)
+                support::serialize_form("", #value, true, support::PercentEncoding::Form)
                     .map_err(support::Error::request_construction)?,
             );
         },
@@ -1127,28 +1735,34 @@ fn querystring_param_tokens(
 }
 
 /// Emit serialization of one cookie parameter into the operation's cookie fragments.
+///
+/// `serialize_form` already returns `name=value` fragments; the caller joins them with `"; "`.
 fn cookie_param_tokens(
     param: &crate::ir::Parameter,
     name: &str,
     value: TokenStream,
     cookies_binding: &crate::name::Ident,
 ) -> TokenStream {
+    let encoding = percent_encoding_tokens(param);
     match &param.style {
         crate::ir::ParamStyle::Form | crate::ir::ParamStyle::Cookie => {
             let explode = param.explode;
             quote! {
-                for (name, value) in support::serialize_form(#name, #value, #explode)
-                    .map_err(support::Error::request_construction)?
-                {
-                    #cookies_binding.push(format!("{name}={value}"));
-                }
+                #cookies_binding.extend(
+                    support::serialize_form(#name, #value, #explode, #encoding)
+                        .map_err(support::Error::request_construction)?,
+                );
             }
         }
         crate::ir::ParamStyle::Content(_) => {
-            let value = param_value_tokens(param, value);
-            quote! { #cookies_binding.push(format!("{}={}", #name, #value)); }
+            let rendered = param_value_tokens(param, value);
+            quote! { #cookies_binding.push(format!("{}={}", #name, #rendered)); }
         }
-        crate::ir::ParamStyle::Simple => quote! {},
+        crate::ir::ParamStyle::Simple
+        | crate::ir::ParamStyle::Matrix
+        | crate::ir::ParamStyle::Label
+        | crate::ir::ParamStyle::Delimited(_)
+        | crate::ir::ParamStyle::DeepObject => quote! {},
     }
 }
 
@@ -1517,8 +2131,8 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
             };
         }
     });
-    // The XML codec module is embedded only when the API uses an XML body; the generated manifest
-    // then carries the `quick-xml` dependency it needs. A non-XML output never references quick-xml.
+    // The XML codec module is embedded only when the API uses an XML body, and only then does the
+    // dependency audit require `quick-xml` of the consumer. A non-XML output never references it.
     let xml_module = uses_xml.then(|| embed(&crate::support::xml_runtime_file()));
     let xml_reexport = uses_xml.then(|| {
         quote! { pub use xml::{classify_error_xml, decode_success_xml, to_xml}; }
@@ -1527,8 +2141,9 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
     // `blocking` feature AND `not(target_arch = "wasm32")` at the module level: the tokio-dependent
     // code compiles only when a consumer opts in on a native target, so a default build carries no
     // tokio reference and a wasm build never pulls tokio even with the feature on (tokio's blocking
-    // runtime cannot run on the single-threaded browser). The generated manifest always declares the
-    // (user-facing) `blocking` feature wired to an optional, non-wasm tokio dependency.
+    // runtime cannot run on the single-threaded browser). A consumer opts in by declaring its own
+    // `blocking` feature wired to an optional, non-wasm tokio dependency — which is what
+    // `spargen deps` prints, commented out, and what the audit then requires.
     let blocking_inner = embed(&crate::support::blocking_runtime_file());
     let blocking_module = quote! {
         #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
@@ -1551,10 +2166,11 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
-            pub use dispatch::{attach_auth, build_url, build_url_with_query_string, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
+            pub use dispatch::{attach_auth, build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
             pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
-            pub use parameter::{serialize_form, serialize_simple, ParameterError};
+            pub use header::{parse_header, require_header, HeaderError, HeaderShape};
+            pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
             pub use paginate::{next_link, LinkPaginator};
             pub use response::ResponseValue;
             pub use retry::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy, RetryWait};
@@ -1700,6 +2316,7 @@ fn emit_type_def(
                     tag_field,
                     tags,
                     categories,
+                    default_variant,
                 } => {
                     let variant_defs = union.variants.iter().map(|variant| {
                         let variant_ident = names
@@ -1777,6 +2394,28 @@ fn emit_type_def(
                         "tagged variant of union {} did not serialize as an object",
                         ident.as_str()
                     );
+                    // OpenAPI 3.2 `defaultMapping`: an absent or unrecognized tag falls back to a
+                    // named variant instead of failing.
+                    let fallback = default_variant.map(|index| {
+                        let variant = &union.variants[index];
+                        let variant_ident = names
+                            .variants
+                            .get(&(id, variant.name_hint.clone()))
+                            .expect("union variant name allocated");
+                        quote! {
+                            serde_json::from_value(value)
+                                .map(#ident::#variant_ident)
+                                .map_err(serde::de::Error::custom)
+                        }
+                    });
+                    let missing_tag_arm = match &fallback {
+                        Some(fallback) => fallback.clone(),
+                        None => quote! { Err(serde::de::Error::custom(#missing_tag)) },
+                    };
+                    let unknown_tag_arm = match &fallback {
+                        Some(fallback) => fallback.clone(),
+                        None => quote! { Err(serde::de::Error::custom(#unknown_tag)) },
+                    };
                     quote! {
                         #docs
                         #deprecated
@@ -1795,11 +2434,13 @@ fn emit_type_def(
                                 let tag = value
                                     .get(#tag_field)
                                     .and_then(serde_json::Value::as_str)
-                                    .map(std::borrow::ToOwned::to_owned)
-                                    .ok_or_else(|| serde::de::Error::custom(#missing_tag))?;
+                                    .map(std::borrow::ToOwned::to_owned);
+                                let Some(tag) = tag else {
+                                    return #missing_tag_arm;
+                                };
                                 match tag.as_str() {
                                     #(#de_arms)*
-                                    _ => Err(serde::de::Error::custom(#unknown_tag)),
+                                    _ => #unknown_tag_arm,
                                 }
                             }
                         }

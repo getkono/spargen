@@ -22,9 +22,9 @@ mod sse;
 pub use audit::audit;
 pub use deserialize::parse_document;
 pub use document::{
-    Components, Document, Info, MediaTypeObject, OperationObject, ParameterObject, PathItem, Paths,
-    RefOr, Reference, RequestBodyObject, ResponseObject, ResponsesObject, SecurityRequirement,
-    SecuritySchemeObject, Server, Tag,
+    Components, Document, EncodingObject, HeaderObject, Info, MediaTypeObject, OperationObject,
+    ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject, ResponseObject,
+    ResponsesObject, SecurityRequirement, SecuritySchemeObject, Server, ServerVariable, Tag,
 };
 pub use lower::lower;
 pub use metaschema::MetaSchemaValidator;

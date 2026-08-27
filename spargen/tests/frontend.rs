@@ -3,16 +3,23 @@
 //! `generate`; the E013 case also proves `check` runs the same lowering (check/generate parity).
 
 use camino::Utf8PathBuf;
-use spargen::{Code, Config, Outcome, Report};
+use spargen::{Build, CargoIntegration, Code, Outcome, Report, Spec};
 
 /// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
 /// tempdir (and any written output) is discarded once the report — which owns its data — is built.
+/// A build for a fixture spec. These tests are not build scripts, so the Cargo integration is
+/// explicitly off: no rebuild triggers to emit, no consumer manifest to audit, and — the reason it
+/// matters here — no `W013` polluting the diagnostics a fixture is asserting on.
+fn build(spec: Utf8PathBuf, out: Utf8PathBuf) -> Build {
+    Spec::new(spec).build(out).cargo(CargoIntegration::Off)
+}
+
 fn generate(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
     let out = temp.path().join("client.rs");
-    spargen::generate(&Config::new(
+    spargen::generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out).unwrap(),
     ))
@@ -23,10 +30,7 @@ fn check(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
-    spargen::check(&Config::new(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from("unused.rs"),
-    ))
+    spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
 }
 
 fn generate_with_code(spec: &str) -> (Report, String) {
@@ -34,7 +38,7 @@ fn generate_with_code(spec: &str) -> (Report, String) {
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&Config::new(
+    let report = spargen::generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
@@ -217,7 +221,7 @@ Pet:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&Config::new(dir.join("openapi.yaml"), out.clone()));
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
@@ -294,7 +298,7 @@ Pet:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&Config::new(dir.join("openapi.yaml"), out.clone()));
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
@@ -355,11 +359,11 @@ mod remote {
             std::fs::write(&path, vendor).unwrap();
         }
         let out = dir.join("client.rs");
-        let config = spargen::Config::new(dir.join("openapi.yaml"), out.clone());
+        let spec = Spec::new(dir.join("openapi.yaml"));
         let report = if check_only {
-            spargen::check(&config)
+            spargen::check(&spec)
         } else {
-            spargen::generate(&config)
+            spargen::generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
         };
         (report, temp, out)
     }
@@ -448,11 +452,11 @@ mod remote {
             std::fs::write(&path, content).unwrap();
         }
         let out = dir.join("client.rs");
-        let config = spargen::Config::new(dir.join("openapi.yaml"), out.clone());
+        let spec = Spec::new(dir.join("openapi.yaml"));
         let report = if check_only {
-            spargen::check(&config)
+            spargen::check(&spec)
         } else {
-            spargen::generate(&config)
+            spargen::generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
         };
         (report, temp, out)
     }
@@ -1046,7 +1050,9 @@ paths:
 }
 
 #[test]
-fn explicit_media_encoding_is_rejected_instead_of_ignored() {
+fn explicit_media_encoding_generates() {
+    // The Encoding Object's RFC 6570 mode: an explicit `style`/`explode` selects query-style
+    // serialization for that property and makes `contentType` inert.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -1064,13 +1070,180 @@ paths:
       responses:
         '204': { description: ok }
 "##;
-    let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+    }
 }
 
 #[test]
-fn oas32_discriminator_default_mapping_is_rejected_explicitly() {
+fn multipart_encoding_content_type_generates() {
+    // The Encoding Object's media-type mode: each part is sent as its declared `contentType`.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                sdp: { type: string }
+                session: { type: object, properties: { id: { type: string } } }
+            encoding:
+              sdp: { contentType: application/sdp }
+              session: { contentType: application/json }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_encoding_on_a_json_body_has_no_effect() {
+    // `encoding` applies only to form and multipart content; elsewhere the specification says it
+    // SHALL be ignored, so it is acknowledged rather than rejected.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { a: { type: string } } }
+            encoding:
+              a: { contentType: text/plain }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_encoding_entry_without_a_property_has_no_effect() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /form:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties: { a: { type: string } }
+            encoding:
+              missing: { contentType: text/plain }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_nested_encoding_object() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties: { part: { type: object, properties: { a: { type: string } } } }
+            encoding:
+              part:
+                contentType: multipart/mixed
+                encoding:
+                  a: { contentType: text/plain }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_wildcard_encoding_content_type() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties: { image: { type: string, contentEncoding: base64 } }
+            encoding:
+              image: { contentType: "image/*" }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_form_urlencoded_body_requires_an_object_schema() {
+    // A non-object form body used to compile and then fail at runtime inside the form encoder.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /form:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: string }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn oas32_discriminator_default_mapping_generates_a_fallback_branch() {
     let spec = r##"
 openapi: 3.2.0
 info: { title: T, version: 1.0.0 }
@@ -1087,9 +1260,37 @@ components:
     Cat: { type: object, properties: { kind: { const: cat } } }
     Dog: { type: object, properties: { kind: { type: string } } }
 "##;
-    let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    }
+}
+
+#[test]
+fn e007_discriminator_default_mapping_outside_the_union() {
+    // A fallback naming a schema that is not a member describes a branch the generated enum does
+    // not have, so it cannot be quietly downgraded to another dispatch strategy.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - { $ref: '#/components/schemas/Cat' }
+        - { $ref: '#/components/schemas/Dog' }
+      discriminator:
+        propertyName: kind
+        defaultMapping: Fish
+    Cat: { type: object, properties: { kind: { const: cat } } }
+    Dog: { type: object, properties: { kind: { type: string } } }
+    Fish: { type: object, properties: { kind: { const: fish } } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    }
 }
 
 #[test]
@@ -2024,10 +2225,9 @@ paths:
 }
 
 #[test]
-fn w006_unsupported_xml_hint_warns_but_generates() {
-    // Issue #13: an unsupported `xml` hint (namespace/prefix/wrapped) is acknowledged with W006 and
-    // generation still succeeds — never silently honored or dropped. The `xml.name`/`xml.attribute`
-    // hints on sibling fields are honored (no warning).
+fn e009_wire_changing_xml_hint_on_an_xml_body() {
+    // `wrapped`/`namespace` change the XML wire. Ignoring them on a type that IS serialized as XML
+    // would put structurally different bytes on the wire while reporting success, so they reject.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -2051,11 +2251,43 @@ paths:
       responses:
         "204": { description: No Content }
 "##;
-    let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
-    let checked = check(spec);
-    assert!(has_code(&checked, Code::XmlHintIgnored), "{checked:#?}");
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn w006_unsupported_xml_hint_on_a_non_xml_type_warns_but_generates() {
+    // The same hint on a type never serialized as XML genuinely has no effect, so it is
+    // acknowledged and the document is not refused for it.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+                  xml: { attribute: true, name: "Id" }
+                tags:
+                  type: array
+                  items: { type: string }
+                  xml: { wrapped: true, namespace: "urn:example" }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    }
 }
 
 #[test]
@@ -2406,9 +2638,9 @@ paths:
 }
 
 #[test]
-fn e010_unsupported_parameter_style() {
-    let report = generate(
-        r##"
+fn deep_object_query_style_generates() {
+    // `style: deepObject` over an object of scalars is fully specified: `filter[key]=value`.
+    let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths:
@@ -2418,38 +2650,142 @@ paths:
         - name: filter
           in: query
           style: deepObject
-          schema: { type: object }
+          explode: true
+          schema:
+            type: object
+            additionalProperties: { type: string }
       responses:
         "204": { description: No Content }
-"##,
-    );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedParameterStyle),
+            "{report:#?}"
+        );
+    }
 }
 
 #[test]
-fn e010_allow_reserved_parameter_encoding() {
-    let report = generate(
-        r##"
+fn matrix_and_label_path_styles_generate() {
+    let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths:
-  /x:
+  /map/{position}/{ext}:
     get:
       parameters:
-        - name: expression
-          in: query
-          allowReserved: true
+        - name: position
+          in: path
+          required: true
+          style: matrix
+          schema:
+            type: array
+            items: { type: integer }
+        - name: ext
+          in: path
+          required: true
+          style: label
           schema: { type: string }
       responses:
         "204": { description: No Content }
-"##,
-    );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
-    assert!(has_code(&report, Code::UnsupportedParameterStyle));
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedParameterStyle),
+            "{report:#?}"
+        );
+    }
+}
 
-    let checked = check(
-        r##"
+#[test]
+fn delimited_query_styles_generate() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: spaced
+          in: query
+          style: spaceDelimited
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: piped
+          in: query
+          style: pipeDelimited
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    }
+}
+
+#[test]
+fn e010_delimited_style_with_explode_true() {
+    // The specification's own serialization table marks this combination n/a, so there is no
+    // correct wire form to emit.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: spaced
+          in: query
+          style: spaceDelimited
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedParameterStyle));
+    }
+}
+
+#[test]
+fn e011_parameter_style_illegal_for_location() {
+    // The official document schema enumerates the legal styles per location, so an illegal
+    // pairing is caught structurally before lowering ever sees it.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          style: label
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+#[test]
+fn allow_reserved_query_parameter_generates() {
+    // `allowReserved: true` selects RFC 6570 reserved expansion — a different encoding set, not an
+    // unrepresentable construct.
+    let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths:
@@ -2462,10 +2798,70 @@ paths:
           schema: { type: string }
       responses:
         "204": { description: No Content }
-"##,
-    );
-    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
-    assert!(has_code(&checked, Code::UnsupportedParameterStyle));
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedParameterStyle),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_allow_reserved_has_no_effect_where_nothing_is_encoded() {
+    // OpenAPI 3.1 scopes `allowReserved` to `in: query`, so its metaschema rejects it elsewhere
+    // structurally. 3.2 broadens it to "wherever the location percent-encodes" — which makes it
+    // declarable, but still inert, on a header and on `style: cookie`.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: X-Expression
+          in: header
+          allowReserved: true
+          schema: { type: string }
+        - name: session
+          in: cookie
+          style: cookie
+          allowReserved: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e011_allow_reserved_on_a_3_1_header_is_structurally_invalid() {
+    // Pins the version difference above: 3.1 permits `allowReserved` only on a query parameter.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: X-Expression
+          in: header
+          allowReserved: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    }
 }
 
 #[test]
@@ -3152,7 +3548,7 @@ components:
     )
     .unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&Config::new(
+    let report = spargen::generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
@@ -3233,5 +3629,617 @@ fn moderate_ref_chain_below_the_cap_still_lowers() {
     assert!(
         !has_code(&report, Code::SchemaNestingTooDeep),
         "a 32-deep chain must lower without E014: {report:#?}"
+    );
+}
+
+#[test]
+fn property_annotations_come_from_the_property_not_the_object() {
+    // Regression: `deprecated`/`readOnly`/`writeOnly` were read from the enclosing object, so an
+    // object-level `deprecated: true` marked every field and a property-level one was ignored.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+components:
+  schemas:
+    Item:
+      type: object
+      deprecated: true
+      properties:
+        current: { type: string }
+        legacy: { type: string, deprecated: true }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("legacy"), "legacy field emitted: {code}");
+    assert!(code.contains("current"), "current field emitted: {code}");
+    // Exactly one item is deprecated — the property that says so — not every field of the
+    // deprecated object, and not zero.
+    assert_eq!(
+        code.matches("#[deprecated]").count(),
+        1,
+        "exactly one item is deprecated, not every field of a deprecated object: {code}"
+    );
+}
+
+#[test]
+fn percent_encoded_pointer_fragments_resolve() {
+    // A `$ref` pointer travels in a URI fragment, so `{`/`}` must be percent-encoded there. The
+    // token is percent-decoded before `~1`/`~0` are unescaped, so this addresses `/pets/{petId}`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets/{petId}:
+    get:
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/paths/~1pets~1%7BpetId%7D/get/responses/200/content/application~1json/schema"
+"##;
+    let report = generate(spec);
+    // The self-reference is a cycle, so it is rejected for being recursive — never for being
+    // unresolvable, which is what the missing percent-decoding used to report.
+    assert!(
+        !has_code(&report, Code::UnresolvedRef),
+        "the percent-encoded pointer must resolve: {report:#?}"
+    );
+}
+
+#[test]
+fn w011_reserved_header_parameters_are_ignored() {
+    // `Accept`, `Content-Type`, and `Authorization` belong to the protocol layer.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: Accept
+          in: header
+          schema: { type: string }
+        - name: authorization
+          in: header
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            report
+                .diagnostics
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .count(),
+            2,
+            "one per reserved header, matched case-insensitively: {report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_content_parameter_with_an_unrenderable_media_type() {
+    // An XML `content` parameter used to fall through to `simple` serialization and be sent in the
+    // wrong format entirely.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          content:
+            application/xml:
+              schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn optional_request_bodies_take_an_option_argument() {
+    // `requestBody.required` was dropped entirely, so an optional body was indistinguishable from
+    // a required one and the caller had to invent a value.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /required:
+    post:
+      operationId: postRequired
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, properties: { a: { type: string } } }
+      responses:
+        "204": { description: No Content }
+  /optional:
+    post:
+      operationId: postOptional
+      requestBody:
+        content:
+          application/json:
+            schema: { type: object, properties: { a: { type: string } } }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("body: Option<&"),
+        "an optional body is passed as an Option: {code}"
+    );
+    assert!(
+        code.contains("body: &"),
+        "a required body is passed by reference: {code}"
+    );
+}
+
+#[test]
+fn path_item_ref_resolves_into_operations() {
+    // Regression: a Path Item `$ref` was ignored outright, so the path contributed no operations
+    // and the client silently generated with fewer methods than the document describes.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    $ref: "#/components/pathItems/Pets"
+components:
+  pathItems:
+    Pets:
+      get:
+        operationId: listPets
+        responses:
+          "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("list_pets"),
+        "the referenced operation must be generated: {code}"
+    );
+}
+
+#[test]
+fn e016_path_item_ref_with_a_structural_sibling() {
+    // The specification leaves `$ref` plus adjacent fields undefined, so either guess would ship a
+    // client calling a different set of endpoints than the document describes.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    $ref: "#/components/pathItems/Pets"
+    post:
+      operationId: createPet
+      responses:
+        "204": { description: No Content }
+components:
+  pathItems:
+    Pets:
+      get:
+        operationId: listPets
+        responses:
+          "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::SpecUndefinedBehavior),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn path_item_ref_keeps_documentation_siblings() {
+    // `summary`/`description` cannot change the wire, so they are allowed beside a `$ref`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    $ref: "#/components/pathItems/Pets"
+    summary: Everything about pets
+components:
+  pathItems:
+    Pets:
+      get:
+        operationId: listPets
+        responses:
+          "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    }
+}
+
+#[test]
+fn e015_items_beside_prefix_items() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                prefixItems:
+                  - { type: string }
+                items: { type: integer }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::TupleRestNotRepresentable),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn items_false_beside_prefix_items_is_a_closed_tuple() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                prefixItems:
+                  - { type: string }
+                  - { type: integer }
+                items: false
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::TupleRestNotRepresentable),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e012_http_security_scheme_that_cannot_be_attached() {
+    // A `digest` scheme used to vanish silently, surfacing only as a confusing E012 at the
+    // requirement site naming a scheme the document plainly declares.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+components:
+  securitySchemes:
+    digestAuth:
+      type: http
+      scheme: digest
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::UnknownSecurityScheme),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_mutual_tls_is_satisfied_by_the_transport() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+security:
+  - mtls: []
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+components:
+  securitySchemes:
+    mtls:
+      type: mutualTLS
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_allow_empty_value_has_no_effect() {
+    // Deprecated in 3.2 and inert for a typed client: an omitted optional parameter is not sent.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: flag
+          in: query
+          allowEmptyValue: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn server_variables_generate_a_typed_builder() {
+    // Regression: `servers[].variables` was dropped entirely, so a templated URL reached rustdoc
+    // with its `{braces}` intact and no way to fill them.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - name: regional
+    url: "https://{region}.example.com/{basePath}"
+    variables:
+      region:
+        default: us
+        enum: [us, eu]
+      basePath:
+        default: v2
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("pub mod servers"), "{code}");
+    assert!(code.contains("pub fn default_url()"), "{code}");
+    // The `enum` variable becomes a closed type, so an illegal region cannot be constructed.
+    assert!(code.contains("pub enum RegionalRegion"), "{code}");
+    assert!(code.contains("with_default_server"), "{code}");
+}
+
+#[test]
+fn e011_server_variable_default_outside_its_enum() {
+    // The default is actually sent, so a default outside its own `enum` would make the
+    // no-argument path put an illegal value on the wire.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: "https://{region}.example.com"
+    variables:
+      region:
+        default: apac
+        enum: [us, eu]
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+#[test]
+fn e011_server_url_references_an_undeclared_variable() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: "https://{region}.example.com"
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+#[test]
+fn documented_response_headers_get_typed_accessors() {
+    // Regression: `response.headers` was dropped entirely, with no diagnostic.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-RateLimit-Remaining:
+              required: true
+              schema: { type: integer }
+            X-Next:
+              $ref: "#/components/headers/Next"
+            Content-Type:
+              schema: { type: string }
+          content:
+            application/json:
+              schema: { type: array, items: { type: string } }
+components:
+  headers:
+    Next:
+      description: The cursor for the next page.
+      schema: { type: string }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("ListPetsStatus200Headers"), "{code}");
+    // A required header is a plain field; an optional one is an Option. Inline header schemas get
+    // a synthesized named type, exactly as inline schemas elsewhere do.
+    assert!(
+        code.contains("pub x_rate_limit_remaining: types::HeaderXRateLimitRemaining"),
+        "{code}"
+    );
+    assert!(code.contains("pub x_next: Option<"), "{code}");
+    assert!(code.contains("from_response"), "{code}");
+    // A documented `Content-Type` is ignored per the specification, and said so.
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
+    assert!(
+        !code.contains("content_type:"),
+        "a documented Content-Type header must not become a field: {code}"
+    );
+}
+
+#[test]
+fn info_contact_license_and_external_docs_reach_the_client_docs() {
+    // All three were parsed away with no diagnostic and no rustdoc.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info:
+  title: T
+  version: 1.0.0
+  contact: { name: API Team, email: api@example.com, url: "https://example.com/support" }
+  license: { name: MIT, identifier: MIT }
+externalDocs:
+  description: Full guide
+  url: "https://example.com/docs"
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("API Team"), "{code}");
+    assert!(code.contains("License: MIT (MIT)"), "{code}");
+    assert!(code.contains("https://example.com/docs"), "{code}");
+}
+
+#[test]
+fn w011_reference_object_documentation_override() {
+    // A Reference Object's summary/description document the reference site, but spargen emits one
+    // shared item per component, so the override has nowhere to land.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+          description: How many to return on this endpoint.
+      responses:
+        "204": { description: No Content }
+components:
+  parameters:
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn oas32_security_requirement_uri_resolves() {
+    // OpenAPI 3.2 lets a requirement name a Security Scheme Object by URI. A component name always
+    // wins, per the specification, so only a name matching no component is resolved as a reference.
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        temp.path().join("bearer.yaml"),
+        "type: http\nscheme: bearer\n",
+    )
+    .unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec_path,
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+security:
+  - "./bearer.yaml": []
+paths:
+  /x:
+    get:
+      responses:
+        "204": { description: No Content }
+"##,
+    )
+    .unwrap();
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&build(
+        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
+        Utf8PathBuf::from_path_buf(out).unwrap(),
+    ));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnknownSecurityScheme),
+        "{report:#?}"
     );
 }

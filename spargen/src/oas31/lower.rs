@@ -2,20 +2,23 @@ use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexMap;
 
-use crate::diag::{Aborted, Code, Diagnostic, Diagnostics};
+use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
-    AdditionalProps, Api, ApiKeyLoc, DefaultValue, DisjointFeature, Docs, Field, FieldDefault,
-    HttpScheme, Info, JsonCategory, MediaType, Operation, OperationId, ParamLoc, ParamStyle,
-    Parameter, PathSegment, PathTemplate, Prim, PropertyName, RequestBody, Response, Responses,
-    ScalarEnum, ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty,
-    TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
+    AdditionalProps, Api, ApiKeyLoc, BodyEncoding, DefaultValue, Delimiter, DisjointFeature, Docs,
+    EncodingMode, Field, FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Operation,
+    OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
+    PropertyEncoding, PropertyName, RequestBody, Response, ResponseHeader, Responses, ScalarEnum,
+    ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef,
+    TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, UrlSegment,
+    XmlField,
 };
 use crate::name::synth_operation_id;
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
 
 use super::{
-    Document, JsonType, ParameterObject, RefOr, RequestBodyObject, Resolver, ResponseObject,
-    Schema, SchemaOr, SecurityRequirement, ValidationKeywords,
+    Document, EncodingObject, JsonType, MediaTypeObject, ParameterObject, PathItem, RefOr,
+    RequestBodyObject, Resolver, ResponseObject, Schema, SchemaOr, SecurityRequirement,
+    ValidationKeywords,
 };
 
 /// Maximum schema-lowering recursion depth. Each nested object property, array item,
@@ -34,7 +37,13 @@ pub fn lower(
     resolver: &Resolver,
     diags: &mut Diagnostics,
 ) -> Result<Api, Aborted> {
-    let security_schemes = lower_security_schemes(document);
+    let mut security_schemes = lower_security_schemes(document, diags);
+    // OpenAPI 3.2 lets a security requirement name a Security Scheme Object by URI instead of by
+    // component name. A component name always wins — the specification is explicit that name
+    // lookup takes precedence, and flags the resulting hijack risk — so only names that match no
+    // declared component are resolved as references. A leading `./` forces the URI reading for a
+    // single-segment name that would otherwise collide.
+    resolve_external_security_schemes(document, resolver, &mut security_schemes, diags);
     let mut ctx = LowerCtx {
         document,
         resolver,
@@ -56,6 +65,10 @@ pub fn lower(
     let mut operations = Vec::new();
     let mut operation_ids = HashSet::new();
     for (path, item) in &document.paths.items {
+        let Some(item) = resolve_path_item(item, resolver, ctx.diags) else {
+            continue;
+        };
+        let item = &item;
         for (method, operation) in &item.operations {
             let path_template = parse_path_template(path);
             let id = operation
@@ -244,6 +257,15 @@ pub fn lower(
     if let Some(description) = &document.info.description {
         append_text(&mut api_description, description.clone());
     }
+    if let Some(contact) = &document.info.contact {
+        append_text(&mut api_description, format!("Contact: {contact}."));
+    }
+    if let Some(license) = &document.info.license {
+        append_text(&mut api_description, format!("License: {license}."));
+    }
+    if let Some(external_docs) = &document.info.external_docs {
+        append_text(&mut api_description, format!("See also: {external_docs}."));
+    }
     if !document.tags.is_empty() {
         let tags = document
             .tags
@@ -270,26 +292,18 @@ pub fn lower(
             .join("; ");
         append_text(&mut api_description, format!("Tags: {tags}."));
     }
+    let servers = document
+        .servers
+        .iter()
+        .filter_map(|server| lower_server(server, ctx.diags))
+        .collect();
     let api = Api {
         info: Info {
             title: document.info.title.clone(),
             version: document.info.version.clone(),
             description: api_description,
         },
-        servers: document
-            .servers
-            .iter()
-            .map(|server| Server {
-                url: server.url.clone(),
-                description: {
-                    let mut docs = server.name.as_ref().map(|name| format!("Server `{name}`."));
-                    if let Some(description) = &server.description {
-                        append_text(&mut docs, description.clone());
-                    }
-                    docs
-                },
-            })
-            .collect(),
+        servers,
         operations,
         types: ctx.graph,
         security_schemes,
@@ -662,6 +676,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ),
             Some(JsonType::Array) => {
                 if !schema.prefix_items.is_empty() {
+                    // `items` beside `prefixItems` is the 2020-12 rest-element schema. A Rust tuple
+                    // is fixed-length, so a typed remainder is not representable — except
+                    // `items: false`, which closes the array at the prefix and *is* a tuple.
+                    if let Some(rest) = &schema.items {
+                        if !matches!(rest.as_ref(), SchemaOr::Bool(false)) {
+                            Diagnostic::error(
+                                Code::TupleRestNotRepresentable,
+                                schema.provenance.clone(),
+                            )
+                            .message(
+                                "`items` beside `prefixItems` allows a typed variable-length \
+                                 remainder, which no single Rust type expresses",
+                            )
+                            .remedy(
+                                "use `items: false` to close the tuple, describe the whole array \
+                                 with `items`, or omit this API segment with spargen::omit!",
+                            )
+                            .emit(self.diags);
+                            return None;
+                        }
+                    }
                     let mut items = Vec::new();
                     for (index, child) in schema.prefix_items.iter().enumerate() {
                         items.push(self.lower_schema_or(child, &format!("{hint}Item{index}"))?);
@@ -829,7 +864,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     self.intersect_types(ty, sibling, &format!("{hint}Variant{index}Constrained"))
                 else {
                     // The sibling constraints make this branch impossible; JSON Schema simply
-                    // removes it from the union's accepted set.
+                    // removes it from the union's accepted set. Acknowledge it, because a variant
+                    // vanishing from the generated enum is otherwise invisible.
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, schema.provenance.clone())
+                        .message(format!(
+                            "union member {index} cannot satisfy the enclosing schema's own \
+                             constraints, so it is not a variant of the generated enum"
+                        ))
+                        .emit(self.diags);
                     continue;
                 };
                 ty = intersection;
@@ -871,6 +913,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         let strategy = if let Some(discriminator) = &schema.discriminator {
+            // A `defaultMapping` that names a schema outside this union describes a fallback
+            // branch the generated enum does not have, so it cannot be quietly downgraded to
+            // another dispatch strategy.
+            if let Some(target) = &discriminator.default_mapping {
+                let bare = target
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap_or(target);
+                if !ref_names.iter().any(|name| name.as_deref() == Some(bare)) {
+                    return self.reject_union(
+                        schema,
+                        &format!(
+                            "`discriminator.defaultMapping` names `{target}`, which is not one of \
+                             this union's members, so there is no branch to fall back to"
+                        ),
+                    );
+                }
+            }
             self.discriminated_strategy(&variants, &ref_names, discriminator)
                 .or_else(|| self.disjoint_strategy(&variants))
                 .unwrap_or_else(|| self.trial_strategy(&variants, mode))
@@ -972,10 +1031,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             tags.push(Some(tag));
             categories.push(None);
         }
+        // 3.2 `defaultMapping` names the schema to fall back to when the tag is absent or
+        // unrecognized. It must name one of this union's own variants; anything else describes a
+        // branch that does not exist.
+        let default_variant = match &discriminator.default_mapping {
+            None => None,
+            Some(target) => {
+                let bare = target
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap_or(target);
+                // A fallback naming a non-member is rejected by the caller, which owns the
+                // union's provenance; here it simply means there is no discriminated strategy.
+                Some(
+                    ref_names
+                        .iter()
+                        .position(|name| name.as_deref() == Some(bare))?,
+                )
+            }
+        };
         Some(UnionStrategy::Discriminated {
             tag_field: discriminator.property_name.clone(),
             tags,
             categories,
+            default_variant,
         })
     }
 
@@ -1148,13 +1226,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let is_required = required.contains(name);
             let default = self.field_default(child, ty, is_required);
             let xml = self.field_xml(child);
+            let (deprecated, read_only, write_only) = field_flags(child);
             fields.push(Field {
                 name: PropertyName { wire: name.clone() },
                 ty,
                 required: is_required,
-                deprecated: schema.deprecated,
-                read_only: schema.read_only,
-                write_only: schema.write_only,
+                deprecated,
+                read_only,
+                write_only,
                 default,
                 xml,
             });
@@ -1181,10 +1260,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some((fields, additional))
     }
 
-    /// Lower a property's OpenAPI `xml` hints into the field's [`XmlField`]. Only `xml.name` and
-    /// `xml.attribute` are represented (applied as a serde rename at emit time); the unsupported
-    /// `xml.namespace`/`xml.prefix`/`xml.wrapped` hints are warned once as `W006` and otherwise
-    /// ignored — never silently honored. A `$ref` property carries no inline `xml` object here.
+    /// Lower a property's OpenAPI `xml` hints into the field's [`XmlField`].
+    ///
+    /// `xml.name` and `xml.attribute` are represented (applied as a serde rename at emit time).
+    /// The hints that change the XML wire without a faithful quick-xml mapping are recorded here
+    /// and dispositioned in [`gate_xml_field_renames`], once it is known whether the owning type is
+    /// ever serialized as XML at all. A `$ref` property carries no inline `xml` object here.
     fn field_xml(&mut self, child: &SchemaOr) -> XmlField {
         let SchemaOr::Schema(schema) = child else {
             return XmlField::default();
@@ -1192,35 +1273,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(hints) = &schema.xml else {
             return XmlField::default();
         };
-        let mut unsupported: Vec<&str> = Vec::new();
+        let mut unsupported: Vec<String> = Vec::new();
         if hints.namespace.is_some() {
-            unsupported.push("namespace");
+            unsupported.push("namespace".to_owned());
         }
         if hints.prefix.is_some() {
-            unsupported.push("prefix");
+            unsupported.push("prefix".to_owned());
         }
         if hints.wrapped {
-            unsupported.push("wrapped");
+            unsupported.push("wrapped".to_owned());
         }
         if matches!(hints.node_type.as_deref(), Some("text" | "cdata" | "none")) {
-            unsupported.push("nodeType");
-        }
-        if !unsupported.is_empty() {
-            Diagnostic::warning(Code::XmlHintIgnored, schema.provenance.clone())
-                .message(format!(
-                    "unsupported XML hint(s) `{}` ignored; only `xml.name` and `xml.attribute` are \
-                     honored",
-                    unsupported.join("`, `")
-                ))
-                .remedy(
-                    "remove the unsupported xml hint, or accept that the field serializes by its \
-                     local name without a namespace/prefix/array wrapper",
-                )
-                .emit(self.diags);
+            unsupported.push("nodeType".to_owned());
         }
         XmlField {
             name: hints.name.clone(),
             attribute: hints.attribute,
+            unsupported,
         }
     }
 
@@ -1866,10 +1935,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 tag_field,
                 tags,
                 categories,
+                default_variant,
             } => UnionStrategy::Discriminated {
                 tag_field: tag_field.clone(),
                 tags: retained.iter().map(|index| tags[*index].clone()).collect(),
                 categories: retained.iter().map(|index| categories[*index]).collect(),
+                // The fallback variant's index moves with the retained set; if the fallback itself
+                // was dropped, the union simply has no fallback any more.
+                default_variant: default_variant
+                    .and_then(|target| retained.iter().position(|index| *index == target)),
             },
             UnionStrategy::Disjoint { features } => UnionStrategy::Disjoint {
                 features: retained
@@ -2133,6 +2207,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return None;
             }
         };
+        // `Accept`, `Content-Type`, and `Authorization` header parameters "SHALL be ignored": the
+        // protocol layer owns those, and emitting a client argument for one would let a caller
+        // silently fight the codec or the auth attachment.
+        if location == ParamLoc::Header
+            && matches!(
+                parameter.name.to_ascii_lowercase().as_str(),
+                "accept" | "content-type" | "authorization"
+            )
+        {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
+                .message(format!(
+                    "header parameter `{}` is ignored: the specification reserves `Accept`, \
+                     `Content-Type`, and `Authorization` to the protocol layer",
+                    parameter.name
+                ))
+                .remedy(
+                    "remove the parameter; content types follow the operation's media types and \
+                     credentials are registered with `Client::with_credential`",
+                )
+                .emit(self.diags);
+            return None;
+        }
         if location == ParamLoc::QueryString {
             let Some((media_name, object)) = parameter.content.iter().next() else {
                 Diagnostic::error(
@@ -2187,6 +2283,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ty,
                 required: parameter.required,
                 style: ParamStyle::Content(media),
+                allow_reserved: false,
                 explode: true,
                 deprecated: parameter.deprecated,
                 default_display: self.param_default_display(object.schema.as_ref(), ty),
@@ -2197,9 +2294,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ParamLoc::Query | ParamLoc::Cookie => "form",
             ParamLoc::QueryString => unreachable!("querystring returned above"),
         });
+        // The legal `(style, in)` pairs are enforced by the official document schema before
+        // lowering (`E011`), so an unknown pairing here is a generator bug rather than user input.
+        // The arm is kept so a future schema relaxation cannot silently mis-serialize.
         let style = match (location, style_name) {
             (ParamLoc::Path | ParamLoc::Header, "simple") => ParamStyle::Simple,
+            (ParamLoc::Path, "matrix") => ParamStyle::Matrix,
+            (ParamLoc::Path, "label") => ParamStyle::Label,
             (ParamLoc::Query | ParamLoc::Cookie, "form") => ParamStyle::Form,
+            (ParamLoc::Query, "spaceDelimited") => ParamStyle::Delimited(Delimiter::Space),
+            (ParamLoc::Query, "pipeDelimited") => ParamStyle::Delimited(Delimiter::Pipe),
+            (ParamLoc::Query, "deepObject") => ParamStyle::DeepObject,
             (ParamLoc::Cookie, "cookie") => ParamStyle::Cookie,
             _ => {
                 Diagnostic::error(
@@ -2207,31 +2312,76 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     parameter.provenance.clone(),
                 )
                 .message(format!(
-                    "parameter style `{style_name}` is not supported for `{}` parameters",
+                    "parameter style `{style_name}` is not permitted for `{}` parameters",
                     parameter.location
                 ))
                 .emit(self.diags);
                 return None;
             }
         };
-        if parameter.allow_reserved {
+        // `deepObject` ignores `explode` entirely; every other style defaults per the
+        // specification (true only for `form` and 3.2's `cookie`).
+        let explode = parameter
+            .explode
+            .unwrap_or(matches!(style, ParamStyle::Form | ParamStyle::Cookie));
+        if matches!(style, ParamStyle::Delimited(_)) && parameter.explode == Some(true) {
             Diagnostic::error(
                 Code::UnsupportedParameterStyle,
                 parameter.provenance.clone(),
             )
-            .message("`allowReserved: true` parameter encoding is not supported")
+            .message(format!(
+                "`style: {style_name}` with `explode: true` has no defined serialization"
+            ))
+            .remedy("set `explode: false`, which is the default for this style")
             .emit(self.diags);
             return None;
         }
-        let explode = parameter
-            .explode
-            .unwrap_or(matches!(style, ParamStyle::Form | ParamStyle::Cookie));
+        // Deprecated in 3.2, and inert for a typed client: an absent optional parameter is simply
+        // not sent, so there is never a case where the client would send an empty string instead.
+        if parameter.allow_empty_value {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
+                .message(
+                    "`allowEmptyValue` has no effect: an optional parameter the caller omits is \
+                     not sent at all",
+                )
+                .remedy("remove `allowEmptyValue`; it is deprecated in OpenAPI 3.2")
+                .emit(self.diags);
+        }
+        // `allowReserved` only means anything where the location percent-encodes at all.
+        if parameter.allow_reserved
+            && (location == ParamLoc::Header || matches!(style, ParamStyle::Cookie))
+        {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
+                .message(
+                    "`allowReserved` has no effect here: this parameter is sent without \
+                     percent-encoding",
+                )
+                .remedy("remove `allowReserved`, or use `style: form` if encoding is wanted")
+                .emit(self.diags);
+        }
         let ty = if let Some(schema) = &parameter.schema {
             let ty = self.lower_schema_ref(schema, &parameter.name)?;
             self.remap_binary_param(ty, &parameter.name)
         } else if let Some((media, object)) = parameter.content.iter().next() {
             let object = self.resolve_media_object(object)?;
+            let media_name = media.clone();
             let media = lower_media_type(media, &parameter.provenance, self.diags)?;
+            // A `content` parameter is rendered by its media codec. Only JSON and raw text have a
+            // codec that produces a single parameter token; anything else would fall through to
+            // `simple` serialization and be sent in the wrong format.
+            if !matches!(media, MediaType::Json | MediaType::Text) {
+                Diagnostic::error(Code::UnsupportedMediaType, parameter.provenance.clone())
+                    .message(format!(
+                        "`content` parameter media type `{media_name}` has no single-token \
+                         serialization"
+                    ))
+                    .remedy(
+                        "use `application/json` or a `text/*` media type, or describe the \
+                         parameter with `schema` and a serialization style",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
             let ty = object
                 .schema
                 .as_ref()
@@ -2244,6 +2394,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ty,
                 required: parameter.required || location == ParamLoc::Path,
                 style: ParamStyle::Content(media),
+                allow_reserved: false,
                 explode: false,
                 deprecated: parameter.deprecated,
                 default_display,
@@ -2274,6 +2425,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ty,
             required: parameter.required || location == ParamLoc::Path,
             style,
+            allow_reserved: parameter.allow_reserved,
             explode,
             deprecated: parameter.deprecated,
             default_display,
@@ -2360,11 +2512,350 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return None;
             }
         }
+        // A form-urlencoded body is rendered property by property, so it needs properties. Without
+        // this gate a non-object body compiled and then failed at runtime inside the form encoder.
+        if media == MediaType::FormUrlEncoded {
+            let is_struct = matches!(
+                ty.and_then(|ty| self.graph.get(ty.id)).map(|def| &def.kind),
+                Some(TypeKind::Struct(_))
+            );
+            let schema_failed_to_lower = object.schema.is_some() && ty.is_none();
+            if !is_struct && !schema_failed_to_lower {
+                Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                    .message(
+                        "an `application/x-www-form-urlencoded` request body must be an object \
+                         schema; its properties are the form fields",
+                    )
+                    .remedy(
+                        "give the body an object schema with a property per form field, or omit \
+                         this API segment with spargen::omit!",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+        }
+        let encoding = self.lower_body_encoding(media, media_name, ty, &object)?;
         Some(RequestBody {
             media,
             content_type: media_essence(media_name).to_owned(),
             ty,
+            required: body.required,
+            encoding,
         })
+    }
+
+    /// Resolve the Encoding Objects of a form or multipart request body into a fully-populated
+    /// [`BodyEncoding`] — one entry per body property, so the emitted code never has to infer a
+    /// default at runtime.
+    ///
+    /// Returns `None` only when the body is unrepresentable; an encoding that simply has no effect
+    /// here is reported as `W011` and dropped.
+    fn lower_body_encoding(
+        &mut self,
+        media: MediaType,
+        media_name: &str,
+        ty: Option<Ty>,
+        object: &MediaTypeObject,
+    ) -> Option<BodyEncoding> {
+        // Encoding diagnostics point at the Media Type Object that declares them, not at the whole
+        // request body.
+        let at = &object.provenance;
+        let declares_encoding = !object.encoding.is_empty()
+            || !object.prefix_encoding.is_empty()
+            || object.item_encoding.is_some();
+        // Encoding applies only to form and multipart content. The specification says it SHALL be
+        // ignored elsewhere, so this is a warning rather than a rejection.
+        if !matches!(media, MediaType::FormUrlEncoded | MediaType::Multipart) {
+            if declares_encoding {
+                Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
+                    .message(format!(
+                        "`encoding` has no effect on `{media_name}`: it applies only to \
+                         `multipart` and `application/x-www-form-urlencoded` content"
+                    ))
+                    .emit(self.diags);
+            }
+            return Some(BodyEncoding::default());
+        }
+        // Positional encoding describes an array-shaped multipart body. Spargen generates
+        // multipart only from an object schema, so there are no positions to encode.
+        let positional = object
+            .prefix_encoding
+            .first()
+            .map(|(_, at)| ("prefixEncoding", at.clone()))
+            .or_else(|| {
+                object
+                    .item_encoding
+                    .as_ref()
+                    .map(|(_, at)| ("itemEncoding", at.clone()))
+            });
+        if let Some((field, at)) = positional {
+            Diagnostic::error(Code::UnsupportedMediaType, at)
+                .message(format!(
+                    "`{field}` describes positional parts of an array-shaped multipart body; \
+                     spargen generates `multipart/form-data` from an object schema, which has no \
+                     positions"
+                ))
+                .remedy(
+                    "use `encoding` keyed by property name, or omit this API segment with \
+                     spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        let Some(TypeKind::Struct(structure)) =
+            ty.and_then(|ty| self.graph.get(ty.id)).map(|def| &def.kind)
+        else {
+            // The body already failed its own shape gate above; don't pile on.
+            return Some(BodyEncoding::default());
+        };
+        let fields: Vec<(String, Ty)> = structure
+            .fields
+            .iter()
+            .map(|field| (field.name.wire.clone(), field.ty))
+            .collect();
+        // Nested encoding describes nested multipart parts (`multipart/mixed` inside a part).
+        // Spargen generates one flat level, so a nested field is rejected rather than dropped.
+        for (name, encoding) in &object.encoding {
+            if let Some((field, at)) = encoding.nested.first() {
+                Diagnostic::error(Code::UnsupportedMediaType, at.clone())
+                    .message(format!(
+                        "`encoding.{name}.{field}` describes a nested multipart part, which \
+                         spargen does not generate"
+                    ))
+                    .remedy("flatten the body, or omit this API segment with spargen::omit!")
+                    .emit(self.diags);
+                return None;
+            }
+        }
+        // An `encoding` key naming no property has nothing to apply to.
+        for name in object.encoding.keys() {
+            if !fields.iter().any(|(wire, _)| wire == name) {
+                Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
+                    .message(format!(
+                        "`encoding` entry `{name}` names no property of the body schema, so it is \
+                         ignored"
+                    ))
+                    .emit(self.diags);
+            }
+        }
+        let mut properties = Vec::with_capacity(fields.len());
+        for (name, field_ty) in fields {
+            let declared = object.encoding.get(&name);
+            let mode = self.encoding_mode(declared, field_ty, media, &name, at)?;
+            let headers = self.encoding_headers(declared, media, &name, at);
+            properties.push(PropertyEncoding {
+                name,
+                mode,
+                headers,
+            });
+        }
+        Some(BodyEncoding { properties })
+    }
+
+    /// Apply the Encoding Object's mode switch for one property.
+    fn encoding_mode(
+        &mut self,
+        declared: Option<&EncodingObject>,
+        field_ty: Ty,
+        media: MediaType,
+        name: &str,
+        at: &Provenance,
+    ) -> Option<EncodingMode> {
+        // Presence of any RFC 6570 field selects query-style serialization outright, and makes
+        // `contentType` inert — the specification is explicit that it is then ignored.
+        if let Some(encoding) = declared {
+            if encoding.style.is_some()
+                || encoding.explode.is_some()
+                || encoding.allow_reserved.is_some()
+            {
+                let style_name = encoding.style.as_deref().unwrap_or("form");
+                let style = match style_name {
+                    "form" => ParamStyle::Form,
+                    "spaceDelimited" => ParamStyle::Delimited(Delimiter::Space),
+                    "pipeDelimited" => ParamStyle::Delimited(Delimiter::Pipe),
+                    "deepObject" => ParamStyle::DeepObject,
+                    // The document schema enumerates these four, so this is unreachable for a
+                    // validated document.
+                    _ => {
+                        Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                            .message(format!(
+                                "`encoding.{name}.style: {style_name}` is not a form style"
+                            ))
+                            .emit(self.diags);
+                        return None;
+                    }
+                };
+                let explode = encoding
+                    .explode
+                    .unwrap_or(matches!(style, ParamStyle::Form));
+                // Multipart part values are never percent-encoded, so `allowReserved` is inert.
+                let allow_reserved = encoding.allow_reserved.unwrap_or(false);
+                if allow_reserved && media == MediaType::Multipart {
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
+                        .message(
+                            "`allowReserved` has no effect on `multipart/form-data`: part values \
+                             are not percent-encoded",
+                        )
+                        .emit(self.diags);
+                }
+                return Some(EncodingMode::Style {
+                    style,
+                    explode,
+                    allow_reserved: allow_reserved && media != MediaType::Multipart,
+                });
+            }
+        }
+        let explicit = declared.and_then(|encoding| encoding.content_type.as_deref());
+        let content_type = match explicit {
+            // `contentType` is a comma-separated list of acceptable types, but a client sends
+            // exactly one, so the first element wins.
+            Some(list) => {
+                let first = list.split(',').next().unwrap_or(list).trim().to_owned();
+                if first.contains('*') {
+                    Diagnostic::error(
+                        Code::UnsupportedMediaType,
+                        declared
+                            .map(|encoding| encoding.provenance.clone())
+                            .unwrap_or_else(|| at.clone()),
+                    )
+                    .message(format!(
+                        "`encoding.{name}.contentType: {first}` is a wildcard; a client must send \
+                         one concrete media type"
+                    ))
+                    .remedy("name a concrete media type such as `image/png`")
+                    .emit(self.diags);
+                    return None;
+                }
+                first
+            }
+            None => self.default_content_type(field_ty),
+        };
+        // The declared `contentType` is a wire *header*; how the value is rendered into bytes is
+        // decided by the property's own lowered type. That is what lets a part declare
+        // `application/sdp` (which spargen has no codec for) over a string property and still be
+        // sent correctly, with the declared header attached.
+        let codec = match classify_media(media_essence(&content_type)).map(|(codec, _)| codec) {
+            Some(codec @ (MediaType::Json | MediaType::Text | MediaType::OctetStream)) => codec,
+            _ => self.natural_codec(field_ty),
+        };
+        // A form field is a single URL-encoded string; raw bytes have no representation there.
+        if media == MediaType::FormUrlEncoded && codec == MediaType::OctetStream {
+            Diagnostic::error(
+                Code::UnsupportedMediaType,
+                declared
+                    .map(|encoding| encoding.provenance.clone())
+                    .unwrap_or_else(|| at.clone()),
+            )
+            .message(format!(
+                "property `{name}` is binary, which has no `application/x-www-form-urlencoded` \
+                 representation"
+            ))
+            .remedy("send the body as `multipart/form-data`, or encode the value as text")
+            .emit(self.diags);
+            return None;
+        }
+        Some(EncodingMode::Media {
+            content_type,
+            codec,
+        })
+    }
+
+    /// How a property's value is rendered into bytes, from its lowered type alone.
+    fn natural_codec(&self, ty: Ty) -> MediaType {
+        match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Bytes) => MediaType::OctetStream,
+            Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => MediaType::Text,
+            _ => MediaType::Json,
+        }
+    }
+
+    /// The Encoding Object's default `contentType` for a property, from its lowered type.
+    fn default_content_type(&self, ty: Ty) -> String {
+        match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Bytes) => "application/octet-stream".to_owned(),
+            Some(TypeKind::Struct(_)) | Some(TypeKind::Union(_)) | Some(TypeKind::Any) => {
+                "application/json".to_owned()
+            }
+            // In 3.1 an array's default follows its item type; 3.2 simplified this to JSON. Both
+            // agree that an array of objects is JSON, and spargen sends any array as JSON, which
+            // is the 3.2 rule and the only self-consistent reading for a nested array.
+            Some(TypeKind::Array(_)) | Some(TypeKind::Tuple(_)) => "application/json".to_owned(),
+            Some(TypeKind::Primitive(_)) | Some(TypeKind::Enum(_)) => "text/plain".to_owned(),
+            _ => "application/octet-stream".to_owned(),
+        }
+    }
+
+    /// The literal extra part headers of one multipart property.
+    ///
+    /// A Header Object *describes* a header; it carries no value. Only a schema that pins one —
+    /// through `const`, or `default` in its absence — gives a client something to send.
+    fn encoding_headers(
+        &mut self,
+        declared: Option<&EncodingObject>,
+        media: MediaType,
+        name: &str,
+        at: &Provenance,
+    ) -> Vec<(String, String)> {
+        let Some(encoding) = declared else {
+            return Vec::new();
+        };
+        if encoding.headers.is_empty() {
+            return Vec::new();
+        }
+        if media != MediaType::Multipart {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
+                .message(format!(
+                    "`encoding.{name}.headers` applies only to `multipart` content"
+                ))
+                .emit(self.diags);
+            return Vec::new();
+        }
+        let _ = at;
+        let mut headers = Vec::new();
+        for (header_name, header) in &encoding.headers {
+            // `Content-Type` is described by `contentType`, not here.
+            if header_name.eq_ignore_ascii_case("content-type") {
+                continue;
+            }
+            let literal = match header {
+                RefOr::Item(header) => header
+                    .schema
+                    .as_ref()
+                    .and_then(|schema| self.literal_header_value(schema)),
+                RefOr::Ref(_) => None,
+            };
+            match literal {
+                Some(value) => headers.push((header_name.clone(), value)),
+                None => {
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.headers.{header_name}` pins no value, so there is \
+                             nothing for the client to send"
+                        ))
+                        .remedy("give the header schema a `const` (or a `default`) value")
+                        .emit(self.diags);
+                }
+            }
+        }
+        headers
+    }
+
+    /// The literal value a header schema pins, if any.
+    fn literal_header_value(&self, schema: &RefOr<Schema>) -> Option<String> {
+        let RefOr::Item(schema) = schema else {
+            return None;
+        };
+        let value = schema.const_value.as_ref().or(schema.default.as_ref())?;
+        match &value.node {
+            crate::source::Node::String(text) => Some(text.clone()),
+            crate::source::Node::Bool(value) => Some(value.to_string()),
+            crate::source::Node::Number(number) => Some(match number {
+                crate::source::Number::Int(value) => value.to_string(),
+                crate::source::Number::UInt(value) => value.to_string(),
+                crate::source::Number::Float(value) => value.to_string(),
+            }),
+            _ => None,
+        }
     }
 
     fn lower_responses(&mut self, responses: &super::ResponsesObject) -> Responses {
@@ -2501,11 +2992,142 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // framing; the body is then the streamed item type `T`. A whole-body response has no
         // framing. Streaming only takes effect when this is the operation's single success body
         // (see `Responses::stream_success`).
+        let headers = self.lower_response_headers(response);
         Some(Response {
             media: body.map(|(media, _, _)| media),
             body: body.and_then(|(_, ty, _)| ty),
             stream: body.and_then(|(_, _, stream)| stream),
+            headers,
         })
+    }
+
+    /// Lower a response's documented headers into typed accessors.
+    ///
+    /// A header that cannot be represented is skipped with a diagnostic rather than failing the
+    /// whole operation: the body is what the call returns, and refusing an otherwise-generatable
+    /// operation over an unreadable header would be a poor trade.
+    fn lower_response_headers(&mut self, response: &ResponseObject) -> Vec<ResponseHeader> {
+        let mut headers = Vec::new();
+        for (name, header) in &response.headers {
+            // The specification says a documented `Content-Type` header SHALL be ignored: the
+            // media type is already the operation's, and a second source would only disagree.
+            if name.eq_ignore_ascii_case("content-type") {
+                Diagnostic::warning(Code::DeclarationHasNoEffect, response.provenance.clone())
+                    .message(
+                        "a documented `Content-Type` response header is ignored; the operation's \
+                         media type already determines it",
+                    )
+                    .emit(self.diags);
+                continue;
+            }
+            let Some(header) = self.resolve_header(header) else {
+                continue;
+            };
+            let header = &header;
+            // A Header Object may only use `simple`; the document schema already enforces that.
+            let (ty, shape) = if let Some(schema) = &header.schema {
+                let Some(ty) = self.lower_schema_ref(schema, &format!("Header{name}")) else {
+                    continue;
+                };
+                let Some(shape) = self.header_shape(ty) else {
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
+                        .message(format!(
+                            "response header `{name}` has a shape `simple` serialization cannot \
+                             express, so no typed accessor is generated"
+                        ))
+                        .emit(self.diags);
+                    continue;
+                };
+                (ty, shape)
+            } else if let Some((media, object)) = header.content.iter().next() {
+                let Some(media) = lower_media_type(media, &header.provenance, self.diags) else {
+                    continue;
+                };
+                if media != MediaType::Json {
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
+                        .message(format!(
+                            "response header `{name}` uses a `content` media type spargen cannot \
+                             decode, so no typed accessor is generated"
+                        ))
+                        .emit(self.diags);
+                    continue;
+                }
+                let Some(ty) = object
+                    .schema
+                    .as_ref()
+                    .and_then(|schema| self.lower_schema_ref(schema, &format!("Header{name}")))
+                else {
+                    continue;
+                };
+                (ty, crate::ir::HeaderShape::Json)
+            } else {
+                continue;
+            };
+            headers.push(ResponseHeader {
+                name: name.clone(),
+                ty,
+                required: header.required,
+                explode: header.explode.unwrap_or(false),
+                shape,
+                deprecated: header.deprecated,
+                docs: Docs {
+                    description: header.description.clone(),
+                    ..Docs::default()
+                },
+            });
+        }
+        headers
+    }
+
+    /// Resolve a Header Object that may be a `$ref` into `#/components/headers/`.
+    fn resolve_header(
+        &mut self,
+        header: &RefOr<super::HeaderObject>,
+    ) -> Option<super::HeaderObject> {
+        let mut current = header.clone();
+        let mut seen = HashSet::new();
+        loop {
+            match current {
+                RefOr::Item(header) => return Some(header),
+                RefOr::Ref(reference) => {
+                    if !seen.insert(reference.reference.clone()) {
+                        Diagnostic::error(Code::UnresolvedRef, reference.provenance)
+                            .message("header reference cycle cannot be resolved")
+                            .emit(self.diags);
+                        return None;
+                    }
+                    let target = reference
+                        .reference
+                        .strip_prefix("#/components/headers/")
+                        .and_then(|name| self.document.components.headers.get(name))
+                        .cloned();
+                    match target {
+                        Some(target) => current = target,
+                        None => {
+                            Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
+                                .message(format!(
+                                    "unresolved header reference `{}`",
+                                    reference.reference
+                                ))
+                                .emit(self.diags);
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The `simple` wire shape of a lowered header type, or `None` when it has none.
+    fn header_shape(&self, ty: Ty) -> Option<crate::ir::HeaderShape> {
+        match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Primitive(_) | TypeKind::Enum(_) | TypeKind::Null) => {
+                Some(crate::ir::HeaderShape::Scalar)
+            }
+            Some(TypeKind::Array(_)) => Some(crate::ir::HeaderShape::Array),
+            Some(TypeKind::Struct(_)) => Some(crate::ir::HeaderShape::Object),
+            _ => None,
+        }
     }
 
     fn resolve_parameter(&mut self, parameter: &RefOr<ParameterObject>) -> Option<ParameterObject> {
@@ -2515,6 +3137,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match current {
                 RefOr::Item(parameter) => return Some(parameter.clone()),
                 RefOr::Ref(reference) => {
+                    self.note_reference_docs(reference);
                     if !seen.insert(reference.reference.clone()) {
                         return self.reject_component_alias(
                             &reference.provenance,
@@ -2524,11 +3147,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     let Some(name) = reference.reference.strip_prefix("#/components/parameters/")
                     else {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "parameter",
+                        // Not a component alias: a multi-file description may reference a whole
+                        // file, which resolves through the input bundle like a schema `$ref`.
+                        let from = reference
+                            .provenance
+                            .span
+                            .map(|span| span.file)
+                            .unwrap_or(crate::diag::FileId(0));
+                        return match self.resolver.resolve_component(
                             &reference.reference,
-                        );
+                            from,
+                            super::deserialize::parse_parameter,
+                            self.diags,
+                        ) {
+                            Some(resolved) => Some(resolved),
+                            None => self.reject_component_alias(
+                                &reference.provenance,
+                                "parameter",
+                                &reference.reference,
+                            ),
+                        };
                     };
                     let Some(target) = self.document.components.parameters.get(name) else {
                         return self.reject_component_alias(
@@ -2553,6 +3191,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match current {
                 RefOr::Item(body) => return Some(body.clone()),
                 RefOr::Ref(reference) => {
+                    self.note_reference_docs(reference);
                     if !seen.insert(reference.reference.clone()) {
                         return self.reject_component_alias(
                             &reference.provenance,
@@ -2564,11 +3203,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .reference
                         .strip_prefix("#/components/requestBodies/")
                     else {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "request body",
+                        // Not a component alias: a multi-file description may reference a whole
+                        // file, which resolves through the input bundle like a schema `$ref`.
+                        let from = reference
+                            .provenance
+                            .span
+                            .map(|span| span.file)
+                            .unwrap_or(crate::diag::FileId(0));
+                        return match self.resolver.resolve_component(
                             &reference.reference,
-                        );
+                            from,
+                            super::deserialize::parse_request_body,
+                            self.diags,
+                        ) {
+                            Some(resolved) => Some(resolved),
+                            None => self.reject_component_alias(
+                                &reference.provenance,
+                                "request body",
+                                &reference.reference,
+                            ),
+                        };
                     };
                     let Some(target) = self.document.components.request_bodies.get(name) else {
                         return self.reject_component_alias(
@@ -2590,6 +3244,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match current {
                 RefOr::Item(response) => return Some(response.clone()),
                 RefOr::Ref(reference) => {
+                    self.note_reference_docs(reference);
                     if !seen.insert(reference.reference.clone()) {
                         return self.reject_component_alias(
                             &reference.provenance,
@@ -2599,11 +3254,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     let Some(name) = reference.reference.strip_prefix("#/components/responses/")
                     else {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "response",
+                        // Not a component alias: a multi-file description may reference a whole
+                        // file, which resolves through the input bundle like a schema `$ref`.
+                        let from = reference
+                            .provenance
+                            .span
+                            .map(|span| span.file)
+                            .unwrap_or(crate::diag::FileId(0));
+                        return match self.resolver.resolve_component(
                             &reference.reference,
-                        );
+                            from,
+                            super::deserialize::parse_response,
+                            self.diags,
+                        ) {
+                            Some(resolved) => Some(resolved),
+                            None => self.reject_component_alias(
+                                &reference.provenance,
+                                "response",
+                                &reference.reference,
+                            ),
+                        };
                     };
                     let Some(target) = self.document.components.responses.get(name) else {
                         return self.reject_component_alias(
@@ -2616,6 +3286,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }
+    }
+
+    /// Acknowledge a Reference Object `summary`/`description`.
+    ///
+    /// These document the *reference site*, not the target. Spargen emits one shared item per
+    /// component, so a per-site documentation override has nowhere to land without making two use
+    /// sites of the same component disagree. Reported rather than dropped.
+    fn note_reference_docs(&mut self, reference: &super::Reference) {
+        if reference.summary.is_none() && reference.description.is_none() {
+            return;
+        }
+        Diagnostic::warning(Code::DeclarationHasNoEffect, reference.provenance.clone())
+            .message(format!(
+                "the `summary`/`description` on the reference to `{}` documents this use site, \
+                 but the generated item is shared across every use, so the override is not applied",
+                reference.reference
+            ))
+            .remedy("document the referenced component itself")
+            .emit(self.diags);
     }
 
     fn reject_component_alias<T>(
@@ -2660,19 +3349,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
             current = target.clone();
         }
-        if let Some((field, provenance)) = current.explicit_encodings.first() {
-            Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
-                .message(format!(
-                    "explicit Media Type Object `{field}` is not representable by spargen's wire \
-                     encoder"
-                ))
-                .remedy(
-                    "use the media type's default property encoding, or omit this API segment with \
-                     spargen::omit!",
-                )
-                .emit(self.diags);
-            return None;
-        }
+        // Encoding fields are validated where the body's media type and schema are known
+        // (`lower_body_encoding`); the specification says they are simply ignored on any other
+        // media, so rejecting them here would refuse valid documents.
         Some(current)
     }
 
@@ -2833,23 +3512,280 @@ fn lower_security_requirement(requirement: &SecurityRequirement) -> crate::ir::S
     )
 }
 
-fn lower_security_schemes(document: &Document) -> IndexMap<SchemeId, SecurityScheme> {
+/// Lower one Server Object, parsing its URL template and validating its variables.
+///
+/// A Server Variable `default` is unlike a Schema Object `default`: the specification says it is
+/// actually sent when the caller supplies no alternative, so it changes the wire and must be
+/// modeled rather than documented.
+fn lower_server(server: &super::Server, diags: &mut Diagnostics) -> Option<Server> {
+    let segments = parse_url_template(&server.url);
+    let mut seen: HashSet<&str> = HashSet::new();
+    for segment in &segments {
+        let UrlSegment::Variable(name) = segment else {
+            continue;
+        };
+        if !seen.insert(name.as_str()) {
+            Diagnostic::error(Code::InvalidInput, server.provenance.clone())
+                .message(format!(
+                    "server variable `{name}` appears more than once in `{}`",
+                    server.url
+                ))
+                .emit(diags);
+            return None;
+        }
+        if !server.variables.contains_key(name) {
+            Diagnostic::error(Code::InvalidInput, server.provenance.clone())
+                .message(format!(
+                    "server URL `{}` references undeclared variable `{name}`",
+                    server.url
+                ))
+                .remedy("declare it under the server's `variables`")
+                .emit(diags);
+            return None;
+        }
+    }
+    for (name, variable) in &server.variables {
+        // A default outside its own `enum` would make the no-argument path send an illegal value.
+        if !variable.enum_values.is_empty() && !variable.enum_values.contains(&variable.default) {
+            Diagnostic::error(Code::InvalidInput, server.provenance.clone())
+                .message(format!(
+                    "server variable `{name}` has default `{}`, which is not one of its declared \
+                     `enum` values",
+                    variable.default
+                ))
+                .emit(diags);
+            return None;
+        }
+        if !seen.contains(name.as_str()) {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, server.provenance.clone())
+                .message(format!(
+                    "server variable `{name}` is declared but does not appear in `{}`",
+                    server.url
+                ))
+                .emit(diags);
+        }
+    }
+    let mut docs = server.name.as_ref().map(|name| format!("Server `{name}`."));
+    if let Some(description) = &server.description {
+        append_text(&mut docs, description.clone());
+    }
+    Some(Server {
+        name: server.name.clone(),
+        url: server.url.clone(),
+        segments,
+        variables: server
+            .variables
+            .iter()
+            .map(|(name, variable)| {
+                (
+                    name.clone(),
+                    crate::ir::ServerVariable {
+                        default: variable.default.clone(),
+                        enum_values: variable.enum_values.clone(),
+                        description: variable.description.clone(),
+                    },
+                )
+            })
+            .collect(),
+        description: docs,
+    })
+}
+
+/// Split a server URL template into literals and `{variable}` references.
+///
+/// An unmatched `{` is kept as literal text: the document schema constrains the template shape, so
+/// there is nothing useful to diagnose here that it has not already refused.
+fn parse_url_template(url: &str) -> Vec<UrlSegment> {
+    let mut segments = Vec::new();
+    let mut rest = url;
+    while let Some(open) = rest.find('{') {
+        let Some(close) = rest[open..].find('}').map(|at| open + at) else {
+            break;
+        };
+        if open > 0 {
+            segments.push(UrlSegment::Literal(rest[..open].to_owned()));
+        }
+        segments.push(UrlSegment::Variable(rest[open + 1..close].to_owned()));
+        rest = &rest[close + 1..];
+    }
+    if !rest.is_empty() {
+        segments.push(UrlSegment::Literal(rest.to_owned()));
+    }
+    segments
+}
+
+/// Resolve a Path Item `$ref`./// Resolve a Path Item `$ref`.
+///
+/// Unlike a Reference Object, the specification leaves the behavior of fields declared *alongside*
+/// a Path Item `$ref` undefined. Guessing either way ships a client that calls a different set of
+/// endpoints than the document describes, so a structural sibling is rejected; `summary` and
+/// `description` are documentation and cannot change the wire, so they are allowed.
+fn resolve_path_item(
+    item: &PathItem,
+    resolver: &Resolver,
+    diags: &mut Diagnostics,
+) -> Option<PathItem> {
+    let Some(reference) = &item.reference else {
+        return Some(item.clone());
+    };
+    if let Some(sibling) = item.reference_siblings.first() {
+        Diagnostic::error(Code::SpecUndefinedBehavior, reference.provenance.clone())
+            .message(format!(
+                "a Path Item `$ref` declared alongside `{sibling}` has undefined behavior, so \
+                 there is no correct client to generate"
+            ))
+            .remedy("move the sibling fields into the referenced Path Item, or drop the `$ref`")
+            .emit(diags);
+        return None;
+    }
+    // Relative refs inside the referenced item resolve against the file that declared the `$ref`.
+    let from = reference
+        .provenance
+        .span
+        .map(|span| span.file)
+        .unwrap_or(crate::diag::FileId(0));
+    let target =
+        resolver.resolve_path_item(&reference.reference, from, &reference.provenance, diags)?;
+    // One level of indirection is what the specification requires implementations to support, and
+    // a chain would need its own cycle guard.
+    if target.reference.is_some() {
+        Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
+            .message(format!(
+                "Path Item `$ref` `{}` resolves to another Path Item `$ref`; chained Path Item \
+                 references are not resolved",
+                reference.reference
+            ))
+            .emit(diags);
+        return None;
+    }
+    Some(target)
+}
+
+/// Resolve security requirement names that are URIs rather than declared component names.
+fn resolve_external_security_schemes(
+    document: &Document,
+    resolver: &Resolver,
+    schemes: &mut IndexMap<SchemeId, SecurityScheme>,
+    diags: &mut Diagnostics,
+) {
+    let mut wanted: Vec<(String, crate::diag::Provenance)> = Vec::new();
+    let mut collect = |requirements: &[SecurityRequirement], at: &crate::diag::Provenance| {
+        for requirement in requirements {
+            for name in requirement.0.keys() {
+                wanted.push((name.clone(), at.clone()));
+            }
+        }
+    };
+    collect(&document.security, &document.provenance);
+    for item in document.paths.items.values() {
+        for operation in item.operations.values() {
+            if let Some(security) = &operation.security {
+                collect(security, &operation.provenance);
+            }
+        }
+    }
+    for (name, at) in wanted {
+        if schemes.contains_key(&SchemeId(name.clone())) {
+            continue;
+        }
+        // Only a name that looks like a reference is worth resolving; a plain unknown name is an
+        // ordinary undeclared-scheme error, reported at the requirement site.
+        let reference = match name.strip_prefix("./") {
+            Some(rest) => rest.to_owned(),
+            None if name.contains('/') || name.contains('#') || name.contains(':') => name.clone(),
+            None => continue,
+        };
+        let from = at
+            .span
+            .map(|span| span.file)
+            .unwrap_or(crate::diag::FileId(0));
+        let Some(object) = resolver.resolve_component(
+            &reference,
+            from,
+            super::deserialize::parse_security_scheme,
+            diags,
+        ) else {
+            continue;
+        };
+        let mut resolved = IndexMap::new();
+        resolved.insert(name.clone(), RefOr::Item(object));
+        let mut document = document.clone();
+        document.components.security_schemes = resolved;
+        for (id, scheme) in lower_security_schemes(&document, diags) {
+            schemes.insert(id, scheme);
+        }
+    }
+}
+
+/// Lower `components.securitySchemes`./// Lower `components.securitySchemes`./// Lower `components.securitySchemes`.
+///
+/// Every declared scheme gets a disposition here rather than only when something references it: a
+/// scheme that silently vanished used to surface — if at all — as a confusing `E012` at the
+/// requirement site, naming a scheme the document plainly declares.
+fn lower_security_schemes(
+    document: &Document,
+    diags: &mut Diagnostics,
+) -> IndexMap<SchemeId, SecurityScheme> {
     let mut schemes = IndexMap::new();
     for (name, scheme) in &document.components.security_schemes {
-        let RefOr::Item(scheme) = scheme else {
-            continue;
+        let scheme = match scheme {
+            RefOr::Item(scheme) => scheme,
+            // A `$ref` to another scheme component resolves; anything else is unresolvable.
+            RefOr::Ref(reference) => {
+                let target = reference
+                    .reference
+                    .strip_prefix("#/components/securitySchemes/")
+                    .and_then(|target| document.components.security_schemes.get(target))
+                    .and_then(|target| match target {
+                        RefOr::Item(target) => Some(target),
+                        RefOr::Ref(_) => None,
+                    });
+                match target {
+                    Some(target) => target,
+                    None => {
+                        Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
+                            .message(format!(
+                                "unresolved security scheme reference `{}`",
+                                reference.reference
+                            ))
+                            .remedy(
+                                "reference a scheme declared under \
+                                 `#/components/securitySchemes/`",
+                            )
+                            .emit(diags);
+                        continue;
+                    }
+                }
+            }
         };
         let lowered = match scheme.scheme_type.as_str() {
             "http" => match scheme.scheme.as_deref() {
                 Some("bearer") => SecurityScheme::Http(HttpScheme::Bearer),
                 Some("basic") => SecurityScheme::Http(HttpScheme::Basic),
-                _ => continue,
+                other => {
+                    // `digest`, `negotiate`, and friends need a challenge/response exchange that a
+                    // statically-attached credential cannot perform.
+                    Diagnostic::error(Code::UnknownSecurityScheme, scheme.provenance.clone())
+                        .message(format!(
+                            "`http` security scheme `{}` uses authentication scheme `{}`, which \
+                             spargen cannot attach",
+                            name,
+                            other.unwrap_or("<missing>")
+                        ))
+                        .remedy(
+                            "use `bearer` or `basic`, or omit this API segment with \
+                             spargen::omit!",
+                        )
+                        .emit(diags);
+                    continue;
+                }
             },
             "apiKey" => {
                 let location = match scheme.location.as_deref() {
                     Some("header") => ApiKeyLoc::Header,
                     Some("query") => ApiKeyLoc::Query,
                     Some("cookie") => ApiKeyLoc::Cookie,
+                    // The document schema requires a valid `in` for `apiKey`.
                     _ => continue,
                 };
                 SecurityScheme::ApiKey {
@@ -2859,6 +3795,19 @@ fn lower_security_schemes(document: &Document) -> IndexMap<SchemeId, SecuritySch
             }
             "oauth2" => SecurityScheme::OAuth2,
             "openIdConnect" => SecurityScheme::OpenIdConnect,
+            "mutualTLS" => {
+                Diagnostic::warning(Code::DeclarationHasNoEffect, scheme.provenance.clone())
+                    .message(format!(
+                        "`mutualTLS` scheme `{name}` is satisfied by the client certificate on the \
+                         injected `reqwest::Client`, so no credential is registered for it"
+                    ))
+                    .remedy(
+                        "configure the certificate on the client passed to `Client::with_client`",
+                    )
+                    .emit(diags);
+                SecurityScheme::MutualTls
+            }
+            // The document schema closes the `type` enum.
             _ => continue,
         };
         schemes.insert(SchemeId(name.clone()), lowered);
@@ -2883,7 +3832,11 @@ fn gate_xml_field_renames(
     // Cheap guard: nothing to gate (and nothing to warn) unless some field carries an XML hint.
     let any_hint = graph.iter().any(|(_, def)| {
         matches!(&def.kind, TypeKind::Struct(object)
-            if object.fields.iter().any(|field| field.xml.name.is_some() || field.xml.attribute))
+        if object.fields.iter().any(|field| {
+            field.xml.name.is_some()
+                || field.xml.attribute
+                || !field.xml.unsupported.is_empty()
+        }))
     });
     if !any_hint {
         return;
@@ -2923,6 +3876,53 @@ fn gate_xml_field_renames(
 
     let xml_reachable = reachable_types(graph, &xml_roots);
     let non_xml_reachable = reachable_types(graph, &non_xml_roots);
+
+    // A hint that changes the XML wire cannot be waved through on a type that is actually
+    // serialized as XML: ignoring `wrapped`, a namespace, or a text/cdata node emits structurally
+    // different XML while reporting success, which is exactly the silent fourth behavior the
+    // contract forbids. On a type never serialized as XML the same hint genuinely has no effect,
+    // so it stays a warning and the document is not refused for it.
+    let mut unsupported_reports: Vec<(bool, Provenance, String)> = Vec::new();
+    for (id, def) in graph.iter() {
+        let TypeKind::Struct(object) = &def.kind else {
+            continue;
+        };
+        for field in &object.fields {
+            if field.xml.unsupported.is_empty() {
+                continue;
+            }
+            unsupported_reports.push((
+                xml_reachable.contains(&id),
+                def.provenance.clone(),
+                format!(
+                    "`{}` on property `{}`",
+                    field.xml.unsupported.join("`, `"),
+                    field.name.wire
+                ),
+            ));
+        }
+    }
+    for (serialized_as_xml, provenance, what) in unsupported_reports {
+        if serialized_as_xml {
+            Diagnostic::error(Code::UnsupportedMediaType, provenance)
+                .message(format!(
+                    "unsupported XML hint(s) {what}: this type is serialized as XML, and ignoring \
+                     the hint would put structurally different XML on the wire"
+                ))
+                .remedy(
+                    "remove the hint, model the wrapper element explicitly as a nested object, or \
+                     omit this API segment with spargen::omit!",
+                )
+                .emit(diags);
+        } else {
+            Diagnostic::warning(Code::XmlHintIgnored, provenance)
+                .message(format!(
+                    "unsupported XML hint(s) {what} ignored; this type is never serialized as XML, \
+                     so the hint has no effect"
+                ))
+                .emit(diags);
+        }
+    }
 
     let to_suppress: Vec<TypeId> = graph
         .iter()
@@ -3160,6 +4160,19 @@ fn classify_default(value: &SpannedValue) -> RawDefault {
 
 /// Decide whether a classified `default` is representable against the field's lowered type: a
 /// `Primitive` of the matching scalar kind, or a `ScalarEnum` value that is one of its variants.
+/// The `deprecated`/`readOnly`/`writeOnly` annotations of one *property* subschema.
+///
+/// These are per-property annotations. Reading them from the enclosing object would both ignore a
+/// property's own `deprecated: true` and mark every field of a deprecated object as deprecated;
+/// an object-level annotation belongs on the type, where it already is.
+fn field_flags(child: &SchemaOr) -> (bool, bool, bool) {
+    match child {
+        // A boolean schema carries no annotations.
+        SchemaOr::Bool(_) => (false, false, false),
+        SchemaOr::Schema(schema) => (schema.deprecated, schema.read_only, schema.write_only),
+    }
+}
+
 fn representable_default(raw: &RawDefault, kind: Option<&TypeKind>) -> Option<DefaultValue> {
     let kind = kind?;
     match (raw, kind) {

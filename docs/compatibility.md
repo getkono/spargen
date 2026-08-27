@@ -61,12 +61,7 @@ gaps). For a committed, reviewed subset, prefer explicit omit rules.
 Library API:
 
 ```rust
-let mut config = spargen::Config::new(
-    "api/openapi.yaml",
-    "src/api.rs",
-);
-
-config.omit = spargen::omit! {
+let spec = spargen::Spec::new("api/openapi.yaml").omit(spargen::omit! {
     operations {
         post "/repos/{owner}/{repo}/releases/{release_id}/assets";
     }
@@ -89,7 +84,7 @@ config.omit = spargen::omit! {
             "/properties/unsupported";
         }
     }
-};
+});
 ```
 
 Use omit profiles as reviewed compatibility code. Do not generate them automatically in production;
@@ -106,9 +101,11 @@ in `build.rs` or the macro invocation.
 omit-rule kinds are discriminated by **field presence** (TOML has no enums):
 
 ```toml
-[features]
-batch_cap = 100         # optional (default 100)
+uuid = true             # optional (default true); map `format: uuid` to `uuid::Uuid`
+time = true             # optional (default true); map `format: date-time`/`date` to `time`
 carve = false           # optional; auto-carve unsupported constructs
+batch_cap = 100         # optional (default 100)
+error_body_cap = 65536  # optional (default 64 KiB)
 
 [[omit]]
 path = "/pets/{id}"                     # → OmitRule::Path (exact)
@@ -142,5 +139,16 @@ spargen check spec.yaml \
 **Precedence (low → high): built-in defaults < `spargen.toml` < CLI flags.** A missing
 auto-discovered config file is fine (defaults apply); a missing `--config` target, a malformed
 config file, or bad omit-flag syntax is a clear error with a non-zero (usage) exit — never a panic.
-The generation APIs do not load `spargen.toml`; application build code is the authoritative
-generation configuration.
+
+The same file is available to the generation APIs — `Spec::discover_config_file()` from `build.rs`,
+and automatically beside the spec for `generate_api!` — because it is parsed by the library, not by
+the CLI. Setters called after it still win, so build code remains authoritative:
+
+```rust
+let spec = spargen::Spec::new("api/openapi.yaml")
+    .discover_config_file()?
+    .carve(false);   // overrides the file
+```
+
+> The keys above lived under a `[features]` table before 0.3. They are top-level now, and the old
+> spelling is a clear migration error rather than an "unknown field".

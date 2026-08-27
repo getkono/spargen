@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use camino::Utf8PathBuf;
-use spargen::{Code, Config, Outcome};
+use spargen::{CargoIntegration, Code, Outcome, Spec};
 
 fn generate_fixture_crate(
     spec: &std::path::Path,
@@ -40,10 +40,13 @@ tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
         ),
     )
     .unwrap();
-    spargen::generate(&Config::new(
-        Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap(),
-        Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap(),
-    ))
+    spargen::generate(
+        &Spec::new(Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap())
+            .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
+            // This test process is not a build script; the fixture crate below is compiled by a
+            // real `cargo build`, which is where the manifest audit belongs.
+            .cargo(CargoIntegration::Off),
+    )
 }
 
 #[test]
@@ -79,8 +82,8 @@ spargen = {{ path = {:?}, default-features = false }}
     std::fs::write(
         crate_dir.join("build.rs"),
         r#"fn main() {
-    let config = spargen::Config::new("openapi.yaml", "src/generated.rs");
-    let report = spargen::generate(&config);
+    let build = spargen::Spec::new("openapi.yaml").build("src/generated.rs");
+    let report = spargen::generate(&build);
     for diagnostic in &report.diagnostics {
         eprintln!("{}: {}", diagnostic.code.as_str(), diagnostic.message);
     }
@@ -336,7 +339,9 @@ fn typed_parameters_follow_openapi_wire_rules() {
         assert!(request_line.starts_with("GET /params/1,2?"), "{request}");
         assert!(request_line.contains("workflow_id=build.yml"), "{request}");
         assert!(request_line.contains("labels=bug&labels=api"), "{request}");
-        assert!(request_line.contains("compact=one%2Ctwo"), "{request}");
+        // A non-exploded array joins with a literal `,`: the delimiter must stay distinguishable
+        // from a comma inside a value, which `%2C` would not be.
+        assert!(request_line.contains("compact=one,two"), "{request}");
         assert!(request.contains("x-flags: fast,safe\r\n"), "{request}");
         assert!(request.contains("cookie: session=a; session=b\r\n"), "{request}");
 
@@ -362,6 +367,184 @@ fn typed_parameters_follow_openapi_wire_rules() {
             vec!["fast".to_owned(), "safe".to_owned()],
             Some(params),
         )
+        .unwrap();
+
+    server.join().unwrap();
+}
+
+/// The full RFC 6570 style table on one request line, plus path-value encoding.
+///
+/// The invariant: a style's delimiters are emitted literally and every data byte is percent-encoded,
+/// so a joining `,` stays distinguishable from a `,` inside a value — and a path value can never
+/// change the route it is spliced into.
+#[test]
+fn every_parameter_style_serializes_onto_the_wire() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+        let request_line = request.lines().next().unwrap().to_owned();
+        let (target, _) = request_line
+            .trim_start_matches("GET ")
+            .split_once(" HTTP/1.1")
+            .unwrap();
+        let (path, query) = target.split_once('?').unwrap();
+
+        // matrix, `explode: false`: `;name=v1,v2` — the `;`/`=`/`,` are structure, so the `,`
+        // inside the value `a,b` must be `%2C` or the two are indistinguishable.
+        // label, `explode: false`: a single `.` prefix and comma-joined members (`.x,y`);
+        // `explode: true` would be `.x.y`.
+        // The `raw` segment carries a `/`, `?`, `#`, and a stray `%`: all four must be encoded, or
+        // the request would address a different route entirely.
+        assert_eq!(
+            path,
+            "/styles/;matrix=one,a%2Cb/.x,y/a%2Fb%3Fc%23d%25e",
+            "{request_line}"
+        );
+
+        let pairs: Vec<&str> = query.split('&').collect();
+        // spaceDelimited/pipeDelimited join with a literal `%20`/`%7C`; RFC 6570 has no bare-space
+        // or bare-pipe form, so the delimiter is the encoded triple and data bytes are encoded too.
+        assert!(pairs.contains(&"space=one%20a%20b"), "{query}");
+        assert!(pairs.contains(&"pipe=one%7Ca%7Cb"), "{query}");
+        // deepObject: one `name[property]=value` pair per member, brackets literal.
+        assert!(pairs.contains(&"deep%5Bkind%5D=wide"), "{query}");
+        assert!(pairs.contains(&"deep%5Blimit%5D=3"), "{query}");
+        // `allowReserved: true` is the one place a `/` in a query value survives unencoded.
+        assert!(pairs.contains(&"reserved=a/b?c"), "{query}");
+
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let params = basic_client::SerializeStylesParams::default()
+        .space(vec!["one".to_owned(), "a b".to_owned()])
+        .pipe(vec!["one".to_owned(), "a|b".to_owned()])
+        .deep(basic_client::types::DeepFilter {
+            kind: "wide".to_owned(),
+            limit: Some(3),
+        })
+        .reserved("a/b?c".to_owned());
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client
+        .serialize_styles(
+            vec!["one".to_owned(), "a,b".to_owned()],
+            vec!["x".to_owned(), "y".to_owned()],
+            "a/b?c#d%e".to_owned(),
+            Some(params),
+        )
+        .unwrap();
+
+    server.join().unwrap();
+}
+
+/// The exact bytes of an `application/x-www-form-urlencoded` body built from an Encoding Object.
+///
+/// A property that declares `style` switches to RFC 6570 mode (its `contentType` becomes inert);
+/// one that does not stays in media-type mode and is rendered by its declared content type.
+#[test]
+fn form_urlencoded_body_bytes_follow_the_encoding_object() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+        let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+
+        assert!(
+            request.contains("content-type: application/x-www-form-urlencoded\r\n"),
+            "{request}"
+        );
+        // `name` is a plain text property; `tags` declared `pipeDelimited` so it joins with `%7C`;
+        // `blob` declared `application/json` and is therefore a JSON document, form-encoded.
+        // A space is `%20`, not `+`: the specification defers to query-parameter serialization
+        // (RFC 6570), and every urlencoded parser decodes `%20` and `+` alike.
+        assert_eq!(
+            body,
+            "name=Ada%20Lovelace&tags=a%7Cb&blob=%7B%22kind%22%3A%22wide%22%2C%22limit%22%3A3%7D",
+            "{request}"
+        );
+
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client
+        .submit_form(&basic_client::types::RequestBody75618f63 {
+            name: "Ada Lovelace".to_owned(),
+            tags: vec!["a".to_owned(), "b".to_owned()],
+            blob: basic_client::types::DeepFilter {
+                kind: "wide".to_owned(),
+                limit: Some(3),
+            },
+        })
+        .unwrap();
+
+    server.join().unwrap();
+}
+
+/// Every multipart part carries a resolved `Content-Type`: the specification's defaulting table
+/// picks `application/octet-stream` for a binary property, `text/plain` for a scalar, and
+/// `application/json` for an object or array.
+#[test]
+fn multipart_parts_carry_their_resolved_content_types() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+
+        assert!(
+            request.contains("content-type: multipart/form-data; boundary="),
+            "{request}"
+        );
+        for (part, content_type) in [
+            ("file", "application/octet-stream"),
+            ("caption", "text/plain"),
+            ("tags", "application/json"),
+        ] {
+            let name = format!("name=\"{part}\"");
+            let position = request.find(&name).unwrap_or_else(|| panic!("{request}"));
+            let rest = &request[position..];
+            let header = rest.split("\r\n\r\n").next().unwrap();
+            assert!(
+                header.contains(&format!("Content-Type: {content_type}")),
+                "part `{part}` must declare {content_type}: {header}"
+            );
+        }
+
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client
+        .upload_file(&basic_client::types::RequestBody {
+            file: bytes::Bytes::from_static(b"\x00\x01binary"),
+            caption: "a caption".to_owned(),
+            count: None,
+            tags: Some(vec!["x".to_owned()]),
+        })
         .unwrap();
 
     server.join().unwrap();
@@ -1049,10 +1232,7 @@ fn rejects_openapi_30_without_conversion() {
     )
     .unwrap();
 
-    let report = spargen::check(&Config::new(
-        Utf8PathBuf::from_path_buf(spec).unwrap(),
-        Utf8PathBuf::from("unused.rs"),
-    ));
+    let report = spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap()));
 
     assert_eq!(report.outcome, Outcome::Rejected);
     assert!(report
@@ -1133,6 +1313,84 @@ fn assert_reconnect_policy_is_public<P: ReconnectPolicy>() {}
             || flat.contains("support::EventStream<types::AdminEvent>"),
         "SSE contentSchema must type EventStream as the JSON payload: {flat}"
     );
+
+    // Wire-level 3.2 coverage: `in: querystring`, `style: cookie`, typed server variables, and a
+    // typed response-header accessor, all against a real socket. Without this the 3.2 constructs
+    // are only compile-verified, and a construct can compile while sending the wrong bytes.
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/wire.rs"),
+        r##"#![cfg(feature = "blocking")]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+#[test]
+fn oas32_constructs_reach_the_wire() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+        let request_line = request.lines().next().unwrap();
+
+        // `in: querystring` with `content: application/x-www-form-urlencoded` serializes the whole
+        // object into the query string.
+        assert!(request_line.starts_with("GET /records?term="), "{request}");
+        assert!(request_line.contains("term=a%20b"), "{request}");
+        // `style: cookie` sends the value verbatim — the one cookie style that never encodes.
+        assert!(request.contains("cookie: session=a/b\r\n"), "{request}");
+
+        let body = r#"[{"id":"r1"}]"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nX-Total-Count: 42\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    });
+
+    // A templated server resolves with every variable at its declared default, and the typed enum
+    // makes an out-of-enum region unconstructible.
+    assert_eq!(oas32_client::servers::default_url(), "https://us.example.com/v1");
+    assert_eq!(
+        oas32_client::servers::Server0::new()
+            .region(oas32_client::servers::Server0Region::Eu)
+            .version("v2")
+            .url(),
+        "https://eu.example.com/v2"
+    );
+
+    let params = oas32_client::ListRecordsParams::default()
+        .filter(oas32_client::types::Query { term: Some("a b".to_owned()) })
+        .session("a/b".to_owned());
+    let client = oas32_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    let response = client.list_records(Some(params)).unwrap();
+
+    // Documented response headers are read through a typed accessor, as an explicit second step —
+    // a malformed header can never turn a successful call into a failure.
+    let headers = oas32_client::ListRecordsStatus200Headers::from_response(&response).unwrap();
+    assert_eq!(headers.x_total_count, 42);
+    assert_eq!(response.into_inner()[0].id, "r1");
+
+    server.join().unwrap();
+}
+"##,
+    )
+    .unwrap();
+
+    let status = Command::new("cargo")
+        .args(["test", "--features", "blocking", "--test", "wire"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the OpenAPI 3.2 wire round-trip must pass with --features blocking"
+    );
 }
 
 #[test]
@@ -1141,15 +1399,14 @@ fn omit_overlay_removes_unsupported_operation() {
     let spec = temp.path().join("openapi.yaml");
     std::fs::write(&spec, SPEC_WITH_UNSUPPORTED_OPERATION).unwrap();
     let out = temp.path().join("client.rs");
-    let mut config = Config::new(
-        Utf8PathBuf::from_path_buf(spec).unwrap(),
-        Utf8PathBuf::from_path_buf(out).unwrap(),
-    );
-    config.omit = spargen::omit! {
-        operations {
-            post "/upload";
-        }
-    };
+    let config = Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap())
+        .omit(spargen::omit! {
+            operations {
+                post "/upload";
+            }
+        })
+        .build(Utf8PathBuf::from_path_buf(out).unwrap())
+        .cargo(CargoIntegration::Off);
 
     let report = spargen::generate(&config);
 
@@ -1446,6 +1703,16 @@ info:
   version: 1.0.0
 servers:
   - url: https://example.com/api
+  # A templated server whose URL splits into single-character literal segments (`:` and `/`).
+  # Rendering one of those with `push_str` trips `clippy::single_char_add_str`, and generated code
+  # must pass `-D warnings` in the consuming crate — which the clippy gate below enforces.
+  - url: https://{host}:{port}/{stage}
+    variables:
+      host: { default: api.example.com }
+      port: { default: "443" }
+      stage:
+        default: v1
+        enum: [v1, v2]
 paths:
   /files:
     get:
@@ -1811,6 +2078,112 @@ paths:
             text/event-stream:
               schema:
                 $ref: "#/components/schemas/ChatChunk"
+  # The complete RFC 6570 style table on ONE request, so the wire test below can assert every
+  # style, `explode` setting, and `allowReserved` in a single request line. The invariant under
+  # test: a style's delimiters are emitted literally while every data byte is percent-encoded, so a
+  # joining `,` stays distinguishable from a `,` inside a value.
+  /styles/{matrix}/{label}/{raw}:
+    get:
+      operationId: serializeStyles
+      parameters:
+        - name: matrix
+          in: path
+          required: true
+          style: matrix
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: label
+          in: path
+          required: true
+          style: label
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        # A path value carrying every character that would change the route if it were spliced in
+        # raw: a segment separator, a query separator, a fragment separator, and a stray percent.
+        - name: raw
+          in: path
+          required: true
+          schema: { type: string }
+        - name: space
+          in: query
+          style: spaceDelimited
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: pipe
+          in: query
+          style: pipeDelimited
+          explode: false
+          schema:
+            type: array
+            items: { type: string }
+        - name: deep
+          in: query
+          style: deepObject
+          explode: true
+          schema:
+            $ref: "#/components/schemas/DeepFilter"
+        # `allowReserved: true` means reserved characters pass through unencoded — the one place a
+        # `/` in a query value is NOT `%2F`.
+        - name: reserved
+          in: query
+          allowReserved: true
+          schema: { type: string }
+      responses:
+        "204": { description: No Content }
+  # An `application/x-www-form-urlencoded` body with an Encoding Object per property. `tags` opts
+  # into RFC 6570 mode (`style` present ⇒ `contentType` is inert); `blob` stays in media-type mode
+  # and is JSON-encoded because its declared content type says so.
+  /forms:
+    post:
+      operationId: submitForm
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [name, tags, blob]
+              properties:
+                name: { type: string }
+                tags:
+                  type: array
+                  items: { type: string }
+                blob:
+                  $ref: "#/components/schemas/DeepFilter"
+            encoding:
+              tags:
+                style: pipeDelimited
+                explode: false
+              blob:
+                contentType: application/json
+      responses:
+        "204": { description: No Content }
+  # Documented response headers whose schemas are NAMED components. The generated header struct
+  # lives beside `Client`, not inside `types`, so an unqualified type path here does not resolve —
+  # a bug that only a named (non-primitive) header schema exposes, and only at compile time.
+  /documented-headers:
+    get:
+      operationId: documentedHeaders
+      responses:
+        "204":
+          description: No Content
+          headers:
+            X-Rate-Limit:
+              required: true
+              description: Requests remaining in the current window.
+              schema:
+                $ref: "#/components/schemas/WorkflowId"
+            X-Trace-Ids:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Mode"
 components:
   securitySchemes:
     bearer:
@@ -1821,6 +2194,14 @@ components:
       in: header
       name: X-Api-Key
   schemas:
+    # A flat object, so `deepObject` is defined for it (the specification leaves nested objects
+    # and arrays inside a deepObject value undefined, and spargen rejects those).
+    DeepFilter:
+      type: object
+      required: [kind]
+      properties:
+        kind: { type: string }
+        limit: { type: integer }
     CollisionPayload:
       type: string
     BlankDocs:
@@ -2203,10 +2584,10 @@ components:
           xml: { name: "ReceiptCode" }
         note:
           type: string
-          xml: { namespace: "urn:example:receipt" }
     # JSON-only schema carrying `xml` metadata (Issue #13 regression guard): the same hint shapes as
     # `XmlOrder`, but reachable only from a JSON body — the rename must be suppressed so JSON is
-    # correct.
+    # correct. Its `xml.namespace` is also the W006 case: on a type never serialized as XML the
+    # hint genuinely has no effect, so it warns rather than rejecting.
     JsonMeta:
       type: object
       required: [id, sku]
@@ -2217,6 +2598,9 @@ components:
         sku:
           type: string
           xml: { name: "ProductSku" }
+        note:
+          type: string
+          xml: { namespace: "urn:example:receipt" }
 "##;
 
 const SPEC_WITH_UNSUPPORTED_OPERATION: &str = r#"
@@ -2248,8 +2632,17 @@ openapi: 3.2.0
 info:
   title: Records
   version: 1.0.0
+# A templated server with an enumerated variable: the generated `servers` module must offer a typed
+# builder whose default resolves with no arguments, and whose enum makes an illegal region
+# unconstructible.
 servers:
-  - url: https://example.com/api
+  - url: https://{region}.example.com/{version}
+    variables:
+      region:
+        default: us
+        enum: [us, eu]
+      version:
+        default: v1
 paths:
   /records:
     get:
@@ -2261,9 +2654,18 @@ paths:
             application/x-www-form-urlencoded:
               schema:
                 $ref: "#/components/schemas/Query"
+        # `style: cookie` is 3.2-only: the cookie value is sent verbatim, never percent-encoded.
+        - name: session
+          in: cookie
+          style: cookie
+          schema: { type: string }
       responses:
         "200":
           description: ok
+          headers:
+            X-Total-Count:
+              required: true
+              schema: { type: integer }
           content:
             application/json:
               schema:
@@ -2407,7 +2809,7 @@ fn macro_preview_is_deterministic() {
     std::fs::write(&spec, BASIC_SPEC).unwrap();
     let out = Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap();
 
-    let config = Config::new(spec, out.clone());
+    let config = Spec::new(spec);
     let preview = spargen::__private::preview(&config);
     assert_eq!(
         preview.report.outcome,
@@ -2446,17 +2848,14 @@ serde_json = "1.0.151"
     )
     .unwrap();
     let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
-    let output = Utf8PathBuf::from_path_buf(temp.path().join("unused.rs")).unwrap();
     std::fs::write(
         &spec,
         "openapi: 3.1.0\ninfo: { title: Core, version: 1.0.0 }\npaths: {}\n",
     )
     .unwrap();
 
-    let core = spargen::__private::preview_for_macro(
-        &Config::new(spec.clone(), output.clone()),
-        manifest.to_str().unwrap(),
-    );
+    let core =
+        spargen::__private::preview_for_macro(&Spec::new(spec.clone()), manifest.to_str().unwrap());
     assert_eq!(
         core.report.outcome,
         Outcome::Generated,
@@ -2518,10 +2917,8 @@ components:
     )
     .unwrap();
 
-    let conditional = spargen::__private::preview_for_macro(
-        &Config::new(spec, output),
-        manifest.to_str().unwrap(),
-    );
+    let conditional =
+        spargen::__private::preview_for_macro(&Spec::new(spec), manifest.to_str().unwrap());
     assert_eq!(conditional.report.outcome, Outcome::Rejected);
     let messages = conditional
         .report
@@ -2567,7 +2964,7 @@ fn preview_of_rejected_spec_has_no_files() {
     )
     .unwrap();
 
-    let preview = spargen::__private::preview(&Config::new(spec, "unused.rs"));
+    let preview = spargen::__private::preview(&Spec::new(spec));
     assert_eq!(preview.report.outcome, Outcome::Rejected);
     assert!(
         preview.contents.is_none(),

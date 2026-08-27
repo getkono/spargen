@@ -166,6 +166,9 @@ pub enum UnionStrategy {
         tags: Vec<Option<String>>,
         /// The JSON category per non-object variant, parallel to [`Union::variants`].
         categories: Vec<Option<JsonCategory>>,
+        /// OpenAPI 3.2 `defaultMapping`: the variant used when the tag is absent or unrecognized.
+        /// Without one, either case is a deserialization error.
+        default_variant: Option<usize>,
     },
     /// No discriminator, but the variants were proven statically disjoint → a custom
     /// content-inspecting `Deserialize`/`Serialize`. Each variant carries the feature that
@@ -287,6 +290,11 @@ pub struct XmlField {
     /// `xml.attribute: true`: serialize this field as an XML attribute (`@name`) rather than a child
     /// element.
     pub attribute: bool,
+    /// XML hints that change the wire but have no faithful mapping — `namespace`, `prefix`,
+    /// `wrapped`, and the 3.2 node types other than `element`/`attribute`. Their disposition
+    /// depends on whether the owning type is ever serialized as XML, which is only known once the
+    /// whole type graph exists, so it is decided after lowering.
+    pub unsupported: Vec<String>,
 }
 
 impl XmlField {

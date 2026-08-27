@@ -197,9 +197,18 @@ impl SpannedMap {
     }
 }
 
+/// Decode one JSON Pointer reference token.
+///
+/// A `$ref` carries its pointer in a URI fragment, so characters that are not legal there are
+/// percent-encoded — `#/paths/~1pets~1%7BpetId%7D` is the spec-mandated spelling of the path item
+/// `/pets/{petId}`. Percent-decoding therefore runs *per token*, after splitting on `/` and before
+/// unescaping `~1`/`~0`. Decoding the whole fragment first would make a `%2F` behave as a pointer
+/// separator instead of a literal `/`; per-token decoding resolves a strict superset and matches
+/// what the wider OpenAPI toolchain does.
 fn unescape_pointer_token(token: &str) -> Option<String> {
+    let decoded = percent_decode(token)?;
     let mut out = String::new();
-    let mut chars = token.chars();
+    let mut chars = decoded.chars();
     while let Some(ch) = chars.next() {
         if ch == '~' {
             match chars.next()? {
@@ -212,4 +221,37 @@ fn unescape_pointer_token(token: &str) -> Option<String> {
         }
     }
     Some(out)
+}
+
+/// Percent-decode a pointer token, returning `None` for a malformed escape or non-UTF-8 result so
+/// the reference reports as unresolved rather than panicking.
+fn percent_decode(token: &str) -> Option<String> {
+    if !token.contains('%') {
+        return Some(token.to_owned());
+    }
+    let bytes = token.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = bytes.get(index + 1)?;
+            let low = bytes.get(index + 2)?;
+            let value = (hex_value(*high)? << 4) | hex_value(*low)?;
+            out.push(value);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }

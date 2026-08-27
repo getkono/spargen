@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, Span};
 use crate::runtime_contract::RuntimeRequirements;
 use crate::source::{sha256_hex, InputBundle};
-use crate::{Code, Config, OmitRule};
+use crate::{Build, Code, OmitRule, Spec};
 
 const CACHE_FORMAT: u32 = 2;
 const INPUT_PREFIX: &str = "// input-sha256: ";
@@ -20,9 +20,9 @@ pub(crate) struct InputSnapshot {
 }
 
 impl InputSnapshot {
-    pub fn load(config: &Config) -> Result<Self, Vec<Diagnostic>> {
-        let mut diagnostics = Diagnostics::new(config.batch_cap);
-        let bundle = match InputBundle::load(&config.spec, &mut diagnostics) {
+    pub fn load(spec: &Spec) -> Result<Self, Vec<Diagnostic>> {
+        let mut diagnostics = Diagnostics::new(spec.batch_cap);
+        let bundle = match InputBundle::load(&spec.path, &mut diagnostics) {
             Ok(bundle) => bundle,
             Err(_) => return Err(diagnostics.items().to_vec()),
         };
@@ -31,7 +31,7 @@ impl InputSnapshot {
             .source_inputs()
             .map(|(path, bytes)| (path.to_path_buf(), bytes.to_vec()))
             .collect::<Vec<_>>();
-        let spec_dir = config.spec.parent().unwrap_or_else(|| Utf8Path::new(""));
+        let spec_dir = spec.path.parent().unwrap_or_else(|| Utf8Path::new(""));
         let lock = spec_dir.join("spargen.lock");
         if lock.is_file() {
             match std::fs::read(&lock) {
@@ -52,16 +52,16 @@ impl InputSnapshot {
             &mut fingerprint,
             env!("SPARGEN_BUILD_FINGERPRINT").as_bytes(),
         );
-        append(&mut fingerprint, config.spec.as_str().as_bytes());
-        append(&mut fingerprint, &[u8::from(config.features.uuid)]);
-        append(&mut fingerprint, &[u8::from(config.features.time)]);
+        append(&mut fingerprint, spec.path.as_str().as_bytes());
+        append(&mut fingerprint, &[u8::from(spec.uuid)]);
+        append(&mut fingerprint, &[u8::from(spec.time)]);
         append(
             &mut fingerprint,
-            &(config.error_body_cap as u64).to_be_bytes(),
+            &(spec.error_body_cap as u64).to_be_bytes(),
         );
-        append(&mut fingerprint, &(config.batch_cap as u64).to_be_bytes());
-        append(&mut fingerprint, &[u8::from(config.carve)]);
-        for rule in &config.omit.rules {
+        append(&mut fingerprint, &(spec.batch_cap as u64).to_be_bytes());
+        append(&mut fingerprint, &[u8::from(spec.carve)]);
+        for rule in &spec.omit.rules {
             match rule {
                 OmitRule::Path { path } => {
                     append(&mut fingerprint, b"path");
@@ -79,7 +79,7 @@ impl InputSnapshot {
                 }
                 OmitRule::Pointer { file, pointer } => {
                     append(&mut fingerprint, b"pointer");
-                    append(&mut fingerprint, file.unwrap_or("").as_bytes());
+                    append(&mut fingerprint, file.as_deref().unwrap_or("").as_bytes());
                     append(&mut fingerprint, pointer.as_bytes());
                 }
             }
@@ -96,11 +96,11 @@ impl InputSnapshot {
     }
 }
 
-pub(crate) fn cargo_directives(config: &Config, snapshot: Option<&InputSnapshot>) {
+pub(crate) fn cargo_directives(build: &Build, snapshot: Option<&InputSnapshot>) {
     let mut paths = snapshot
         .map(|snapshot| snapshot.paths.clone())
-        .unwrap_or_else(|| vec![config.spec.clone()]);
-    paths.push(config.output.clone());
+        .unwrap_or_else(|| vec![build.spec.path.clone()]);
+    paths.push(build.output.clone());
     paths.sort();
     paths.dedup();
     for path in paths {
@@ -364,10 +364,10 @@ impl CachedLoc {
 #[cfg(test)]
 mod tests {
     use super::{cache_path, finalized, verified_output, InputSnapshot};
-    use crate::{Config, Outcome};
+    use crate::{Build, CargoIntegration, Outcome, Spec};
     use camino::Utf8PathBuf;
 
-    fn fixture() -> (tempfile::TempDir, Config) {
+    fn fixture() -> (tempfile::TempDir, Build) {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("openapi.yaml");
         let schema = temp.path().join("schema.yaml");
@@ -383,31 +383,32 @@ components:
         )
         .unwrap();
         std::fs::write(&schema, "type: string\n").unwrap();
-        let config = Config::new(
-            Utf8PathBuf::from_path_buf(root).unwrap(),
-            Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap(),
-        );
-        (temp, config)
+        let build = Spec::new(Utf8PathBuf::from_path_buf(root).unwrap())
+            .build(Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap())
+            // Not a build script: the cargo integration has nothing to integrate with, and
+            // saying so keeps these reports free of `W013`.
+            .cargo(CargoIntegration::Off);
+        (temp, build)
     }
 
     #[test]
     fn fingerprint_covers_transitive_files_lock_and_config() {
         let (temp, config) = fixture();
-        let initial = InputSnapshot::load(&config).unwrap();
+        let initial = InputSnapshot::load(&config.spec).unwrap();
         assert_eq!(initial.paths.len(), 2);
 
         std::fs::write(temp.path().join("schema.yaml"), "type: integer\n").unwrap();
-        let transitive_changed = InputSnapshot::load(&config).unwrap();
+        let transitive_changed = InputSnapshot::load(&config.spec).unwrap();
         assert_ne!(initial.digest, transitive_changed.digest);
 
         std::fs::write(temp.path().join("spargen.lock"), "version = 1\n").unwrap();
-        let lock_changed = InputSnapshot::load(&config).unwrap();
+        let lock_changed = InputSnapshot::load(&config.spec).unwrap();
         assert_ne!(transitive_changed.digest, lock_changed.digest);
         assert_eq!(lock_changed.paths.len(), 3);
 
         let mut configured = config;
-        configured.error_body_cap += 1;
-        let config_changed = InputSnapshot::load(&configured).unwrap();
+        configured.spec = configured.spec.clone().error_body_cap(1);
+        let config_changed = InputSnapshot::load(&configured.spec).unwrap();
         assert_ne!(lock_changed.digest, config_changed.digest);
     }
 
@@ -439,14 +440,14 @@ components:
         let (temp, config) = fixture();
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
-        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir), false);
+        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(first.outcome, Outcome::Generated, "{first:#?}");
         let original = std::fs::read_to_string(&config.output).unwrap();
         let record = cache_path(&cache_dir, &config.output);
         assert!(record.is_file(), "generation must seed the target cache");
 
         std::fs::remove_file(&record).unwrap();
-        let seeded = crate::generate_with_cache_dir(&config, Some(&cache_dir), false);
+        let seeded = crate::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(seeded.outcome, Outcome::Generated, "{seeded:#?}");
         assert!(
             record.is_file(),
@@ -455,12 +456,12 @@ components:
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
 
         std::fs::write(&config.output, format!("{original}// manual edit\n")).unwrap();
-        let repaired = crate::generate_with_cache_dir(&config, Some(&cache_dir), false);
+        let repaired = crate::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(repaired.outcome, Outcome::Generated, "{repaired:#?}");
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
 
         std::fs::remove_file(&config.output).unwrap();
-        let restored = crate::generate_with_cache_dir(&config, Some(&cache_dir), false);
+        let restored = crate::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(restored.outcome, Outcome::Generated, "{restored:#?}");
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
     }

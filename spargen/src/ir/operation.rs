@@ -100,6 +100,10 @@ pub struct Parameter {
     pub required: bool,
     /// The serialization style.
     pub style: ParamStyle,
+    /// `allowReserved: true` — RFC 6570 reserved expansion. Orthogonal to the style: it selects a
+    /// percent-encoding set rather than a delimiter layout, and it is a no-op wherever the
+    /// location does not percent-encode at all (headers, `style: cookie`).
+    pub allow_reserved: bool,
     /// Whether array/object values use the style's exploded representation.
     pub explode: bool,
     /// `deprecated` → `#[deprecated]`.
@@ -122,14 +126,35 @@ pub enum ParamLoc {
 }
 
 /// The serialization style of a parameter (matrix: Parameters → S).
-#[derive(Debug, Clone)]
+///
+/// Which `(style, in)` pairs are legal is enforced by the official document schema before
+/// lowering, so this enum only carries what codegen must emit.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParamStyle {
-    /// `style: simple`.
+    /// `style: simple` — path and header. RFC 6570 §3.2.2.
     Simple,
-    /// `style: form`.
+    /// `style: matrix` — path only. Leading `;`. RFC 6570 §3.2.7.
+    Matrix,
+    /// `style: label` — path only. Leading `.`. RFC 6570 §3.2.5.
+    Label,
+    /// `style: form` — query and cookie. RFC 6570 §3.2.8.
     Form,
+    /// `style: spaceDelimited` / `pipeDelimited` — query, array/object, `explode: false` only.
+    Delimited(Delimiter),
+    /// `style: deepObject` — query, object only. `explode` has no effect on this style.
+    DeepObject,
     /// OpenAPI 3.2 cookie syntax (form-shaped values joined with Cookie delimiters, no escaping).
     Cookie,
     /// A `content`-typed parameter, serialized in the given media type.
     Content(MediaType),
+}
+
+/// The delimiter of the non-RFC 6570 query styles. Always emitted percent-encoded, since neither
+/// a bare space nor a bare `|` is legal in a query string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delimiter {
+    /// `style: spaceDelimited`.
+    Space,
+    /// `style: pipeDelimited`.
+    Pipe,
 }

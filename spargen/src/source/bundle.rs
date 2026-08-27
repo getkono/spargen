@@ -160,8 +160,9 @@ impl InputBundle {
         } else if fragment.starts_with('/') {
             JsonPointer::from(fragment.to_owned())
         } else {
-            // Named JSON Schema anchors are indexed separately by the OAS frontend. Do not mistake
-            // one for a JSON Pointer.
+            // A non-empty fragment that is not a JSON Pointer is a named JSON Schema anchor
+            // (`$anchor`), which spargen rejects rather than resolves (`E004`). Do not mistake one
+            // for a pointer.
             return None;
         };
         Some((file, pointer))

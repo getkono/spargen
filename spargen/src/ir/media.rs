@@ -1,4 +1,4 @@
-use super::Ty;
+use super::{ParamStyle, Ty};
 
 /// The wire codec selected for a supported request/response media type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +68,54 @@ pub struct RequestBody {
     pub content_type: String,
     /// The body's type, or `None` for an untyped/byte body.
     pub ty: Option<Ty>,
+    /// Whether the body is `required`. A required body is a plain argument; an optional one is
+    /// passed as `Option<&T>` and omitted from the request when absent.
+    pub required: bool,
+    /// Per-property wire encoding for a form or multipart body. Always fully resolved — one entry
+    /// per body property, in field order — so the runtime never has to infer a default.
+    pub encoding: BodyEncoding,
+}
+
+/// Per-property wire encoding for an `application/x-www-form-urlencoded` or
+/// `multipart/form-data` request body (matrix: Media → Encoding Object).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BodyEncoding {
+    /// One entry per body-schema property, in the body struct's field order.
+    pub properties: Vec<PropertyEncoding>,
+}
+
+/// How one property of a form or multipart body is rendered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyEncoding {
+    /// The wire property name — the form field name, or the multipart part name.
+    pub name: String,
+    pub mode: EncodingMode,
+    /// Literal extra part headers (multipart only), with `Content-Type` already removed because
+    /// the specification describes it separately.
+    pub headers: Vec<(String, String)>,
+}
+
+/// The Encoding Object's mode switch.
+///
+/// The specification keys this on *presence*: any explicit `style`/`explode`/`allowReserved`
+/// selects RFC 6570 query-style serialization and makes `contentType` inert, while all three
+/// absent selects media-type serialization under `contentType` (explicit or defaulted).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EncodingMode {
+    /// Media-type mode: the value is rendered in `content_type` by `codec`.
+    Media {
+        /// The single concrete media type this property is sent as.
+        content_type: String,
+        /// The codec that renders it.
+        codec: MediaType,
+    },
+    /// RFC 6570 query-style mode.
+    Style {
+        /// Restricted by the document schema to form/spaceDelimited/pipeDelimited/deepObject.
+        style: ParamStyle,
+        explode: bool,
+        allow_reserved: bool,
+    },
 }
 
 /// A response status selector (matrix: Responses).
@@ -89,8 +137,8 @@ impl StatusSpec {
     }
 }
 
-/// A typed response for one status selector. Response headers stay reachable through
-/// `ResponseValue::headers`; typed header accessors are not generated.
+/// A typed response for one status selector. Documented headers get typed accessors; every header
+/// stays reachable raw through `ResponseValue::headers`.
 #[derive(Debug, Clone)]
 pub struct Response {
     /// The response body type, if any.
@@ -102,6 +150,42 @@ pub struct Response {
     /// framing of the streamed items; `None` for a whole-body response. The `body` is the item
     /// type `T` when this is `Some`.
     pub stream: Option<Framing>,
+    /// Documented response headers, in source order. A `Content-Type` entry is dropped during
+    /// lowering, because the specification says it is ignored.
+    pub headers: Vec<ResponseHeader>,
+}
+
+/// One documented response header.
+#[derive(Debug, Clone)]
+pub struct ResponseHeader {
+    /// The header name, as declared.
+    pub name: String,
+    /// The value type.
+    pub ty: Ty,
+    /// Whether the header is documented as always present.
+    pub required: bool,
+    /// `explode` for the `simple` style; the default is `false`.
+    pub explode: bool,
+    /// The wire shape, derived from `ty` — `simple` is lossy, so the shape cannot be recovered
+    /// from the text and must travel with it.
+    pub shape: HeaderShape,
+    /// `deprecated` → `#[deprecated]` on the accessor field.
+    pub deprecated: bool,
+    /// Documentation carried onto the generated field.
+    pub docs: super::Docs,
+}
+
+/// The wire shape of a documented header value. Mirrors the runtime enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderShape {
+    /// A single scalar.
+    Scalar,
+    /// A comma-separated list.
+    Array,
+    /// Alternating `key,value` pairs, or `key=value` when exploded.
+    Object,
+    /// A `content`-typed header carrying JSON.
+    Json,
 }
 
 /// The full set of responses for an operation: per-status entries plus an optional `default`.
@@ -345,6 +429,7 @@ mod tests {
             media: body.map(|_| super::MediaType::Json),
             body: body.map(ty),
             stream: None,
+            headers: Vec::new(),
         }
     }
 

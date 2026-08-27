@@ -197,20 +197,29 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
     let raw = args.spec.value();
     let spec_path = resolve_spec_path(&raw);
 
-    let mut config = spargen::Config::new(
-        spec_path.clone(),
-        // Never written — the private preview bridge renders in memory.
-        "generated.rs",
-    );
-    config.features.uuid = !args.no_uuid;
-    config.features.time = !args.no_time;
-    config.carve = args.carve;
-    config.omit = args.omit.clone();
+    // The config file is discovered beside the spec, then macro arguments override it — the same
+    // precedence the CLI and `build.rs` use.
+    let mut config = match spargen::Spec::new(spec_path.clone()).discover_config_file() {
+        Ok(spec) => spec,
+        Err(error) => return Err(syn::Error::new(args.spec.span(), error.to_string())),
+    };
+    if args.no_uuid {
+        config = config.uuid(false);
+    }
+    if args.no_time {
+        config = config.time(false);
+    }
+    if args.carve {
+        config = config.carve(true);
+    }
+    for rule in &args.omit.rules {
+        config = config.omit_rule(rule.clone());
+    }
     if let Some(cap) = args.error_body_cap {
-        config.error_body_cap = cap;
+        config = config.error_body_cap(cap);
     }
     if let Some(cap) = args.batch_cap {
-        config.batch_cap = cap;
+        config = config.batch_cap(cap);
     }
 
     // Keep spargen's codegen (and the tokenization below) off the compiler bridge; restored on drop.
@@ -295,7 +304,7 @@ fn parse_omit(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result<()> {
                 if pointers != "pointers" {
                     return Err(syn::Error::new(pointers.span(), "expected `pointers`"));
                 }
-                parse_pointers(&file_body, omit, Some(leak(file.value())))?;
+                parse_pointers(&file_body, omit, Some(file.value().into()))?;
             }
             other => {
                 return Err(syn::Error::new(
@@ -328,7 +337,7 @@ fn parse_operations(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
         body.parse::<Token![;]>()?;
         omit.rules.push(spargen::OmitRule::Operation {
             method,
-            path: leak(path.value()),
+            path: path.value().into(),
         });
     }
     Ok(())
@@ -341,7 +350,7 @@ fn parse_paths(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result<()> 
         let path: LitStr = body.parse()?;
         body.parse::<Token![;]>()?;
         omit.rules.push(spargen::OmitRule::Path {
-            path: leak(path.value()),
+            path: path.value().into(),
         });
     }
     Ok(())
@@ -352,24 +361,26 @@ fn parse_components(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
     braced!(body in input);
     while !body.is_empty() {
         let kind: Ident = body.parse()?;
-        let kind = match kind.to_string().as_str() {
-            "schemas" => spargen::ComponentKind::Schemas,
-            "responses" => spargen::ComponentKind::Responses,
-            "parameters" => spargen::ComponentKind::Parameters,
-            "request_bodies" => spargen::ComponentKind::RequestBodies,
-            "headers" => spargen::ComponentKind::Headers,
-            "security_schemes" => spargen::ComponentKind::SecuritySchemes,
-            _ => return Err(syn::Error::new(kind.span(), "unsupported component kind")),
-        };
+        // One shared parser, so `omit!`, the CLI, and `spargen.toml` accept the same spellings.
+        let kind = kind
+            .to_string()
+            .parse::<spargen::ComponentKind>()
+            .map_err(|error| {
+                syn::Error::new(
+                    kind.span(),
+                    format!(
+                        "{error}; expected one of \
+                         schemas/responses/parameters/request_bodies/headers/security_schemes"
+                    ),
+                )
+            })?;
         let names;
         braced!(names in body);
         while !names.is_empty() {
             let name: LitStr = names.parse()?;
             names.parse::<Token![;]>()?;
-            omit.rules.push(spargen::OmitRule::Component {
-                kind,
-                name: leak(name.value()),
-            });
+            omit.rules
+                .push(spargen::OmitRule::component(kind, name.value()));
         }
     }
     Ok(())
@@ -378,7 +389,7 @@ fn parse_components(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
 fn parse_pointers(
     input: ParseStream,
     omit: &mut spargen::Omit,
-    file: Option<&'static str>,
+    file: Option<std::borrow::Cow<'static, str>>,
 ) -> syn::Result<()> {
     let body;
     braced!(body in input);
@@ -386,15 +397,11 @@ fn parse_pointers(
         let pointer: LitStr = body.parse()?;
         body.parse::<Token![;]>()?;
         omit.rules.push(spargen::OmitRule::Pointer {
-            file,
-            pointer: leak(pointer.value()),
+            file: file.clone(),
+            pointer: pointer.value().into(),
         });
     }
     Ok(())
-}
-
-fn leak(value: String) -> &'static str {
-    Box::leak(value.into_boxed_str())
 }
 
 /// Resolve a spec path relative to the **consumer crate's** manifest directory (as `build.rs` and
@@ -442,24 +449,15 @@ mod tests {
         assert_eq!(args.omit.rules.len(), 5);
         assert_eq!(
             args.omit.rules[0],
-            OmitRule::Operation {
-                method: OmitMethod::Post,
-                path: "/legacy"
-            }
+            OmitRule::operation(OmitMethod::Post, "/legacy")
         );
         assert_eq!(
             args.omit.rules[2],
-            OmitRule::Component {
-                kind: ComponentKind::Schemas,
-                name: "Legacy"
-            }
+            OmitRule::component(ComponentKind::Schemas, "Legacy")
         );
         assert_eq!(
             args.omit.rules[4],
-            OmitRule::Pointer {
-                file: Some("shared.yaml"),
-                pointer: "/Legacy"
-            }
+            OmitRule::pointer(Some("shared.yaml".into()), "/Legacy")
         );
     }
 }

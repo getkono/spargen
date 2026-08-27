@@ -130,6 +130,7 @@ generated client turns the `xml` feature on only when its spec uses an `applicat
 ## Format mappings (`uuid` / `time`)
 
 `format: uuid` maps to the `uuid` crate and `format: date-time` / `date` to `time`, as opt-out
-mappings in generated code. Set `config.features.uuid` / `config.features.time` to `false` (or use
-the macro's `no_uuid` / `no_time`) to fall back to `String`. The corresponding dependency is
+mappings in generated code. Call `Spec::uuid(false)` / `Spec::time(false)` (or use
+the macro's `no_uuid` / `no_time`, or `uuid = false` / `time = false` in `spargen.toml`) to fall
+back to `String`. The corresponding dependency is
 required only when that mapping is enabled and actually occurs in the compiled API.

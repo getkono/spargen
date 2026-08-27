@@ -43,6 +43,10 @@ pub enum RefOr<T> {
 pub struct Reference {
     /// The raw reference string.
     pub reference: String,
+    /// A Reference Object `summary`/`description`, which document the *reference site* rather than
+    /// the target. Retained so the override has a disposition instead of vanishing.
+    pub summary: Option<String>,
+    pub description: Option<String>,
     /// Where the reference occurred, including its source file.
     pub provenance: Provenance,
 }
@@ -54,6 +58,12 @@ pub struct Info {
     pub version: String,
     pub summary: Option<String>,
     pub description: Option<String>,
+    /// `contact.name`/`url`/`email`, flattened into one displayable line.
+    pub contact: Option<String>,
+    /// `license.name` plus its SPDX `identifier` or `url`.
+    pub license: Option<String>,
+    /// `externalDocs.url`, with its description when one is given.
+    pub external_docs: Option<String>,
 }
 
 /// A `servers` entry.
@@ -61,6 +71,21 @@ pub struct Info {
 pub struct Server {
     pub name: Option<String>,
     pub url: String,
+    pub description: Option<String>,
+    /// `variables`: substitutions for the `{braces}` in `url`. Unlike a Schema Object `default`,
+    /// a Server Variable `default` genuinely changes the wire — the specification says it SHALL be
+    /// sent when the caller supplies no alternative.
+    pub variables: IndexMap<String, ServerVariable>,
+    pub provenance: Provenance,
+}
+
+/// An OAS Server Variable Object.
+#[derive(Debug, Clone)]
+pub struct ServerVariable {
+    /// The value sent when the caller supplies none. Required by the document schema.
+    pub default: String,
+    /// The closed set of permitted values, if the document declares one.
+    pub enum_values: Vec<String>,
     pub description: Option<String>,
 }
 
@@ -73,6 +98,11 @@ pub struct Paths {
 /// A `paths` entry: the per-method operations plus path-level shared parameters.
 #[derive(Debug, Clone)]
 pub struct PathItem {
+    /// A Path Item `$ref`, which replaces this item with the referenced one.
+    pub reference: Option<Reference>,
+    /// Structural fields declared alongside a `$ref`. The specification leaves their interaction
+    /// with the referenced item *undefined*, so they are rejected rather than guessed at.
+    pub reference_siblings: Vec<String>,
     /// Operations keyed by HTTP method.
     pub operations: IndexMap<Method, OperationObject>,
     /// Parameters shared across all operations on this path.
@@ -105,6 +135,10 @@ pub struct ParameterObject {
     pub style: Option<String>,
     pub explode: Option<bool>,
     pub allow_reserved: bool,
+    /// `allowEmptyValue`. Deprecated in OpenAPI 3.2 and inert for a typed client: an absent
+    /// optional parameter is simply not sent, so there is no case where a client would choose to
+    /// send an empty string instead.
+    pub allow_empty_value: bool,
     /// A schema-typed parameter …
     pub schema: Option<RefOr<Schema>>,
     /// … or a `content`-typed one (media type → schema).
@@ -117,6 +151,9 @@ pub struct ParameterObject {
 pub struct RequestBodyObject {
     /// Media type → schema.
     pub content: IndexMap<String, MediaTypeObject>,
+    /// `required`, defaulting to `false`. Decides whether the generated method takes the body by
+    /// value or as an `Option`.
+    pub required: bool,
     pub provenance: Provenance,
 }
 
@@ -134,6 +171,8 @@ pub struct ResponseObject {
     pub description: Option<String>,
     /// Media type → schema.
     pub content: IndexMap<String, MediaTypeObject>,
+    /// Documented response headers, keyed by header name.
+    pub headers: IndexMap<String, RefOr<HeaderObject>>,
     pub provenance: Provenance,
 }
 
@@ -158,9 +197,52 @@ pub struct MediaTypeObject {
     /// (`text/event-stream`, `application/x-ndjson`). For a streaming response it supplies the
     /// streamed item type `T`; on a non-streaming media it is meaningless and acknowledged (`W010`).
     pub item_schema: Option<RefOr<Schema>>,
-    /// Explicit OpenAPI Media Type Object encoding fields, retained so lowering can reject them
-    /// after the complete warning audit instead of aborting document parsing early.
-    pub explicit_encodings: Vec<(String, Provenance)>,
+    /// `encoding`: per-property wire encoding, keyed by body-schema property name. Applies only to
+    /// `multipart` and `application/x-www-form-urlencoded` content; the specification says it is
+    /// ignored elsewhere.
+    pub encoding: IndexMap<String, EncodingObject>,
+    /// OpenAPI 3.2 `prefixEncoding`: positional encodings for an array-shaped `multipart` body.
+    pub prefix_encoding: Vec<(EncodingObject, Provenance)>,
+    /// OpenAPI 3.2 `itemEncoding`: the encoding applied to every remaining item of an
+    /// array-shaped `multipart` body.
+    pub item_encoding: Option<(EncodingObject, Provenance)>,
+    pub provenance: Provenance,
+}
+
+/// An OAS Encoding Object: how one property of a form or multipart body reaches the wire.
+///
+/// The three RFC 6570 fields are `Option` because the specification switches modes on their
+/// *presence*, not their value: any one of them explicitly set selects query-style serialization
+/// and makes `contentType` inert; all three absent selects media-type serialization.
+#[derive(Debug, Clone)]
+pub struct EncodingObject {
+    pub content_type: Option<String>,
+    pub headers: IndexMap<String, RefOr<HeaderObject>>,
+    pub style: Option<String>,
+    pub explode: Option<bool>,
+    pub allow_reserved: Option<bool>,
+    /// Nested `encoding`/`prefixEncoding`/`itemEncoding` fields, retained so lowering can reject
+    /// them with a message that names the offending field.
+    pub nested: Vec<(String, Provenance)>,
+    pub provenance: Provenance,
+}
+
+/// An OAS Header Object, as it appears under `encoding.headers` and `response.headers`.
+///
+/// A Header Object *describes* a header rather than carrying a value, so only a schema that pins
+/// one — through `const`, or `default` in its absence — gives a client something to send.
+#[derive(Debug, Clone)]
+pub struct HeaderObject {
+    pub description: Option<String>,
+    pub required: bool,
+    pub deprecated: bool,
+    /// `explode` for the `simple` style. A Header Object may only use `simple`, which the
+    /// document schema already enforces, so the style itself is not modeled.
+    pub explode: Option<bool>,
+    pub schema: Option<RefOr<Schema>>,
+    /// A `content`-typed header, as an alternative to `schema`.
+    pub content: IndexMap<String, MediaTypeObject>,
+    pub provenance: Provenance,
 }
 
 /// `components`. Only the maps spargen consumes are modeled.
@@ -172,6 +254,10 @@ pub struct Components {
     pub request_bodies: IndexMap<String, RefOr<RequestBodyObject>>,
     pub media_types: IndexMap<String, MediaTypeObject>,
     pub security_schemes: IndexMap<String, RefOr<SecuritySchemeObject>>,
+    /// Reusable Path Items, referenced by a Path Item `$ref`.
+    pub path_items: IndexMap<String, PathItem>,
+    /// Reusable Header Objects, referenced from `response.headers` and `encoding.headers`.
+    pub headers: IndexMap<String, RefOr<HeaderObject>>,
 }
 
 /// An OAS Security Scheme Object.
@@ -185,6 +271,7 @@ pub struct SecuritySchemeObject {
     pub location: Option<String>,
     /// `name` (for `apiKey`).
     pub name: Option<String>,
+    pub provenance: Provenance,
 }
 
 /// A `security` requirement: scheme name → required scopes.

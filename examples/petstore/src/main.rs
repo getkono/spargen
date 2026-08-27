@@ -63,20 +63,46 @@ async fn main() {
         .unwrap()
         .with_credential("bearerAuth", Credential::Bearer(SecretString::from(TOKEN)));
 
-    // List with query + header parameters, built via the fluent optional-param setters.
+    // The spec's server is templated (`http://{host}:{port}`), so spargen generates a typed builder
+    // whose variables default to a resolvable URL. The example dials the mock's ephemeral port
+    // instead, but the typed surface is real and is exercised here.
+    assert_eq!(petstore::servers::default_url(), "http://127.0.0.1:0");
+    assert_eq!(
+        petstore::servers::Server0::new()
+            .host("example.test")
+            .port("8443")
+            .url(),
+        "http://example.test:8443"
+    );
+
+    // List with query + header parameters, built via the fluent optional-param setters. `filter` is
+    // a `deepObject`, so each member travels as its own `filter[member]=value` pair.
     let pets = client
         .list_pets(Some(
             petstore::ListPetsParams::default()
                 .limit(10)
                 .status(types::Status::Available)
-                .x_request_id("example-1".to_owned()),
+                .x_request_id("example-1".to_owned())
+                .filter(types::PetFilter {
+                    name: Some("Rex".to_owned()),
+                    tag: None,
+                }),
         ))
         .await
         .expect("list_pets");
     assert_eq!(pets.status(), 200);
+    // A documented response header is read through a typed accessor — an explicit second step, so a
+    // malformed header can never turn a successful call into a failure.
+    let totals = petstore::ListPetsStatus200Headers::from_response(&pets).expect("typed headers");
+    assert_eq!(totals.x_total_count, 1);
     let pets = pets.into_inner();
     assert_eq!(pets.len(), 1);
-    println!("listed {} available pet(s): {}", pets.len(), pets[0].name);
+    println!(
+        "listed {} of {} available pet(s): {}",
+        pets.len(),
+        totals.x_total_count,
+        pets[0].name
+    );
 
     // Create with a typed JSON body.
     let created = client
@@ -103,6 +129,25 @@ async fn main() {
         }
         other => panic!("expected a typed 404, got {other:?}"),
     }
+
+    // A multipart body with an Encoding Object: each part is sent with the Content-Type the spec
+    // declares for it — `image/png` for the binary photo, `application/json` for the metadata
+    // object — rather than one blanket type for the whole form.
+    let stored = client
+        .upload_photo(
+            "1".to_owned(),
+            &types::RequestBody {
+                photo: bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\n"),
+                meta: types::PhotoMeta {
+                    caption: "Rex at the park".to_owned(),
+                    width: Some(1024),
+                },
+            },
+        )
+        .await
+        .expect("upload_photo");
+    assert_eq!(stored.status(), 204);
+    println!("uploaded a photo with typed multipart part Content-Types");
 
     // 204 maps to a unit body.
     let deleted = client.delete_pet("1".to_owned()).await.expect("delete_pet");
@@ -180,9 +225,13 @@ fn handle(mut stream: TcpStream) {
     let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
         return;
     };
-    let path = target.split('?').next().unwrap_or(target);
+    let (path, query) = match target.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (target, ""),
+    };
 
     let mut authorization = String::new();
+    let mut content_type = String::new();
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
@@ -194,6 +243,7 @@ fn handle(mut stream: TcpStream) {
         };
         match name.to_ascii_lowercase().as_str() {
             "authorization" => authorization = value.trim().to_owned(),
+            "content-type" => content_type = value.trim().to_owned(),
             "content-length" => content_length = value.trim().parse().unwrap_or(0),
             _ => {}
         }
@@ -203,14 +253,49 @@ fn handle(mut stream: TcpStream) {
         return;
     }
 
+    // Extra response headers the route wants to add on top of the fixed ones.
+    let mut extra_headers = String::new();
+
     let (status, response_body) = if authorization != format!("Bearer {TOKEN}") {
         ("401 Unauthorized", r#"{"message":"unauthorized"}"#.to_owned())
     } else {
         match (method, path) {
-            ("GET", "/pets") => (
-                "200 OK",
-                r#"[{"id":"1","name":"Rex","status":"available"}]"#.to_owned(),
-            ),
+            ("GET", "/pets") => {
+                // `deepObject` sends one bracketed pair per member, and an absent member sends
+                // nothing at all — a JSON blob or a `filter=name,Rex` join would both be wrong.
+                assert!(
+                    query.contains("filter%5Bname%5D=Rex"),
+                    "deepObject filter must travel as filter[name]=Rex: {query}"
+                );
+                assert!(
+                    !query.contains("filter%5Btag%5D"),
+                    "an absent deepObject member must not be sent: {query}"
+                );
+                extra_headers.push_str("X-Total-Count: 1\r\n");
+                (
+                    "200 OK",
+                    r#"[{"id":"1","name":"Rex","status":"available"}]"#.to_owned(),
+                )
+            }
+            ("POST", "/pets/1/photo") => {
+                // Every part carries the Content-Type the Encoding Object declared for it.
+                assert!(
+                    content_type.starts_with("multipart/form-data; boundary="),
+                    "photo upload must be multipart: {content_type}"
+                );
+                let text = String::from_utf8_lossy(&body);
+                for (part, declared) in [("photo", "image/png"), ("meta", "application/json")] {
+                    let at = text
+                        .find(&format!("name=\"{part}\""))
+                        .unwrap_or_else(|| panic!("part `{part}` missing: {text}"));
+                    let header = text[at..].split("\r\n\r\n").next().unwrap_or("");
+                    assert!(
+                        header.contains(&format!("Content-Type: {declared}")),
+                        "part `{part}` must declare {declared}: {header}"
+                    );
+                }
+                ("204 No Content", String::new())
+            }
             ("POST", "/pets") => {
                 let new: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
                 let name = new["name"].as_str().unwrap_or("unnamed");
@@ -249,7 +334,7 @@ fn handle(mut stream: TcpStream) {
 
     let _ = write!(
         stream,
-        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{extra_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
         response_body.len(),
     );
 }

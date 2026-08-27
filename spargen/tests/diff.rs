@@ -3,7 +3,7 @@
 //! classification policy live in `spargen/src/surface/`.
 
 use camino::Utf8PathBuf;
-use spargen::{ChangeKind, Config, DiffReport, Impact};
+use spargen::{ChangeKind, DiffReport, Impact, Spec};
 
 /// Assemble a minimal, valid 3.1 spec from its variable parts:
 /// * `params` — the `get` operation's `parameters:` block (6-space indent), or `""` for none;
@@ -80,22 +80,9 @@ fn diff(old_spec: &str, new_spec: &str) -> DiffReport {
     let new_path = temp.path().join("new.yaml");
     std::fs::write(&old_path, old_spec).unwrap();
     std::fs::write(&new_path, new_spec).unwrap();
-    let old = Config::new(
-        Utf8PathBuf::from_path_buf(old_path).unwrap(),
-        "unused-old.rs",
-    );
-    let new = Config::new(
-        Utf8PathBuf::from_path_buf(new_path).unwrap(),
-        "unused-new.rs",
-    );
-    let outcome = spargen::diff(&old, &new);
-    assert!(
-        outcome.old_rejection.is_none() && outcome.new_rejection.is_none(),
-        "both specs should lower; old_rejection={:?} new_rejection={:?}",
-        outcome.old_rejection,
-        outcome.new_rejection
-    );
-    outcome.report.expect("both specs lowered => a report")
+    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap());
+    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap());
+    spargen::diff(&old, &new).expect("both specs should lower")
 }
 
 /// The kinds present in a report, for order-independent membership assertions.
@@ -247,16 +234,10 @@ fn rejecting_spec_reports_cleanly_without_a_diff() {
     let new_path = temp.path().join("new.yaml");
     std::fs::write(&old_path, base()).unwrap();
     std::fs::write(&new_path, "not: a valid openapi document\n").unwrap();
-    let old = Config::new(
-        Utf8PathBuf::from_path_buf(old_path).unwrap(),
-        "unused-old.rs",
-    );
-    let new = Config::new(
-        Utf8PathBuf::from_path_buf(new_path).unwrap(),
-        "unused-new.rs",
-    );
+    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap());
+    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap());
     let outcome = spargen::diff(&old, &new);
-    assert!(outcome.report.is_none());
-    assert!(outcome.old_rejection.is_none());
-    assert!(outcome.new_rejection.is_some());
+    let rejection = outcome.expect_err("the new spec does not lower, so there is no diff");
+    assert!(rejection.old_spec().is_none());
+    assert!(rejection.new_spec().is_some());
 }

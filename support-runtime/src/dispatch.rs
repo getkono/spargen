@@ -15,14 +15,30 @@ use serde::de::DeserializeOwned;
 
 use crate::{AuthKind, AuthScheme, ClientCore, Credential, Error, ResponseValue};
 
-/// Build a request URL from the base URL and pre-rendered path plus query pairs. Paths compile to
-/// static segment concatenation — no runtime regex. Non-generic.
+/// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
+/// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
+///
+/// `query` holds complete `name=value` fragments that the parameter helpers have already
+/// percent-encoded. They are installed verbatim rather than through `query_pairs_mut`, which would
+/// re-encode the style delimiters and make a `,` that joins two array items indistinguishable from
+/// a `,` inside one of them.
 pub fn build_url(
     core: &ClientCore,
     path: &str,
-    query: &[(String, String)],
+    query: &[String],
 ) -> Result<Url, Error<Infallible>> {
-    let mut url = core.base_url().clone();
+    build_url_on(core, None, path, query)
+}
+
+/// As [`build_url`], but against an optional per-operation server override. An absolute override
+/// replaces the client's base URL; a relative one is joined onto it.
+pub fn build_url_on(
+    core: &ClientCore,
+    server: Option<&str>,
+    path: &str,
+    query: &[String],
+) -> Result<Url, Error<Infallible>> {
+    let mut url = base_for(core, server)?;
     let base_path = url.path().trim_end_matches('/');
     let request_path = path.trim_start_matches('/');
     let joined = if base_path.is_empty() {
@@ -32,38 +48,70 @@ pub fn build_url(
     } else {
         format!("{base_path}/{request_path}")
     };
+    // `Url::set_path` leaves `%`, `;`, `=`, `,` and `.` alone, so pre-encoded values and the
+    // `matrix`/`label` style prefixes survive it unchanged.
     url.set_path(&joined);
-    if !query.is_empty() {
-        let mut pairs = url.query_pairs_mut();
-        for (name, value) in query {
-            pairs.append_pair(name, value);
-        }
-    }
+    append_query(&mut url, query);
     Ok(url)
 }
 
+/// Resolve the base URL for one request: the client's own, or a per-operation server override.
+fn base_for(core: &ClientCore, server: Option<&str>) -> Result<Url, Error<Infallible>> {
+    match server {
+        None => Ok(core.base_url().clone()),
+        Some(server) => match Url::parse(server) {
+            Ok(absolute) => Ok(absolute),
+            // A relative override is resolved against the client's base URL.
+            Err(_) => core
+                .base_url()
+                .join(server)
+                .map_err(Error::request_construction),
+        },
+    }
+}
+
+/// Append pre-encoded fragments to a URL, preserving any query the base URL already carried.
+fn append_query(url: &mut Url, query: &[String]) {
+    if query.is_empty() {
+        return;
+    }
+    let joined = match url.query() {
+        Some(existing) if !existing.is_empty() => format!("{existing}&{}", query.join("&")),
+        _ => query.join("&"),
+    };
+    url.set_query(Some(&joined));
+}
+
 /// Build a URL whose entire query string is owned by an OpenAPI 3.2 `in: querystring` parameter.
-/// JSON content is appended as one key-only encoded value, while form content is appended as named
-/// pairs. Both forms replace any query embedded in the selected server URL.
+/// Both forms replace any query embedded in the selected server URL.
 pub fn build_url_with_query_string(
     core: &ClientCore,
     path: &str,
-    query: &[(String, String)],
+    query: &[String],
     query_string: Option<&str>,
 ) -> Result<Url, Error<Infallible>> {
-    let mut url = build_url(core, path, &[])?;
+    build_url_with_query_string_on(core, None, path, query, query_string)
+}
+
+/// As [`build_url_with_query_string`], but against an optional per-operation server override.
+pub fn build_url_with_query_string_on(
+    core: &ClientCore,
+    server: Option<&str>,
+    path: &str,
+    query: &[String],
+    query_string: Option<&str>,
+) -> Result<Url, Error<Infallible>> {
+    let mut url = build_url_on(core, server, path, &[])?;
     // `in: querystring` owns the complete query. A query embedded in the selected server URL must
-    // not leak into that value; form-urlencoded whole-query values are appended as pairs below,
-    // while JSON is appended as one key-only encoded value.
+    // not leak into that value.
     url.set_query(None);
-    if !query.is_empty() {
-        let mut pairs = url.query_pairs_mut();
-        for (name, value) in query {
-            pairs.append_pair(name, value);
-        }
-    }
+    append_query(&mut url, query);
     if let Some(query_string) = query_string {
-        url.query_pairs_mut().append_key_only(query_string);
+        let joined = match url.query() {
+            Some(existing) if !existing.is_empty() => format!("{existing}&{query_string}"),
+            _ => query_string.to_owned(),
+        };
+        url.set_query(Some(&joined));
     }
     Ok(url)
 }
@@ -82,9 +130,11 @@ pub async fn attach_auth(
         return Ok(request);
     }
     let Some(alternative) = requirements.iter().find(|alternative| {
-        alternative
-            .iter()
-            .all(|scheme| core.credential(scheme.name).is_some())
+        alternative.iter().all(|scheme| {
+            // `mutualTLS` is satisfied by the transport's client certificate, so it never needs a
+            // registered credential and never blocks an alternative from being chosen.
+            matches!(scheme.kind, AuthKind::MutualTls) || core.credential(scheme.name).is_some()
+        })
     }) else {
         let mut names: Vec<&str> = requirements
             .iter()
@@ -100,6 +150,9 @@ pub async fn attach_auth(
     };
     let mut request = request;
     for scheme in *alternative {
+        if matches!(scheme.kind, AuthKind::MutualTls) {
+            continue;
+        }
         // Present by construction: the alternative was selected because every scheme resolves.
         let Some(credential) = core.credential(scheme.name) else {
             continue;
@@ -141,6 +194,8 @@ async fn apply_credential(
             Some(token) => Ok(request.query(&[(name, token.expose_secret())])),
             None => Err(credential_mismatch(scheme.name, "apiKey")),
         },
+        // Satisfied by the transport; `attach_auth` never reaches this arm.
+        AuthKind::MutualTls => Ok(request),
         AuthKind::ApiKeyCookie(name) => match token {
             Some(token) => {
                 let cookie = format!("{name}={}", token.expose_secret());
@@ -556,7 +611,7 @@ mod tests {
         assert!(value.is_sensitive());
     }
 
-    use super::{build_url, build_url_with_query_string, StatusSpec};
+    use super::{build_url, build_url_on, build_url_with_query_string, StatusSpec};
 
     fn core_at(base: &str) -> ClientCore {
         ClientCore::new(base).unwrap()
@@ -589,45 +644,82 @@ mod tests {
     }
 
     #[test]
-    fn build_url_appends_and_percent_encodes_query_pairs() {
+    fn build_url_installs_pre_encoded_query_fragments_verbatim() {
         let core = core_at("https://example.com");
-        let url = build_url(&core, "/search", &[("q".to_owned(), "a b&c".to_owned())]).unwrap();
-        // The space and ampersand are form-encoded, so the pair round-trips unambiguously.
-        assert_eq!(url.query(), Some("q=a+b%26c"));
+        // The caller has already encoded the data and left the style delimiter literal; the two
+        // commas here must stay distinguishable all the way onto the wire.
+        let url = build_url(
+            &core,
+            "/search",
+            &["q=a%20b%26c".to_owned(), "tags=x%2Cy,z".to_owned()],
+        )
+        .unwrap();
+        assert_eq!(url.query(), Some("q=a%20b%26c&tags=x%2Cy,z"));
         let pairs: Vec<(String, String)> = url
             .query_pairs()
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
-        assert_eq!(pairs, vec![("q".to_owned(), "a b&c".to_owned())]);
+        assert_eq!(
+            pairs,
+            vec![
+                ("q".to_owned(), "a b&c".to_owned()),
+                ("tags".to_owned(), "x,y,z".to_owned()),
+            ]
+        );
     }
 
     #[test]
-    fn build_url_encodes_a_whole_json_query_string_without_a_name() {
+    fn build_url_appends_to_a_query_already_on_the_base_url() {
+        let core = core_at("https://example.com?tenant=acme");
+        let url = build_url(&core, "/search", &["q=rust".to_owned()]).unwrap();
+        assert_eq!(url.query(), Some("tenant=acme&q=rust"));
+    }
+
+    #[test]
+    fn build_url_keeps_matrix_and_label_prefixes_in_the_path() {
+        let core = core_at("https://example.com");
+        // `set_path` must not disturb `;`, `=`, `,` or an existing percent-triple.
+        let url = build_url(&core, "/map/;position=B,150,R,100", &[]).unwrap();
+        assert_eq!(url.path(), "/map/;position=B,150,R,100");
+        let labelled = build_url(&core, "/files/.tar%2Egz", &[]).unwrap();
+        assert_eq!(labelled.path(), "/files/.tar%2Egz");
+    }
+
+    #[test]
+    fn build_url_on_replaces_the_base_with_an_absolute_server_override() {
+        let core = core_at("https://example.com/api");
+        let url = build_url_on(&core, Some("https://files.example.net/v2"), "/blobs", &[]).unwrap();
+        assert_eq!(url.as_str(), "https://files.example.net/v2/blobs");
+    }
+
+    #[test]
+    fn build_url_on_joins_a_relative_server_override_onto_the_base() {
+        let core = core_at("https://example.com/api/");
+        let url = build_url_on(&core, Some("../edge/"), "/blobs", &[]).unwrap();
+        assert_eq!(url.as_str(), "https://example.com/edge/blobs");
+    }
+
+    #[test]
+    fn build_url_with_query_string_installs_a_whole_query_verbatim() {
         let core = core_at("https://example.com?stale=server-value");
+        // The whole-query value arrives already encoded by the generated method.
         let url = build_url_with_query_string(
             &core,
             "/search",
             &[],
-            Some(r#"{"numbers":[1,2],"flag":null}"#),
+            Some("%7B%22numbers%22%3A%5B1%2C2%5D%7D"),
         )
         .unwrap();
-        assert_eq!(
-            url.query(),
-            Some("%7B%22numbers%22%3A%5B1%2C2%5D%2C%22flag%22%3Anull%7D")
-        );
+        assert_eq!(url.query(), Some("%7B%22numbers%22%3A%5B1%2C2%5D%7D"));
     }
 
     #[test]
     fn build_url_replaces_the_server_query_with_a_form_whole_query_string() {
         let core = core_at("https://example.com?stale=server-value");
-        let url = build_url_with_query_string(
-            &core,
-            "/search",
-            &[("term".to_owned(), "rust api".to_owned())],
-            None,
-        )
-        .unwrap();
-        assert_eq!(url.query(), Some("term=rust+api"));
+        let url =
+            build_url_with_query_string(&core, "/search", &["term=rust%20api".to_owned()], None)
+                .unwrap();
+        assert_eq!(url.query(), Some("term=rust%20api"));
     }
 
     #[test]

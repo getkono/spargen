@@ -9,7 +9,7 @@ use super::{InterpId, Severity};
 /// enumerable via [`all`](Code::all) so the docs/behavior exhaustiveness test can iterate it and
 /// fail the build if code and docs diverge. `#[non_exhaustive]` keeps adding a code a non-breaking
 /// change for external matchers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Code {
     /// The `openapi` field declares an unsupported version (e.g. 3.0.x); no conversion is
@@ -76,6 +76,24 @@ pub enum Code {
     /// The consuming Cargo package does not declare the versions or features required by the
     /// generated runtime.
     RuntimeDependencyContract,
+    /// A construct whose behavior the OpenAPI specification explicitly leaves *undefined*, so no
+    /// generated client could be known to be correct.
+    SpecUndefinedBehavior,
+    /// `items` beside `prefixItems` describes a tuple with a typed variable-length rest, which no
+    /// Rust type expresses. `items: false` — a pure fixed-length tuple — is supported.
+    TupleRestNotRepresentable,
+    /// A construct was declared that cannot change anything spargen generates or sends. It is
+    /// acknowledged rather than dropped in silence, so the input never has an undocumented
+    /// disposition.
+    DeclarationHasNoEffect,
+    /// Generation ran without a consumer Cargo manifest, so the generated runtime's dependency
+    /// contract (`E023`) could not be audited.
+    RuntimeAuditSkipped,
+    /// Generation ran outside a Cargo build script, so no rebuild triggers were emitted and the
+    /// dependency audit was skipped.
+    CargoIntegrationDegraded,
+    /// Cargo integration was required by the caller but is not available in this process.
+    CargoIntegrationRequired,
 }
 
 impl Code {
@@ -107,6 +125,12 @@ impl Code {
             Code::Oas32ConstructIgnored => "W010",
             Code::SchemaNestingTooDeep => "E014",
             Code::RuntimeDependencyContract => "E023",
+            Code::SpecUndefinedBehavior => "E016",
+            Code::TupleRestNotRepresentable => "E015",
+            Code::DeclarationHasNoEffect => "W011",
+            Code::RuntimeAuditSkipped => "W012",
+            Code::CargoIntegrationDegraded => "W013",
+            Code::CargoIntegrationRequired => "E024",
         }
     }
 
@@ -147,6 +171,12 @@ impl Code {
             Code::Oas32ConstructIgnored => "non-sequential itemSchema ignored",
             Code::SchemaNestingTooDeep => "schema nesting is too deep to lower",
             Code::RuntimeDependencyContract => "invalid generated-runtime dependency contract",
+            Code::SpecUndefinedBehavior => "specification-undefined construct",
+            Code::TupleRestNotRepresentable => "variable-length tuple not representable",
+            Code::DeclarationHasNoEffect => "declared construct has no effect",
+            Code::RuntimeAuditSkipped => "runtime-dependency audit skipped",
+            Code::CargoIntegrationDegraded => "cargo integration degraded",
+            Code::CargoIntegrationRequired => "cargo integration required but unavailable",
         }
     }
 
@@ -225,6 +255,24 @@ impl Code {
             Code::RuntimeDependencyContract => {
                 "The generated module is freestanding, so its consuming Cargo package must declare the crates and dependency features referenced by that specific API. Spargen derives the exact requirement set after lowering and audits Cargo.toml during build.rs and proc-macro generation. Use the documented tested lower bounds (or a higher semver-compatible caret floor), keep reqwest default features disabled, and enable only the reqwest/bytes/XML/UUID/time capabilities named by the diagnostic. Cargo resolves the declared range; Rust compilation then verifies the selected crates expose the APIs and traits used by the generated client."
             }
+            Code::SpecUndefinedBehavior => {
+                "The OpenAPI Specification marks some constructs' behavior as *undefined* rather than leaving them merely unsupported. Currently this fires for a Path Item `$ref` declared alongside structural fields (operations, `parameters`, `servers`): the specification says that when a field appears both in the referring Path Item and the referenced one, the behavior is undefined. Unlike a Reference Object, which requires adjacent properties to be ignored, there is no rule to follow — so either choice (the local fields winning, or the referenced ones) silently discards operations the author wrote, and produces a client that calls a different set of endpoints than the document describes. `summary` and `description` are exempt because they are documentation and cannot change the wire. Move the sibling fields into the referenced Path Item, or drop the `$ref` and declare the item inline."
+            }
+            Code::TupleRestNotRepresentable => {
+                "In JSON Schema 2020-12 `prefixItems` fixes the leading positions of an array and `items` describes every position after them. Spargen lowers `prefixItems` to a Rust tuple, which is fixed-length, so a schema that also allows a typed remainder describes a value no single Rust type expresses: a tuple cannot grow, and a `Vec` cannot hold the distinct per-position types. `items: false` closes the array at the prefix and is fully supported — that is exactly a tuple. To send a variable-length remainder, drop `prefixItems` and describe the whole array with `items`, split the fixed head into its own object properties, or omit this API segment with `spargen::omit!`."
+            }
+            Code::DeclarationHasNoEffect => {
+                "The document declared something the specification permits here, but which cannot change any byte spargen generates or sends, so it is acknowledged rather than dropped in silence. It fires for: `allowReserved` on a parameter that is never percent-encoded (an `in: header` parameter, or `style: cookie`, both of which the specification sends verbatim); `encoding`, `prefixEncoding`, or `itemEncoding` on a media type that is neither `multipart` nor `application/x-www-form-urlencoded`, where the specification says those fields SHALL be ignored; an `encoding` entry naming a property the body schema does not declare; `encoding.headers` on a non-`multipart` media type; an `encoding.headers` Header Object that pins no `const`/`default` value, leaving a client nothing to send; `allowEmptyValue`, which is deprecated and cannot change what a typed client omits; a `mutualTLS` security scheme, which is satisfied by the transport's client certificate rather than by anything the client attaches; a response header named `Content-Type`, which the specification says SHALL be ignored; a `servers` entry past the first on a path item or operation, where the specification defines no client selection rule; and a union branch that the enclosing schema's own constraints have already made unsatisfiable. None of these is an error: the document is valid, and the construct simply has no reachable effect on this client."
+            }
+            Code::RuntimeAuditSkipped => {
+                "Generated output is freestanding: the consuming package must itself declare the crates and dependency features that specific API needs. Spargen audits the consumer's `Cargo.toml` for that contract and reports any gap as `E023` — but only when it can find the manifest, which in practice means a real `build.rs` process, where Cargo puts the package in the environment. Generating from a test, a wrapper binary, or a script leaves nothing to audit, so the contract is unverified and a missing dependency surfaces later as a compile error in the generated module instead of a spargen diagnostic. Run `spargen deps <spec>` to print the exact `[dependencies]` block that spec requires, or generate from a build script so the audit runs automatically. Set `CargoIntegration::Off` if this generation is deliberately not part of a Cargo build."
+            }
+            Code::CargoIntegrationDegraded => {
+                "`generate` was called outside a Cargo build-script process, so two things Cargo would otherwise do did not happen: no `cargo:rerun-if-changed` directives were emitted, meaning an edited spec will NOT trigger a rebuild and the checked-in module can silently go stale; and the consumer manifest could not be located, so the runtime-dependency audit (`E023`) was skipped. Neither is an error — generating outside a build script is a legitimate thing to do — but both are silent by nature, which is why they are reported. Call `generate` from a `build.rs` to get both, or declare the intent with `CargoIntegration::Off` to accept them silently."
+            }
+            Code::CargoIntegrationRequired => {
+                "The caller set `CargoIntegration::Required`, declaring that this generation must be wired into Cargo — rebuild triggers emitted, consumer manifest audited — and it is not: either the process is not a build script, or no consumer manifest could be found. This is an error rather than a warning purely because the caller asked for it: `Required` exists for builds where a missed rebuild trigger would ship a client generated from a stale spec. Move the call into a `build.rs`, or relax to `CargoIntegration::Auto` (degrade with `W013`/`W012`) or `CargoIntegration::Off` (degrade silently)."
+            }
             Code::XmlHintIgnored => {
                 "XML request/response bodies honor the `xml.name` (element/attribute rename) and `xml.attribute` (serialize as an XML attribute via quick-xml's `@name` convention) hints on a field, but only for a schema used *exclusively* as an XML body. A serde `rename` is format-agnostic — it would also rewrite the JSON wire names — so `xml.name`/`xml.attribute` are NOT applied to a schema that is also reachable from a JSON/form/multipart/text body, a response, or a parameter (or that is not used as an XML body at all); the field keeps its normal wire name and this warning fires, so JSON is never corrupted. The `xml.namespace`, `xml.prefix`, and `xml.wrapped` (wrapped arrays) hints are never represented — quick-xml serde has no faithful mapping for them — so they are always ignored with this warning rather than silently honored or rejected."
             }
@@ -269,8 +317,22 @@ impl Code {
             Code::Oas32ConstructIgnored,
             Code::SchemaNestingTooDeep,
             Code::RuntimeDependencyContract,
+            Code::SpecUndefinedBehavior,
+            Code::TupleRestNotRepresentable,
+            Code::DeclarationHasNoEffect,
+            Code::RuntimeAuditSkipped,
+            Code::CargoIntegrationDegraded,
+            Code::CargoIntegrationRequired,
         ];
         ALL
+    }
+}
+
+impl Serialize for Code {
+    /// Serializes as the stable `E###`/`W###` string, not the Rust variant name: the code string
+    /// is the documented product surface, and the variant name is an implementation detail.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
     }
 }
 
@@ -310,6 +372,63 @@ mod tests {
     use std::str::FromStr;
 
     use super::Code;
+
+    /// Every code must appear in the published index, with the same title, and nothing may appear
+    /// there that is not a real code. The index is product surface — `spargen explain` and
+    /// `docs/errors.md` are the same contract — and without this the two drift silently.
+    #[test]
+    fn the_published_index_lists_exactly_the_declared_codes() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/errors.md");
+        let Ok(index) = std::fs::read_to_string(path) else {
+            // Absent when the crate is tested from a packaged `.crate`, which carries no docs
+            // directory. In the repository — where the invariant matters — it is always there.
+            eprintln!("skipping: {path} is not present");
+            return;
+        };
+        let rows: Vec<(String, String)> = index
+            .lines()
+            .filter(|line| line.starts_with("| `E") || line.starts_with("| `W"))
+            .map(|line| {
+                let mut cells = line.split('|').map(str::trim);
+                cells.next();
+                let code = cells
+                    .next()
+                    .unwrap_or_default()
+                    .trim_matches('`')
+                    .to_owned();
+                let _severity = cells.next();
+                let title = cells.next().unwrap_or_default().to_owned();
+                (code, title)
+            })
+            .collect();
+
+        for code in Code::all() {
+            let row = rows
+                .iter()
+                .find(|(listed, _)| listed == code.as_str())
+                .unwrap_or_else(|| panic!("{} is missing from docs/errors.md", code.as_str()));
+            // The index may elaborate ("… (3.1.x and 3.2.x are supported)") and may add markdown
+            // code spans, but it must not describe a different thing than `spargen explain` does.
+            assert!(
+                row.1.replace('`', "").contains(code.title()),
+                "docs/errors.md describes {} as `{}`, but its title is `{}`",
+                code.as_str(),
+                row.1,
+                code.title()
+            );
+            assert!(
+                !code.explain().is_empty(),
+                "{} has no explain text",
+                code.as_str()
+            );
+        }
+        for (listed, _) in &rows {
+            assert!(
+                Code::all().iter().any(|code| code.as_str() == listed),
+                "docs/errors.md lists `{listed}`, which is not a declared code"
+            );
+        }
+    }
 
     #[test]
     fn all_codes_round_trip_from_stable_strings() {

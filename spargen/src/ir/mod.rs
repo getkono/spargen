@@ -17,10 +17,12 @@ use indexmap::IndexMap;
 pub use auth::{ApiKeyLoc, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme};
 pub use invariant::check_invariants;
 pub use media::{
-    ErrorShape, Framing, MediaType, RequestBody, Response, Responses, StatusSpec, SuccessShape,
+    BodyEncoding, EncodingMode, ErrorShape, Framing, HeaderShape, MediaType, PropertyEncoding,
+    RequestBody, Response, ResponseHeader, Responses, StatusSpec, SuccessShape,
 };
 pub use operation::{
-    Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate,
+    Delimiter, Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment,
+    PathTemplate,
 };
 pub use types::{
     AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Prim,
@@ -87,9 +89,36 @@ pub struct Info {
 /// A server entry (matrix: Document).
 #[derive(Debug, Clone)]
 pub struct Server {
-    /// The (possibly templated) server URL.
+    /// OpenAPI 3.2 `name`: a stable identity for this host, used to name the generated builder.
+    pub name: Option<String>,
+    /// The raw, possibly templated server URL.
     pub url: String,
+    /// The URL template split into literals and variable references, parsed once here so codegen
+    /// and rendering never re-scan the string.
+    pub segments: Vec<UrlSegment>,
+    /// Declared variables, in source order.
+    pub variables: IndexMap<String, ServerVariable>,
     /// `server.description`.
+    pub description: Option<String>,
+}
+
+/// One piece of a parsed server URL template.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UrlSegment {
+    /// Literal text, emitted verbatim.
+    Literal(String),
+    /// A `{name}` reference to a declared server variable.
+    Variable(String),
+}
+
+/// A server variable: a closed or open set of substitutions with a default that is actually sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerVariable {
+    /// The value used when the caller supplies none.
+    pub default: String,
+    /// The permitted values, when the document declares a closed set. Empty means free-form.
+    pub enum_values: Vec<String>,
+    /// `description`, surfaced as rustdoc on the generated setter.
     pub description: Option<String>,
 }
 

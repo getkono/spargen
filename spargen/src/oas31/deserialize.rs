@@ -5,10 +5,10 @@ use crate::ir::Method;
 use crate::source::{InputBundle, Node, Number, SpannedMap, SpannedValue};
 
 use super::{
-    Components, Discriminator, Document, Info, JsonType, MediaTypeObject, OperationObject,
-    ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject, ResponseObject,
-    ResponsesObject, Schema, SchemaOr, SecurityRequirement, SecuritySchemeObject, Server, Tag,
-    TypeSet, ValidationKeywords, XmlHints,
+    Components, Discriminator, Document, EncodingObject, HeaderObject, Info, JsonType,
+    MediaTypeObject, OperationObject, ParameterObject, PathItem, Paths, RefOr, Reference,
+    RequestBodyObject, ResponseObject, ResponsesObject, Schema, SchemaOr, SecurityRequirement,
+    SecuritySchemeObject, Server, ServerVariable, Tag, TypeSet, ValidationKeywords, XmlHints,
 };
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
@@ -47,7 +47,7 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
         }
     }
 
-    let info = root
+    let mut info = root
         .get("info")
         .and_then(|value| parse_info(value, &root_pointer.push("info"), diags))
         .unwrap_or_else(|| Info {
@@ -55,7 +55,13 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
             version: "0.0.0".to_owned(),
             summary: None,
             description: None,
+            contact: None,
+            license: None,
+            external_docs: None,
         });
+    // Root-level `externalDocs` documents the API as a whole, so it belongs with the rest of the
+    // client-level identity rather than in its own field.
+    info.external_docs = root.get("externalDocs").and_then(external_docs_line);
 
     let servers = root
         .get("servers")
@@ -117,6 +123,47 @@ fn version_supported(value: &str) -> bool {
         && patch.parse::<u16>().is_ok()
 }
 
+/// Flatten a Contact Object into one displayable line.
+fn contact_line(value: &SpannedValue) -> Option<String> {
+    let name = value.get("name").and_then(string);
+    let url = value.get("url").and_then(string);
+    let email = value.get("email").and_then(string);
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(name) = name {
+        parts.push(name.to_owned());
+    }
+    if let Some(email) = email {
+        parts.push(format!("<{email}>"));
+    }
+    if let Some(url) = url {
+        parts.push(format!("({url})"));
+    }
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+/// Flatten a License Object into one displayable line. `identifier` and `url` are mutually
+/// exclusive, so at most one appears.
+fn license_line(value: &SpannedValue) -> Option<String> {
+    let name = value.get("name").and_then(string)?;
+    let detail = value
+        .get("identifier")
+        .and_then(string)
+        .or_else(|| value.get("url").and_then(string));
+    Some(match detail {
+        Some(detail) => format!("{name} ({detail})"),
+        None => name.to_owned(),
+    })
+}
+
+/// Flatten an External Documentation Object into one displayable line.
+fn external_docs_line(value: &SpannedValue) -> Option<String> {
+    let url = value.get("url").and_then(string)?;
+    Some(match value.get("description").and_then(string) {
+        Some(description) => format!("{description}: {url}"),
+        None => url.to_owned(),
+    })
+}
+
 fn parse_info(
     value: &SpannedValue,
     pointer: &JsonPointer,
@@ -136,6 +183,9 @@ fn parse_info(
             .to_owned(),
         summary: value.get("summary").and_then(string).map(str::to_owned),
         description: value.get("description").and_then(string).map(str::to_owned),
+        contact: value.get("contact").and_then(contact_line),
+        license: value.get("license").and_then(license_line),
+        external_docs: None,
     })
 }
 
@@ -162,6 +212,40 @@ fn parse_server(
         name: value.get("name").and_then(string).map(str::to_owned),
         url: value.get("url").and_then(string).unwrap_or("/").to_owned(),
         description: value.get("description").and_then(string).map(str::to_owned),
+        variables: value
+            .get("variables")
+            .and_then(SpannedValue::as_object)
+            .map(|variables| {
+                variables
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        parse_server_variable(value).map(|variable| (key.name.clone(), variable))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        provenance: provenance(pointer, value),
+    })
+}
+
+/// Parse one Server Variable Object. `default` is required by the document schema, so a variable
+/// without one cannot reach here in a validated document.
+fn parse_server_variable(value: &SpannedValue) -> Option<ServerVariable> {
+    let _ = value.as_object()?;
+    Some(ServerVariable {
+        default: value.get("default").and_then(string)?.to_owned(),
+        enum_values: value
+            .get("enum")
+            .and_then(SpannedValue::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(string)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        description: value.get("description").and_then(string).map(str::to_owned),
     })
 }
 
@@ -177,7 +261,7 @@ fn parse_paths(value: &SpannedValue, pointer: &JsonPointer, diags: &mut Diagnost
     paths
 }
 
-fn parse_path_item(
+pub(super) fn parse_path_item(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -208,7 +292,29 @@ fn parse_path_item(
         .get("parameters")
         .map(|value| parse_ref_array(value, &pointer.push("parameters"), diags, parse_parameter))
         .unwrap_or_default();
+    // `$ref` on a Path Item is not a Reference Object: the specification explicitly leaves the
+    // behavior of adjacent fields undefined. `summary`/`description` are documentation and cannot
+    // change the wire, so they are allowed to override; anything structural is refused.
+    let reference = value
+        .get("$ref")
+        .and_then(string)
+        .map(|reference| Reference {
+            reference: reference.to_owned(),
+            summary: value.get("summary").and_then(string).map(str::to_owned),
+            description: value.get("description").and_then(string).map(str::to_owned),
+            provenance: provenance(pointer, value),
+        });
+    let reference_siblings = if reference.is_some() {
+        map.iter()
+            .map(|(key, _)| key.name.clone())
+            .filter(|key| !matches!(key.as_str(), "$ref" | "summary" | "description"))
+            .collect()
+    } else {
+        Vec::new()
+    };
     Some(PathItem {
+        reference,
+        reference_siblings,
         operations,
         parameters,
     })
@@ -270,7 +376,7 @@ fn parse_operation(
     })
 }
 
-fn parse_parameter(
+pub(super) fn parse_parameter(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -301,6 +407,10 @@ fn parse_parameter(
             .get("allowReserved")
             .and_then(SpannedValue::as_bool)
             .unwrap_or(false),
+        allow_empty_value: value
+            .get("allowEmptyValue")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
         schema: value
             .get("schema")
             .and_then(|value| parse_schema_ref_or(value, &pointer.push("schema"), diags)),
@@ -312,7 +422,7 @@ fn parse_parameter(
     })
 }
 
-fn parse_request_body(
+pub(super) fn parse_request_body(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -323,6 +433,10 @@ fn parse_request_body(
             .get("content")
             .map(|value| parse_media_map(value, &pointer.push("content"), diags))
             .unwrap_or_default(),
+        required: value
+            .get("required")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
         provenance: provenance(pointer, value),
     })
 }
@@ -346,7 +460,7 @@ fn parse_responses(
     responses
 }
 
-fn parse_response(
+pub(super) fn parse_response(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -366,6 +480,25 @@ fn parse_response(
         content: value
             .get("content")
             .map(|value| parse_media_map(value, &pointer.push("content"), diags))
+            .unwrap_or_default(),
+        headers: value
+            .get("headers")
+            .and_then(SpannedValue::as_object)
+            .map(|headers| {
+                let headers_pointer = pointer.push("headers");
+                headers
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        parse_ref_or(
+                            value,
+                            &headers_pointer.push(&key.name),
+                            diags,
+                            parse_header_object,
+                        )
+                        .map(|header| (key.name.clone(), header))
+                    })
+                    .collect()
+            })
             .unwrap_or_default(),
         provenance: provenance(pointer, value),
     })
@@ -454,6 +587,8 @@ fn parse_media_type(
             .and_then(string)
             .map(|reference| Reference {
                 reference: reference.to_owned(),
+                summary: value.get("summary").and_then(string).map(str::to_owned),
+                description: value.get("description").and_then(string).map(str::to_owned),
                 provenance: provenance(pointer, value),
             }),
         schema: value
@@ -462,15 +597,130 @@ fn parse_media_type(
         item_schema: value
             .get("itemSchema")
             .and_then(|schema| parse_schema_ref_or(schema, &pointer.push("itemSchema"), diags)),
-        explicit_encodings: ["encoding", "prefixEncoding", "itemEncoding"]
+        encoding: value
+            .get("encoding")
+            .and_then(SpannedValue::as_object)
+            .map(|map| {
+                let encoding_pointer = pointer.push("encoding");
+                map.iter()
+                    .map(|(key, value)| {
+                        (
+                            key.name.clone(),
+                            parse_encoding(value, &encoding_pointer.push(&key.name), diags),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        prefix_encoding: value
+            .get("prefixEncoding")
+            .and_then(SpannedValue::as_array)
+            .map(|items| {
+                let prefix_pointer = pointer.push("prefixEncoding");
+                items
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| {
+                        let at = prefix_pointer.index(index);
+                        let encoding = parse_encoding(item, &at, diags);
+                        let where_ = provenance(&at, item);
+                        (encoding, where_)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        item_encoding: value.get("itemEncoding").map(|item| {
+            let at = pointer.push("itemEncoding");
+            let encoding = parse_encoding(item, &at, diags);
+            let where_ = provenance(&at, item);
+            (encoding, where_)
+        }),
+        provenance: provenance(pointer, value),
+    }
+}
+
+/// Parse one Encoding Object. The RFC 6570 fields stay `Option` because the specification's mode
+/// switch keys on their presence rather than their value.
+fn parse_encoding(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> EncodingObject {
+    let Some(map) = object(value, pointer, diags) else {
+        return empty_encoding(provenance(pointer, value));
+    };
+    EncodingObject {
+        content_type: map.get("contentType").and_then(string).map(str::to_owned),
+        headers: map
+            .get("headers")
+            .and_then(SpannedValue::as_object)
+            .map(|headers| {
+                let headers_pointer = pointer.push("headers");
+                headers
+                    .iter()
+                    .filter_map(|(key, value)| {
+                        let at = headers_pointer.push(&key.name);
+                        parse_ref_or(value, &at, diags, parse_header_object)
+                            .map(|header| (key.name.clone(), header))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        style: map.get("style").and_then(string).map(str::to_owned),
+        explode: map.get("explode").and_then(SpannedValue::as_bool),
+        allow_reserved: map.get("allowReserved").and_then(SpannedValue::as_bool),
+        nested: ["encoding", "prefixEncoding", "itemEncoding"]
             .into_iter()
             .filter_map(|field| {
-                value
-                    .get(field)
+                map.get(field)
                     .map(|value| (field.to_owned(), provenance(&pointer.push(field), value)))
             })
             .collect(),
+        provenance: provenance(pointer, value),
     }
+}
+
+/// An Encoding Object that declares nothing, used when the node is not an object (already
+/// reported) so parsing can continue and collect the rest of the document's diagnostics.
+fn empty_encoding(provenance: Provenance) -> EncodingObject {
+    EncodingObject {
+        content_type: None,
+        headers: IndexMap::new(),
+        style: None,
+        explode: None,
+        allow_reserved: None,
+        nested: Vec::new(),
+        provenance,
+    }
+}
+
+/// Parse one Header Object — the Parameter Object shape without `name`/`in`.
+fn parse_header_object(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<HeaderObject> {
+    let map = object(value, pointer, diags)?;
+    Some(HeaderObject {
+        description: map.get("description").and_then(string).map(str::to_owned),
+        required: map
+            .get("required")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
+        deprecated: map
+            .get("deprecated")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
+        explode: map.get("explode").and_then(SpannedValue::as_bool),
+        schema: map
+            .get("schema")
+            .and_then(|schema| parse_schema_ref_or(schema, &pointer.push("schema"), diags)),
+        content: map
+            .get("content")
+            .map(|content| parse_media_map(content, &pointer.push("content"), diags))
+            .unwrap_or_default(),
+        provenance: provenance(pointer, value),
+    })
 }
 
 fn parse_components(
@@ -531,6 +781,26 @@ fn parse_components(
                 .collect()
         })
         .unwrap_or_default();
+    components.path_items = map
+        .get("pathItems")
+        .and_then(SpannedValue::as_object)
+        .map(|items| {
+            let items_pointer = pointer.push("pathItems");
+            items
+                .iter()
+                .filter_map(|(key, value)| {
+                    parse_path_item(value, &items_pointer.push(&key.name), diags)
+                        .map(|item| (key.name.clone(), item))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    components.headers = parse_component_map(
+        map.get("headers"),
+        &pointer.push("headers"),
+        diags,
+        parse_header_object,
+    );
     components.security_schemes = parse_component_map(
         map.get("securitySchemes"),
         &pointer.push("securitySchemes"),
@@ -559,7 +829,7 @@ fn parse_component_map<T>(
         .unwrap_or_default()
 }
 
-fn parse_security_scheme(
+pub(super) fn parse_security_scheme(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -574,6 +844,7 @@ fn parse_security_scheme(
         scheme: value.get("scheme").and_then(string).map(str::to_owned),
         location: value.get("in").and_then(string).map(str::to_owned),
         name: value.get("name").and_then(string).map(str::to_owned),
+        provenance: provenance(pointer, value),
     })
 }
 
@@ -608,6 +879,8 @@ fn parse_schema_ref_or(
         }
         Some(RefOr::Ref(Reference {
             reference: reference.to_owned(),
+            summary: value.get("summary").and_then(string).map(str::to_owned),
+            description: value.get("description").and_then(string).map(str::to_owned),
             provenance: provenance(pointer, value),
         }))
     } else {
@@ -828,23 +1101,16 @@ fn parse_discriminator(
     diags: &mut Diagnostics,
 ) -> Option<Discriminator> {
     let _ = object(value, pointer, diags)?;
-    if let Some(default_mapping) = value.get("defaultMapping") {
-        Diagnostic::error(
-            Code::NonDisjointUnion,
-            provenance(&pointer.push("defaultMapping"), default_mapping),
-        )
-        .message(
-            "discriminator.defaultMapping requires a generated fallback branch for absent or \
-             unknown discriminator values, which is not yet representable",
-        )
-        .emit(diags);
-    }
     Some(Discriminator {
         property_name: value
             .get("propertyName")
             .and_then(string)
             .unwrap_or_default()
             .to_owned(),
+        default_mapping: value
+            .get("defaultMapping")
+            .and_then(string)
+            .map(str::to_owned),
         mapping: value
             .get("mapping")
             .and_then(SpannedValue::as_object)
@@ -1013,6 +1279,8 @@ fn parse_ref_or<T>(
     if let Some(reference) = value.get("$ref").and_then(string) {
         Some(RefOr::Ref(Reference {
             reference: reference.to_owned(),
+            summary: value.get("summary").and_then(string).map(str::to_owned),
+            description: value.get("description").and_then(string).map(str::to_owned),
             provenance: provenance(pointer, value),
         }))
     } else {

@@ -15,7 +15,9 @@ Current cases:
   `b138e9cdcf4ac29a23fea1f6579d2840668a5f3d41fe7f160b263bec590d2e3f`.
 - `openai-openapi`: `openai/openai-openapi@5162af98d3147432c14680df789e8e12d4891e6b`,
   `openapi.yaml`, SHA-256
-  `74cbcf73838f4cd7e209b2d3f2e9ddc9fa155f21a44360b6fac7646a6d4f5f8b`.
+  `74cbcf73838f4cd7e209b2d3f2e9ddc9fa155f21a44360b6fac7646a6d4f5f8b` (OpenAPI 3.1.0; rejects with
+  exactly one `E009` — `POST /realtime/calls` documents its `201` with `application/sdp` as its
+  only content entry, and spargen has no codec for an unregistered media type).
 - `ollama`: `ollama/ollama@d47859ce495496196df211e939702364492a2b7f`,
   `docs/openapi.yaml`, SHA-256
   `d54e2ef5c24a396662ca7222af31ab3e26a642efbd2bb060d921b9393e9fef87`.

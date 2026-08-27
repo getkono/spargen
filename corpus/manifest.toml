@@ -26,7 +26,11 @@ revision = "5162af98d3147432c14680df789e8e12d4891e6b"
 upstream_path = "openapi.yaml"
 sha256 = "74cbcf73838f4cd7e209b2d3f2e9ddc9fa155f21a44360b6fac7646a6d4f5f8b"
 license = "MIT"
-expect = "reject"
+# Down to a single cause since parameter styles and the Encoding Object landed: `POST
+# /realtime/calls` documents its 201 with `application/sdp` as the ONLY content entry, and spargen
+# has no codec for an unregistered media type. Its `style: deepObject` query parameter and its
+# multipart `encoding.contentType` parts both generate now.
+expect = "reject:E009"
 
 [[case]]
 id = "ollama"

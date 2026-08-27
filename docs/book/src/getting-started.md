@@ -24,11 +24,8 @@ does not generate clients.
 // build.rs
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
-    let config = spargen::Config::new(
-        "api/openapi.yaml",
-        format!("{out_dir}/api.rs"),
-    );
-    let report = spargen::generate(&config);
+    let build = spargen::Spec::new("api/openapi.yaml").build(format!("{out_dir}/api.rs"));
+    let report = spargen::generate(&build);
     assert_eq!(report.outcome, spargen::Outcome::Generated, "{report:#?}");
 }
 ```
