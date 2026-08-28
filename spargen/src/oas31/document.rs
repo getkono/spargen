@@ -110,6 +110,10 @@ pub struct PathItem {
     /// `servers`: an alternative base URL for every operation on this path, overriding the
     /// document's.
     pub servers: Vec<Server>,
+    /// `summary`: applies to every operation on this path.
+    pub summary: Option<String>,
+    /// `description`: applies to every operation on this path.
+    pub description: Option<String>,
 }
 
 /// An OAS Operation Object.
@@ -269,7 +273,7 @@ pub struct Components {
 /// An OAS Security Scheme Object.
 #[derive(Debug, Clone)]
 pub struct SecuritySchemeObject {
-    /// `type`: `http` / `apiKey` / `oauth2` / `openIdConnect`.
+    /// `type`: `http` / `apiKey` / `oauth2` / `openIdConnect` / `mutualTLS`.
     pub scheme_type: String,
     /// `scheme` (for `http`).
     pub scheme: Option<String>,
@@ -277,7 +281,39 @@ pub struct SecuritySchemeObject {
     pub location: Option<String>,
     /// `name` (for `apiKey`).
     pub name: Option<String>,
+    /// `description`.
+    pub description: Option<String>,
+    /// `bearerFormat` (for `http` `bearer`) — a hint such as `JWT`.
+    pub bearer_format: Option<String>,
+    /// `openIdConnectUrl` (for `openIdConnect`).
+    pub open_id_connect_url: Option<String>,
+    /// OpenAPI 3.2 `oauth2MetadataUrl` (for `oauth2`).
+    pub oauth2_metadata_url: Option<String>,
+    /// `deprecated`.
+    pub deprecated: bool,
+    /// `flows` (for `oauth2`), in source order.
+    pub flows: Vec<OAuthFlow>,
     pub provenance: Provenance,
+}
+
+/// One entry of an OAuth Flows Object. Documentation only: spargen attaches a caller-supplied
+/// token as a bearer credential rather than driving a flow, so these fields describe *where* a
+/// caller obtains that token.
+#[derive(Debug, Clone)]
+pub struct OAuthFlow {
+    /// The flow name: `implicit`, `password`, `clientCredentials`, `authorizationCode`, or the
+    /// OpenAPI 3.2 `deviceAuthorization`.
+    pub name: String,
+    /// `authorizationUrl`.
+    pub authorization_url: Option<String>,
+    /// `tokenUrl`.
+    pub token_url: Option<String>,
+    /// `refreshUrl`.
+    pub refresh_url: Option<String>,
+    /// OpenAPI 3.2 `deviceAuthorizationUrl`.
+    pub device_authorization_url: Option<String>,
+    /// `scopes`: name → description, in source order.
+    pub scopes: Vec<(String, String)>,
 }
 
 /// A `security` requirement: scheme name → required scopes.

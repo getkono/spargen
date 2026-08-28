@@ -6,9 +6,10 @@ use crate::source::{InputBundle, Node, Number, SpannedMap, SpannedValue};
 
 use super::{
     Components, Discriminator, Document, EncodingObject, HeaderObject, Info, JsonType,
-    MediaTypeObject, OperationObject, ParameterObject, PathItem, Paths, RefOr, Reference,
-    RequestBodyObject, ResponseObject, ResponsesObject, Schema, SchemaOr, SecurityRequirement,
-    SecuritySchemeObject, Server, ServerVariable, Tag, TypeSet, ValidationKeywords, XmlHints,
+    MediaTypeObject, OAuthFlow, OperationObject, ParameterObject, PathItem, Paths, RefOr,
+    Reference, RequestBodyObject, ResponseObject, ResponsesObject, Schema, SchemaOr,
+    SecurityRequirement, SecuritySchemeObject, Server, ServerVariable, Tag, TypeSet,
+    ValidationKeywords, XmlHints,
 };
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
@@ -321,6 +322,8 @@ pub(super) fn parse_path_item(
             .get("servers")
             .map(|value| parse_servers(value, &pointer.push("servers"), diags))
             .unwrap_or_default(),
+        summary: value.get("summary").and_then(string).map(str::to_owned),
+        description: value.get("description").and_then(string).map(str::to_owned),
     })
 }
 
@@ -852,8 +855,66 @@ pub(super) fn parse_security_scheme(
         scheme: value.get("scheme").and_then(string).map(str::to_owned),
         location: value.get("in").and_then(string).map(str::to_owned),
         name: value.get("name").and_then(string).map(str::to_owned),
+        description: value.get("description").and_then(string).map(str::to_owned),
+        bearer_format: value
+            .get("bearerFormat")
+            .and_then(string)
+            .map(str::to_owned),
+        open_id_connect_url: value
+            .get("openIdConnectUrl")
+            .and_then(string)
+            .map(str::to_owned),
+        oauth2_metadata_url: value
+            .get("oauth2MetadataUrl")
+            .and_then(string)
+            .map(str::to_owned),
+        deprecated: value
+            .get("deprecated")
+            .and_then(SpannedValue::as_bool)
+            .unwrap_or(false),
+        flows: parse_oauth_flows(value.get("flows")),
         provenance: provenance(pointer, value),
     })
+}
+
+/// Parse an OAuth Flows Object into a flat, source-ordered list. Documentation only — the shape of
+/// each flow is never acted on, so an unrecognized flow name is carried through as written rather
+/// than matched against a fixed set.
+fn parse_oauth_flows(value: Option<&SpannedValue>) -> Vec<OAuthFlow> {
+    let Some(flows) = value.and_then(SpannedValue::as_object) else {
+        return Vec::new();
+    };
+    flows
+        .iter()
+        .map(|(key, flow)| OAuthFlow {
+            name: key.name.clone(),
+            authorization_url: flow
+                .get("authorizationUrl")
+                .and_then(string)
+                .map(str::to_owned),
+            token_url: flow.get("tokenUrl").and_then(string).map(str::to_owned),
+            refresh_url: flow.get("refreshUrl").and_then(string).map(str::to_owned),
+            device_authorization_url: flow
+                .get("deviceAuthorizationUrl")
+                .and_then(string)
+                .map(str::to_owned),
+            scopes: flow
+                .get("scopes")
+                .and_then(SpannedValue::as_object)
+                .map(|scopes| {
+                    scopes
+                        .iter()
+                        .map(|(name, description)| {
+                            (
+                                name.name.clone(),
+                                string(description).unwrap_or_default().to_owned(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
 }
 
 /// Parse a schema position that may be a `$ref` or an inline [`Schema`]. Unlike the generic

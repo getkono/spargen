@@ -37,8 +37,35 @@ pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) ->
     }
 }
 
+/// The declared security schemes, rendered as rustdoc for `with_credential`.
+///
+/// This is the one place a caller chooses what to register, so it is where the scheme's own
+/// documentation belongs: the bearer format, the flows that mint a token, the OpenID Connect
+/// discovery URL, and whether the scheme is deprecated.
+fn scheme_doc_lines(api: &Api) -> Vec<TokenStream> {
+    let documented: Vec<&String> = api
+        .security_schemes
+        .values()
+        .flat_map(|scheme| scheme.docs.iter())
+        .collect();
+    if documented.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        String::new(),
+        "# Declared schemes".to_owned(),
+        String::new(),
+    ];
+    lines.extend(documented.into_iter().cloned());
+    lines
+        .into_iter()
+        .map(|line| quote! { #[doc = #line] })
+        .collect()
+}
+
 /// Emit the `Client` struct and its `new` / `with_client` constructors.
 pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStream {
+    let scheme_docs = scheme_doc_lines(api);
     let params = api
         .operations
         .iter()
@@ -122,6 +149,7 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
             /// Register a credential for a named security scheme. Operations whose `security`
             /// requirement cannot be satisfied by the registered credentials fail with a
             /// request-construction error before anything is sent.
+            #(#scheme_docs)*
             #[must_use]
             pub fn with_credential(
                 mut self,
@@ -454,7 +482,7 @@ pub(crate) fn emit_operation(
                     .get(id)
                     .expect("security scheme validated during lowering");
                 let name = &id.0;
-                let kind = match scheme {
+                let kind = match &scheme.kind {
                     // Caller-supplied oauth2/oidc tokens attach as bearer credentials.
                     SecurityScheme::Http(HttpScheme::Bearer)
                     | SecurityScheme::OAuth2

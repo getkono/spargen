@@ -8,9 +8,9 @@ use crate::ir::{
     EncodingMode, Field, FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Operation,
     OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
     PropertyEncoding, PropertyName, RequestBody, Response, ResponseHeader, Responses, ScalarEnum,
-    ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef,
-    TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, UrlSegment,
-    XmlField,
+    ScalarRepr, ScalarValue, SchemeId, SecurityScheme, SecuritySchemeDef, Server, StatusSpec,
+    Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy,
+    UnionVariant, UrlSegment, XmlField,
 };
 use crate::name::synth_operation_id;
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
@@ -208,6 +208,15 @@ pub fn lower(
             }
 
             let mut operation_description = operation.description.clone();
+            // A Path Item's `summary`/`description` apply to every operation on the path. They are
+            // additional context rather than a replacement, so the operation's own documentation
+            // stays first and these follow it.
+            for text in [item.summary.as_ref(), item.description.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                append_text(&mut operation_description, text.clone());
+            }
             if !operation.tags.is_empty() {
                 append_text(
                     &mut operation_description,
@@ -3788,7 +3797,7 @@ fn resolve_path_item(
 fn resolve_external_security_schemes(
     document: &Document,
     resolver: &Resolver,
-    schemes: &mut IndexMap<SchemeId, SecurityScheme>,
+    schemes: &mut IndexMap<SchemeId, SecuritySchemeDef>,
     diags: &mut Diagnostics,
 ) {
     let mut wanted: Vec<(String, crate::diag::Provenance)> = Vec::new();
@@ -3848,7 +3857,7 @@ fn resolve_external_security_schemes(
 fn lower_security_schemes(
     document: &Document,
     diags: &mut Diagnostics,
-) -> IndexMap<SchemeId, SecurityScheme> {
+) -> IndexMap<SchemeId, SecuritySchemeDef> {
     let mut schemes = IndexMap::new();
     for (name, scheme) in &document.components.security_schemes {
         let scheme = match scheme {
@@ -3933,9 +3942,69 @@ fn lower_security_schemes(
             // The document schema closes the `type` enum.
             _ => continue,
         };
-        schemes.insert(SchemeId(name.clone()), lowered);
+        schemes.insert(
+            SchemeId(name.clone()),
+            SecuritySchemeDef {
+                kind: lowered,
+                docs: security_scheme_docs(name, scheme),
+            },
+        );
     }
     schemes
+}
+
+/// Render the documentation a Security Scheme Object carries into rustdoc lines.
+///
+/// A caller of `Client::with_credential` needs exactly this to know what to register: the token
+/// format, where a token is obtained, and whether the scheme is on its way out. None of it changes
+/// a byte on the wire, which is why it is documentation rather than lowered structure.
+fn security_scheme_docs(name: &str, scheme: &super::SecuritySchemeObject) -> Vec<String> {
+    let mut docs = Vec::new();
+    let kind = match scheme.scheme_type.as_str() {
+        "http" => match scheme.scheme.as_deref() {
+            Some(inner) => format!("`http` (`{inner}`)"),
+            None => "`http`".to_owned(),
+        },
+        other => format!("`{other}`"),
+    };
+    docs.push(format!("- `{name}` — {kind}."));
+    if scheme.deprecated {
+        docs.push("  - **Deprecated.**".to_owned());
+    }
+    if let Some(description) = &scheme.description {
+        docs.push(format!("  - {}", description.replace('\n', " ")));
+    }
+    if let Some(format) = &scheme.bearer_format {
+        docs.push(format!("  - Bearer format: `{format}`."));
+    }
+    if let Some(url) = &scheme.open_id_connect_url {
+        docs.push(format!("  - OpenID Connect discovery: <{url}>"));
+    }
+    if let Some(url) = &scheme.oauth2_metadata_url {
+        docs.push(format!("  - OAuth 2 metadata: <{url}>"));
+    }
+    for flow in &scheme.flows {
+        docs.push(format!("  - Flow `{}`:", flow.name));
+        for (label, url) in [
+            ("authorization", &flow.authorization_url),
+            ("token", &flow.token_url),
+            ("refresh", &flow.refresh_url),
+            ("device authorization", &flow.device_authorization_url),
+        ] {
+            if let Some(url) = url {
+                docs.push(format!("    - {label}: <{url}>"));
+            }
+        }
+        for (scope, description) in &flow.scopes {
+            let description = description.replace('\n', " ");
+            if description.is_empty() {
+                docs.push(format!("    - scope `{scope}`"));
+            } else {
+                docs.push(format!("    - scope `{scope}` — {description}"));
+            }
+        }
+    }
+    docs
 }
 
 /// Suppress `xml.name`/`xml.attribute` renames on any type that is not XML-dedicated, warning `W006`.

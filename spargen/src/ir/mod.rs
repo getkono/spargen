@@ -14,7 +14,9 @@ mod types;
 
 use indexmap::IndexMap;
 
-pub use auth::{ApiKeyLoc, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme};
+pub use auth::{
+    ApiKeyLoc, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme, SecuritySchemeDef,
+};
 pub use invariant::check_invariants;
 pub use media::{
     BodyEncoding, EncodingMode, ErrorShape, Framing, HeaderShape, MediaType, PropertyEncoding,
@@ -42,7 +44,7 @@ pub struct Api {
     /// The type graph referenced by operations and each other.
     pub types: TypeGraph,
     /// Named security schemes (`components.securitySchemes`).
-    pub security_schemes: IndexMap<SchemeId, SecurityScheme>,
+    pub security_schemes: IndexMap<SchemeId, SecuritySchemeDef>,
 }
 
 impl Api {

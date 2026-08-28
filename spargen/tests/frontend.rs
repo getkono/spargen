@@ -4575,3 +4575,104 @@ paths:
         );
     }
 }
+
+#[test]
+fn security_scheme_documentation_reaches_credential_registration() {
+    // The support matrix promises `bearerFormat`, flows, `openIdConnectUrl` and deprecation become
+    // rustdoc on credential registration. `SecuritySchemeObject` used to carry four fields and none
+    // of these, so every one of them was dropped without a trace.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      security:
+        - oauth: [read]
+      responses:
+        "204": { description: No Content }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: A short-lived service token.
+      deprecated: true
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://id.example.com/.well-known/openid-configuration
+    oauth:
+      type: oauth2
+      oauth2MetadataUrl: https://id.example.com/.well-known/oauth-authorization-server
+      flows:
+        authorizationCode:
+          authorizationUrl: https://id.example.com/authorize
+          tokenUrl: https://id.example.com/token
+          scopes:
+            read: Read your data
+        deviceAuthorization:
+          deviceAuthorizationUrl: https://id.example.com/device
+          tokenUrl: https://id.example.com/token
+          scopes:
+            read: Read your data
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    for expected in [
+        "Bearer format: `JWT`",
+        "A short-lived service token.",
+        "**Deprecated.**",
+        "OpenID Connect discovery: <https://id.example.com/.well-known/openid-configuration>",
+        "OAuth 2 metadata: <https://id.example.com/.well-known/oauth-authorization-server>",
+        "Flow `authorizationCode`",
+        // OpenAPI 3.2's device flow, which `docs/openapi-3.2.md` also claims is documented.
+        "Flow `deviceAuthorization`",
+        "device authorization: <https://id.example.com/device>",
+        "scope `read` — Read your data",
+    ] {
+        assert!(code.contains(expected), "missing {expected:?} in: {code}");
+    }
+}
+
+#[test]
+fn path_item_summary_and_description_reach_operation_rustdoc() {
+    // A Path Item's `summary`/`description` apply to every operation on the path. They were parsed
+    // only when a `$ref` was present, and then discarded, so the matrix's claim that they become
+    // rustdoc never held.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    summary: Everything about pets.
+    description: Shared across both operations on this path.
+    get:
+      operationId: listPets
+      description: List them.
+      responses:
+        "204": { description: No Content }
+    delete:
+      operationId: purgePets
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("Everything about pets."),
+        "path-item summary must reach rustdoc: {code}"
+    );
+    // Both operations carry it. (The count is doubled by the blocking facade, which mirrors every
+    // method's rustdoc, so this asserts the floor rather than an exact number.)
+    assert!(
+        code.matches("Shared across both operations on this path.")
+            .count()
+            >= 2,
+        "the path item's description belongs on every operation of the path: {code}"
+    );
+    // The operation's own documentation is not displaced by it.
+    assert!(code.contains("List them."), "{code}");
+}
