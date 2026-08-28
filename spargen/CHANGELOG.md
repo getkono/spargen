@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/getkono/spargen/compare/spargen-v0.2.2...spargen-v0.3.0) - 2026-08-28
+
+### Added
+
+- [**breaking**] report a diagnostic list the batch cap truncated
+- accept the 3.2 dialect URI its own schema publishes
+- [**breaking**] take impl Into for required string params and params bundles
+- derive Debug and Clone on the generated client
+- name every runtime type a generated signature uses
+- [**breaking**] give generated error types Display and std::error::Error
+- [**breaking**] let omit and carve target OpenAPI 3.2 operations and components
+- surface security scheme and path item documentation
+- report the media types a body offers but does not generate
+- [**breaking**] emit RFC 3339 date types instead of time's own serde form
+- [**breaking**] split Config into Spec and Build, and add `spargen deps`
+- [**breaking**] give Report, Outcome and Diagnostic a usable public shape
+- [**breaking**] support discriminator.defaultMapping and 3.2 security requirement URIs
+- give the remaining dropped metadata a disposition
+- [**breaking**] generate typed accessors for documented response headers
+- [**breaking**] model server variables and generate typed server selection
+- [**breaking**] reject XML hints that change the wire, and acknowledge allowEmptyValue
+- [**breaking**] resolve Path Item and multi-file references, and give every security scheme a disposition
+- [**breaking**] support the Encoding Object and honor requestBody.required
+- [**breaking**] implement every OpenAPI parameter serialization style
+- [**breaking**] generate Beam-compatible typed SSE streams
+- [**breaking**] enforce generated runtime dependency contracts
+- *(oas)* complete OpenAPI 3.1 and 3.2 conformance
+
+### Fixed
+
+- [**breaking**] emit each diagnostic at its own severity, and rename the method
+- keep a literal glob metacharacter out of a bulk omit rule
+- resolve a $ref'd encoding header instead of warning about it
+- resolve header and media type refs like every other component
+- give every XML node type a disposition
+- make the new omit constructs reachable from every surface
+- keep generated error type names out of the runtime prelude
+- derive Deserialize only where the decode path uses serde
+- check response header types in the IR invariants
+- stop inventing a `paths` requirement after an omit profile
+- apply a Path Item $ref's documentation siblings
+- reject an optional dependency that generated code names unconditionally
+- read a documented Set-Cookie response header per line
+- send RFC 6570 multipart parts unencoded and reject the undefined shapes
+- honor Path Item and Operation servers overrides
+- qualify the type path in generated response-header structs
+- correct four constructs that were lowered or serialized wrongly
+- prevent operation parameter shadowing
+
+### Other
+
+- kill the mutants that survived in the new glob-escape logic
+- narrow the file-level items that were wider than they need to be
+- make four claims match what the code does
+- build every feature combination, not just --all-features
+- give the four facade-only diagnostics a fixture
+- [**breaking**] report vendoring failure the way every other entry point does
+- correct the API claims the code contradicts
+- compile-verify the remaining OpenAPI 3.2 constructs
+- [**breaking**] mark the growable public enums non_exhaustive
+- [**breaking**] hide the unusable diagnostic builder constructors
+- fold the generator API reference into Getting Started
+- drop the 0.3 migration guide
+- drop the validation plan page
+- drop the benchmarks page
+- drop the corpus page in favour of the corpus README
+- *(mise)* define the hook gates as tasks
+- correct the claims the code contradicts
+- pin the diagnostic index against the declared codes
+- bring the support matrix and 3.2 scope up to what the code now does
+- exercise servers, deepObject, response headers and multipart in the example
+- pin the serialization constructs at the wire, including a 3.2 arm
+- [**breaking**] restrict generation to compile-time Rust APIs
+
 ## [0.2.2](https://github.com/getkono/spargen/compare/spargen-v0.2.1...spargen-v0.2.2) - 2026-07-22
 
 ### Added
