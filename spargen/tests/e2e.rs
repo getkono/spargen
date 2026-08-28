@@ -382,7 +382,7 @@ fn generated_module_compiles_in_basic_oas31_crate() {
         generated.contains("pub struct BlockingClient"),
         "BlockingClient must be emitted"
     );
-    // Issue #21: the `BlockingClient` is gated on the `blocking` feature AND `not(wasm32)` — its
+    // the `BlockingClient` is gated on the `blocking` feature AND `not(wasm32)` — its
     // current-thread tokio runtime cannot run on the single-threaded browser, so a wasm build never
     // compiles it (and never pulls tokio) even with the feature enabled.
     assert!(
@@ -1004,7 +1004,7 @@ fn nullable_variant_union_resolves_null_at_option() {
 #[test]
 fn disjoint_union_round_trips_without_wrapper() {
     // A `string` payload deserializes to the string variant and re-serializes as a BARE string —
-    // no tag, no wrapper (Issue #9, strategy B custom Serialize).
+    // no tag, no wrapper (strategy B custom Serialize).
     let text: basic_client::types::StringOrList =
         serde_json::from_str(r#""hello""#).unwrap();
     assert_eq!(serde_json::to_string(&text).unwrap(), r#""hello""#);
@@ -1017,7 +1017,7 @@ fn disjoint_union_round_trips_without_wrapper() {
 
 #[test]
 fn multi_status_response_enums_carry_typed_variants() {
-    // Issue #10: the two success statuses lowered to a `GetMultiResponse` enum and the two error
+    // the two success statuses lowered to a `GetMultiResponse` enum and the two error
     // statuses to a `GetMultiError` enum, each variant carrying that status's typed body. The
     // variants deserialize their bodies (the same `serde_json::from_slice` the generated dispatch
     // runs after selecting by HTTP status), proving the types are real and payload-carrying — not
@@ -1055,7 +1055,7 @@ fn multi_status_response_enums_carry_typed_variants() {
 
 #[test]
 fn multipart_body_struct_has_typed_form_part_fields() {
-    // Issue #12: the multipart/form-data body lowered to a typed struct whose fields are the form
+    // the multipart/form-data body lowered to a typed struct whose fields are the form
     // parts. The binary `file` part is `bytes::Bytes` (its `serde` impls compile only because the
     // synthesized Cargo.toml enabled bytes' `serde` feature), `caption` a required `String`, and the
     // optional `count`/`tags` are `Option`. Constructing the value proves the field types; the
@@ -1075,7 +1075,7 @@ fn multipart_body_struct_has_typed_form_part_fields() {
 
 #[test]
 fn streaming_op_item_type_is_typed_not_json_value() {
-    // Issue #14: the SSE `/chat/stream` response schema lowered to a real `ChatChunk` type — the
+    // the SSE `/chat/stream` response schema lowered to a real `ChatChunk` type — the
     // streamed item of the `EventStream<ChatChunk>` the `stream_chat` method returns (that signature
     // and the embedded runtime `EventStream` are compile-verified by this crate's build). The item
     // type is a typed struct, never `serde_json::Value`; deserializing a frame the way the runtime's
@@ -1087,7 +1087,7 @@ fn streaming_op_item_type_is_typed_not_json_value() {
 
 #[test]
 fn xml_body_types_carry_attribute_and_rename() {
-    // Issue #13: the XML request/response bodies lowered to typed structs whose serde wire names
+    // the XML request/response bodies lowered to typed structs whose serde wire names
     // honor the `xml` hints — `XmlOrder.id` is an attribute (`xml.attribute` → serde `@id`), `sku` a
     // child element, and `XmlReceipt.code` is renamed via `xml.name` to `ReceiptCode`. The generated
     // crate depends on quick-xml (proving the conditional `xml` feature was enabled in its
@@ -1108,7 +1108,7 @@ fn xml_body_types_carry_attribute_and_rename() {
 
 #[test]
 fn json_only_schema_with_xml_metadata_keeps_original_json_names() {
-    // Issue #13 regression guard: `JsonMeta` carries `xml.attribute`/`xml.name` hints but is used
+    // regression guard: `JsonMeta` carries `xml.attribute`/`xml.name` hints but is used
     // only by a JSON operation, so the format-agnostic serde rename is SUPPRESSED. JSON must use the
     // original `id`/`sku` names — deserializing a normal server payload succeeds and re-serializing
     // produces the same names (never `@id`/`ProductSku`), proving JSON is uncorrupted.
@@ -1125,7 +1125,7 @@ fn json_only_schema_with_xml_metadata_keeps_original_json_names() {
 
 #[test]
 fn optional_params_construct_via_fluent_setters() {
-    // Issue #18: each optional param on a `…Params` struct gets a `#[must_use]` consuming setter
+    // each optional param on a `…Params` struct gets a `#[must_use]` consuming setter
     // named after its field, taking the field's inner `T` (never `Option<T>`) and storing `Some`.
     // `getUser` has an ordinary optional query param (`page` → `Option<i64>`) and a NULLABLE optional
     // one (`filter`, `type: [integer, "null"]` → `Option<i64>`); the setter for the nullable param
@@ -1147,7 +1147,7 @@ fn optional_params_construct_via_fluent_setters() {
 
 #[test]
 fn generated_support_module_exposes_link_paginator() {
-    // Issue #27: the generic Link-header paginator is a runtime helper re-exported at the crate root
+    // the generic Link-header paginator is a runtime helper re-exported at the crate root
     // (`basic_client::LinkPaginator` / `basic_client::next_link`), so a generated client can drive
     // Link/RFC-8288 pagination with no per-operation codegen. Constructing one via
     // `client.core().paginate_links::<T>(url)` compiles under clippy -D warnings, proving the
@@ -1174,7 +1174,7 @@ fn generated_support_module_exposes_link_paginator() {
 
 #[test]
 fn custom_http_backend_plugs_into_non_generic_client() {
-    // Issue #11: the transport seam is re-exported at the crate root
+    // the transport seam is re-exported at the crate root
     // (`basic_client::HttpBackend` / `ExecuteFuture` / `ReqwestBackend`), so a consumer can
     // implement their own transport and plug it via `Client::with_backend` WITHOUT `Client`
     // becoming generic. A trivial backend compiles (under clippy -D warnings) and constructs a
@@ -1207,7 +1207,7 @@ fn custom_http_backend_plugs_into_non_generic_client() {
 
 #[test]
 fn retry_backend_wraps_an_inner_backend() {
-    // Issue #17: the retry adapter is re-exported at the crate root (`basic_client::RetryBackend`
+    // the retry adapter is re-exported at the crate root (`basic_client::RetryBackend`
     // / `RetryPolicy` / `RetryOutcome` / `exponential_backoff`). A consumer implements a policy
     // that decides retry AND supplies the wait (bring-your-own timing — no tokio in the runtime),
     // wraps their backend in a `RetryBackend`, and installs it via `Client::with_backend`, all
@@ -1255,7 +1255,7 @@ fn retry_backend_wraps_an_inner_backend() {
 
 #[test]
 fn middleware_backend_wraps_an_inner_backend() {
-    // Issue #20: the interceptor middleware is re-exported at the crate root
+    // the interceptor middleware is re-exported at the crate root
     // (`basic_client::Middleware` / `Next` / `MiddlewareBackend`). A consumer implements a trivial
     // header-injecting middleware, layers it onto a `MiddlewareBackend`, and installs the whole
     // chain via `Client::with_backend` — all without `Client` becoming generic. This construction
@@ -1303,7 +1303,7 @@ fn middleware_backend_wraps_an_inner_backend() {
         .unwrap();
     assert!(status.success());
 
-    // Issue #19: the same generated crate must also build and lint clean WITH the `blocking` feature,
+    // the same generated crate must also build and lint clean WITH the `blocking` feature,
     // proving the `BlockingClient` type and its blocking methods compile under clippy -D warnings.
     let status = Command::new("cargo")
         .args(["build", "--features", "blocking"])
@@ -1731,7 +1731,7 @@ fn omit_overlay_removes_unsupported_operation() {
         .any(|diagnostic| diagnostic.code == Code::OmittedConstruct));
 }
 
-/// Issue #34 (layer A) — GENERATED-CODE property round-trip. Generate a module in a fixture crate carrying
+/// GENERATED-CODE property round-trip. Generate a module in a fixture crate carrying
 /// the representative union/allOf types (a discriminated union, a structurally-disjoint
 /// string-vs-array union, a required-key-disjoint closed-object union, a nullable-variant union, and
 /// an `allOf`-merged struct), then add `proptest` as a dev-dependency OF THE HARNESS-SCAFFOLDED
@@ -2149,7 +2149,7 @@ paths:
           schema:
             type: integer
             default: 1
-        # Optional nullable query param (Issue #6): `type: [integer, "null"]` lowers to a nullable
+        # Optional nullable query param: `type: [integer, "null"]` lowers to a nullable
         # `Ty`, which `ty_tokens` renders as `Option<i64>`. The params struct must NOT wrap it again
         # (`Option<Option<i64>>` would not serialize — `Option<i64>: !Display`).
         - name: filter
@@ -2169,7 +2169,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/User"
-  # Multi-status responses (Issue #10): TWO success statuses (200/201) with different bodies lower
+  # Multi-status responses: TWO success statuses (200/201) with different bodies lower
   # to a typed `GetMultiResponse` enum, and TWO error statuses (404/409) with different bodies to a
   # typed `GetMultiError` enum — no `serde_json::Value`, no `serde(untagged)`. Decode dispatches by
   # HTTP status. Here we compile-verify the enums and construct/deserialize their variants.
@@ -2190,7 +2190,7 @@ paths:
               schema:
                 $ref: "#/components/schemas/MultiCreated"
         # A documented bodyless success alongside 2+ bodied successes → a payload-free unit variant
-        # (Issue #10 follow-up): not silently dropped, decoded without reading a body.
+        # not silently dropped, decoded without reading a body.
         "204":
           description: No Content
         "404":
@@ -2205,7 +2205,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
-  # multipart/form-data request body (Issue #12): the body is an object whose properties are the form
+  # multipart/form-data request body: the body is an object whose properties are the form
   # parts. `file` is `format: binary` → a `bytes::Bytes` file part; `caption` a required text part;
   # `count` an optional scalar text part; `tags` an optional array → a JSON-encoded text part. The
   # generated method builds a `reqwest::multipart::Form` (compile-verifies the multipart emit AND that
@@ -2235,7 +2235,7 @@ paths:
       responses:
         "204":
           description: No Content
-  # Binary in parameter / non-multipart body positions (Issue #12 regression guard): `format: binary`
+  # Binary in parameter / non-multipart body positions (regression guard): `format: binary`
   # on a param has no faithful byte rendering, so it is represented as `String` (remapped) and stays
   # renderable via `to_string()`; a `format: binary` text/plain body lowers to `bytes::Bytes` and is
   # sent as a raw byte body (`request.body(body.clone())`), never `.to_string()` (`Bytes: !Display`).
@@ -2337,7 +2337,7 @@ paths:
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
-  # XML request + response bodies (Issue #13): both lower to typed structs and are
+  # XML request + response bodies: both lower to typed structs and are
   # serialized/decoded through the embedded quick-xml codec — compile-verifies that the synthesized
   # Cargo.toml enabled quick-xml (the `xml` feature) and that the embedded `support::xml` helpers
   # (`to_xml`, `decode_success_xml`) compile. `id` carries `xml.attribute` (serde `@id`) and `code`
@@ -2358,7 +2358,7 @@ paths:
             application/xml:
               schema:
                 $ref: "#/components/schemas/XmlReceipt"
-  # JSON body carrying `xml` metadata (Issue #13 regression guard): the schema has `xml.attribute`
+  # JSON body carrying `xml` metadata (regression guard): the schema has `xml.attribute`
   # and `xml.name` hints but is used only by a JSON operation. The format-agnostic serde rename must
   # NOT be applied (it would corrupt JSON), so `JsonMeta` keeps its `id`/`sku` wire names — the
   # suppression is acknowledged as W006. Round-trip is compile+run verified below.
@@ -2378,7 +2378,7 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/JsonMeta"
-  # Streaming response (Issue #14): a `text/event-stream` success response lowers to a streaming
+  # Streaming response: a `text/event-stream` success response lowers to a streaming
   # operation whose method returns `support::EventStream<ChatChunk>` instead of `ResponseValue<T>`.
   # Compile-verifies both the streaming method signature and the embedded runtime `EventStream`
   # (framing + standard Stream plus inherent async `next`) and conditional stream dependencies.
@@ -2641,14 +2641,14 @@ components:
           $ref: "#/components/schemas/Dict"
         priority:
           $ref: "#/components/schemas/Priority"
-        # Discriminated union (Issue #9): an internally-tagged enum over object `$ref` variants.
+        # Discriminated union: an internally-tagged enum over object `$ref` variants.
         pet:
           $ref: "#/components/schemas/Pet"
         # Undiscriminated but provably-disjoint union (string vs array JSON category): an enum with a
         # content-inspecting custom Deserialize/Serialize — no wrapper on the wire.
         alias:
           $ref: "#/components/schemas/StringOrList"
-        # Nullable union variant (Issue #9 fix 2): the string variant is `{type: [string, null]}`;
+        # Nullable union variant: the string variant is `{type: [string, null]}`;
         # its nullability is HOISTED to the union so this field is `Option<...>` and a `null` payload
         # resolves to `None` rather than erroring in the custom Deserialize.
         notes:
@@ -2746,14 +2746,14 @@ components:
       type: object
       additionalProperties:
         $ref: "#/components/schemas/Dict"
-    # Null-mixed enum (Issue #6): the `null` member is stripped and the remaining homogeneous string
+    # Null-mixed enum: the `null` member is stripped and the remaining homogeneous string
     # scalars lower as a real Rust enum; the `"null"` in the type array makes every use nullable, so
     # a field of this type is emitted as `Option<Priority>`. An absent or `null` value deserializes
     # to `None`; a string value to the matching variant.
     Priority:
       type: [string, "null"]
       enum: [low, medium, high, null]
-    # Propagation of component nullability through `$ref` (Issue #6): a REQUIRED field whose type is
+    # Propagation of component nullability through `$ref`: a REQUIRED field whose type is
     # the nullable `Priority` component must still be `Option<Priority>` (present, but may be `null`),
     # and an array of the component must be `Vec<Option<Priority>>` (a null element is accepted).
     # Before propagation these emitted `Priority` / `Vec<Priority>` and rejected a conforming `null`.
@@ -2824,7 +2824,7 @@ components:
           type: string
       patternProperties:
         "^x-": { type: integer }
-    # allOf merge (Issue #8): `Account` flattens a `$ref` base (id, required), an inline member
+    # allOf merge: `Account` flattens a `$ref` base (id, required), an inline member
     # (label, required) and the enclosing schema's own sibling property (owner, optional) into ONE
     # struct. All fields must be present and correctly typed in the generated `Account` type.
     AccountBase:
@@ -2845,7 +2845,7 @@ components:
           properties:
             label:
               type: string
-    # Distinct bodies for the multi-status `getMulti` operation (Issue #10).
+    # Distinct bodies for the multi-status `getMulti` operation.
     MultiOk:
       type: object
       required: [ok]
@@ -2870,14 +2870,14 @@ components:
       properties:
         detail:
           type: string
-    # Streamed item type for the `/chat/stream` SSE operation (Issue #14).
+    # Streamed item type for the `/chat/stream` SSE operation.
     ChatChunk:
       type: object
       required: [delta]
       properties:
         delta:
           type: string
-    # XML request body (Issue #13): `id` is an XML attribute (serde `@id`), `sku` a plain element.
+    # XML request body: `id` is an XML attribute (serde `@id`), `sku` a plain element.
     XmlOrder:
       type: object
       required: [id, sku]
@@ -2887,7 +2887,7 @@ components:
           xml: { attribute: true }
         sku:
           type: string
-    # XML response body (Issue #13): `code` renamed via `xml.name`; `note` carries an unsupported
+    # XML response body: `code` renamed via `xml.name`; `note` carries an unsupported
     # `xml.namespace` hint (→ W006, still generates).
     XmlReceipt:
       type: object
@@ -2898,7 +2898,7 @@ components:
           xml: { name: "ReceiptCode" }
         note:
           type: string
-    # JSON-only schema carrying `xml` metadata (Issue #13 regression guard): the same hint shapes as
+    # JSON-only schema carrying `xml` metadata (regression guard): the same hint shapes as
     # `XmlOrder`, but reachable only from a JSON body — the rename must be suppressed so JSON is
     # correct. Its `xml.namespace` is also the W006 case: on a type never serialized as XML the
     # hint genuinely has no effect, so it warns rather than rejecting.
@@ -3105,7 +3105,7 @@ fn wasm32_target_installed() -> bool {
     }
 }
 
-/// Issue #21 — THE gate: a generated client must compile for `wasm32-unknown-unknown` (the browser,
+/// THE gate: a generated client must compile for `wasm32-unknown-unknown` (the browser,
 /// via reqwest's `fetch` backend), where reqwest's client/request/response and fetch futures are
 /// `!Send`. The `BASIC_SPEC` exercises the wasm-sensitive surface — the transport seam, the auth
 /// token provider, and a streaming `EventStream` operation — so `cargo check --target

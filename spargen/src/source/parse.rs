@@ -98,9 +98,7 @@ pub fn parse_yaml(
     builder.build(diags)
 }
 
-// ===========================================================================================
 // JSON: hand-rolled span-tracking recursive-descent parser
-// ===========================================================================================
 
 /// Guard against unbounded recursion on pathological input (deeply nested `[[[…]]]`).
 const MAX_JSON_DEPTH: u32 = 256;
@@ -549,9 +547,7 @@ impl<'a> JsonParser<'a> {
     }
 }
 
-// ===========================================================================================
 // YAML: event-based span-tracking builder over the JSON-compatible subset
-// ===========================================================================================
 
 /// Collects `(event, marker)` pairs from `yaml_rust2`'s push parser so the tree can be built in a
 /// second pass with lookahead to container-end markers.
@@ -796,9 +792,7 @@ fn scalar_end(positions: &Positions, style: TScalarStyle, value: &str, start_ind
     positions.loc(start_index + value.chars().count() + quotes)
 }
 
-// ===========================================================================================
 // Shared position bookkeeping
-// ===========================================================================================
 
 /// A precomputed map from a source character index to its [`Loc`] (byte offset + 1-based
 /// line/column). `yaml_rust2` reports positions as character indices, so this converts them to
@@ -959,7 +953,7 @@ mod tests {
     #[test]
     fn json_rejects_malformed_numbers_like_serde() {
         // Leading zeros, a fraction/exponent with no digit, and an overflow-to-infinity literal
-        // are all malformed and must be rejected (they used to be silently accepted).
+        // are all malformed and must be rejected.
         for bad in [
             "01",
             "00",

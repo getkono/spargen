@@ -3,8 +3,7 @@
 //! Every entry point takes one of these two. [`check`](crate::check), [`diff`](crate::diff),
 //! [`vendor`](crate::vendor) and [`requirements`](crate::requirements) analyse a spec and write
 //! nothing, so they take a `Spec`; only [`generate`](crate::generate) writes a file, so only it
-//! takes a `Build`. That split is why the analysis entry points no longer demand a fabricated
-//! output path that is never used.
+//! takes a `Build`, and the analysis entry points demand no output path they would never use.
 //!
 //! Both types have private fields and chained setters, so a new knob is an additive change rather
 //! than a breaking one.

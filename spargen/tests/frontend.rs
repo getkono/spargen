@@ -2258,7 +2258,7 @@ paths:
 
 #[test]
 fn xml_request_body_generates() {
-    // Issue #13: an `application/xml` request body lowers to a typed struct and generates (no E009);
+    // an `application/xml` request body lowers to a typed struct and generates (no E009);
     // it is serialized through the runtime's quick-xml codec. check/generate stay in parity.
     let spec = r##"
 openapi: 3.1.0
@@ -2293,7 +2293,7 @@ paths:
 
 #[test]
 fn xml_response_body_generates() {
-    // Issue #13: a `text/xml` response body lowers to a typed struct and generates (no E009); it is
+    // a `text/xml` response body lowers to a typed struct and generates (no E009); it is
     // decoded through the runtime's quick-xml codec rather than serde_json.
     let spec = r##"
 openapi: 3.1.0
@@ -2417,7 +2417,7 @@ paths:
 
 #[test]
 fn json_only_schema_with_xml_hints_suppresses_rename_and_warns_w006() {
-    // Issue #13 regression guard: a schema carrying `xml.name`/`xml.attribute` but reachable only
+    // regression guard: a schema carrying `xml.name`/`xml.attribute` but reachable only
     // from a JSON body must NOT have the format-agnostic serde rename applied (it would corrupt
     // JSON). The suppression is acknowledged with W006 (never silent), and generation still succeeds.
     let spec = r##"
@@ -2512,7 +2512,7 @@ components:
 
 #[test]
 fn xml_body_in_multi_status_enum_is_rejected() {
-    // Issue #13: XML decode is scoped to single-body success/error. An XML body that would land in a
+    // XML decode is scoped to single-body success/error. An XML body that would land in a
     // multi-status success enum (two bodied success statuses) is rejected cleanly with narrowed E009
     // rather than silently decoded as JSON.
     let spec = r##"
@@ -2543,7 +2543,7 @@ paths:
 
 #[test]
 fn sse_response_body_generates() {
-    // Issue #14: a `text/event-stream` (SSE) success response is now a typed stream, not `E009`. It
+    // a `text/event-stream` (SSE) success response is now a typed stream, not `E009`. It
     // generates without the code firing, and check/generate stay in parity.
     let spec = r##"
 openapi: 3.1.0
@@ -2575,7 +2575,7 @@ paths:
 
 #[test]
 fn ndjson_response_body_generates() {
-    // Issue #14: an `application/x-ndjson` success response is a typed stream, not `E009`.
+    // an `application/x-ndjson` success response is a typed stream, not `E009`.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }

@@ -1,4 +1,4 @@
-//! Integration coverage for omit-profile globbing (bulk omits) and auto-carve (Issue #24). These
+//! Integration coverage for omit-profile globbing (bulk omits) and auto-carve. These
 //! drive the supported Rust generation API end-to-end, proving that:
 //!
 //! * a glob omit-path value removes EVERY matching construct (bulk), while exact

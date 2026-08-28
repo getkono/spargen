@@ -23,10 +23,9 @@
 #![allow(clippy::result_large_err)]
 mod auth;
 // The blocking facade owns a current-thread tokio runtime, so it pulls in the optional `tokio`
-// dependency and is compiled only under the `blocking` feature. The default runtime dependency set
-// (reqwest/serde/serde_json/bytes/secrecy, plus conditional futures-core) stays unchanged; a generated client embeds this module
-// unconditionally but gates it on the same `blocking` feature, so nothing tokio-related is
-// referenced unless the consumer opts in.
+// dependency and is compiled only under the `blocking` feature. A generated client embeds this
+// module unconditionally but gates it on the same feature, so nothing tokio-related is referenced
+// unless the consumer opts in.
 #[cfg(feature = "blocking")]
 mod blocking;
 mod client;
@@ -50,9 +49,7 @@ mod transport;
 // set of bounds that builds both natively and on the browser `fetch` backend.
 mod wasm;
 // The XML codec pulls in the optional `quick-xml` dependency, so it is compiled only under the
-// `xml` feature; the default runtime dependency set (reqwest/serde/serde_json/bytes/secrecy, plus
-// conditional futures-core) stays
-// unchanged. A generated client embeds this module only when its spec uses an XML body.
+// `xml` feature. A generated client embeds this module only when its spec uses an XML body.
 #[cfg(feature = "xml")]
 mod xml;
 

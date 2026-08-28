@@ -108,8 +108,7 @@ impl std::fmt::Display for Outcome {
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
 ///
 /// Fields are private and read through accessors, matching [`Spec`], [`Build`], [`Diagnostic`],
-/// and [`DiffRejection`]. That is what let [`Self::truncated`] be added without a second breaking
-/// change the next time the shape grows.
+/// and [`DiffRejection`], so the shape can grow without a breaking change.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Report {
     /// Every diagnostic emitted during the run (batch reporting).
@@ -177,10 +176,8 @@ impl Report {
 
     /// Print every diagnostic as a Cargo build-script directive, so it surfaces in the build's
     /// output at its own severity: an error-severity diagnostic goes out as `cargo::error=`, a
-    /// warning as `cargo::warning=`.
-    ///
-    /// Announcing a rejection as a warning made the one message that stops generation look like
-    /// the ones that do not, which is why this is not called `emit_cargo_warnings` any more.
+    /// warning as `cargo::warning=`. Announcing a rejection as a warning would make the one
+    /// message that stops generation look like the ones that do not.
     pub fn emit_cargo_diagnostics(&self) {
         for line in self.cargo_directive_lines() {
             println!("{line}");
@@ -296,8 +293,8 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                         truncated: false,
                     };
                 }
-                // A verified cache hit did not rewrite anything, and saying `Generated` made
-                // `wrote_output` a lie.
+                // A verified cache hit rewrote nothing, so the outcome is `Cached`, not
+                // `Generated` — `wrote_output` must stay true to what happened.
                 return Report {
                     diagnostics: cargo_diagnostics,
                     outcome: Outcome::Cached,
