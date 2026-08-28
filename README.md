@@ -161,6 +161,7 @@ mise run hooks        # install git hooks
 | --- | --- |
 | `mise run check` | Type-check the workspace |
 | `mise run fmt` | Format the workspace |
+| `mise run fmt-check` | Verify the workspace is formatted |
 | `mise run lint` | Clippy with warnings denied |
 | `mise run test` | Full suite: unit, property, frontend-fixture, cache, determinism, and generated-code E2E tests |
 | `mise run corpus-smoke` | Fast checks against pinned real-world specs |

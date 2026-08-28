@@ -10,9 +10,17 @@ hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
 description = "Format the whole workspace"
 run = "cargo fmt --all"
 
+[tasks.fmt-check]
+description = "Verify the whole workspace is formatted"
+run = "cargo fmt --all --check"
+
 [tasks.lint]
 description = "Clippy across the workspace with warnings denied"
 run = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+
+[tasks.lint-fix]
+description = "Clippy across the workspace, applying machine-applicable fixes"
+run = "cargo clippy --workspace --all-targets --all-features --fix --allow-dirty --allow-staged"
 
 [tasks.check]
 description = "Type-check the whole workspace"
@@ -74,6 +82,17 @@ run = [
 description = "Build the mdBook documentation site into docs/book/book (git-ignored)"
 # Requires mdBook (`cargo install mdbook`). Fails on broken includes/links.
 run = "mdbook build docs/book"
+
+[tasks.commit-msg]
+description = "Validate a Conventional Commit message read from stdin (merge commits exempt)"
+# During an in-progress merge Git exposes MERGE_HEAD; skip so merge commits stay exempt. The guard
+# is an `if` condition, which is exempt from the `errexit` the task shell runs under.
+run = "if git rev-parse --verify --quiet MERGE_HEAD >/dev/null; then exit 0; fi; convco check --from-stdin --strip"
+
+[tasks.commit-range]
+description = "Validate the outgoing commit range against Conventional Commits"
+# convco skips merge commits by default for revwalks (do not add --merges).
+run = "convco check origin/master..HEAD"
 
 [tasks.hooks]
 description = "Install git hooks through mise"
