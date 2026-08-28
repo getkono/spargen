@@ -18,7 +18,10 @@ exclude = ["fuzz"]
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
-rust-version = "1.85"
+# The floor the workspace actually compiles on with the committed lockfile, verified by the
+# `msrv` CI job. `time 0.3.55` — itself a tested runtime-contract floor — requires 1.88, so
+# 1.85 was never true; nothing checked it until that job existed.
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Justin Chung"]
 repository = "https://github.com/getkono/spargen"
