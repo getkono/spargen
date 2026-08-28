@@ -8,7 +8,7 @@ fn main() {
         // stale client — so say it must be, and fail loudly if it ever is not.
         .cargo(spargen::CargoIntegration::Required);
     let report = spargen::generate(&build);
-    report.emit_cargo_warnings();
+    report.emit_cargo_diagnostics();
     // Accepts a fresh render and a verified cache hit alike; panics with the full diagnostic list
     // otherwise.
     report.expect_success();

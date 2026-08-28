@@ -43,7 +43,7 @@ Choose an `OUT_DIR` path for ephemeral output or a source path for output you al
 fn main() {
     let build = spargen::Spec::new("openapi.json").build("src/api.rs");
     let report = spargen::generate(&build);
-    report.emit_cargo_warnings();
+    report.emit_cargo_diagnostics();
 }
 ```
 

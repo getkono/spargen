@@ -148,11 +148,28 @@ impl Report {
         }
     }
 
-    /// Print every diagnostic as a `cargo:warning=` line, so they surface in a build's output.
-    pub fn emit_cargo_warnings(&self) {
-        for diagnostic in &self.diagnostics {
-            println!("cargo:warning={diagnostic}");
+    /// Print every diagnostic as a Cargo build-script directive, so it surfaces in the build's
+    /// output at its own severity: an error-severity diagnostic goes out as `cargo::error=`, a
+    /// warning as `cargo::warning=`.
+    ///
+    /// Announcing a rejection as a warning made the one message that stops generation look like
+    /// the ones that do not, which is why this is not called `emit_cargo_warnings` any more.
+    pub fn emit_cargo_diagnostics(&self) {
+        for line in self.cargo_directive_lines() {
+            println!("{line}");
         }
+    }
+
+    /// The directive lines [`Self::emit_cargo_diagnostics`] prints, split out so the severity
+    /// mapping is testable without capturing the process's stdout.
+    fn cargo_directive_lines(&self) -> Vec<String> {
+        self.diagnostics
+            .iter()
+            .map(|diagnostic| match diagnostic.severity {
+                Severity::Error => format!("cargo::error={diagnostic}"),
+                Severity::Warning => format!("cargo::warning={diagnostic}"),
+            })
+            .collect()
     }
 
     /// Panic with the rendered report unless the run succeeded. The build-script one-liner —
@@ -1049,6 +1066,29 @@ mod tests {
             .iter()
             .map(|diagnostic| diagnostic.code.as_str())
             .collect()
+    }
+
+    /// A rejection announced as a warning looks like the diagnostics that do *not* stop
+    /// generation. Each diagnostic goes out at its own severity.
+    #[test]
+    fn cargo_directives_carry_each_diagnostics_own_severity() {
+        let provenance = diag::Provenance::new(JsonPointer::root(), None);
+        let report = Report {
+            diagnostics: vec![
+                Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance.clone())
+                    .message("a rejection")
+                    .build(),
+                Diagnostic::warning(Code::DeclarationHasNoEffect, provenance)
+                    .message("a warning")
+                    .build(),
+            ],
+            outcome: Outcome::Rejected,
+        };
+
+        let lines = report.cargo_directive_lines();
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        assert!(lines[0].starts_with("cargo::error="), "{lines:#?}");
+        assert!(lines[1].starts_with("cargo::warning="), "{lines:#?}");
     }
 
     /// Every Cargo-integration branch, without touching process-global environment state.
