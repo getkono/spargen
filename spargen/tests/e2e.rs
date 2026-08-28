@@ -1432,6 +1432,16 @@ fn assert_reconnect_policy_is_public<P: ReconnectPolicy>() {}
         generated.contains("reqwest::Method::from_bytes(b\"QUERY\")"),
         "QUERY method should be built from its token bytes"
     );
+    // 3.2 `additionalOperations`: a custom method token also emits a real client method, built
+    // from its exact bytes rather than mapped onto a fixed `reqwest::Method` constant.
+    assert!(
+        generated.contains("pub async fn purge_cache"),
+        "an additionalOperations method should emit a client method"
+    );
+    assert!(
+        generated.contains("reqwest::Method::from_bytes(b\"PURGE\")"),
+        "a custom method should be built from its token bytes"
+    );
 
     // The OpenAPI 3.2 streaming response recognizes the standard SSE envelope annotation and types
     // the stream as its JSON `data.contentSchema`, not as the envelope object.
@@ -1509,6 +1519,65 @@ fn oas32_constructs_reach_the_wire() {
     assert_eq!(response.into_inner()[0].id, "r1");
 
     server.join().unwrap();
+}
+
+/// `additionalOperations` on the wire, plus the two constructs its operation is built from: a
+/// `components.mediaTypes` reference supplying the request body, and a discriminated union whose
+/// `defaultMapping` catches an unrecognized tag.
+#[test]
+fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
+    for (tag, expect_unknown) in [("purged", false), ("something-else", true)] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let read = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..read]);
+
+            // The custom method token travels verbatim; nothing maps it onto a fixed method.
+            assert!(
+                request.starts_with("PURGE /records/cache "),
+                "custom method must reach the wire unchanged: {request}"
+            );
+            // The body came from the reusable `components.mediaTypes` entry, typed as `Query`.
+            assert!(request.contains(r#"{"term":"drop"}"#), "{request}");
+
+            let body = if expect_unknown {
+                format!(r#"{{"outcome":"{tag}","detail":"not recognized"}}"#)
+            } else {
+                r#"{"outcome":"purged","entries":7}"#.to_owned()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let client = oas32_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+        let outcome = client
+            .purge_cache(&oas32_client::types::Query { term: Some("drop".to_owned()) })
+            .unwrap()
+            .into_inner();
+
+        match outcome {
+            // An unmapped discriminator value decodes into the `defaultMapping` branch rather
+            // than failing, which is the whole point of the 3.2 field.
+            oas32_client::types::CacheOutcome::CacheUnknown(unknown) => {
+                assert!(expect_unknown, "mapped tag must not fall back: {unknown:?}");
+                assert_eq!(unknown.detail, "not recognized");
+            }
+            oas32_client::types::CacheOutcome::CachePurged(purged) => {
+                assert!(!expect_unknown, "unmapped tag must fall back");
+                assert_eq!(purged.entries, 7);
+            }
+        }
+
+        server.join().unwrap();
+    }
 }
 "##,
     )
@@ -2831,6 +2900,26 @@ paths:
             text/event-stream:
               itemSchema:
                 $ref: "#/components/schemas/SseEnvelope"
+  # 3.2 `additionalOperations`: a custom method token generates a client method and must reach the
+  # wire verbatim. The reusable `components.mediaTypes` reference supplies its request body, and the
+  # response is a discriminated union with `defaultMapping` — three constructs that each emit code
+  # and, until now, were only ever checked for diagnostics.
+  /records/cache:
+    additionalOperations:
+      PURGE:
+        operationId: purgeCache
+        requestBody:
+          required: true
+          content:
+            application/json:
+              $ref: "#/components/mediaTypes/QueryBody"
+        responses:
+          "200":
+            description: ok
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/CacheOutcome"
 components:
   schemas:
     Record:
@@ -2860,6 +2949,32 @@ components:
       properties:
         kind: { type: string }
         resource: { type: [string, "null"] }
+    CacheOutcome:
+      oneOf:
+        - $ref: "#/components/schemas/CachePurged"
+        - $ref: "#/components/schemas/CacheUnknown"
+      discriminator:
+        propertyName: outcome
+        mapping:
+          purged: "#/components/schemas/CachePurged"
+        # 3.2: an absent or unrecognized discriminator value decodes into this branch instead of
+        # failing, and spargen generates exactly that fallback.
+        defaultMapping: "#/components/schemas/CacheUnknown"
+    CachePurged:
+      type: object
+      required: [outcome, entries]
+      properties:
+        outcome: { type: string }
+        entries: { type: integer }
+    CacheUnknown:
+      type: object
+      required: [detail]
+      properties:
+        detail: { type: string }
+  mediaTypes:
+    QueryBody:
+      schema:
+        $ref: "#/components/schemas/Query"
 "##;
 
 /// Whether the `wasm32-unknown-unknown` target's std is installed, so the wasm gate can run. When
