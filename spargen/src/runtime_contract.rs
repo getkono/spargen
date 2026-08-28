@@ -653,6 +653,19 @@ fn check_dependency(
             dependency.name
         )));
     }
+    // The mirror of the rule above, and the one that was missing: generated code names these
+    // crates unconditionally, with no `cfg` to hide behind. Declaring one `optional = true` — even
+    // wired into `default` — leaves a feature resolution (`--no-default-features`, or a dependent
+    // that turns defaults off) in which the generated module references a crate that is not in the
+    // graph, and the failure surfaces as a rustc error inside generated code rather than here.
+    if !check.require_optional && declaration_bool(declaration, "optional") == Some(true) {
+        diagnostics.push(diagnostic(format!(
+            "`{}` must not be optional: generated code references it unconditionally, so a build \
+             with that feature disabled would not compile. Drop `optional = true`, or turn the \
+             mapping off at generation time",
+            dependency.name
+        )));
+    }
     if [Some(declaration), workspace_declaration]
         .into_iter()
         .flatten()

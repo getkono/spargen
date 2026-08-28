@@ -18,9 +18,6 @@ version = "0.0.0"
 edition = "2021"
 
 [features]
-default = ["uuid", "time"]
-uuid = ["dep:uuid"]
-time = ["dep:time"]
 blocking = ["dep:tokio"]
 
 [dependencies]
@@ -31,8 +28,8 @@ reqwest = {{ version = "0.12.28", default-features = false, features = ["json", 
 secrecy = "0.10.3"
 serde = {{ version = "1.0.229", features = ["derive"] }}
 serde_json = "1.0.151"
-uuid = {{ version = "1.24.0", features = ["serde"], optional = true }}
-time = {{ version = "0.3.55", features = ["serde", "formatting", "parsing"], optional = true }}
+uuid = {{ version = "1.24.0", features = ["serde"] }}
+time = {{ version = "0.3.55", features = ["formatting", "parsing"] }}
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
@@ -258,10 +255,12 @@ fn generated_module_compiles_in_basic_oas31_crate() {
         manifest.contains(r#"tokio = { version = "1.53.1", features = ["rt"], optional = true }"#),
         "tokio must be an optional dependency: {manifest}"
     );
+    // `blocking` is opt-in and must never be a default feature. `uuid`/`time` are not consumer
+    // features at all any more: generated code names them unconditionally, so the dependency audit
+    // now requires them non-optional — which leaves this manifest with no `default` list.
     assert!(
-        !manifest.contains(r#"default = ["uuid", "time", "blocking"]"#)
-            && manifest.contains(r#"default = ["uuid", "time"]"#),
-        "blocking must NOT be in the default feature set: {manifest}"
+        !manifest.contains("default = "),
+        "the fixture manifest must declare no default features: {manifest}"
     );
     // The `BlockingClient` and every blocking method are emitted behind `#[cfg(feature = "blocking")]`
     // so a default build compiles them out entirely — there is no `BlockingClient` without the opt-in.
@@ -3387,4 +3386,77 @@ fn rfc6570_multipart_parts_are_not_percent_encoded() {
         .status()
         .unwrap();
     assert!(status.success(), "the multipart wire round-trip must pass");
+}
+
+/// A crate that declares `uuid`/`time` as *optional* must be rejected.
+///
+/// Generated code names `uuid::Uuid` and the date newtypes unconditionally — there is no `cfg` to
+/// hide behind — so an optional declaration leaves a feature resolution
+/// (`--no-default-features`, or a dependent turning defaults off) in which the generated module
+/// references a crate that is not in the graph. The audit checked only the opposite direction, so
+/// this shape passed and failed later as a rustc error inside generated code. Both this repo's
+/// examples and this test's own fixture shipped it.
+#[test]
+fn the_manifest_audit_rejects_an_optional_unconditional_dependency() {
+    let temp = tempfile::tempdir().unwrap();
+    let manifest = temp.path().join("Cargo.toml");
+    std::fs::write(
+        &manifest,
+        r#"[package]
+name = "optional-consumer"
+version = "0.0.0"
+
+[features]
+default = ["uuid"]
+uuid = ["dep:uuid"]
+
+[dependencies]
+bytes = "1.12.1"
+reqwest = { version = "0.12.28", default-features = false, features = ["json"] }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+uuid = { version = "1.24.0", features = ["serde"], optional = true }
+
+[workspace]
+"#,
+    )
+    .unwrap();
+    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+    std::fs::write(
+        &spec,
+        r##"openapi: 3.1.0
+info: { title: Ids, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: string, format: uuid }
+"##,
+    )
+    .unwrap();
+
+    let preview =
+        spargen::__private::preview_for_macro(&Spec::new(spec), manifest.to_str().unwrap());
+    assert_eq!(
+        preview.report.outcome,
+        Outcome::Rejected,
+        "{:#?}",
+        preview.report
+    );
+    let messages = preview
+        .report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| {
+            assert_eq!(diagnostic.code, Code::RuntimeDependencyContract);
+            diagnostic.message.as_str()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(messages.contains("must not be optional"), "{messages}");
 }
