@@ -674,6 +674,24 @@ paths:
     assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
 
+    // The 3.2 prose names only the 3.1 URI, but 3.2's own published document schema gives this one
+    // as `jsonSchemaDialect`'s default, so tooling that follows the schema writes it into otherwise
+    // valid 3.2 documents. Both spellings are accepted on a 3.2 document.
+    let published = accepted.replace(
+        "https://spec.openapis.org/oas/3.1/dialect/base",
+        "https://spec.openapis.org/oas/3.2/dialect/2025-09-17",
+    );
+    let report = generate(&published);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
+
+    // That leniency is scoped to 3.2: a 3.1 document claiming the 3.2 dialect is still wrong.
+    let on_31 = published.replace("openapi: 3.2.0", "openapi: 3.1.0");
+    let report = generate(&on_31);
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedDialect), "{report:#?}");
+
+    // A URI that no version of the specification defines stays `E002` either way.
     let nonexistent = accepted.replace("oas/3.1/dialect", "oas/3.2/dialect");
     let report = generate(&nonexistent);
     assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");

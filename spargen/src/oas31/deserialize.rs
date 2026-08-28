@@ -14,6 +14,14 @@ use super::{
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
 
+/// The URI OpenAPI 3.2's own published document schema gives as `jsonSchemaDialect`'s default.
+///
+/// The 3.2 prose (§Specifying Schema Dialects) still names [`OAS31_DIALECT`] as *the* OAS dialect
+/// schema id, and never mentions this URI — but tooling that follows the published schema will
+/// write it into otherwise valid 3.2 documents. The two identify the same dialect for spargen's
+/// purposes, so a 3.2 document may spell it either way; anything else is still `E002`.
+const OAS32_DIALECT: &str = "https://spec.openapis.org/oas/3.2/dialect/2025-09-17";
+
 /// Build the typed [`Document`] from a loaded [`InputBundle`], carrying spans through.
 pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<Document, Aborted> {
     let root = bundle.root();
@@ -33,17 +41,25 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
         return Err(Aborted);
     }
 
+    let is_oas32 = openapi_text.starts_with("3.2.");
+
     if let Some(dialect) = root.get("jsonSchemaDialect") {
         let dialect_text = string(dialect);
-        if dialect_text != Some(OAS31_DIALECT) {
+        let accepted = dialect_text == Some(OAS31_DIALECT)
+            || (is_oas32 && dialect_text == Some(OAS32_DIALECT));
+        if !accepted {
             Diagnostic::error(
                 Code::UnsupportedDialect,
                 provenance(&root_pointer.push("jsonSchemaDialect"), dialect),
             )
             .message("jsonSchemaDialect is not the OpenAPI Schema Object dialect")
-            .remedy(format!(
-                "set jsonSchemaDialect to `{OAS31_DIALECT}`, or omit it"
-            ))
+            .remedy(if is_oas32 {
+                format!(
+                    "set jsonSchemaDialect to `{OAS31_DIALECT}` or `{OAS32_DIALECT}`, or omit it"
+                )
+            } else {
+                format!("set jsonSchemaDialect to `{OAS31_DIALECT}`, or omit it")
+            })
             .emit(diags);
         }
     }
@@ -99,7 +115,7 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
     }
 
     let document = Document {
-        is_oas32: openapi_text.starts_with("3.2."),
+        is_oas32,
         info,
         servers,
         paths,
