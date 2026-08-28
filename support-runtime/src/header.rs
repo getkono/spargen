@@ -27,7 +27,7 @@ pub enum HeaderShape {
     Json,
     /// `Set-Cookie`: one value per occurrence, never joined, decoded into a list.
     ///
-    /// [[RFC9110]] §5.3 exempts this one field from the rule that lets a repeated header be folded
+    /// RFC 9110 §5.3 exempts this one field from the rule that lets a repeated header be folded
     /// into a comma-separated line: its values may contain unescaped commas, so it is
     /// one-value-per-line only. Joining and re-splitting on `,` would cut cookie values in half —
     /// an `Expires=Wed, 09 Jun 2021 …` attribute is enough to trigger it.
