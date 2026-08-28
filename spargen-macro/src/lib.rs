@@ -237,12 +237,12 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
 
     let errors: Vec<&spargen::Diagnostic> = preview
         .report
-        .diagnostics
+        .diagnostics()
         .iter()
         .filter(|d| d.severity == spargen::Severity::Error)
         .collect();
 
-    if preview.report.outcome != spargen::Outcome::Generated || preview.contents.is_none() {
+    if preview.report.outcome() != spargen::Outcome::Generated || preview.contents.is_none() {
         let mut message = format!("spargen could not generate a client from `{raw}`");
         if errors.is_empty() {
             message.push_str(": generation did not succeed");

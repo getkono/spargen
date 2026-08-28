@@ -5,6 +5,7 @@
 hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
 "cargo:convco" = "0.6.4"                    # Conventional Commit checker
 "aqua:EmbarkStudios/cargo-deny" = "0.19.9"  # supply-chain audit
+"cargo:cargo-hack" = "0.6.39"               # feature-combination builds
 
 [tasks.fmt]
 description = "Format the whole workspace"
@@ -29,6 +30,17 @@ run = "cargo check --workspace --all-features"
 [tasks.runtime-dependencies]
 description = "Resolve generated-runtime dependencies at their declared floors and compile them"
 run = "cargo test -p spargen --test e2e runtime_dependency_floors_compile_with_direct_minimal_versions -- --exact --ignored --nocapture"
+
+[tasks.powerset]
+description = "Build every feature combination, not just --all-features"
+# Every other gate runs `--all-features`, so a combination such as `xml` on and `time` off was
+# never compiled — and those are exactly the subsets the generator embeds per spec. `--each-feature`
+# adds the none/all ends; the powerset covers the middle for the runtime, where the conditional
+# modules live.
+run = [
+  "cargo hack check --workspace --each-feature --no-dev-deps",
+  "cargo hack check -p support-runtime --feature-powerset",
+]
 
 [tasks.deny]
 description = "Supply-chain audit (licenses, advisories, bans)"

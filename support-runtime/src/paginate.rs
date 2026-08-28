@@ -126,7 +126,7 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
     /// * a **non-success HTTP status** (anything outside `2xx`) → `Some(Err(Error::UnexpectedStatus))`
     ///   — the body is *never* decoded as `T`, so an error payload can't masquerade as a page. The
     ///   generic paginator has no per-operation error taxonomy, and it attaches no per-operation
-    ///   credentials, so a follow-up page that `401`s (see the auth caveat in the [module docs](self))
+    ///   credentials, so a follow-up page that `401`s (see the auth caveat in this module's docs)
     ///   surfaces here rather than being silently mis-decoded;
     /// * a **decode failure** on a `2xx` body → `Some(Err(Error::Decode))`.
     ///
@@ -181,7 +181,7 @@ impl<T: DeserializeOwned> LinkPaginator<T> {
 
 impl ClientCore {
     /// Start a [`LinkPaginator<T>`] over a `Link`-header-paginated collection, beginning at `first`.
-    /// See the [module docs](self) for the full pattern and the authentication caveat.
+    /// See this module's docs for the full pattern and the authentication caveat.
     pub fn paginate_links<T>(&self, first: Url) -> LinkPaginator<T> {
         LinkPaginator::new(self.clone(), first)
     }

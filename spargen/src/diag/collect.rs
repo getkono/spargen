@@ -6,9 +6,8 @@ use super::Diagnostic;
 /// reporting); the cap bounds memory under pathological inputs. Once the cap is reached, further
 /// diagnostics are dropped and `cap_reached` records that it happened.
 ///
-/// Nothing outside this module reads `cap_reached` yet, so a run that hits `batch_cap` currently
-/// presents a truncated list with no marker on it. Surfacing that on `Report` is a public-API
-/// change and is tracked separately; the flag is kept because it is the input that change needs.
+/// `cap_reached` is what `Report::truncated` reports, so a run that hits `batch_cap` says so
+/// instead of presenting a partial list as a complete one.
 #[derive(Debug)]
 pub struct Diagnostics {
     items: Vec<Diagnostic>,
@@ -51,6 +50,11 @@ impl Diagnostics {
         } else {
             self.cap_reached = true;
         }
+    }
+
+    /// Whether the cap was reached and diagnostics past it were dropped.
+    pub fn cap_reached(&self) -> bool {
+        self.cap_reached
     }
 
     /// Whether any error-severity diagnostic has been recorded.

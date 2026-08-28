@@ -11,8 +11,10 @@
 //!   [`OmitRule::Component`] path/name — and an [`OmitRule::Pointer`] string — that contains a glob
 //!   metacharacter (`*`, `**`, or `?`) is matched as a glob over the construct's path/name (or the
 //!   whole pointer string). A glob rule removes **every** matching construct (bulk); a rule with no
-//!   metacharacter is an exact rule and behaves exactly as before. See [`glob_match`] for the
-//!   semantics.
+//!   metacharacter is an exact rule and behaves exactly as before. A metacharacter is escapable
+//!   with a backslash (`\*`, `\?`), because a URI path may legitimately contain one; rules that
+//!   auto-carve builds from literal document text are escaped for exactly that reason. See
+//!   [`glob_match`] for the semantics.
 //! * **Auto-carve.** [`carve_rules`] maps error diagnostics to the smallest enclosing *omittable*
 //!   construct, so the facade can iteratively omit the unsupported islands of a spec and generate
 //!   the rest. The fixpoint driver lives in the facade (it must re-run the pipeline); this module
@@ -135,7 +137,7 @@ impl Omit {
             }
             OmitRule::Path { path } => RuleMatch::Exact {
                 file: root,
-                pointer: JsonPointer::root().push("paths").push(path),
+                pointer: JsonPointer::root().push("paths").push(&unescape_glob(path)),
             },
             OmitRule::Operation { method, path } if has_glob_meta(path) => {
                 let paths = bundle.root().get("paths");
@@ -161,7 +163,7 @@ impl Omit {
                 file: root,
                 pointer: JsonPointer::root()
                     .push("paths")
-                    .push(path)
+                    .push(&unescape_glob(path))
                     .push(method.as_oas_key()),
             },
             OmitRule::Component { kind, name } if has_glob_meta(name) => {
@@ -184,7 +186,7 @@ impl Omit {
                 pointer: JsonPointer::root()
                     .push("components")
                     .push(kind.as_oas_key())
-                    .push(name),
+                    .push(&unescape_glob(name)),
             },
             OmitRule::Pointer { file, pointer } => {
                 if pointer.is_empty() {
@@ -219,7 +221,7 @@ impl Omit {
                 } else {
                     RuleMatch::Exact {
                         file: file_id,
-                        pointer: JsonPointer::from(pointer.to_string()),
+                        pointer: JsonPointer::from(unescape_glob(pointer)),
                     }
                 }
             }
@@ -303,10 +305,60 @@ fn last_segment_index(pointer: &JsonPointer) -> Option<usize> {
     pointer.as_str().rsplit('/').next()?.parse::<usize>().ok()
 }
 
-/// Whether `pattern` contains a glob metacharacter (`*` or `?`) and should be matched as a glob
-/// rather than compared exactly.
+/// Whether `pattern` contains an *unescaped* glob metacharacter (`*` or `?`) and should be matched
+/// as a glob rather than compared exactly.
+///
+/// A metacharacter is escapable with a backslash, because a URI path may legitimately contain `*`
+/// (RFC 3986 lists it as a sub-delimiter) and without an escape such a path is unaddressable: an
+/// exact rule for it cannot be written, and auto-carve would silently widen into a bulk rule.
 fn has_glob_meta(pattern: &str) -> bool {
-    pattern.contains('*') || pattern.contains('?')
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                chars.next();
+            }
+            '*' | '?' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Resolve the escapes in a pattern with no unescaped metacharacter, so an exact rule compares
+/// against the literal text the author meant. `\*` → `*`, `\?` → `?`, `\\` → `\`; a backslash
+/// before anything else is kept, since it is an ordinary character in a URI path.
+fn unescape_glob(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some(escaped @ ('*' | '?' | '\\')) => out.push(escaped),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Escape every glob metacharacter in literal document text, so a rule built from it targets that
+/// one construct instead of being reinterpreted as a bulk pattern.
+fn escape_glob_meta(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '*' | '?' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// One compiled glob token.
@@ -328,6 +380,11 @@ fn compile_glob(pattern: &str) -> Vec<GlobToken> {
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
+            // A backslash escapes the next character, so a literal `*`/`?` in a path stays literal.
+            '\\' if i + 1 < chars.len() => {
+                tokens.push(GlobToken::Lit(chars[i + 1]));
+                i += 2;
+            }
             '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
                 tokens.push(GlobToken::DoubleStar);
                 i += 2;
@@ -575,11 +632,15 @@ pub(crate) fn carve_rules(diagnostics: &[Diagnostic]) -> Vec<OmitRule> {
 }
 
 /// The smallest omittable construct enclosing `pointer`, or `None` if none is (root / unmodelled).
+///
+/// Every path and component name here is literal text lifted out of the document, so its glob
+/// metacharacters are escaped: a path such as `/files/*` is a legal URI path, and an unescaped rule
+/// for it would be reinterpreted as a bulk pattern and carve away its supported siblings too.
 fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
     let tokens = pointer_tokens(pointer);
     match tokens.first()?.as_str() {
         "paths" => {
-            let path = tokens.get(1)?.clone();
+            let path = escape_glob_meta(tokens.get(1)?);
             // An OpenAPI 3.2 `additionalOperations` method is not a Path Item fixed field, so no
             // `OmitMethod` names it. Carving it as a pointer keeps the blast radius at the one
             // operation; falling through to the path rule would take its supported siblings too.
@@ -593,7 +654,7 @@ fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
                     format!(
                         "/paths/{}/additionalOperations/{}",
                         escape_pointer_token(&path),
-                        escape_pointer_token(method)
+                        escape_glob_meta(&escape_pointer_token(method))
                     ),
                 ));
             }
@@ -607,7 +668,7 @@ fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
         }
         "components" => {
             let kind = tokens.get(1)?.parse::<ComponentKind>().ok()?;
-            Some(OmitRule::component(kind, tokens.get(2)?.clone()))
+            Some(OmitRule::component(kind, escape_glob_meta(tokens.get(2)?)))
         }
         _ => None,
     }
@@ -945,6 +1006,49 @@ mod tests {
         assert!(has_glob_meta("/pet?"));
     }
 
+    /// The escape half of the matcher, pinned against mutation testing: a scoped `cargo mutants`
+    /// run over this file left every arithmetic and guard mutant in `compile_glob` and the
+    /// backslash arm of `has_glob_meta` alive, because the integration tests exercise escaping
+    /// only through paths where an escaped and an unescaped rule happen to remove the same
+    /// construct. These assert the two functions directly.
+    #[test]
+    fn escaped_metacharacters_are_literal_and_cannot_run_off_the_pattern() {
+        // An escaped metacharacter is not a metacharacter, so the rule stays exact.
+        assert!(!has_glob_meta(r"\*"));
+        assert!(!has_glob_meta(r"\?"));
+        assert!(!has_glob_meta(r"/files/\*"));
+        // Escaping is per-character: a second, unescaped one still makes it a glob.
+        assert!(has_glob_meta(r"/files/\*/*"));
+        // An escaped backslash consumes itself, so the `*` after it is live again.
+        assert!(has_glob_meta(r"\\*"));
+        // A trailing lone backslash escapes nothing and must not read past the end.
+        assert!(!has_glob_meta(r"/files/\"));
+
+        // The escaped character matches itself, and nothing else.
+        assert!(glob_match(r"/files/\*", "/files/*"));
+        assert!(!glob_match(r"/files/\*", "/files/other"));
+        assert!(glob_match(r"/files/\?", "/files/?"));
+        assert!(!glob_match(r"/files/\?", "/files/x"));
+        // An escaped backslash is one literal backslash.
+        assert!(glob_match(r"/files/\\", r"/files/\"));
+        // `**` still spans depth when it is not escaped, and its first `*` escapes cleanly.
+        assert!(glob_match(r"/a/**", "/a/b/c"));
+        assert!(glob_match(r"/a/\**", "/a/*b"));
+        // A `*` that is not the final character must stay a single-segment star: reading the
+        // lookahead off by one turns every `*` into `**` and silently widens the rule.
+        assert!(glob_match("/pets/*/paw", "/pets/dog/paw"));
+        assert!(!glob_match("/pets/*/paw", "/pets/dog/left/paw"));
+        // `**` must consume both of its characters, so what follows it still has to match.
+        assert!(glob_match("/a/**/z", "/a/b/c/z"));
+        assert!(!glob_match("/a/**/z", "/a/b/c/y"));
+        assert!(glob_match("/a/**x", "/a/b/cx"));
+        assert!(!glob_match("/a/**/z", "/a/bz"));
+        // A pattern that is nothing but a trailing backslash compiles and terminates.
+        assert!(glob_match(r"\", r"\"));
+        // A pattern opening with an escape must not index before its start.
+        assert!(glob_match(r"\*x", "*x"));
+    }
+
     /// Load an inline YAML spec into an [`InputBundle`] via a tempfile (the loader reads from disk).
     fn bundle_of(spec: &str) -> InputBundle {
         let dir = tempfile::tempdir().unwrap();
@@ -1081,6 +1185,60 @@ components:
             .items()
             .iter()
             .any(|d| d.code == Code::InvalidOmitRule));
+        // A glob that matched nothing means the *pattern* is wrong; say which kind of rule it was,
+        // because the fix differs from an exact rule naming a construct that is not there.
+        assert!(
+            diags
+                .items()
+                .iter()
+                .any(|d| d.message.starts_with("glob omit rule")),
+            "{:#?}",
+            diags.items()
+        );
+    }
+
+    /// The exact-rule counterpart. The two paths are behaviourally identical when the rule has no
+    /// metacharacter — a literal glob matches the same single key — so the message is the only
+    /// thing that distinguishes them, and it is what tells a user which mistake they made.
+    #[test]
+    fn an_exact_rule_matching_nothing_is_e019_and_says_it_was_exact() {
+        let mut bundle = bundle_of(MULTI_SPEC);
+        let mut diags = Diagnostics::default();
+        let omit = Omit {
+            rules: vec![OmitRule::path("/nope")],
+        };
+        assert!(omit.apply(&mut bundle, &mut diags).is_err());
+        let invalid: Vec<_> = diags
+            .items()
+            .iter()
+            .filter(|d| d.code == Code::InvalidOmitRule)
+            .collect();
+        assert_eq!(invalid.len(), 1, "{invalid:#?}");
+        assert!(
+            invalid[0].message.starts_with("omit rule did not match"),
+            "{invalid:#?}"
+        );
+
+        // The same distinction on the other two rule kinds, which resolve through their own arms.
+        for rule in [
+            OmitRule::operation(OmitMethod::Get, "/nope"),
+            OmitRule::component(ComponentKind::Schemas, "Nope"),
+        ] {
+            let mut bundle = bundle_of(MULTI_SPEC);
+            let mut diags = Diagnostics::default();
+            let omit = Omit {
+                rules: vec![rule.clone()],
+            };
+            assert!(omit.apply(&mut bundle, &mut diags).is_err(), "{rule:?}");
+            assert!(
+                diags
+                    .items()
+                    .iter()
+                    .any(|d| d.message.starts_with("omit rule did not match")),
+                "{rule:?}: {:#?}",
+                diags.items()
+            );
+        }
     }
 
     #[test]

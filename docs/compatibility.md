@@ -27,6 +27,13 @@ with no metacharacter is an exact rule and behaves exactly as before. The matche
 | `*`    | zero or more characters within a single segment (never a `/`)   |
 | `**`   | zero or more characters across any depth (including `/`)         |
 | `?`    | exactly one character other than `/`                             |
+| `\*`, `\?` | that character, literally — the value stays an exact rule   |
+
+A backslash escapes a metacharacter, because a URI path may legitimately contain one (RFC 3986
+lists `*` as a sub-delimiter). `path = "/files/\*"` removes exactly the path named `/files/*`,
+while `path = "/files/*"` removes every path under `/files/`. Rules that [auto-carve](#auto-carve)
+derives from a document are escaped for you, so carving one operation never widens into its
+siblings.
 
 ```rust
 let spec = spargen::Spec::new("api/openapi.yaml").omit(spargen::omit! {

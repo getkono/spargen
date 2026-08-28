@@ -13,7 +13,7 @@ use super::{parse_json, parse_yaml, SpannedValue};
 
 /// A single loaded source file.
 #[derive(Debug, Clone)]
-pub struct SourceFile {
+pub(crate) struct SourceFile {
     /// Path as loaded (relative to the bundle root, or the vendored path for a remote document).
     pub path: Utf8PathBuf,
     /// Exact bytes parsed from disk, retained for build-input fingerprinting.

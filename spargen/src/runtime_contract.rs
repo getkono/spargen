@@ -450,7 +450,7 @@ impl std::fmt::Display for Requirements {
     }
 }
 
-pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
+pub fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
     let mut diagnostics = Vec::new();
     let mut manifests = vec![manifest_path.to_path_buf()];
     let manifest = match read_toml(manifest_path) {
@@ -760,6 +760,31 @@ secrecy = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 "#;
+
+    /// `format: date-time`/`date` lower to hand-written RFC 3339 newtypes, so `time` is required
+    /// with `formatting`/`parsing` and deliberately **without** `serde`: `time`'s own serde
+    /// representation is not RFC 3339 with or without `serde-human-readable`, and that mismatch
+    /// once shipped wrong bytes on the wire. Keeping the feature off is what makes the sequence
+    /// fallback unreachable, so the contract asserts it rather than only commenting on it.
+    #[test]
+    fn the_time_requirement_never_asks_for_serde() {
+        let requirements = RuntimeRequirements {
+            time: true,
+            ..RuntimeRequirements::default()
+        };
+        let time = requirement_table(&requirements)
+            .into_iter()
+            .find(|requirement| requirement.dependency.name == "time")
+            .expect("a time-using API requires the time crate");
+
+        assert!(
+            !time.features.contains(&"serde"),
+            "time must not be required with serde: {:?}",
+            time.features
+        );
+        assert!(time.features.contains(&"formatting"), "{:?}", time.features);
+        assert!(time.features.contains(&"parsing"), "{:?}", time.features);
+    }
 
     fn audit_manifest(contents: &str, requirements: RuntimeRequirements) -> Vec<Diagnostic> {
         let directory = tempfile::tempdir().unwrap();

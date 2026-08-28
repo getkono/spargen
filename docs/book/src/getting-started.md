@@ -29,6 +29,12 @@ setters, so a new knob is additive rather than breaking.
 so the three cannot drift. Setters called afterwards still win, so build code stays
 authoritative.
 
+`Report` reads through accessors — `report.diagnostics()`, `report.outcome()`, and
+`report.truncated()`. A run that reaches `batch_cap` stops collecting and drops the rest;
+`truncated()` is `true` in exactly that case, and the rendered report says so on its last line.
+Treat a truncated report as a partial view: fixing everything it lists may not be enough, so raise
+`batch_cap` to see the remainder.
+
 ### `build.rs` mode
 
 ```rust
@@ -37,7 +43,7 @@ fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let build = spargen::Spec::new("api/openapi.yaml").build(format!("{out_dir}/api.rs"));
     let report = spargen::generate(&build);
-    assert_eq!(report.outcome, spargen::Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
 }
 ```
 

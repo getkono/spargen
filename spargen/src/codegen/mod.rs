@@ -18,7 +18,7 @@ pub use format::format_tokens;
 /// Options controlling code generation. The `uuid`/`time` flags mirror the emitted crate's
 /// features: when off, the corresponding `format` mappings fall back to `String`.
 #[derive(Debug, Clone)]
-pub struct CodegenOptions {
+pub(crate) struct CodegenOptions {
     /// Map `format: uuid` to `uuid::Uuid` (else `String`).
     pub feature_uuid: bool,
     /// Map `format: date-time`/`date` to the `time` crate (else `String`).
@@ -40,14 +40,14 @@ impl Default for CodegenOptions {
 
 /// A single generated source file, already formatted rustfmt-clean via `prettyplease`.
 #[derive(Debug, Clone)]
-pub struct GeneratedFile {
+pub(crate) struct GeneratedFile {
     /// The formatted source.
     pub contents: String,
 }
 
 /// The complete generated code for one client (models, client, embedded support).
 #[derive(Debug, Clone, Default)]
-pub struct GeneratedCode {
+pub(crate) struct GeneratedCode {
     /// The generated files, in deterministic order.
     pub files: Vec<GeneratedFile>,
 }
@@ -57,7 +57,7 @@ pub struct GeneratedCode {
 /// Output is deterministic: item ordering does not depend on input map ordering, so checked-in code
 /// produces stable diffs. `diags` is retained for any future codegen-time diagnostic; codegen emits
 /// none today (every spec construct is decided during lowering).
-pub fn generate(
+pub(crate) fn generate(
     api: &Api,
     names: &Names,
     options: &CodegenOptions,

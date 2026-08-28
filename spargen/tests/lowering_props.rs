@@ -40,7 +40,7 @@ fn generate_module(spec: &str) -> (Report, String) {
 }
 
 fn has_code(report: &Report, code: Code) -> bool {
-    report.diagnostics.iter().any(|d| d.code == code)
+    report.diagnostics().iter().any(|d| d.code == code)
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +203,7 @@ proptest! {
         variants in proptest::collection::vec(category_strategy(), 2..=5)
     ) {
         let (report, source) = generate_module(&category_union_spec(&variants));
-        prop_assert_ne!(report.outcome, Outcome::Rejected, "{:#?}", report);
+        prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
         prop_assert!(!has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
         prop_assert!(source.contains("pub enum U"), "union was not emitted as a typed enum:\n{source}");
     }
@@ -215,7 +215,7 @@ proptest! {
         variants in proptest::collection::vec(key_set_strategy(), 2..=4)
     ) {
         let (report, source) = generate_module(&closed_object_union_spec(&variants));
-        prop_assert_ne!(report.outcome, Outcome::Rejected, "{:#?}", report);
+        prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
         prop_assert!(!has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
         prop_assert!(source.contains("pub enum U"), "union was not emitted as a typed enum:\n{source}");
     }
@@ -230,14 +230,14 @@ proptest! {
 
         if has_type_conflict(&members) {
             let report = check(&spec);
-            prop_assert_eq!(report.outcome, Outcome::Rejected, "{:#?}", report);
+            prop_assert_eq!(report.outcome(), Outcome::Rejected, "{:#?}", report);
             prop_assert!(has_code(&report, Code::AllOfIrreconcilable), "{:#?}", report);
             return Ok(());
         }
 
         // No conflict: the merge must succeed and preserve every member's fields.
         let (report, source) = generate_module(&spec);
-        prop_assert_ne!(report.outcome, Outcome::Rejected, "{:#?}", report);
+        prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
         prop_assert!(!has_code(&report, Code::AllOfIrreconcilable), "{:#?}", report);
 
         // Expected field set = union of member properties; required = union of member required flags.

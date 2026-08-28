@@ -109,7 +109,7 @@ impl<'a> Next<'a> {
 
 /// An [`HttpBackend`] that runs an ordered chain of [`Middleware`] around an inner backend.
 ///
-/// The first middleware in the chain runs outermost (see the [module docs](self) for ordering and
+/// The first middleware in the chain runs outermost (see this module's docs for ordering and
 /// composability). Purely additive: it takes effect only when a caller wraps their backend in it and
 /// installs it via `Client::with_backend`.
 #[derive(Clone)]

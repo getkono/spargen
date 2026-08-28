@@ -516,7 +516,7 @@ pub fn serialize_form_body<T: Serialize>(
 /// The per-part values for one RFC 6570-mode `multipart/form-data` property.
 ///
 /// An array yields one value per item when `explode` is set, all sent under the same part name (the
-/// [[RFC7578]] §4.3 shape the specification points at); otherwise the items are joined by the
+/// RFC 7578 §4.3 shape the specification points at); otherwise the items are joined by the
 /// style's delimiter into a single value. Any other shape yields one value.
 ///
 /// Two rules make this deliberately *not* the query-fragment builders with the `name=` prefix

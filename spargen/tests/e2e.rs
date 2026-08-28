@@ -79,7 +79,7 @@ fn an_operation_named_after_a_runtime_type_still_compiles() {
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "collide_client");
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
     assert!(
@@ -146,7 +146,7 @@ fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
             .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
             .cargo(CargoIntegration::Off),
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let status = Command::new("cargo")
         .arg("check")
@@ -194,10 +194,10 @@ spargen = {{ path = {:?}, default-features = false }}
         r#"fn main() {
     let build = spargen::Spec::new("openapi.yaml").build("src/generated.rs");
     let report = spargen::generate(&build);
-    for diagnostic in &report.diagnostics {
+    for diagnostic in report.diagnostics() {
         eprintln!("{}: {}", diagnostic.code.as_str(), diagnostic.message);
     }
-    assert_eq!(report.outcome, spargen::Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
 }
 "#,
     )
@@ -242,7 +242,7 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
     std::fs::write(&spec, BASIC_SPEC).unwrap();
     let out = temp.path().join("minimum_runtime_client");
     let report = generate_fixture_crate(&spec, &out, "minimum_runtime_client");
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let status = Command::new("cargo")
         .args([
@@ -330,9 +330,9 @@ fn generated_module_compiles_in_basic_oas31_crate() {
 
     let report = generate_fixture_crate(&spec, &out, "basic_client");
 
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(report
-        .diagnostics
+        .diagnostics()
         .iter()
         .all(|diagnostic| diagnostic.severity != spargen::Severity::Error));
 
@@ -1479,9 +1479,9 @@ fn rejects_openapi_30_without_conversion() {
 
     let report = spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap()));
 
-    assert_eq!(report.outcome, Outcome::Rejected);
+    assert_eq!(report.outcome(), Outcome::Rejected);
     assert!(report
-        .diagnostics
+        .diagnostics()
         .iter()
         .any(|diagnostic| diagnostic.code == Code::UnsupportedOpenApiVersion));
 }
@@ -1498,9 +1498,9 @@ fn generated_module_compiles_in_oas32_crate_with_query_method() {
 
     let report = generate_fixture_crate(&spec, &out, "oas32_client");
 
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(report
-        .diagnostics
+        .diagnostics()
         .iter()
         .all(|diagnostic| diagnostic.severity != spargen::Severity::Error));
 
@@ -1724,9 +1724,9 @@ fn omit_overlay_removes_unsupported_operation() {
 
     let report = spargen::generate(&config);
 
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(report
-        .diagnostics
+        .diagnostics()
         .iter()
         .any(|diagnostic| diagnostic.code == Code::OmittedConstruct));
 }
@@ -1752,7 +1752,7 @@ fn union_and_allof_roundtrip_under_proptest() {
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "roundtrip_client");
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     // The property-test dependency is exclusively scaffolding for this test harness's crate.
     let mut manifest = std::fs::read_to_string(out.join("Cargo.toml")).unwrap();
@@ -3127,7 +3127,7 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
     let out = temp.path().join("wasm_client");
 
     let report = generate_fixture_crate(&spec, &out, "wasm_client");
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     // Default features: the client, transport seam, middleware/retry helpers, auth token provider,
     // and streaming `EventStream` must all compile against reqwest's `!Send` wasm `fetch` backend.
@@ -3172,7 +3172,7 @@ fn macro_preview_is_deterministic() {
     let config = Spec::new(spec);
     let preview = spargen::__private::preview(&config);
     assert_eq!(
-        preview.report.outcome,
+        preview.report.outcome(),
         Outcome::Generated,
         "{:#?}",
         preview.report
@@ -3217,7 +3217,7 @@ serde_json = "1.0.151"
     let core =
         spargen::__private::preview_for_macro(&Spec::new(spec.clone()), manifest.to_str().unwrap());
     assert_eq!(
-        core.report.outcome,
+        core.report.outcome(),
         Outcome::Generated,
         "{:#?}",
         core.report
@@ -3279,10 +3279,10 @@ components:
 
     let conditional =
         spargen::__private::preview_for_macro(&Spec::new(spec), manifest.to_str().unwrap());
-    assert_eq!(conditional.report.outcome, Outcome::Rejected);
+    assert_eq!(conditional.report.outcome(), Outcome::Rejected);
     let messages = conditional
         .report
-        .diagnostics
+        .diagnostics()
         .iter()
         .map(|diagnostic| {
             assert_eq!(diagnostic.code, Code::RuntimeDependencyContract);
@@ -3325,14 +3325,14 @@ fn preview_of_rejected_spec_has_no_files() {
     .unwrap();
 
     let preview = spargen::__private::preview(&Spec::new(spec));
-    assert_eq!(preview.report.outcome, Outcome::Rejected);
+    assert_eq!(preview.report.outcome(), Outcome::Rejected);
     assert!(
         preview.contents.is_none(),
         "a rejected preview retains no generated module"
     );
     assert!(preview
         .report
-        .diagnostics
+        .diagnostics()
         .iter()
         .any(|d| d.code == Code::UnsupportedOpenApiVersion));
 }
@@ -3353,7 +3353,7 @@ fn date_and_date_time_reach_the_wire_as_rfc3339() {
     let out = temp.path().join("client");
 
     let report = generate_fixture_crate(&spec, &out, "dates_client");
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
     // The model resolves to the embedded newtypes, not to `time`'s own types — naming those in a
@@ -3556,7 +3556,7 @@ paths:
     .unwrap();
     let out = temp.path().join("client");
     let report = generate_fixture_crate(&spec, &out, "servers_client");
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     std::fs::create_dir_all(out.join("tests")).unwrap();
     std::fs::write(
@@ -3675,7 +3675,7 @@ paths:
     .unwrap();
     let out = temp.path().join("client");
     let report = generate_fixture_crate(&spec, &out, "multipart_client");
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     std::fs::create_dir_all(out.join("tests")).unwrap();
     std::fs::write(
@@ -3804,14 +3804,14 @@ paths:
     let preview =
         spargen::__private::preview_for_macro(&Spec::new(spec), manifest.to_str().unwrap());
     assert_eq!(
-        preview.report.outcome,
+        preview.report.outcome(),
         Outcome::Rejected,
         "{:#?}",
         preview.report
     );
     let messages = preview
         .report
-        .diagnostics
+        .diagnostics()
         .iter()
         .map(|diagnostic| {
             assert_eq!(diagnostic.code, Code::RuntimeDependencyContract);
@@ -3820,4 +3820,88 @@ paths:
         .collect::<Vec<_>>()
         .join("\n");
     assert!(messages.contains("must not be optional"), "{messages}");
+}
+
+/// `W012` fires only where `under_build_script()` is true and no consumer manifest is discoverable
+/// — a combination no plain test process can reach, because Cargo always sets
+/// `CARGO_MANIFEST_DIR`. A real build script that clears it exercises the branch honestly rather
+/// than through a stubbed environment, and proves the run still generates: an un-audited build is
+/// degraded, not failed.
+#[test]
+fn w012_a_build_script_with_no_discoverable_manifest_warns_and_still_generates() {
+    let temp = tempfile::tempdir().unwrap();
+    let crate_dir = temp.path().join("consumer");
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+    let spargen_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "unauditable-consumer"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1.12.1"
+reqwest = {{ version = "0.12.28", default-features = false }}
+secrecy = "0.10.3"
+serde = {{ version = "1.0.229", features = ["derive"] }}
+serde_json = "1.0.151"
+
+[build-dependencies]
+spargen = {{ path = {spargen_path:?}, default-features = false }}
+
+[workspace]
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("build.rs"),
+        r#"fn main() {
+    // Cargo always sets these for a build script, which is exactly why the "no manifest" branch
+    // is otherwise unreachable. Clearing them here is the honest way to reach it.
+    std::env::remove_var("CARGO_MANIFEST_PATH");
+    std::env::remove_var("CARGO_MANIFEST_DIR");
+
+    // Resolved at compile time, so clearing the runtime variable above cannot affect it.
+    let build = spargen::Spec::new(concat!(env!("CARGO_MANIFEST_DIR"), "/openapi.yaml"))
+        .build(concat!(env!("OUT_DIR"), "/generated.rs"));
+    let report = spargen::generate(&build);
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == spargen::Code::RuntimeAuditSkipped),
+        "expected W012: {report:#?}"
+    );
+    assert!(report.outcome().is_success(), "{report:#?}");
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(crate_dir.join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        crate_dir.join("openapi.yaml"),
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /ping:
+    get: { operationId: ping, responses: { "204": { description: OK } } }
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("cargo")
+        .arg("check")
+        .current_dir(&crate_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "build script must warn and still generate:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }

@@ -106,15 +106,42 @@ impl std::fmt::Display for Outcome {
 }
 
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
+///
+/// Fields are private and read through accessors, matching [`Spec`], [`Build`], [`Diagnostic`],
+/// and [`DiffRejection`]. That is what let [`Self::truncated`] be added without a second breaking
+/// change the next time the shape grows.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Report {
     /// Every diagnostic emitted during the run (batch reporting).
-    pub diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<Diagnostic>,
     /// What happened.
-    pub outcome: Outcome,
+    outcome: Outcome,
+    /// Whether the run hit `batch_cap` and dropped diagnostics past it.
+    truncated: bool,
 }
 
 impl Report {
+    /// Every diagnostic emitted during the run, in emission order.
+    ///
+    /// This is the whole list only when [`Self::truncated`] is `false`.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    /// What happened.
+    pub fn outcome(&self) -> Outcome {
+        self.outcome
+    }
+
+    /// Whether the run reached `batch_cap` and dropped the diagnostics past it.
+    ///
+    /// A truncated report is a partial view: the constructs behind the dropped diagnostics were
+    /// still diagnosed, so fixing every diagnostic listed here may not be enough to make the run
+    /// clean. Raise [`Spec::batch_cap`] to see the rest.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
     /// Every error-severity diagnostic.
     pub fn errors(&self) -> impl Iterator<Item = &Diagnostic> + '_ {
         self.diagnostics
@@ -148,11 +175,28 @@ impl Report {
         }
     }
 
-    /// Print every diagnostic as a `cargo:warning=` line, so they surface in a build's output.
-    pub fn emit_cargo_warnings(&self) {
-        for diagnostic in &self.diagnostics {
-            println!("cargo:warning={diagnostic}");
+    /// Print every diagnostic as a Cargo build-script directive, so it surfaces in the build's
+    /// output at its own severity: an error-severity diagnostic goes out as `cargo::error=`, a
+    /// warning as `cargo::warning=`.
+    ///
+    /// Announcing a rejection as a warning made the one message that stops generation look like
+    /// the ones that do not, which is why this is not called `emit_cargo_warnings` any more.
+    pub fn emit_cargo_diagnostics(&self) {
+        for line in self.cargo_directive_lines() {
+            println!("{line}");
         }
+    }
+
+    /// The directive lines [`Self::emit_cargo_diagnostics`] prints, split out so the severity
+    /// mapping is testable without capturing the process's stdout.
+    fn cargo_directive_lines(&self) -> Vec<String> {
+        self.diagnostics
+            .iter()
+            .map(|diagnostic| match diagnostic.severity {
+                Severity::Error => format!("cargo::error={diagnostic}"),
+                Severity::Warning => format!("cargo::warning={diagnostic}"),
+            })
+            .collect()
     }
 
     /// Panic with the rendered report unless the run succeeded. The build-script one-liner —
@@ -168,6 +212,13 @@ impl std::fmt::Display for Report {
         writeln!(formatter, "spargen: {}", self.outcome)?;
         for diagnostic in &self.diagnostics {
             writeln!(formatter, "{diagnostic}")?;
+        }
+        if self.truncated {
+            writeln!(
+                formatter,
+                "spargen: diagnostic list truncated at batch_cap ({} shown); raise batch_cap to see the rest",
+                self.diagnostics.len()
+            )?;
         }
         Ok(())
     }
@@ -196,6 +247,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
         return Report {
             diagnostics: cargo_diagnostics,
             outcome: Outcome::Rejected,
+            truncated: false,
         };
     }
     let consumer_manifest = cargo.manifest;
@@ -206,10 +258,12 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
             if emit_cargo_directives {
                 cache::cargo_directives(build, None);
             }
-            cargo_diagnostics.extend(diagnostics);
+            let truncated = diagnostics.cap_reached();
+            cargo_diagnostics.extend(diagnostics.items().to_vec());
             return Report {
                 diagnostics: cargo_diagnostics,
                 outcome: Outcome::Rejected,
+                truncated,
             };
         }
     };
@@ -239,6 +293,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                     return Report {
                         diagnostics: cargo_diagnostics,
                         outcome: Outcome::Rejected,
+                        truncated: false,
                     };
                 }
                 // A verified cache hit did not rewrite anything, and saying `Generated` made
@@ -246,6 +301,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                 return Report {
                     diagnostics: cargo_diagnostics,
                     outcome: Outcome::Cached,
+                    truncated: false,
                 };
             }
         }
@@ -271,11 +327,15 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
             }
             if !audit.diagnostics.is_empty() {
                 let mut diagnostics = cargo_diagnostics;
+                // The inner run's truncation carries: merging its diagnostics into a wider list
+                // does not make the dropped ones reappear.
+                let truncated = preview.report.truncated;
                 diagnostics.extend(preview.report.diagnostics);
                 diagnostics.extend(audit.diagnostics);
                 return Report {
                     diagnostics,
                     outcome: Outcome::Rejected,
+                    truncated,
                 };
             }
         }
@@ -283,10 +343,12 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
         let after = match run_on_frontend_stack(|| cache::InputSnapshot::load(spec)) {
             Ok(snapshot) => snapshot,
             Err(diagnostics) => {
-                cargo_diagnostics.extend(diagnostics);
+                let truncated = diagnostics.cap_reached();
+                cargo_diagnostics.extend(diagnostics.items().to_vec());
                 return Report {
                     diagnostics: cargo_diagnostics,
                     outcome: Outcome::Rejected,
+                    truncated,
                 };
             }
         };
@@ -739,57 +801,6 @@ pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
     Code::from_str(code).map(Code::explain)
 }
 
-/// The outcome of a [`vendor`] run: the report (present on success) and any diagnostics.
-#[cfg(feature = "remote-fetch")]
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct VendorOutcome {
-    /// The vendored-refs report, or `None` if vendoring failed.
-    pub report: Option<VendorReport>,
-    /// Diagnostics emitted while vendoring (fetch failures, unfetchable schemes, …).
-    pub diagnostics: Vec<Diagnostic>,
-}
-
-#[cfg(feature = "remote-fetch")]
-impl VendorOutcome {
-    /// Whether vendoring completed and wrote a lock file.
-    pub fn succeeded(&self) -> bool {
-        self.report.is_some()
-            && !self
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.severity == Severity::Error)
-    }
-}
-
-#[cfg(feature = "remote-fetch")]
-impl std::fmt::Display for VendorOutcome {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for diagnostic in &self.diagnostics {
-            writeln!(formatter, "{diagnostic}")?;
-        }
-        let Some(report) = &self.report else {
-            return Ok(());
-        };
-        if report.refs.is_empty() {
-            return write!(
-                formatter,
-                "no remote $refs found; wrote {}",
-                report.lock_path
-            );
-        }
-        writeln!(
-            formatter,
-            "vendored {} remote document(s) under {}:",
-            report.refs.len(),
-            report.vendor_dir
-        )?;
-        for vendored in &report.refs {
-            writeln!(formatter, "  {} -> {}", vendored.url, vendored.path)?;
-        }
-        write!(formatter, "wrote {}", report.lock_path)
-    }
-}
-
 /// Fetch, vendor, and hash-pin every remote (`http`/`https`) `$ref` reachable from `spec.path`,
 /// writing copies under `.spargen/vendor/` and (re)writing `spargen.lock` next to the spec.
 ///
@@ -797,13 +808,12 @@ impl std::fmt::Display for VendorOutcome {
 /// resolve remote refs purely from the vendored, pinned copies this step produces, so builds stay
 /// hermetic. Backed by `reqwest` and gated behind the `remote-fetch` feature (implied by `cli`).
 #[cfg(feature = "remote-fetch")]
-pub fn vendor(spec: &Spec) -> VendorOutcome {
+pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
     let mut diags = diag::Diagnostics::new(spec.batch_cap);
     let fetcher = source::ReqwestFetcher;
-    let report = source::vendor(&spec.path, &fetcher, &mut diags).ok();
-    VendorOutcome {
-        report,
-        diagnostics: diags.items().to_vec(),
+    match source::vendor(&spec.path, &fetcher, &mut diags) {
+        Ok(vendored) if !diags.has_errors() => Ok(vendored),
+        _ => Err(report(diags, Outcome::Rejected)),
     }
 }
 
@@ -1036,6 +1046,7 @@ fn report(diags: diag::Diagnostics, outcome: Outcome) -> Report {
     Report {
         diagnostics: diags.items().to_vec(),
         outcome,
+        truncated: diags.cap_reached(),
     }
 }
 
@@ -1049,6 +1060,30 @@ mod tests {
             .iter()
             .map(|diagnostic| diagnostic.code.as_str())
             .collect()
+    }
+
+    /// A rejection announced as a warning looks like the diagnostics that do *not* stop
+    /// generation. Each diagnostic goes out at its own severity.
+    #[test]
+    fn cargo_directives_carry_each_diagnostics_own_severity() {
+        let provenance = diag::Provenance::new(JsonPointer::root(), None);
+        let report = Report {
+            diagnostics: vec![
+                Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance.clone())
+                    .message("a rejection")
+                    .build(),
+                Diagnostic::warning(Code::DeclarationHasNoEffect, provenance)
+                    .message("a warning")
+                    .build(),
+            ],
+            outcome: Outcome::Rejected,
+            truncated: false,
+        };
+
+        let lines = report.cargo_directive_lines();
+        assert_eq!(lines.len(), 2, "{lines:#?}");
+        assert!(lines[0].starts_with("cargo::error="), "{lines:#?}");
+        assert!(lines[1].starts_with("cargo::warning="), "{lines:#?}");
     }
 
     /// Every Cargo-integration branch, without touching process-global environment state.

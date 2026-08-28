@@ -14,6 +14,25 @@ use super::{
 
 const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
 
+/// The URI OpenAPI 3.2's own published document schema gives as `jsonSchemaDialect`'s default.
+///
+/// The 3.2 prose (§Specifying Schema Dialects) still names [`OAS31_DIALECT`] as *the* OAS dialect
+/// schema id, and never mentions this URI — but tooling that follows the published schema will
+/// write it into otherwise valid 3.2 documents. The two identify the same dialect for spargen's
+/// purposes, so a 3.2 document may spell it either way; anything else is still `E002`.
+const OAS32_DIALECT: &str = "https://spec.openapis.org/oas/3.2/dialect/2025-09-17";
+
+/// Whether a URI names the OAS Schema Object dialect under either of its two published spellings.
+///
+/// This is the rule for a Schema Object's own `$schema`, which names a dialect outright. The
+/// document-level `jsonSchemaDialect` default is additionally scoped by version in
+/// [`parse_document`], where the document version is known; a Schema Object is parsed through
+/// function pointers with a fixed signature, so it does not carry that version, and the root gate
+/// is what stops a 3.1 document from adopting the 3.2 spelling as its default.
+fn is_oas_dialect(uri: &str) -> bool {
+    uri == OAS31_DIALECT || uri == OAS32_DIALECT
+}
+
 /// Build the typed [`Document`] from a loaded [`InputBundle`], carrying spans through.
 pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<Document, Aborted> {
     let root = bundle.root();
@@ -33,17 +52,25 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
         return Err(Aborted);
     }
 
+    let is_oas32 = openapi_text.starts_with("3.2.");
+
     if let Some(dialect) = root.get("jsonSchemaDialect") {
         let dialect_text = string(dialect);
-        if dialect_text != Some(OAS31_DIALECT) {
+        let accepted = dialect_text == Some(OAS31_DIALECT)
+            || (is_oas32 && dialect_text == Some(OAS32_DIALECT));
+        if !accepted {
             Diagnostic::error(
                 Code::UnsupportedDialect,
                 provenance(&root_pointer.push("jsonSchemaDialect"), dialect),
             )
             .message("jsonSchemaDialect is not the OpenAPI Schema Object dialect")
-            .remedy(format!(
-                "set jsonSchemaDialect to `{OAS31_DIALECT}`, or omit it"
-            ))
+            .remedy(if is_oas32 {
+                format!(
+                    "set jsonSchemaDialect to `{OAS31_DIALECT}` or `{OAS32_DIALECT}`, or omit it"
+                )
+            } else {
+                format!("set jsonSchemaDialect to `{OAS31_DIALECT}`, or omit it")
+            })
             .emit(diags);
         }
     }
@@ -99,7 +126,7 @@ pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<D
     }
 
     let document = Document {
-        is_oas32: openapi_text.starts_with("3.2."),
+        is_oas32,
         info,
         servers,
         paths,
@@ -587,7 +614,7 @@ fn parse_media_map(
         .unwrap_or_default()
 }
 
-fn parse_media_type(
+pub(super) fn parse_media_type(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -706,7 +733,7 @@ fn empty_encoding(provenance: Provenance) -> EncodingObject {
 }
 
 /// Parse one Header Object — the Parameter Object shape without `name`/`in`.
-fn parse_header_object(
+pub(super) fn parse_header_object(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -1021,10 +1048,17 @@ fn parse_schema_or(
     if map.get("$id").is_some() || map.get("$anchor").is_some() {
         Diagnostic::error(Code::UnresolvedRef, provenance(pointer, value))
             .message("static `$id`/`$anchor` schema resource scopes are not yet supported")
+            // The code reads "unresolved $ref" because scope-aware resolution is what is missing;
+            // say so, since nothing here is literally an unresolved reference.
+            .remedy(
+                "spargen resolves references against the document and its files, not against \
+                 `$id`/`$anchor` schema resource scopes; inline the subschema or reference it by \
+                 JSON Pointer",
+            )
             .emit(diags);
     }
     if let Some(dialect) = map.get("$schema").and_then(string) {
-        if dialect != OAS31_DIALECT {
+        if !is_oas_dialect(dialect) {
             Diagnostic::error(
                 Code::UnsupportedDialect,
                 provenance(
@@ -1129,7 +1163,9 @@ fn parse_schema_or(
         content_schema: map.get("contentSchema").and_then(|value| {
             parse_schema_or(value, &pointer.push("contentSchema"), diags).map(Box::new)
         }),
-        xml: map.get("xml").and_then(parse_xml),
+        xml: map
+            .get("xml")
+            .and_then(|value| parse_xml(value, &pointer.push("xml"), diags)),
         validation: parse_validation(map),
         deprecated: map
             .get("deprecated")
@@ -1197,8 +1233,34 @@ fn parse_discriminator(
 /// Parse the OpenAPI `xml` object. Malformed shapes (a non-object `xml`) yield `None`; individual
 /// missing keys default. Lowering later warns (`W006`) on the unsupported namespace/prefix/wrapped
 /// hints, so they are captured here rather than dropped at parse time.
-fn parse_xml(value: &SpannedValue) -> Option<XmlHints> {
+///
+/// OpenAPI 3.2 deprecates `attribute`/`wrapped` in favour of `nodeType` and states that if
+/// `nodeType` is present, neither field MUST be present. The two spellings can disagree
+/// (`nodeType: element` beside `attribute: true`), and the specification defines no winner, so a
+/// document that carries both is rejected rather than resolved by a guess.
+fn parse_xml(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<XmlHints> {
     let _ = value.as_object()?;
+    if value.get("nodeType").is_some() {
+        for deprecated in ["attribute", "wrapped"] {
+            if let Some(sibling) = value.get(deprecated) {
+                Diagnostic::error(
+                    Code::InvalidInput,
+                    provenance(&pointer.push(deprecated), sibling),
+                )
+                .message(format!(
+                    "xml.{deprecated} must not be present beside xml.nodeType"
+                ))
+                .remedy(format!(
+                    "drop `{deprecated}` and express it through `nodeType` alone"
+                ))
+                .emit(diags);
+            }
+        }
+    }
     Some(XmlHints {
         name: value.get("name").and_then(string).map(str::to_owned),
         attribute: value.get("nodeType").and_then(string) == Some("attribute")

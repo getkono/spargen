@@ -19,7 +19,7 @@ use super::{parse_json, parse_yaml, SpannedValue};
 
 /// The network seam used by [`vendor`]. Real fetching lives in [`ReqwestFetcher`]; tests supply a
 /// stub so the vendor logic is exercised without HTTP.
-pub trait RemoteFetch {
+pub(crate) trait RemoteFetch {
     /// Fetch the raw bytes at an absolute `http`/`https` `url`, or an error message.
     fn fetch(&self, url: &str) -> Result<Vec<u8>, String>;
 }
@@ -46,6 +46,26 @@ pub struct VendorReport {
     /// The vendor directory the copies were written under.
     #[serde(serialize_with = "serialize_path")]
     pub vendor_dir: Utf8PathBuf,
+}
+
+/// The human rendering `spargen lock` prints on success. It lives with the report rather than in
+/// the facade so the success and failure halves of `vendor` both render themselves.
+impl std::fmt::Display for VendorReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.refs.is_empty() {
+            return write!(formatter, "no remote $refs found; wrote {}", self.lock_path);
+        }
+        writeln!(
+            formatter,
+            "vendored {} remote document(s) under {}:",
+            self.refs.len(),
+            self.vendor_dir
+        )?;
+        for vendored in &self.refs {
+            writeln!(formatter, "  {} -> {}", vendored.url, vendored.path)?;
+        }
+        write!(formatter, "wrote {}", self.lock_path)
+    }
 }
 
 /// `camino` does not implement `serde` without its optional feature, and the runtime dependency

@@ -52,12 +52,12 @@ fn generate(name: &str, carve: bool) -> (Report, Option<String>) {
 }
 
 fn has_code(report: &Report, code: Code) -> bool {
-    report.diagnostics.iter().any(|d| d.code == code)
+    report.diagnostics().iter().any(|d| d.code == code)
 }
 
 fn error_codes(report: &Report) -> Vec<&'static str> {
     report
-        .diagnostics
+        .diagnostics()
         .iter()
         .filter(|d| d.code.as_str().starts_with('E'))
         .map(|d| d.code.as_str())
@@ -70,24 +70,29 @@ fn error_codes(report: &Report) -> Vec<&'static str> {
 fn utoipa_document_generates_cleanly() {
     // `check` and `generate` must agree (the recipe tells users `check` is a safe pre-flight).
     let checked = check("utoipa.json");
-    assert_eq!(checked.outcome, Outcome::Clean, "{:?}", checked.diagnostics);
+    assert_eq!(
+        checked.outcome(),
+        Outcome::Clean,
+        "{:?}",
+        checked.diagnostics()
+    );
     assert!(
         error_codes(&checked).is_empty(),
         "no errors expected: {:?}",
-        checked.diagnostics
+        checked.diagnostics()
     );
 
     let (report, text) = generate("utoipa.json", false);
     assert_eq!(
-        report.outcome,
+        report.outcome(),
         Outcome::Generated,
         "{:?}",
-        report.diagnostics
+        report.diagnostics()
     );
     assert!(
         error_codes(&report).is_empty(),
         "no errors expected: {:?}",
-        report.diagnostics
+        report.diagnostics()
     );
     let text = text.expect("utoipa generation wrote a module");
     // The idiomatic operations (tag-grouped, multi-status, union return) all lower to methods.
@@ -107,25 +112,25 @@ fn utoipa_document_generates_cleanly() {
 fn aide_document_generates_with_only_validation_warnings() {
     let (report, text) = generate("aide.json", false);
     assert_eq!(
-        report.outcome,
+        report.outcome(),
         Outcome::Generated,
         "{:?}",
-        report.diagnostics
+        report.diagnostics()
     );
     assert!(
         error_codes(&report).is_empty(),
         "no errors expected: {:?}",
-        report.diagnostics
+        report.diagnostics()
     );
     // schemars emits `minimum`/`format` validation hints that spargen faithfully ignores (W001);
     // any other diagnostic class would be a surprise the recipe should mention.
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .all(|d| d.code == Code::ValidationKeywordIgnored),
         "only validation-only warnings expected: {:?}",
-        report.diagnostics
+        report.diagnostics()
     );
     let text = text.expect("aide generation wrote a module");
     for op in [
@@ -145,15 +150,15 @@ fn poem_openapi_document_is_rejected_e001() {
     // poem-openapi pins OPENAPI_VERSION = "3.0.0"; spargen requires 3.1.x/3.2.x, so the document is
     // rejected loudly with E001 (never silently degraded). check/generate agree.
     let checked = check("poem-openapi.json");
-    assert_eq!(checked.outcome, Outcome::Rejected);
+    assert_eq!(checked.outcome(), Outcome::Rejected);
     assert!(has_code(&checked, Code::UnsupportedOpenApiVersion));
 
     let (report, _) = generate("poem-openapi.json", false);
-    assert_eq!(report.outcome, Outcome::Rejected);
+    assert_eq!(report.outcome(), Outcome::Rejected);
     assert!(
         has_code(&report, Code::UnsupportedOpenApiVersion),
         "E001 expected: {:?}",
-        report.diagnostics
+        report.diagnostics()
     );
 }
 
@@ -162,11 +167,11 @@ fn poem_openapi_document_is_rejected_e001() {
 #[test]
 fn utoipa_untagged_overlap_generates_a_typed_union() {
     let (report, text) = generate("utoipa-untagged-overlap.json", false);
-    assert_eq!(report.outcome, Outcome::Generated);
+    assert_eq!(report.outcome(), Outcome::Generated);
     assert!(
         !has_code(&report, Code::NonDisjointUnion),
         "overlapping numeric branches are supported: {:?}",
-        report.diagnostics
+        report.diagnostics()
     );
 
     let text = text.expect("untagged-union generation wrote a module");

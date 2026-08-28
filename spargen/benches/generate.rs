@@ -79,7 +79,7 @@ fn bench_check(c: &mut Criterion) {
         group.bench_function(*name, |b| {
             b.iter(|| {
                 let report = spargen::check(black_box(&config));
-                assert_ne!(report.outcome, Outcome::Rejected, "{name} must lower");
+                assert_ne!(report.outcome(), Outcome::Rejected, "{name} must lower");
                 black_box(report);
             });
         });
@@ -110,7 +110,7 @@ fn bench_generate(c: &mut Criterion) {
             b.iter(|| {
                 let report = spargen::generate(black_box(&config));
                 // `Generated` on the first iteration, `Cached` on the rest — both are success.
-                assert!(report.outcome.is_success(), "{name} must generate");
+                assert!(report.outcome().is_success(), "{name} must generate");
                 black_box(report);
             });
         });

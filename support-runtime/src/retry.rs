@@ -150,7 +150,7 @@ pub trait RetryPolicy: MaybeSend + MaybeSync {
 /// An [`HttpBackend`] that retries requests through an inner backend per a [`RetryPolicy`].
 ///
 /// Purely additive: it only takes effect when a caller wraps their backend in it and installs it via
-/// `Client::with_backend`. See the [module docs](self) for the timing and cloneability contracts.
+/// `Client::with_backend`. See this module's docs for the timing and cloneability contracts.
 #[derive(Clone)]
 pub struct RetryBackend {
     inner: Arc<dyn HttpBackend>,

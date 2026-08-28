@@ -1301,7 +1301,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if hints.wrapped {
             unsupported.push("wrapped".to_owned());
         }
-        if matches!(hints.node_type.as_deref(), Some("text" | "cdata" | "none")) {
+        // `element` and `attribute` are the two node types spargen's XML representation can
+        // express. Every other value — the specification's `text`/`cdata`/`none`, and anything
+        // outside the enumeration, which the document schema does not validate because it does not
+        // validate Schema Objects — changes the XML on the wire, so it takes a disposition rather
+        // than being ignored.
+        if matches!(hints.node_type.as_deref(), Some(node_type)
+            if !matches!(node_type, "element" | "attribute"))
+        {
             unsupported.push("nodeType".to_owned());
         }
         XmlField {
@@ -2889,12 +2896,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if header_name.eq_ignore_ascii_case("content-type") {
                 continue;
             }
+            // A `$ref` here is resolved rather than treated as pinning nothing: the target may
+            // well declare the `const` that gives the client something to send, and reporting
+            // "pins no value" without looking would name the wrong reason. An unresolvable
+            // reference is `E004` from `resolve_header`, not a warning.
             let literal = match header {
                 RefOr::Item(header) => header
                     .schema
                     .as_ref()
                     .and_then(|schema| self.literal_header_value(schema)),
-                RefOr::Ref(_) => None,
+                RefOr::Ref(_) => match self.resolve_header(header) {
+                    Some(resolved) => resolved
+                        .schema
+                        .as_ref()
+                        .and_then(|schema| self.literal_header_value(schema)),
+                    // `resolve_header` already reported the unresolvable reference; adding
+                    // "pins no value" would name a second, wrong reason for one defect.
+                    None => continue,
+                },
             };
             match literal {
                 Some(value) => headers.push((header_name.clone(), value)),
@@ -3186,14 +3205,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             .emit(self.diags);
                         return None;
                     }
-                    let target = reference
+                    let alias = reference
                         .reference
                         .strip_prefix("#/components/headers/")
-                        .and_then(|name| self.document.components.headers.get(name))
-                        .cloned();
-                    match target {
-                        Some(target) => current = target,
-                        None => {
+                        .map(|name| self.document.components.headers.get(name).cloned());
+                    match alias {
+                        Some(Some(target)) => current = target,
+                        Some(None) => {
                             Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
                                 .message(format!(
                                     "unresolved header reference `{}`",
@@ -3201,6 +3219,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 ))
                                 .emit(self.diags);
                             return None;
+                        }
+                        // Not a component alias: a multi-file description may reference a whole
+                        // file, which resolves through the input bundle exactly as a Parameter or
+                        // Response Object reference already does.
+                        None => {
+                            let from = reference
+                                .provenance
+                                .span
+                                .map(|span| span.file)
+                                .unwrap_or(crate::diag::FileId(0));
+                            return match self.resolver.resolve_component(
+                                &reference.reference,
+                                from,
+                                super::deserialize::parse_header_object,
+                                self.diags,
+                            ) {
+                                Some(resolved) => Some(resolved),
+                                None => {
+                                    Diagnostic::error(
+                                        Code::UnresolvedRef,
+                                        reference.provenance.clone(),
+                                    )
+                                    .message(format!(
+                                        "unresolved header reference `{}`",
+                                        reference.reference
+                                    ))
+                                    .emit(self.diags);
+                                    None
+                                }
+                            };
                         }
                     }
                 }
@@ -3423,13 +3471,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return None;
             }
             let Some(name) = reference.reference.strip_prefix("#/components/mediaTypes/") else {
-                Diagnostic::error(Code::UnresolvedRef, reference.provenance)
-                    .message(format!(
-                        "unsupported or unresolved Media Type Object reference `{}`",
-                        reference.reference
-                    ))
-                    .emit(self.diags);
-                return None;
+                // Not a component alias: a multi-file description may reference a whole file,
+                // which resolves through the input bundle exactly as a Parameter or Response
+                // Object reference already does.
+                let from = reference
+                    .provenance
+                    .span
+                    .map(|span| span.file)
+                    .unwrap_or(crate::diag::FileId(0));
+                let resolved = self.resolver.resolve_component(
+                    &reference.reference,
+                    from,
+                    |value, pointer, diags| {
+                        Some(super::deserialize::parse_media_type(value, pointer, diags))
+                    },
+                    self.diags,
+                );
+                match resolved {
+                    Some(resolved) => {
+                        current = resolved;
+                        continue;
+                    }
+                    None => {
+                        Diagnostic::error(Code::UnresolvedRef, reference.provenance)
+                            .message(format!(
+                                "unsupported or unresolved Media Type Object reference `{}`",
+                                reference.reference
+                            ))
+                            .emit(self.diags);
+                        return None;
+                    }
+                }
             };
             let Some(target) = self.document.components.media_types.get(name) else {
                 Diagnostic::error(Code::UnresolvedRef, reference.provenance)

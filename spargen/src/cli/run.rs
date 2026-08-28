@@ -54,12 +54,15 @@ pub(crate) fn run(cli: Cli) -> ExitCode {
                 Ok(spec) => spec,
                 Err(error) => return config_error(error),
             };
-            let outcome = spargen::vendor(&spec);
-            emit(&outcome, args.format, Stream::Stdout);
-            if outcome.succeeded() {
-                ExitStatus::Ok.into()
-            } else {
-                ExitStatus::Diagnostics.into()
+            match spargen::vendor(&spec) {
+                Ok(vendored) => {
+                    emit(&vendored, args.format, Stream::Stdout);
+                    ExitStatus::Ok.into()
+                }
+                Err(report) => {
+                    emit(&report, args.format, Stream::Stderr);
+                    ExitStatus::Diagnostics.into()
+                }
             }
         }
         Command::Diff(args) => {
