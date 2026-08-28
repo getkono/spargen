@@ -1,55 +1,63 @@
-/// hk — git hooks for spargen. Install with `hk install --mise` (or `mise run hooks`).
+/// hk — git hooks for spargen. Install with `mise run hooks` (`hk install --mise`), which wraps the
+/// hook shim in `mise x` so hk and its tools resolve from `mise.toml`.
 ///
-/// `pre-commit` auto-fixes formatting/lints on the working tree; `pre-push` is the read-only
-/// gate (format check, clippy-as-error, tests) plus Conventional Commit validation of the
-/// outgoing range. `commit-msg` validates each new commit immediately. Commit-message
-/// validation is also enforced in CI on pull requests.
+/// Every step delegates to a task in `mise.toml`. There is no second copy of a gate here, so the
+/// hooks, `mise run …` and the documented commands cannot drift apart, and each step runs at the
+/// tool versions `mise.toml` pins rather than whatever is on PATH.
+///
+/// `pre-commit` auto-fixes formatting/lints on the working tree; `pre-push` is the read-only gate
+/// (format check, clippy-as-error, tests) plus Conventional Commit validation of the outgoing
+/// range. `commit-msg` validates each new commit immediately. Commit-message validation is also
+/// enforced in CI on pull requests.
 amends "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Config.pkl"
+
+/// Matches the `amends` package above and the `hk` pin in `mise.toml`.
+min_hk_version = "1.50.0"
 
 hooks {
   ["pre-commit"] {
     fix = true
     stash = "git"
     steps {
-      // cargo fmt / clippy operate on the whole workspace (no per-file mode); the glob only
-      // decides whether the step runs when Rust files are staged.
+      // The mise tasks operate on the whole workspace (cargo fmt/clippy have no per-file mode); the
+      // glob only decides whether the step runs at all.
       ["fmt"] {
         glob = List("*.rs")
-        check = "cargo fmt --all --check"
-        fix = "cargo fmt --all"
+        check = "mise run fmt-check"
+        fix = "mise run fmt"
       }
       ["clippy"] {
-        glob = List("*.rs")
+        glob = List("*.rs", "Cargo.toml", "*/Cargo.toml", "Cargo.lock")
         exclusive = true
-        check = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
-        fix = "cargo clippy --workspace --all-targets --all-features --fix --allow-dirty --allow-staged"
+        check = "mise run lint"
+        fix = "mise run lint-fix"
       }
     }
   }
   ["commit-msg"] {
     steps {
-      // Use convco for the actual Conventional Commit policy. During an in-progress merge,
-      // Git exposes MERGE_HEAD; skip that hook invocation so merge commits remain exempt.
+      // The merge-commit exemption lives in the task; hk supplies the message file.
       ["convco"] {
-        check = "sh -c 'if test -f \"$(git rev-parse --git-path MERGE_HEAD)\"; then exit 0; fi; convco check --from-stdin --strip < \"$1\"' sh \"{{ commit_msg_file }}\""
+        check = "mise run --quiet commit-msg < \"{{commit_msg_file}}\""
       }
     }
   }
   ["pre-push"] {
+    // Deliberately unglobbed, as before: this is the last gate before code leaves the machine, and
+    // the suite pins docs/errors.md and the corpus fixtures, so a change touching no Rust at all
+    // can still break it. A rust-toolchain.toml bump likewise changes what clippy reports.
     steps {
       ["fmt"] {
-        check = "cargo fmt --all --check"
+        check = "mise run fmt-check"
       }
       ["clippy"] {
-        check = "cargo clippy --workspace --all-targets --all-features -- -D warnings"
+        check = "mise run lint"
       }
       ["test"] {
-        check = "cargo test --workspace"
+        check = "mise run test"
       }
-      // Validate the full outgoing commit range against Conventional Commits.
-      // convco skips merge commits by default for revwalks (do not add --merges).
       ["convco"] {
-        check = "convco check origin/master..HEAD"
+        check = "mise run commit-range"
       }
     }
   }
