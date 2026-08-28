@@ -62,7 +62,7 @@ requirement that could resolve below these versions or beyond the next semver br
 | `futures-core = "0.3.32"` | - | Only for an API with sequential responses |
 | `quick-xml = "0.41.0"` | `serialize` | Only for an API with XML bodies |
 | `uuid = "1.24.0"` | `serde` | Only when the enabled UUID mapping is actually emitted |
-| `time = "0.3.55"` | `serde`, `formatting`, `parsing` | Only when an enabled date/date-time mapping is actually emitted |
+| `time = "0.3.55"` | `formatting`, `parsing` | Only when an enabled date/date-time mapping is actually emitted |
 | `tokio = "1.53.1"` | `rt`; optional and native-only | Only when your package declares the generated `blocking` feature |
 
 The audit happens during both `build.rs` and proc-macro expansion and fails compilation with

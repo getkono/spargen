@@ -30,6 +30,11 @@ mod auth;
 #[cfg(feature = "blocking")]
 mod blocking;
 mod client;
+// The RFC 3339 `DateTime`/`Date` newtypes pull in the optional `time` dependency, so they are
+// compiled only under the `time` feature; a generated client embeds this module only when its spec
+// has a `format: date-time` or `format: date`.
+#[cfg(feature = "time")]
+mod datetime;
 mod dispatch;
 mod error;
 mod header;
@@ -58,6 +63,8 @@ pub use auth::{
 #[cfg(feature = "blocking")]
 pub use blocking::BlockingRuntime;
 pub use client::{ClientConfig, ClientCore};
+#[cfg(feature = "time")]
+pub use datetime::{Date, DateTime, ParseError};
 pub use dispatch::{
     attach_auth, build_url, build_url_on, build_url_with_query_string,
     build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text,

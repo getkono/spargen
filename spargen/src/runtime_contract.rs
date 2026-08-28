@@ -99,13 +99,7 @@ impl RuntimeRequirements {
                 && api.types.iter().any(|(_, definition)| {
                     matches!(definition.kind, TypeKind::Primitive(Prim::Uuid))
                 }),
-            time: spec.time
-                && api.types.iter().any(|(_, definition)| {
-                    matches!(
-                        definition.kind,
-                        TypeKind::Primitive(Prim::Date | Prim::DateTime)
-                    )
-                }),
+            time: spec.time && api.uses_time(),
         }
     }
 }
@@ -318,7 +312,11 @@ fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requirement> {
         push(UUID, &["serde"], false);
     }
     if requirements.time {
-        push(TIME, &["serde", "formatting", "parsing"], false);
+        // NOT `serde`: the embedded `DateTime`/`Date` newtypes write RFC 3339 themselves, because
+        // `time`'s own serde representation is a nine-integer sequence without
+        // `serde-human-readable` and a space-separated form with it — neither is what OpenAPI's
+        // `format: date-time` means. `formatting`/`parsing` are what the RFC 3339 codec needs.
+        push(TIME, &["formatting", "parsing"], false);
     }
     // The blocking client is opt-in: it is required only from a consumer that declares its own
     // `blocking` Cargo feature, and then only off wasm, where no thread-blocking runtime exists.
@@ -652,6 +650,19 @@ fn check_dependency(
     if check.require_optional && declaration_bool(declaration, "optional") != Some(true) {
         diagnostics.push(diagnostic(format!(
             "`{}` must be optional because it is enabled only by the generated `blocking` feature",
+            dependency.name
+        )));
+    }
+    // The mirror of the rule above, and the one that was missing: generated code names these
+    // crates unconditionally, with no `cfg` to hide behind. Declaring one `optional = true` — even
+    // wired into `default` — leaves a feature resolution (`--no-default-features`, or a dependent
+    // that turns defaults off) in which the generated module references a crate that is not in the
+    // graph, and the failure surfaces as a rustc error inside generated code rather than here.
+    if !check.require_optional && declaration_bool(declaration, "optional") == Some(true) {
+        diagnostics.push(diagnostic(format!(
+            "`{}` must not be optional: generated code references it unconditionally, so a build \
+             with that feature disabled would not compile. Drop `optional = true`, or turn the \
+             mapping off at generation time",
             dependency.name
         )));
     }

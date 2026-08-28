@@ -17,9 +17,11 @@ changes.
   are host/build-time only, so neither crate enters a consumer's runtime graph — the invariant
   below is unchanged. `examples/petstore-macro` is its end-to-end guard.
 - `support-runtime/` — the freestanding runtime embedded verbatim into generated output.
-  `publish = false`; its dependencies are exactly `reqwest` / `serde` / `serde_json` / `bytes` /
-  `secrecy` / `futures-core` (the stream module and its dependency are emitted only for APIs with
-  sequential responses). No spargen crate may ever appear in a consumer's runtime graph. Each source file
+  `publish = false`; its unconditional dependencies are exactly `reqwest` / `serde` / `serde_json` /
+  `bytes` / `secrecy` / `futures-core` (the stream module and its dependency are emitted only for
+  APIs with sequential responses), plus three optional ones behind features for the conditionally
+  embedded modules: `quick-xml` (`xml`), `tokio` (`blocking`), and `time` (`time`, the RFC 3339
+  date newtypes). No spargen crate may ever appear in a consumer's runtime graph. Each source file
   keeps its `#[cfg(test)]` module last — everything above that marker is embedded into generated
   code and must compile there.
 - `examples/petstore/` — the end-to-end example (own workspace); `mise run example` must stay

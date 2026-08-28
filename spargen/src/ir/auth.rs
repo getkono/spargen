@@ -2,6 +2,20 @@
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SchemeId(pub String);
 
+/// A declared security scheme: how a credential attaches, plus the documentation the specification
+/// lets the scheme carry.
+///
+/// The documentation is rendered onto `Client::with_credential`, which is where a caller decides
+/// what to register and needs to know the token format, the flows that mint one, and whether the
+/// scheme is deprecated.
+#[derive(Debug, Clone)]
+pub struct SecuritySchemeDef {
+    /// How a credential for this scheme attaches to a request.
+    pub kind: SecurityScheme,
+    /// Ready-to-render rustdoc lines, in display order. Empty when the scheme documents nothing.
+    pub docs: Vec<String>,
+}
+
 /// A security scheme (matrix: Security). `http`/`apiKey` are fully plumbed; `oauth2`/`oidc` are
 /// W-class — the scheme metadata is retained but tokens are supplied by the caller.
 #[derive(Debug, Clone)]

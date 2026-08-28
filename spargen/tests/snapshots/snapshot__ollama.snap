@@ -5,3 +5,4 @@ expression: summary(&report)
 outcome: Generated
 diagnostics (code: count):
   W001: 1
+  W014: 5

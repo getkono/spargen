@@ -69,6 +69,9 @@ pub enum Code {
     XmlHintIgnored,
     /// OpenAPI 3.2 `itemSchema` appeared on non-sequential media, where it has no wire meaning.
     Oas32ConstructIgnored,
+    /// A body or response offered several media types; one was generated and the alternatives were
+    /// not (matrix: Media → W).
+    AlternativeMediaIgnored,
     /// Schema composition nests deeper than spargen will lower (a very long `$ref` chain or a
     /// pathologically nested inline schema), so lowering is stopped before it could exhaust the
     /// stack. Rejected rather than risk a crash on adversarial or machine-generated input.
@@ -123,6 +126,7 @@ impl Code {
             Code::SchemaDefaultNotApplied => "W005",
             Code::XmlHintIgnored => "W006",
             Code::Oas32ConstructIgnored => "W010",
+            Code::AlternativeMediaIgnored => "W014",
             Code::SchemaNestingTooDeep => "E014",
             Code::RuntimeDependencyContract => "E023",
             Code::SpecUndefinedBehavior => "E016",
@@ -169,6 +173,7 @@ impl Code {
             Code::SchemaDefaultNotApplied => "schema default not applied",
             Code::XmlHintIgnored => "unsupported XML hint ignored",
             Code::Oas32ConstructIgnored => "non-sequential itemSchema ignored",
+            Code::AlternativeMediaIgnored => "alternative media type not generated",
             Code::SchemaNestingTooDeep => "schema nesting is too deep to lower",
             Code::RuntimeDependencyContract => "invalid generated-runtime dependency contract",
             Code::SpecUndefinedBehavior => "specification-undefined construct",
@@ -214,10 +219,10 @@ impl Code {
                 "Enums and const values must be homogeneous scalar sets. A `null` member (or `\"null\"` in the schema's type array) is allowed: it is stripped and makes a remaining scalar enum nullable (`Option<Enum>`), while a value set of only `null` lowers to the exact JSON null type (`()`). Sets that mix distinct non-null scalar kinds (e.g. a string with an integer) or that contain object/array members are rejected."
             }
             Code::UnsupportedMediaType => {
-                "JSON (`application/json` and `application/*+json`), XML (`application/xml` and `text/xml`), raw binary (`application/octet-stream`), raw UTF-8 text (`text/*` and GitHub's `application/octocat-stream`), form-urlencoded requests, and multipart requests are generated. Text is decoded through a JSON string value so string enums/formats remain typed; binary responses remain `bytes::Bytes`; single- and multi-status success/error dispatch use the selected response's codec. Raw text requires a string-like/binary schema and octet-stream requires a binary schema. XML uses the feature-gated quick-xml codec and is currently limited to an operation's single success or error body. Multipart requires an object request schema; form-urlencoded and multipart response bodies are rejected. Sequential responses with `itemSchema` (`text/event-stream`, JSON Lines/NDJSON, and JSON Text Sequences) generate a typed standard `EventStream<T>`; an SSE envelope's JSON `data.contentSchema` becomes `T` directly. Streaming requests, a complete-sequence `schema` without `itemSchema`, and explicit Media Type Object `encoding`/`prefixEncoding`/`itemEncoding` are rejected until their exact wire representation can be generated."
+                "JSON (`application/json` and `application/*+json`), XML (`application/xml` and `text/xml`), raw binary (`application/octet-stream`), raw UTF-8 text (`text/*` and GitHub's `application/octocat-stream`), form-urlencoded requests, and multipart requests are generated. Text is decoded through a JSON string value so string enums/formats remain typed; binary responses remain `bytes::Bytes`; single- and multi-status success/error dispatch use the selected response's codec. Raw text requires a string-like/binary schema and octet-stream requires a binary schema. XML uses the feature-gated quick-xml codec and is currently limited to an operation's single success or error body. Multipart requires an object request schema; form-urlencoded and multipart response bodies are rejected. Sequential responses with `itemSchema` (`text/event-stream`, JSON Lines/NDJSON, and JSON Text Sequences) generate a typed standard `EventStream<T>`; an SSE envelope's JSON `data.contentSchema` becomes `T` directly. Media Type Object `encoding` is implemented for `multipart/form-data` and `application/x-www-form-urlencoded`, with the specification's mode switch: any explicit `style`/`explode`/`allowReserved` selects RFC 6570 serialization (making `contentType` inert), otherwise the property is rendered by its `contentType`. Rejected are streaming requests, a complete-sequence `schema` without `itemSchema`, `prefixEncoding`/`itemEncoding` (which describe positional parts of an array-shaped multipart body, where spargen generates from an object schema), and the RFC 6570 combinations the specification leaves undefined — `deepObject` or an object-valued property on multipart, and `spaceDelimited`/`pipeDelimited` with `explode: true`."
             }
             Code::UnsupportedParameterStyle => {
-                "Path/header parameters support simple style and query/cookie parameters support form style, including the OpenAPI explode defaults and explicit explode overrides. OpenAPI 3.2 cookie style is emitted without percent encoding, and a single whole-query-string parameter supports JSON or application/x-www-form-urlencoded content. JSON content-typed parameters are generated. Deep object, pipe-delimited, space-delimited, invalid location/style combinations, and allowReserved: true are rejected rather than serialized with incorrect wire semantics."
+                "Path/header parameters support simple style and query/cookie parameters support form style, including the OpenAPI explode defaults and explicit explode overrides. OpenAPI 3.2 cookie style is emitted without percent encoding, and a single whole-query-string parameter supports JSON or application/x-www-form-urlencoded content. JSON content-typed parameters are generated. `deepObject`, `spaceDelimited`, and `pipeDelimited` query parameters and `allowReserved: true` are all supported. What is rejected is a style the parameter's location does not permit, `spaceDelimited`/`pipeDelimited` with `explode: true` (which the specification's own serialization table leaves undefined), a nested array or object inside a `simple`/`form` value, and a `querystring` parameter without exactly one JSON or form-urlencoded content entry with a schema — none of which could be serialized with defined wire semantics."
             }
             Code::ServerInitiatedFlowIgnored => {
                 "Webhooks, callbacks, and links describe server-initiated or hypermedia behavior. They are acknowledged with a warning and no client code is emitted."
@@ -248,6 +253,9 @@ impl Code {
             }
             Code::Oas32ConstructIgnored => {
                 "OpenAPI 3.2 `itemSchema` describes one item of sequential media. On a non-sequential media type it does not define any wire behavior, so spargen acknowledges and ignores it while continuing to use the complete-body `schema`. Move the item schema to sequential media such as `application/x-ndjson`, `application/json-seq`, or `text/event-stream`, or use only `schema` for ordinary media."
+            }
+            Code::AlternativeMediaIgnored => {
+                "A request body or response offered more than one media type. A generated method sends and decodes exactly one, so spargen picks the one it can represent best — JSON first, then XML, multipart, form-urlencoded, octet-stream, text, and finally the sequential media — breaking ties by source order. The alternatives are not generated. That is a real narrowing of the documented API surface: a server willing to accept XML as well as JSON will only ever be sent JSON by this client. It is reported rather than left silent so the choice is visible, and it is a warning rather than an error because the selected media type is genuinely supported and the generated client is correct for it. To generate against a different one, remove the alternatives from the document, or omit this API segment with `spargen::omit!` and hand-write the call."
             }
             Code::SchemaNestingTooDeep => {
                 "Lowering a schema into a Rust type is recursive: each nested object property, array item, `allOf`/`oneOf`/`anyOf` member, and `$ref` target descends one level. Spargen caps that descent so a pathologically deep composition — a very long chain of components that each `$ref` the next, or a deeply nested inline schema — is rejected with this error instead of being allowed to exhaust the call stack and abort the process. A genuine API surface never approaches the limit; hitting it almost always means the spec was machine-generated or adversarial. Flatten the offending chain, or omit that API segment with `spargen::omit!`."
@@ -315,6 +323,7 @@ impl Code {
             Code::SchemaDefaultNotApplied,
             Code::XmlHintIgnored,
             Code::Oas32ConstructIgnored,
+            Code::AlternativeMediaIgnored,
             Code::SchemaNestingTooDeep,
             Code::RuntimeDependencyContract,
             Code::SpecUndefinedBehavior,

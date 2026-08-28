@@ -14,7 +14,9 @@ mod types;
 
 use indexmap::IndexMap;
 
-pub use auth::{ApiKeyLoc, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme};
+pub use auth::{
+    ApiKeyLoc, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme, SecuritySchemeDef,
+};
 pub use invariant::check_invariants;
 pub use media::{
     BodyEncoding, EncodingMode, ErrorShape, Framing, HeaderShape, MediaType, PropertyEncoding,
@@ -42,7 +44,7 @@ pub struct Api {
     /// The type graph referenced by operations and each other.
     pub types: TypeGraph,
     /// Named security schemes (`components.securitySchemes`).
-    pub security_schemes: IndexMap<SchemeId, SecurityScheme>,
+    pub security_schemes: IndexMap<SchemeId, SecuritySchemeDef>,
 }
 
 impl Api {
@@ -63,6 +65,21 @@ impl Api {
                 .chain(operation.responses.default.as_ref())
                 .any(|response| response.media == Some(MediaType::Xml));
             request_xml || response_xml
+        })
+    }
+
+    /// Whether the type graph contains a `format: date-time` or `format: date` primitive. Drives
+    /// the conditional embedding of the RFC 3339 `DateTime`/`Date` runtime newtypes and the `time`
+    /// requirement.
+    ///
+    /// This is a property of the API alone; whether those primitives actually *become* the newtypes
+    /// additionally depends on the `time` config knob, which callers apply themselves.
+    pub fn uses_time(&self) -> bool {
+        self.types.iter().any(|(_, definition)| {
+            matches!(
+                definition.kind,
+                TypeKind::Primitive(Prim::Date | Prim::DateTime)
+            )
         })
     }
 

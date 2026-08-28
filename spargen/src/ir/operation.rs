@@ -82,6 +82,12 @@ pub struct Operation {
     pub deprecated: bool,
     /// Documentation lowered from `summary`/`description`.
     pub docs: Docs,
+    /// The base URL this operation is sent to when the Operation or Path Item Object overrides the
+    /// document's `servers`, already rendered with each server variable at its declared default.
+    ///
+    /// `None` means "use the client's base URL". An absolute override replaces that base; a
+    /// relative one is joined onto it.
+    pub server: Option<String>,
     /// Where the operation came from.
     pub provenance: Provenance,
 }

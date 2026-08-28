@@ -19,20 +19,53 @@ pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) ->
         .types
         .iter()
         .map(|(id, def)| emit_type_def(id, def, api, names, options));
+    // The RFC 3339 newtypes live beside `types`, so bring them into scope under the same bare names
+    // `prim_tokens` emits; at the generated root the prelude re-export supplies them instead.
+    let datetime_import = (options.feature_time && api.uses_time()).then(|| {
+        quote! { use super::{Date, DateTime}; }
+    });
     quote! {
         #[forbid(unsafe_code)]
         #[allow(dead_code, unused_imports)]
         pub mod types {
             use serde::{Deserialize, Serialize};
             use std::collections::BTreeMap;
+            #datetime_import
 
             #(#items)*
         }
     }
 }
 
+/// The declared security schemes, rendered as rustdoc for `with_credential`.
+///
+/// This is the one place a caller chooses what to register, so it is where the scheme's own
+/// documentation belongs: the bearer format, the flows that mint a token, the OpenID Connect
+/// discovery URL, and whether the scheme is deprecated.
+fn scheme_doc_lines(api: &Api) -> Vec<TokenStream> {
+    let documented: Vec<&String> = api
+        .security_schemes
+        .values()
+        .flat_map(|scheme| scheme.docs.iter())
+        .collect();
+    if documented.is_empty() {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        String::new(),
+        "# Declared schemes".to_owned(),
+        String::new(),
+    ];
+    lines.extend(documented.into_iter().cloned());
+    lines
+        .into_iter()
+        .map(|line| quote! { #[doc = #line] })
+        .collect()
+}
+
 /// Emit the `Client` struct and its `new` / `with_client` constructors.
 pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStream {
+    let scheme_docs = scheme_doc_lines(api);
     let params = api
         .operations
         .iter()
@@ -116,6 +149,7 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
             /// Register a credential for a named security scheme. Operations whose `security`
             /// requirement cannot be satisfied by the registered credentials fail with a
             /// request-construction error before anything is sent.
+            #(#scheme_docs)*
             #[must_use]
             pub fn with_credential(
                 mut self,
@@ -448,7 +482,7 @@ pub(crate) fn emit_operation(
                     .get(id)
                     .expect("security scheme validated during lowering");
                 let name = &id.0;
-                let kind = match scheme {
+                let kind = match &scheme.kind {
                     // Caller-supplied oauth2/oidc tokens attach as bearer credentials.
                     SecurityScheme::Http(HttpScheme::Bearer)
                     | SecurityScheme::OAuth2
@@ -742,17 +776,27 @@ pub(crate) fn emit_operation(
     // The return type is shared with the blocking shim so both surfaces stay identical.
     let (return_ok_ty, _) = operation_return_ty(operation, names, options);
 
+    // An Operation or Path Item Object may override the document's `servers`. The runtime's
+    // `*_on` entry points take that override: absolute, it replaces the client's base URL;
+    // relative, it is joined onto it. `None` keeps the client's base.
+    let server_override = match &operation.server {
+        Some(server) => quote! { Some(#server) },
+        None => quote! { None },
+    };
     let build_url = if uses_querystring {
         quote! {
-            support::build_url_with_query_string(
+            support::build_url_with_query_string_on(
                 &self.core,
+                #server_override,
                 &#path_binding,
                 &#query_binding,
                 #raw_query_binding.as_deref(),
             )
         }
     } else {
-        quote! { support::build_url(&self.core, &#path_binding, &#query_binding) }
+        quote! {
+            support::build_url_on(&self.core, #server_override, &#path_binding, &#query_binding)
+        }
     };
 
     quote! {
@@ -1141,6 +1185,7 @@ fn emit_response_headers(
                 crate::ir::HeaderShape::Array => quote! { support::HeaderShape::Array },
                 crate::ir::HeaderShape::Object => quote! { support::HeaderShape::Object },
                 crate::ir::HeaderShape::Json => quote! { support::HeaderShape::Json },
+                crate::ir::HeaderShape::SetCookie => quote! { support::HeaderShape::SetCookie },
             };
             let explode = header.explode;
             let call = if header.required {
@@ -1415,7 +1460,7 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
     }
 }
 
-/// Emit a `multipart/form-data` body./// Emit a `multipart/form-data` body.
+/// Emit a `multipart/form-data` body.
 ///
 /// Every part carries the Content-Type its Encoding Object resolves to — explicit, or defaulted
 /// from the property's type by the specification's table — and any header the Encoding Object pins
@@ -2099,8 +2144,9 @@ pub(crate) fn emit_error_enum(
 /// Emit the private `support` module by embedding the freestanding runtime source verbatim, under
 /// `#![forbid(unsafe_code)]`. When `uses_xml` is set (the API has an `application/xml` / `text/xml`
 /// body), the feature-gated XML codec module is embedded and its helpers re-exported; otherwise it
-/// is omitted entirely, so a non-XML output carries no `quick-xml` reference.
-pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
+/// is omitted entirely, so a non-XML output carries no `quick-xml` reference. `uses_time` embeds
+/// the RFC 3339 `DateTime`/`Date` newtypes on the same terms.
+pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) -> TokenStream {
     let embed = |file: &crate::support::SupportFile| {
         let stem = file.name.trim_end_matches(".rs");
         let ident = format_ident!("{}", stem);
@@ -2137,6 +2183,12 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
     let xml_reexport = uses_xml.then(|| {
         quote! { pub use xml::{classify_error_xml, decode_success_xml, to_xml}; }
     });
+    // The RFC 3339 newtypes are embedded only when a date-typed primitive survives lowering with the
+    // `time` mapping enabled; only then does the audit require `time` of the consumer.
+    let datetime_module = uses_time.then(|| embed(&crate::support::datetime_runtime_file()));
+    let datetime_reexport = uses_time.then(|| {
+        quote! { pub use datetime::{Date, DateTime}; }
+    });
     // The blocking facade (`BlockingRuntime`) is embedded unconditionally but gated on the
     // `blocking` feature AND `not(target_arch = "wasm32")` at the module level: the tokio-dependent
     // code compiles only when a consumer opts in on a native target, so a default build carries no
@@ -2162,6 +2214,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
             #(#modules)*
             #stream_module
             #xml_module
+            #datetime_module
             #blocking_module
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
@@ -2178,6 +2231,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
             pub use wasm::{MaybeSend, MaybeSync};
             #stream_reexport
             #xml_reexport
+            #datetime_reexport
             #blocking_reexport
         }
     }
@@ -2863,8 +2917,11 @@ fn prim_tokens(prim: Prim, options: &CodegenOptions) -> TokenStream {
         Prim::I64 => quote! { i64 },
         Prim::F64 => quote! { f64 },
         Prim::Uuid if options.feature_uuid => quote! { uuid::Uuid },
-        Prim::DateTime if options.feature_time => quote! { time::OffsetDateTime },
-        Prim::Date if options.feature_time => quote! { time::Date },
+        // The embedded newtypes, not `time`'s own types: OpenAPI fixes these to RFC 3339, which is
+        // not what `time`'s `Serialize`/`Display` produce. Named bare so one spelling works at the
+        // generated root (via the prelude re-export) and inside `types` (via its `use super::`).
+        Prim::DateTime if options.feature_time => quote! { DateTime },
+        Prim::Date if options.feature_time => quote! { Date },
         Prim::Uuid | Prim::DateTime | Prim::Date => quote! { String },
     }
 }

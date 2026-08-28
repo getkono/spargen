@@ -8,9 +8,9 @@ use crate::ir::{
     EncodingMode, Field, FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Operation,
     OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
     PropertyEncoding, PropertyName, RequestBody, Response, ResponseHeader, Responses, ScalarEnum,
-    ScalarRepr, ScalarValue, SchemeId, SecurityScheme, Server, StatusSpec, Struct, Ty, TypeDef,
-    TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, UrlSegment,
-    XmlField,
+    ScalarRepr, ScalarValue, SchemeId, SecurityScheme, SecuritySchemeDef, Server, StatusSpec,
+    Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy,
+    UnionVariant, UrlSegment, XmlField,
 };
 use crate::name::synth_operation_id;
 use crate::source::{is_remote_ref, Node, Number, SpannedValue};
@@ -208,6 +208,15 @@ pub fn lower(
             }
 
             let mut operation_description = operation.description.clone();
+            // A Path Item's `summary`/`description` apply to every operation on the path. They are
+            // additional context rather than a replacement, so the operation's own documentation
+            // stays first and these follow it.
+            for text in [item.summary.as_ref(), item.description.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                append_text(&mut operation_description, text.clone());
+            }
             if !operation.tags.is_empty() {
                 append_text(
                     &mut operation_description,
@@ -228,6 +237,14 @@ pub fn lower(
                 append_response_docs(&mut operation_description, "default", &response);
             }
 
+            // Operation `servers` override the path item's, which override the document's. The
+            // document's is the client's base URL, so "no override" is the common case.
+            let server = if operation.servers.is_empty() {
+                lower_server_override(&item.servers, ctx.diags)
+            } else {
+                lower_server_override(&operation.servers, ctx.diags)
+            };
+
             operations.push(Operation {
                 id: OperationId(id),
                 method: method.clone(),
@@ -243,6 +260,7 @@ pub fn lower(
                     description: operation_description,
                     deprecated: operation.deprecated,
                 },
+                server,
                 provenance: operation.provenance.clone(),
             });
         }
@@ -2688,6 +2706,60 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let explode = encoding
                     .explode
                     .unwrap_or(matches!(style, ParamStyle::Form));
+                // The specification's own serialization table marks the delimited styles with
+                // `explode: true` as *n/a* — undefined. The identical parameter-side construct is
+                // already `E010`; without this an Encoding Object could declare it and have the
+                // `explode` silently ignored.
+                if explode && matches!(style, ParamStyle::Delimited(_)) {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.style: {style_name}` with `explode: true` is \
+                             undefined: the specification's serialization table gives no value for \
+                             that combination"
+                        ))
+                        .remedy("set `explode: false`, or use `style: form`")
+                        .emit(self.diags);
+                    return None;
+                }
+                // `deepObject` builds `name[key]=value` query fragments. A multipart part carries
+                // its name in `Content-Disposition` and its value alone, so there is nowhere for
+                // that syntax to go and no defined representation to fall back on.
+                if media == MediaType::Multipart && style == ParamStyle::DeepObject {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.style: deepObject` is defined only for `in: query`; \
+                             it has no `multipart/form-data` part representation"
+                        ))
+                        .remedy(
+                            "use `style: form`, give the property a `contentType` such as \
+                             `application/json`, or omit this API segment with spargen::omit!",
+                        )
+                        .emit(self.diags);
+                    return None;
+                }
+                // An object property under RFC 6570 serialization: the specification says the
+                // Encoding Object applies to the *entire value* for a non-array property, but
+                // defines no part representation for an object, so there is nothing to generate.
+                if media == MediaType::Multipart
+                    && matches!(
+                        self.graph.get(field_ty.id).map(|def| &def.kind),
+                        Some(TypeKind::Struct(_))
+                    )
+                {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}` selects RFC 6570 serialization for an object \
+                             property, which has no defined `multipart/form-data` part \
+                             representation"
+                        ))
+                        .remedy(
+                            "give the property a `contentType` such as `application/json` instead \
+                             of `style`/`explode`/`allowReserved`, or omit this API segment with \
+                             spargen::omit!",
+                        )
+                        .emit(self.diags);
+                    return None;
+                }
                 // Multipart part values are never percent-encoded, so `allowReserved` is inert.
                 let allow_reserved = encoding.allow_reserved.unwrap_or(false);
                 if allow_reserved && media == MediaType::Multipart {
@@ -3062,6 +3134,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 (ty, crate::ir::HeaderShape::Json)
             } else {
                 continue;
+            };
+            // `Set-Cookie` is the one field RFC 9110 §5.3 exempts from the comma-joined field-list
+            // rule, and 3.2 gives it a section of its own saying each value must be kept on its own
+            // line. The declared schema therefore describes ONE cookie, and the accessor is a list
+            // of them — a schema that is already a list is taken to be that list.
+            let (ty, shape) = if name.eq_ignore_ascii_case("set-cookie") {
+                let list = match self.graph.get(ty.id).map(|def| &def.kind) {
+                    Some(TypeKind::Array(_)) => ty,
+                    _ => self.insert_type(
+                        &format!("Header{name}"),
+                        TypeKind::Array(Box::new(ty)),
+                        Docs::default(),
+                        Some(header.provenance.clone()),
+                    ),
+                };
+                (list, crate::ir::HeaderShape::SetCookie)
+            } else {
+                (ty, shape)
             };
             headers.push(ResponseHeader {
                 name: name.clone(),
@@ -3517,6 +3607,48 @@ fn lower_security_requirement(requirement: &SecurityRequirement) -> crate::ir::S
 /// A Server Variable `default` is unlike a Schema Object `default`: the specification says it is
 /// actually sent when the caller supplies no alternative, so it changes the wire and must be
 /// modeled rather than documented.
+/// Resolve the base-URL override an Operation or Path Item Object declares, rendered with every
+/// server variable at its declared default.
+///
+/// The specification defines no way for a client to *choose* among several `servers` entries in
+/// this position, so the first is used and the rest are acknowledged as having no effect (`W011`).
+/// Variables are substituted with their declared defaults — what the specification says is sent
+/// when nothing selects another value. Unlike the document's `servers`, a per-operation override
+/// gets no typed builder: there is no constructor to hand a selection to, since the choice is made
+/// per call rather than per client.
+fn lower_server_override(servers: &[super::Server], diags: &mut Diagnostics) -> Option<String> {
+    let (first, rest) = servers.split_first()?;
+    for extra in rest {
+        Diagnostic::warning(Code::DeclarationHasNoEffect, extra.provenance.clone())
+            .message(format!(
+                "`servers` entry `{}` past the first has no effect here: the specification \
+                 defines no rule for selecting among per-operation servers, so the first is used",
+                extra.url
+            ))
+            .emit(diags);
+    }
+    lower_server(first, diags).map(|server| render_server_url(&server))
+}
+
+/// Render a lowered server URL template with each variable at its declared default.
+///
+/// `lower_server` has already rejected a template naming an undeclared variable, so a missing
+/// entry here can only occur on a document that is already failing.
+fn render_server_url(server: &Server) -> String {
+    let mut url = String::with_capacity(server.url.len());
+    for segment in &server.segments {
+        match segment {
+            UrlSegment::Literal(text) => url.push_str(text),
+            UrlSegment::Variable(name) => {
+                if let Some(variable) = server.variables.get(name) {
+                    url.push_str(&variable.default);
+                }
+            }
+        }
+    }
+    url
+}
+
 fn lower_server(server: &super::Server, diags: &mut Diagnostics) -> Option<Server> {
     let segments = parse_url_template(&server.url);
     let mut seen: HashSet<&str> = HashSet::new();
@@ -3665,7 +3797,7 @@ fn resolve_path_item(
 fn resolve_external_security_schemes(
     document: &Document,
     resolver: &Resolver,
-    schemes: &mut IndexMap<SchemeId, SecurityScheme>,
+    schemes: &mut IndexMap<SchemeId, SecuritySchemeDef>,
     diags: &mut Diagnostics,
 ) {
     let mut wanted: Vec<(String, crate::diag::Provenance)> = Vec::new();
@@ -3725,7 +3857,7 @@ fn resolve_external_security_schemes(
 fn lower_security_schemes(
     document: &Document,
     diags: &mut Diagnostics,
-) -> IndexMap<SchemeId, SecurityScheme> {
+) -> IndexMap<SchemeId, SecuritySchemeDef> {
     let mut schemes = IndexMap::new();
     for (name, scheme) in &document.components.security_schemes {
         let scheme = match scheme {
@@ -3810,9 +3942,69 @@ fn lower_security_schemes(
             // The document schema closes the `type` enum.
             _ => continue,
         };
-        schemes.insert(SchemeId(name.clone()), lowered);
+        schemes.insert(
+            SchemeId(name.clone()),
+            SecuritySchemeDef {
+                kind: lowered,
+                docs: security_scheme_docs(name, scheme),
+            },
+        );
     }
     schemes
+}
+
+/// Render the documentation a Security Scheme Object carries into rustdoc lines.
+///
+/// A caller of `Client::with_credential` needs exactly this to know what to register: the token
+/// format, where a token is obtained, and whether the scheme is on its way out. None of it changes
+/// a byte on the wire, which is why it is documentation rather than lowered structure.
+fn security_scheme_docs(name: &str, scheme: &super::SecuritySchemeObject) -> Vec<String> {
+    let mut docs = Vec::new();
+    let kind = match scheme.scheme_type.as_str() {
+        "http" => match scheme.scheme.as_deref() {
+            Some(inner) => format!("`http` (`{inner}`)"),
+            None => "`http`".to_owned(),
+        },
+        other => format!("`{other}`"),
+    };
+    docs.push(format!("- `{name}` — {kind}."));
+    if scheme.deprecated {
+        docs.push("  - **Deprecated.**".to_owned());
+    }
+    if let Some(description) = &scheme.description {
+        docs.push(format!("  - {}", description.replace('\n', " ")));
+    }
+    if let Some(format) = &scheme.bearer_format {
+        docs.push(format!("  - Bearer format: `{format}`."));
+    }
+    if let Some(url) = &scheme.open_id_connect_url {
+        docs.push(format!("  - OpenID Connect discovery: <{url}>"));
+    }
+    if let Some(url) = &scheme.oauth2_metadata_url {
+        docs.push(format!("  - OAuth 2 metadata: <{url}>"));
+    }
+    for flow in &scheme.flows {
+        docs.push(format!("  - Flow `{}`:", flow.name));
+        for (label, url) in [
+            ("authorization", &flow.authorization_url),
+            ("token", &flow.token_url),
+            ("refresh", &flow.refresh_url),
+            ("device authorization", &flow.device_authorization_url),
+        ] {
+            if let Some(url) = url {
+                docs.push(format!("    - {label}: <{url}>"));
+            }
+        }
+        for (scope, description) in &flow.scopes {
+            let description = description.replace('\n', " ");
+            if description.is_empty() {
+                docs.push(format!("    - scope `{scope}`"));
+            } else {
+                docs.push(format!("    - scope `{scope}` — {description}"));
+            }
+        }
+    }
+    docs
 }
 
 /// Suppress `xml.name`/`xml.attribute` renames on any type that is not XML-dedicated, warning `W006`.
@@ -4040,6 +4232,26 @@ fn choose_media<'a, T>(
         }
     }
     if let Some((_, _, media, value)) = selected {
+        // A generated method sends and decodes exactly one media type, so the alternatives are not
+        // generated. That narrows the documented surface — a server that also accepts XML will only
+        // ever be sent JSON — so it is reported rather than dropped in silence.
+        let ignored: Vec<&str> = content
+            .keys()
+            .map(String::as_str)
+            .filter(|candidate| *candidate != media)
+            .collect();
+        if !ignored.is_empty() {
+            Diagnostic::warning(Code::AlternativeMediaIgnored, provenance.clone())
+                .message(format!(
+                    "`{media}` is generated; the alternative media type(s) `{}` are not",
+                    ignored.join("`, `")
+                ))
+                .remedy(
+                    "remove the alternatives, or omit this API segment with spargen::omit! and \
+                     hand-write the call",
+                )
+                .emit(diags);
+        }
         return Some((media, value));
     }
     let (media, _) = content.first()?;

@@ -4243,3 +4243,436 @@ paths:
         "{report:#?}"
     );
 }
+
+#[test]
+fn path_item_and_operation_servers_override_the_base_url() {
+    // Regression: `servers` was read only at the document root, so a Path Item or Operation Object
+    // that redirects its calls to another host was skipped along with every other non-method key —
+    // silently generating a client that called the document's server instead.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: https://api.example.com/v1
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "204": { description: No Content }
+  /upload:
+    servers:
+      - url: https://files.example.net/store
+    post:
+      operationId: uploadItem
+      responses:
+        "204": { description: No Content }
+  /reports:
+    get:
+      operationId: getReport
+      servers:
+        - url: https://{region}.reports.example.org/v2
+          variables:
+            region:
+              default: eu
+              enum: [eu, us]
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    // No override: the client's base URL stands.
+    assert!(
+        code.contains("build_url_on(&self.core, None, &path, &query)"),
+        "an operation without an override must pass no server: {code}"
+    );
+    // A path-item override applies to every operation on that path.
+    assert!(
+        code.contains(r#"Some("https://files.example.net/store")"#),
+        "a path-item `servers` override must reach the URL builder: {code}"
+    );
+    // An operation override wins, and its variables are substituted with their declared defaults.
+    assert!(
+        code.contains(r#"Some("https://eu.reports.example.org/v2")"#),
+        "an operation `servers` override must be rendered with variable defaults: {code}"
+    );
+}
+
+#[test]
+fn w011_server_override_past_the_first_has_no_effect() {
+    // The specification defines no rule for a client to choose among several per-operation servers,
+    // so the first is used and the rest are acknowledged rather than dropped in silence.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: https://api.example.com
+paths:
+  /x:
+    get:
+      servers:
+        - url: https://first.example.net
+        - url: https://second.example.net
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e011_server_override_variables_are_validated_like_the_document_s() {
+    // The override goes through the same `lower_server`, so a template naming an undeclared
+    // variable is rejected wherever it appears rather than only at the document root.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: https://api.example.com
+paths:
+  /x:
+    get:
+      servers:
+        - url: https://{stage}.example.net
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_multipart_deep_object_encoding_rejected() {
+    // `deepObject` builds `name[key]=value` query fragments. A multipart part carries its name in
+    // `Content-Disposition` and its value alone, so the style has no representation there — it used
+    // to generate parts holding only the values, with the keys dropped.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                filter:
+                  type: object
+                  properties:
+                    a: { type: string }
+            encoding:
+              filter:
+                style: deepObject
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_multipart_rfc6570_object_property_rejected() {
+    // The specification applies the Encoding Object to the entire value for a non-array property,
+    // but defines no part representation for an object. Reusing the query builders silently emitted
+    // one part per member carrying only the value.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                meta:
+                  type: object
+                  properties:
+                    a: { type: string }
+            encoding:
+              meta:
+                style: form
+                explode: true
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_encoding_delimited_style_with_explode_rejected() {
+    // The specification's serialization table marks `spaceDelimited`/`pipeDelimited` with
+    // `explode: true` as *n/a*. The identical parameter-side construct is already `E010`; an
+    // Encoding Object used to accept it and then ignore the `explode`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                tags:
+                  type: array
+                  items: { type: string }
+            encoding:
+              tags:
+                style: pipeDelimited
+                explode: true
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn multipart_rfc6570_array_encoding_generates() {
+    // The shapes that *are* defined stay supported: an array property under a delimited or form
+    // style, exploded or not.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                tags:
+                  type: array
+                  items: { type: string }
+                names:
+                  type: array
+                  items: { type: string }
+            encoding:
+              tags:
+                style: spaceDelimited
+                explode: false
+              names:
+                style: form
+                explode: true
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    }
+}
+
+#[test]
+fn set_cookie_response_header_is_a_list_of_lines() {
+    // RFC 9110 s5.3 exempts `Set-Cookie` from the rule that lets a repeated header be folded into a
+    // comma-separated line, and OpenAPI 3.2 gives it a section saying each value stays on its own
+    // line. The declared schema describes one cookie, so the accessor is a list of them — the
+    // generic path would have joined the occurrences and split them back apart on every comma,
+    // fragmenting any cookie with an `Expires=Wed, 09 Jun ...` attribute.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "204":
+          description: No Content
+          headers:
+            Set-Cookie:
+              required: true
+              schema: { type: string }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("support::HeaderShape::SetCookie"),
+        "a documented Set-Cookie header must use the non-joining shape: {code}"
+    );
+    assert!(
+        code.contains("Vec<String>"),
+        "the accessor must be a list of per-line values: {code}"
+    );
+}
+
+#[test]
+fn w014_alternative_media_type_is_not_generated() {
+    // A generated method sends and decodes exactly one media type, so a body offering both JSON and
+    // XML narrows to JSON. That is a real reduction of the documented surface and used to happen
+    // with no diagnostic at all — the one silent disposition left in the media path.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: string }
+          application/xml:
+            schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_single_media_type_draws_no_alternative_warning() {
+    // The warning must fire only when something is actually dropped.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn security_scheme_documentation_reaches_credential_registration() {
+    // The support matrix promises `bearerFormat`, flows, `openIdConnectUrl` and deprecation become
+    // rustdoc on credential registration. `SecuritySchemeObject` used to carry four fields and none
+    // of these, so every one of them was dropped without a trace.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      security:
+        - oauth: [read]
+      responses:
+        "204": { description: No Content }
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: A short-lived service token.
+      deprecated: true
+    oidc:
+      type: openIdConnect
+      openIdConnectUrl: https://id.example.com/.well-known/openid-configuration
+    oauth:
+      type: oauth2
+      oauth2MetadataUrl: https://id.example.com/.well-known/oauth-authorization-server
+      flows:
+        authorizationCode:
+          authorizationUrl: https://id.example.com/authorize
+          tokenUrl: https://id.example.com/token
+          scopes:
+            read: Read your data
+        deviceAuthorization:
+          deviceAuthorizationUrl: https://id.example.com/device
+          tokenUrl: https://id.example.com/token
+          scopes:
+            read: Read your data
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    for expected in [
+        "Bearer format: `JWT`",
+        "A short-lived service token.",
+        "**Deprecated.**",
+        "OpenID Connect discovery: <https://id.example.com/.well-known/openid-configuration>",
+        "OAuth 2 metadata: <https://id.example.com/.well-known/oauth-authorization-server>",
+        "Flow `authorizationCode`",
+        // OpenAPI 3.2's device flow, which `docs/openapi-3.2.md` also claims is documented.
+        "Flow `deviceAuthorization`",
+        "device authorization: <https://id.example.com/device>",
+        "scope `read` — Read your data",
+    ] {
+        assert!(code.contains(expected), "missing {expected:?} in: {code}");
+    }
+}
+
+#[test]
+fn path_item_summary_and_description_reach_operation_rustdoc() {
+    // A Path Item's `summary`/`description` apply to every operation on the path. They were parsed
+    // only when a `$ref` was present, and then discarded, so the matrix's claim that they become
+    // rustdoc never held.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pets:
+    summary: Everything about pets.
+    description: Shared across both operations on this path.
+    get:
+      operationId: listPets
+      description: List them.
+      responses:
+        "204": { description: No Content }
+    delete:
+      operationId: purgePets
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("Everything about pets."),
+        "path-item summary must reach rustdoc: {code}"
+    );
+    // Both operations carry it. (The count is doubled by the blocking facade, which mirrors every
+    // method's rustdoc, so this asserts the floor rather than an exact number.)
+    assert!(
+        code.matches("Shared across both operations on this path.")
+            .count()
+            >= 2,
+        "the path item's description belongs on every operation of the path: {code}"
+    );
+    // The operation's own documentation is not displaced by it.
+    assert!(code.contains("List them."), "{code}");
+}

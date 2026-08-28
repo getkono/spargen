@@ -515,24 +515,45 @@ pub fn serialize_form_body<T: Serialize>(
 
 /// The per-part values for one RFC 6570-mode `multipart/form-data` property.
 ///
-/// An array yields one value per item, all sent under the same part name; any other shape yields
-/// one. Multipart values are never percent-encoded, so the encoding is always passthrough.
+/// An array yields one value per item when `explode` is set, all sent under the same part name (the
+/// [[RFC7578]] §4.3 shape the specification points at); otherwise the items are joined by the
+/// style's delimiter into a single value. Any other shape yields one value.
+///
+/// Two rules make this deliberately *not* the query-fragment builders with the `name=` prefix
+/// stripped:
+///
+/// - The part name travels in `Content-Disposition`, so no fragment syntax appears in the value.
+/// - "When using RFC6570-style serialization for `multipart/form-data`, URI percent-encoding MUST
+///   NOT be applied" — so the delimiters are emitted literally (` `, `|`, `,`), not as the `%20` /
+///   `%7C` triples a query string needs, and the data is passed through byte-for-byte.
+///
+/// Object values never reach here: the specification defines no part representation for them, so
+/// the frontend rejects an object-valued RFC 6570 encoding (and `deepObject`, which is a query-only
+/// style) rather than guessing at one.
 pub fn serialize_multipart_values<T: Serialize>(
     value: &T,
     style: FormStyle,
     explode: bool,
 ) -> Result<Vec<String>, ParameterError> {
-    let value = serde_json::to_value(value)?;
-    let fragments = style_fragments("", &value, style, explode, PercentEncoding::Passthrough)?;
-    // The part name lives in `Content-Disposition`, so strip the `name=` prefix each fragment
-    // carries for query use.
-    Ok(fragments
-        .into_iter()
-        .map(|fragment| match fragment.split_once('=') {
-            Some((_, rest)) => rest.to_owned(),
-            None => fragment,
-        })
-        .collect())
+    // Multipart part values are never percent-encoded, so every rendering below is passthrough.
+    let raw = PercentEncoding::Passthrough;
+    let separator = match style {
+        FormStyle::Form => ",",
+        FormStyle::Delimited(Delimiter::Space) => " ",
+        FormStyle::Delimited(Delimiter::Pipe) => "|",
+        // Defined only for `in: query`: its `name[key]=value` syntax has no meaning as a part value.
+        FormStyle::DeepObject => return Err(ParameterError::ExpectedObject),
+    };
+    match serde_json::to_value(value)? {
+        Value::Null => Ok(vec![String::new()]),
+        Value::Array(values) if explode => values
+            .iter()
+            .map(|value| scalar(value, raw))
+            .collect::<Result<Vec<_>, ParameterError>>(),
+        Value::Array(values) => Ok(vec![join_scalars(values.iter(), separator, raw)?]),
+        Value::Object(_) => Err(ParameterError::NestedValue),
+        value => Ok(vec![scalar(&value, raw)?]),
+    }
 }
 
 fn style_fragments(
@@ -970,6 +991,60 @@ mod tests {
             serialize_multipart_values(&serde_json::json!("solo"), FormStyle::Form, false).unwrap(),
             ["solo"]
         );
+    }
+
+    /// The specification is explicit: "When using RFC6570-style serialization for
+    /// `multipart/form-data`, URI percent-encoding MUST NOT be applied." Building these values out
+    /// of the query fragment builders put `%20`/`%7C` triples into part bodies instead of the
+    /// literal delimiters.
+    #[test]
+    fn multipart_delimiters_are_literal_not_percent_encoded() {
+        let values = array();
+        assert_eq!(
+            serialize_multipart_values(&values, FormStyle::Delimited(Delimiter::Space), false)
+                .unwrap(),
+            ["blue black brown"]
+        );
+        assert_eq!(
+            serialize_multipart_values(&values, FormStyle::Delimited(Delimiter::Pipe), false)
+                .unwrap(),
+            ["blue|black|brown"]
+        );
+        assert_eq!(
+            serialize_multipart_values(&values, FormStyle::Form, false).unwrap(),
+            ["blue,black,brown"]
+        );
+    }
+
+    /// Data bytes are passed through untouched too — a part value is not a query fragment.
+    #[test]
+    fn multipart_values_are_never_percent_encoded() {
+        let values = serde_json::json!(["a b&c", "d=e"]);
+        assert_eq!(
+            serialize_multipart_values(&values, FormStyle::Form, true).unwrap(),
+            ["a b&c", "d=e"]
+        );
+    }
+
+    /// An object has no defined part representation. Reusing the query builders silently produced
+    /// one part per member holding only the *value* — the keys were dropped on the floor — so this
+    /// now fails loudly. The frontend rejects the construct before generation, making this the
+    /// belt to that braces.
+    #[test]
+    fn multipart_rejects_object_values_rather_than_dropping_their_keys() {
+        assert!(matches!(
+            serialize_multipart_values(&object(), FormStyle::Form, true),
+            Err(ParameterError::NestedValue)
+        ));
+        assert!(matches!(
+            serialize_multipart_values(&object(), FormStyle::Form, false),
+            Err(ParameterError::NestedValue)
+        ));
+        // `deepObject` is defined only for `in: query`.
+        assert!(matches!(
+            serialize_multipart_values(&object(), FormStyle::DeepObject, false),
+            Err(ParameterError::ExpectedObject)
+        ));
     }
 
     #[test]

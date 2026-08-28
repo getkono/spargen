@@ -97,6 +97,17 @@ pub fn xml_runtime_file() -> SupportFile {
     }
 }
 
+/// The RFC 3339 date-time runtime source, embedded only when an output maps `format: date-time` or
+/// `format: date` to a typed value (see [`crate::ir::Api::uses_time`] and the `time` config knob).
+/// Kept out of [`runtime_files`] so an output with no dates never carries a `time` reference; its
+/// bytes still ship inside the published crate through the `runtime/datetime.rs` symlink.
+pub fn datetime_runtime_file() -> SupportFile {
+    SupportFile {
+        name: "datetime.rs",
+        contents: include_str!("runtime/datetime.rs"),
+    }
+}
+
 /// The blocking-facade runtime source (`BlockingRuntime`), embedded into every crate output but
 /// gated behind the `blocking` feature at the module level, so the tokio-dependent code is compiled
 /// only when a consumer opts in. Kept out of [`runtime_files`] (which is embedded unconditionally
