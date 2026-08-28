@@ -48,6 +48,26 @@ pub struct VendorReport {
     pub vendor_dir: Utf8PathBuf,
 }
 
+/// The human rendering `spargen lock` prints on success. It lives with the report rather than in
+/// the facade so the success and failure halves of `vendor` both render themselves.
+impl std::fmt::Display for VendorReport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.refs.is_empty() {
+            return write!(formatter, "no remote $refs found; wrote {}", self.lock_path);
+        }
+        writeln!(
+            formatter,
+            "vendored {} remote document(s) under {}:",
+            self.refs.len(),
+            self.vendor_dir
+        )?;
+        for vendored in &self.refs {
+            writeln!(formatter, "  {} -> {}", vendored.url, vendored.path)?;
+        }
+        write!(formatter, "wrote {}", self.lock_path)
+    }
+}
+
 /// `camino` does not implement `serde` without its optional feature, and the runtime dependency
 /// set is closed, so paths serialize through their `Display` form.
 fn serialize_path<S: serde::Serializer>(

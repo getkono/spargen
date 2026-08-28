@@ -801,57 +801,6 @@ pub fn explain(code: &str) -> Result<&'static str, UnknownCode> {
     Code::from_str(code).map(Code::explain)
 }
 
-/// The outcome of a [`vendor`] run: the report (present on success) and any diagnostics.
-#[cfg(feature = "remote-fetch")]
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct VendorOutcome {
-    /// The vendored-refs report, or `None` if vendoring failed.
-    pub report: Option<VendorReport>,
-    /// Diagnostics emitted while vendoring (fetch failures, unfetchable schemes, …).
-    pub diagnostics: Vec<Diagnostic>,
-}
-
-#[cfg(feature = "remote-fetch")]
-impl VendorOutcome {
-    /// Whether vendoring completed and wrote a lock file.
-    pub fn succeeded(&self) -> bool {
-        self.report.is_some()
-            && !self
-                .diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.severity == Severity::Error)
-    }
-}
-
-#[cfg(feature = "remote-fetch")]
-impl std::fmt::Display for VendorOutcome {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for diagnostic in &self.diagnostics {
-            writeln!(formatter, "{diagnostic}")?;
-        }
-        let Some(report) = &self.report else {
-            return Ok(());
-        };
-        if report.refs.is_empty() {
-            return write!(
-                formatter,
-                "no remote $refs found; wrote {}",
-                report.lock_path
-            );
-        }
-        writeln!(
-            formatter,
-            "vendored {} remote document(s) under {}:",
-            report.refs.len(),
-            report.vendor_dir
-        )?;
-        for vendored in &report.refs {
-            writeln!(formatter, "  {} -> {}", vendored.url, vendored.path)?;
-        }
-        write!(formatter, "wrote {}", report.lock_path)
-    }
-}
-
 /// Fetch, vendor, and hash-pin every remote (`http`/`https`) `$ref` reachable from `spec.path`,
 /// writing copies under `.spargen/vendor/` and (re)writing `spargen.lock` next to the spec.
 ///
@@ -859,13 +808,12 @@ impl std::fmt::Display for VendorOutcome {
 /// resolve remote refs purely from the vendored, pinned copies this step produces, so builds stay
 /// hermetic. Backed by `reqwest` and gated behind the `remote-fetch` feature (implied by `cli`).
 #[cfg(feature = "remote-fetch")]
-pub fn vendor(spec: &Spec) -> VendorOutcome {
+pub fn vendor(spec: &Spec) -> Result<VendorReport, Report> {
     let mut diags = diag::Diagnostics::new(spec.batch_cap);
     let fetcher = source::ReqwestFetcher;
-    let report = source::vendor(&spec.path, &fetcher, &mut diags).ok();
-    VendorOutcome {
-        report,
-        diagnostics: diags.items().to_vec(),
+    match source::vendor(&spec.path, &fetcher, &mut diags) {
+        Ok(vendored) if !diags.has_errors() => Ok(vendored),
+        _ => Err(report(diags, Outcome::Rejected)),
     }
 }
 
