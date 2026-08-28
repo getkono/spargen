@@ -19,7 +19,7 @@ use super::{parse_json, parse_yaml, SpannedValue};
 
 /// The network seam used by [`vendor`]. Real fetching lives in [`ReqwestFetcher`]; tests supply a
 /// stub so the vendor logic is exercised without HTTP.
-pub trait RemoteFetch {
+pub(crate) trait RemoteFetch {
     /// Fetch the raw bytes at an absolute `http`/`https` `url`, or an error message.
     fn fetch(&self, url: &str) -> Result<Vec<u8>, String>;
 }

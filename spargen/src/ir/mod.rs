@@ -34,7 +34,7 @@ pub use types::{
 
 /// The whole lowered API: the single artifact frontends produce and backends consume.
 #[derive(Debug, Clone)]
-pub struct Api {
+pub(crate) struct Api {
     /// API identity (`info`).
     pub info: Info,
     /// Servers, with variable-substitution metadata retained.
@@ -121,7 +121,7 @@ pub struct Server {
 
 /// One piece of a parsed server URL template.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UrlSegment {
+pub(crate) enum UrlSegment {
     /// Literal text, emitted verbatim.
     Literal(String),
     /// A `{name}` reference to a declared server variable.
@@ -142,7 +142,7 @@ pub struct ServerVariable {
 /// Documentation carried from a construct's `title`/`summary`/`description`/`deprecated`, lowered
 /// to rustdoc so IDE hover shows API docs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Docs {
+pub(crate) struct Docs {
     /// `title`.
     pub title: Option<String>,
     /// `summary`.

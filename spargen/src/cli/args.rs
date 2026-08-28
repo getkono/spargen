@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
     version,
     about = "A compile-time-correct Rust client generator for OpenAPI 3.1.x and 3.2.x."
 )]
-pub struct Cli {
+pub(crate) struct Cli {
     /// The subcommand to run.
     #[command(subcommand)]
     pub command: Command,
@@ -16,7 +16,7 @@ pub struct Cli {
 
 /// A `spargen` subcommand.
 #[derive(Debug, Subcommand)]
-pub enum Command {
+pub(crate) enum Command {
     /// Audit a spec's feature support without generating code.
     Check(CheckArgs),
     /// Print the `[dependencies]` block generated output from this spec requires.
@@ -35,7 +35,7 @@ pub enum Command {
 /// [`spargen::Spec`], so `check`, `deps`, `lock`, and `diff` cannot drift from each other or from
 /// the `build.rs` and `spargen.toml` surfaces.
 #[derive(Debug, Args)]
-pub struct SpecArgs {
+pub(crate) struct SpecArgs {
     /// Path to a `spargen.toml` config file. Defaults to `spargen.toml` beside the spec, if present.
     #[arg(long)]
     pub config: Option<Utf8PathBuf>,
@@ -71,7 +71,7 @@ pub struct SpecArgs {
 
 /// Arguments for `spargen check`.
 #[derive(Debug, Args)]
-pub struct CheckArgs {
+pub(crate) struct CheckArgs {
     /// Path to the root OpenAPI document.
     pub spec: Utf8PathBuf,
     #[command(flatten)]
@@ -83,7 +83,7 @@ pub struct CheckArgs {
 
 /// Arguments for `spargen deps`.
 #[derive(Debug, Args)]
-pub struct DepsArgs {
+pub(crate) struct DepsArgs {
     /// Path to the root OpenAPI document.
     pub spec: Utf8PathBuf,
     #[command(flatten)]
@@ -95,7 +95,7 @@ pub struct DepsArgs {
 
 /// Arguments for `spargen lock`.
 #[derive(Debug, Args)]
-pub struct LockArgs {
+pub(crate) struct LockArgs {
     /// Path to the root OpenAPI document. Remote `$ref`s reachable from it are fetched, vendored
     /// under `.spargen/vendor/`, and pinned in `spargen.lock` beside the spec.
     pub spec: Utf8PathBuf,
@@ -108,7 +108,7 @@ pub struct LockArgs {
 
 /// Arguments for `spargen diff`.
 #[derive(Debug, Args)]
-pub struct DiffArgs {
+pub(crate) struct DiffArgs {
     /// Path to the OLD (baseline) OpenAPI document.
     pub old: Utf8PathBuf,
     /// Path to the NEW (candidate) OpenAPI document.
@@ -127,7 +127,7 @@ pub struct DiffArgs {
 
 /// Arguments for `spargen explain`.
 #[derive(Debug, Args)]
-pub struct ExplainArgs {
+pub(crate) struct ExplainArgs {
     /// The diagnostic code, e.g. `E042`.
     pub code: String,
     /// Output format.
@@ -137,7 +137,7 @@ pub struct ExplainArgs {
 
 /// The rendering format for diagnostics and reports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-pub enum Format {
+pub(crate) enum Format {
     /// Human-readable, rustc-style.
     Human,
     /// Machine-readable JSON, for CI.

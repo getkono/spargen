@@ -450,7 +450,7 @@ impl std::fmt::Display for Requirements {
     }
 }
 
-pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
+pub fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
     let mut diagnostics = Vec::new();
     let mut manifests = vec![manifest_path.to_path_buf()];
     let manifest = match read_toml(manifest_path) {

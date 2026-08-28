@@ -27,7 +27,7 @@ pub use synth::synth_operation_id;
 /// and variant. Codegen looks names up here rather than deriving them, so naming stays in one
 /// place and stays deterministic.
 #[derive(Debug, Default)]
-pub struct Names {
+pub(crate) struct Names {
     /// Method name per operation.
     pub operations: HashMap<OperationId, Ident>,
     /// Optional-parameters `…Params` struct name per operation.
@@ -63,7 +63,7 @@ pub struct Names {
 
 /// Generator-owned bindings emitted inside one operation method.
 #[derive(Debug)]
-pub struct OperationBindings {
+pub(crate) struct OperationBindings {
     /// The optional-parameters struct argument, when one is emitted.
     pub params: Option<Ident>,
     /// The request-body argument, when one is emitted.
@@ -86,7 +86,7 @@ pub struct OperationBindings {
 
 /// Allocate every identifier the API needs, in one deterministic pass. Naming conflicts
 /// that cannot be resolved are reported through `diags`.
-pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
+pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     let _ = diags;
     let mut names = Names::default();
 
@@ -294,7 +294,7 @@ pub fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
 
 /// The stable label for one documented status, shared by naming and codegen so a header struct and
 /// its response variant always agree.
-pub fn status_label(spec: Option<crate::ir::StatusSpec>) -> String {
+pub(crate) fn status_label(spec: Option<crate::ir::StatusSpec>) -> String {
     match spec {
         Some(crate::ir::StatusSpec::Exact(code)) => format!("Status{code}"),
         Some(crate::ir::StatusSpec::Range(0)) | None => "Default".to_owned(),

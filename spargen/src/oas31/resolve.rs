@@ -15,7 +15,7 @@ pub struct Resolver<'doc> {
 /// A resolved reference target. Component refs borrow the target schema from the document; a remote
 /// ref yields a schema parsed on the fly from its vendored copy (owned).
 #[derive(Debug)]
-pub struct Resolved<'doc> {
+pub(crate) struct Resolved<'doc> {
     /// The target schema.
     pub schema: Cow<'doc, Schema>,
 }

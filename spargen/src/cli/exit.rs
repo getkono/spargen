@@ -4,7 +4,7 @@ use std::process::ExitCode;
 /// consumers. The numeric values are product surface and contract-tested.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum ExitStatus {
+pub(crate) enum ExitStatus {
     /// Success — no errors (warnings may still have been emitted).
     Ok = 0,
     /// One or more error-severity diagnostics were reported.
