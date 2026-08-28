@@ -29,16 +29,16 @@ with no metacharacter is an exact rule and behaves exactly as before. The matche
 | `?`    | exactly one character other than `/`                             |
 
 ```rust
-config.omit = spargen::omit! {
+let spec = spargen::Spec::new("api/openapi.yaml").omit(spargen::omit! {
     paths { "/admin/**"; }
     operations { get "/internal/*"; }
     components { schemas { "Legacy*"; } }
-};
+});
 ```
 
 ## Auto-carve
 
-`Config { carve: true, .. }` (or the macro's `carve` argument) turns a spec that would **reject**
+`Spec::carve(true)` (or the macro's `carve` argument) turns a spec that would **reject**
 into a generate-what-you-can outcome. Instead of failing on rejections, spargen:
 
 1. runs the frontend audit;
