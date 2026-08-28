@@ -120,12 +120,13 @@ across threads; on wasm the browser is single-threaded and those futures are `!S
 `Send` / `Sync` (so native bounds and trait-object auto-traits are unchanged), and on wasm they
 are vacuous. One set of source compiles on both.
 
-## XML bodies (feature `xml`)
+## XML bodies
 
-An XML request/response body codec backed by `quick-xml`, mirroring the JSON paths. It is **off by
-default**, so it does not alter the API-derived dependency set; a
-generated client turns the `xml` feature on only when its spec uses an `application/xml` /
-`text/xml` body.
+An XML request/response body codec backed by `quick-xml`, mirroring the JSON paths. It is embedded
+only when the spec actually uses an `application/xml` / `text/xml` body, and only then does the
+dependency contract require `quick-xml` of the consumer — so an API without XML carries neither the
+module nor the dependency. There is no consumer-side Cargo feature to turn it on or off: whether a
+generated client speaks XML is a property of its spec, decided at generation time.
 
 ## Format mappings (`uuid` / `time`)
 

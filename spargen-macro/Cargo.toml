@@ -26,9 +26,11 @@ readme = "README.md"
 proc-macro = true
 
 [dependencies]
-# The generator. `default-features = false` drops the CLI stack (clap/toml/reqwest); the
-# generation pipeline itself is always compiled. `uuid`/`time` output mappings are controlled at
-# call time via `Config.features`, not these cargo features, so none are needed here.
+# The generator. `default-features = false` drops the optional CLI stack (clap) and the networked
+# fetcher (reqwest); the generation pipeline itself is always compiled. Note that `toml` is an
+# unconditional dependency of `spargen` — the config-file parser is library code, not CLI code.
+# `uuid`/`time` output mappings are controlled at call time through `Spec::uuid`/`Spec::time` (or
+# the macro's `no_uuid`/`no_time`), not by Cargo features, so none are needed here.
 spargen = { path = "../spargen", version = "0.2.2", default-features = false }
 syn = { workspace = true }
 quote = { workspace = true }

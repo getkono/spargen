@@ -46,7 +46,8 @@ let out_dir = std::env::var("OUT_DIR").unwrap();
 let report = spargen::generate(
     &spargen::Spec::new("api/openapi.yaml").build(format!("{out_dir}/api.rs")),
 );
-assert_eq!(report.outcome, spargen::Outcome::Generated);
+// `Generated` on a cold build, `Cached` on a warm one — `expect_success` accepts both.
+report.expect_success();
 ```
 
 ```rust
@@ -86,8 +87,10 @@ the version it emits, and the idioms spargen handles.
 - **Freestanding output.** The runtime support code is embedded into the generated module; no
   spargen crate ever appears in a consumer's runtime dependency tree. Runtime dependencies are
   exactly `reqwest` (no default features), `serde`, `serde_json`, `bytes`, and `secrecy`, plus only
-  the capabilities the compiled API uses (`futures-core` and reqwest's `stream` feature only for
-  sequential responses). Generation audits the consumer manifest against the
+  the capabilities the compiled API uses: `futures-core` and reqwest's `stream` feature for
+  sequential responses, `quick-xml` for XML bodies, `time` for date formats, `uuid` for UUIDs, and
+  an opt-in `tokio` only when the consumer declares its own `blocking` feature. Generation audits
+  the consumer manifest against the
   tested floors and feature set before Cargo/rustc compile the emitted client; see the
   [runtime dependency contract](docs/book/src/getting-started.md#runtime-dependency-contract).
 - **Deterministic.** Same spargen version + spec + config ⇒ byte-identical output, enforced by
