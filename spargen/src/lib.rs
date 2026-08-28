@@ -59,6 +59,7 @@ pub use surface::{Change, ChangeKind, DiffReport, Impact};
 /// The outcome of a pipeline run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
+#[non_exhaustive]
 pub enum Outcome {
     /// The generated module was freshly rendered and written.
     Generated,

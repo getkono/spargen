@@ -397,6 +397,7 @@ fn glob_match_at(
 /// still be built from data at runtime — the CLI, the config file, and the carve driver all derive
 /// rules dynamically, and each previously leaked a `String` to fake a `&'static str`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum OmitRule {
     /// Remove a path item and every operation beneath it.
     Path {
@@ -646,6 +647,7 @@ impl OmitRule {
 
 /// HTTP method used by compatibility omit rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum OmitMethod {
     Get,
     Put,
@@ -679,6 +681,7 @@ impl OmitMethod {
 
 /// Component map used by compatibility omit rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ComponentKind {
     Schemas,
     Responses,
