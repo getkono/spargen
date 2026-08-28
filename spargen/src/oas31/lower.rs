@@ -3746,12 +3746,17 @@ fn parse_url_template(url: &str) -> Vec<UrlSegment> {
     segments
 }
 
-/// Resolve a Path Item `$ref`./// Resolve a Path Item `$ref`.
+/// Resolve a Path Item `$ref`.
 ///
 /// Unlike a Reference Object, the specification leaves the behavior of fields declared *alongside*
 /// a Path Item `$ref` undefined. Guessing either way ships a client that calls a different set of
 /// endpoints than the document describes, so a structural sibling is rejected; `summary` and
-/// `description` are documentation and cannot change the wire, so they are allowed.
+/// `description` are documentation and cannot change the wire, so they are applied.
+///
+/// Applying them is what makes them "allowed" rather than silently dropped. A Path Item resolves
+/// to exactly one generated construct per path, so unlike a Reference Object — whose target is a
+/// component shared across every use site, and whose per-site docs therefore have nowhere to land
+/// (`W011`) — a Path Item reference site has a unique home for its documentation.
 fn resolve_path_item(
     item: &PathItem,
     resolver: &Resolver,
@@ -3776,7 +3781,7 @@ fn resolve_path_item(
         .span
         .map(|span| span.file)
         .unwrap_or(crate::diag::FileId(0));
-    let target =
+    let mut target =
         resolver.resolve_path_item(&reference.reference, from, &reference.provenance, diags)?;
     // One level of indirection is what the specification requires implementations to support, and
     // a chain would need its own cycle guard.
@@ -3789,6 +3794,15 @@ fn resolve_path_item(
             ))
             .emit(diags);
         return None;
+    }
+    // The reference site documents *this* path, so its `summary`/`description` override the
+    // referenced item's own. Each is overridden independently: declaring only one at the reference
+    // site keeps the other from the target rather than blanking it.
+    if reference.summary.is_some() {
+        target.summary = reference.summary.clone();
+    }
+    if reference.description.is_some() {
+        target.description = reference.description.clone();
     }
     Some(target)
 }
