@@ -90,10 +90,16 @@ impl fmt::Display for DateTime {
     /// This matters beyond convenience: a `multipart/form-data` text part and a `text/plain` body
     /// are rendered through `Display`, so a `Display` that disagreed with `Serialize` would put two
     /// different encodings of the same value on the wire depending on the body's media type.
+    ///
+    /// RFC 3339 fixes the year at four digits, so a year outside `0..=9999` — which `time` can hold
+    /// but RFC 3339 cannot express — has no rendering here. It falls back to `time`'s own form
+    /// rather than failing, because `Display` failure would panic through `to_string()` at exactly
+    /// those two call sites. `Serialize` still refuses such a value, so it can never reach a JSON
+    /// body claiming to be RFC 3339.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.0.format(&Rfc3339) {
             Ok(text) => formatter.write_str(&text),
-            Err(_) => Err(fmt::Error),
+            Err(_) => write!(formatter, "{}", self.0),
         }
     }
 }
@@ -162,14 +168,12 @@ impl From<Date> for time::Date {
 }
 
 impl fmt::Display for Date {
-    /// `YYYY-MM-DD`, matching `Serialize` for the reason given on [`DateTime`]'s `Display`.
-    ///
-    /// RFC 3339's `full-date` fixes the year at four digits, so a year outside `0..=9999` has no
-    /// representation and is reported rather than truncated into a different date.
+    /// `YYYY-MM-DD`, matching `Serialize` for the reason given on [`DateTime`]'s `Display`, with the
+    /// same fallback for a year RFC 3339's four-digit `full-date` cannot express.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let year = self.0.year();
         if !(0..=9999).contains(&year) {
-            return Err(fmt::Error);
+            return write!(formatter, "{}", self.0);
         }
         write!(
             formatter,
@@ -304,6 +308,21 @@ mod tests {
         assert!(serde_json::from_str::<Date>("\"2023/11/14\"").is_err());
         assert!(serde_json::from_str::<Date>("\"2023-13-01\"").is_err());
         assert!(serde_json::from_str::<Date>("\"2023-02-30\"").is_err());
+    }
+
+    /// `Display` must never fail: generated code renders a `multipart/form-data` text part and a
+    /// `text/plain` body through `to_string()`, which panics on a `Display` error. A year outside
+    /// RFC 3339's four-digit range is constructible (`time` holds -9999..=9999), so this is
+    /// reachable from ordinary user input rather than only from a malformed response.
+    #[test]
+    fn display_never_panics_for_a_year_rfc3339_cannot_express() {
+        let date = Date(time::Date::from_calendar_date(-1, time::Month::January, 2).unwrap());
+        assert!(!date.to_string().is_empty());
+        let stamp = DateTime(time::OffsetDateTime::new_utc(date.0, time::Time::MIDNIGHT));
+        assert!(!stamp.to_string().is_empty());
+        // Serialization still refuses: such a value must never reach a body claiming RFC 3339.
+        assert!(serde_json::to_string(&date).is_err());
+        assert!(serde_json::to_string(&stamp).is_err());
     }
 
     /// The newtypes are transparent: `time`'s API is one deref away.
