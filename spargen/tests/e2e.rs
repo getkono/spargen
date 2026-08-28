@@ -629,7 +629,11 @@ fn textual_documented_errors_decode_without_json_quotes() {
     let (base, server) = serve_once("text/plain", "400 Bad Request", b"plain failure");
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_text_error().unwrap_err() {
-        basic_client::Error::Api(response) => assert_eq!(response.into_inner(), "plain failure"),
+        // `.0` unwraps the documented-error newtype; the same value is one `Deref` away, and
+        // `String::from(..)` converts. The newtype is what makes `Error<E>` a `std::error::Error`.
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.into_inner().0, "plain failure")
+        }
         other => panic!("expected typed textual API error, got {other:?}"),
     }
     server.join().unwrap();
@@ -1206,6 +1210,61 @@ fn middleware_backend_wraps_an_inner_backend() {
     assert!(
         status.success(),
         "generated crate must pass clippy -D warnings with --features blocking"
+    );
+
+    // Every generated error type is a real `std::error::Error`, for both shapes the frontend
+    // produces. This is the bound `Error<E>` has always carried and no generated `E` used to
+    // satisfy, so `?` into `Box<dyn Error>` (the pattern the book's own snippet uses), `anyhow`,
+    // `thiserror`'s `#[from]`, and `to_string()` were all unavailable on a client with a
+    // documented error body.
+    std::fs::write(
+        out.join("tests/errors.rs"),
+        r##"fn assert_error<E: std::error::Error + 'static>() {}
+
+#[test]
+fn generated_error_types_are_std_errors() {
+    // `GetMultiError` is the multi-status enum; `GetTextErrorError` the single-body newtype.
+    assert_error::<basic_client::Error<basic_client::GetMultiError>>();
+    assert_error::<basic_client::Error<basic_client::GetTextErrorError>>();
+    // The no-documented-error shape stays the uninhabited alias.
+    assert_error::<basic_client::Error<std::convert::Infallible>>();
+}
+
+#[test]
+fn a_generated_error_boxes_and_renders() -> Result<(), Box<dyn std::error::Error>> {
+    let error: basic_client::Error<basic_client::GetTextErrorError> =
+        basic_client::Error::request_message("boom");
+    let boxed: Box<dyn std::error::Error> = Box::new(error);
+    assert!(!boxed.to_string().is_empty());
+    Ok(())
+}
+
+#[test]
+fn the_single_error_body_stays_one_deref_away() {
+    let wrapped = basic_client::GetTextErrorError("nope".to_owned());
+    assert_eq!(wrapped.len(), 4); // through `Deref` to `String`
+    assert_eq!(wrapped.into_inner(), "nope");
+    assert_eq!(String::from(basic_client::GetTextErrorError("x".to_owned())), "x");
+}
+
+#[test]
+fn a_multi_status_error_names_its_status() {
+    let error = basic_client::GetMultiError::Status404(Box::new(
+        basic_client::types::NotFoundError { reason: "gone".to_owned() },
+    ));
+    assert!(error.to_string().contains("404"), "{error}");
+}
+"##,
+    )
+    .unwrap();
+    let status = Command::new("cargo")
+        .args(["test", "--test", "errors"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "generated error types must be usable as `std::error::Error`"
     );
 
     // Drive the blocking round-trip test under the feature (it is `#![cfg(feature = "blocking")]`, so

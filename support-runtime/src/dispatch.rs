@@ -416,17 +416,17 @@ where
 }
 
 /// Classify a documented raw-byte error body without passing it through a structured decoder.
-pub async fn classify_error_bytes(
+pub async fn classify_error_bytes<E: From<Bytes>>(
     core: &ClientCore,
     response: Response,
     documented: &[StatusSpec],
-) -> Error<Bytes> {
+) -> Error<E> {
     let status = response.status();
     let headers = response.headers().clone();
     match read_capped(core, response).await {
         Ok((body, _truncated)) => {
             if documented.iter().any(|spec| spec.matches(status)) {
-                Error::Api(ResponseValue::new(status, headers, body))
+                Error::Api(ResponseValue::new(status, headers, E::from(body)))
             } else {
                 Error::UnexpectedStatus {
                     status,
@@ -799,7 +799,7 @@ mod tests {
         .unwrap();
         assert_eq!(&success.into_inner()[..], b"\0raw\xff");
 
-        let error = poll_ready(classify_error_bytes(
+        let error = poll_ready(classify_error_bytes::<bytes::Bytes>(
             &core(),
             raw_response(400, bytes::Bytes::from_static(b"bad\0")),
             &[StatusSpec::Exact(400)],

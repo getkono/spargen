@@ -2097,7 +2097,18 @@ fn response_variant_def(
     }
 }
 
-/// Emit an operation's typed error enum (or type alias for a single error body).
+/// The status a response variant was dispatched on, as it reads in a `Display` message:
+/// `404`, `5XX`, or `default`.
+fn status_label(spec: crate::ir::StatusSpec) -> String {
+    match spec {
+        crate::ir::StatusSpec::Exact(code) => code.to_string(),
+        crate::ir::StatusSpec::Range(0) => "default".to_owned(),
+        crate::ir::StatusSpec::Range(prefix) => format!("{prefix}XX"),
+    }
+}
+
+/// Emit an operation's typed error type: a payload-carrying enum for several documented error
+/// bodies, a transparent newtype for one, and the uninhabited alias for none.
 pub(crate) fn emit_error_enum(
     operation: &Operation,
     names: &Names,
@@ -2116,20 +2127,96 @@ pub(crate) fn emit_error_enum(
             let variants = entries
                 .iter()
                 .map(|(spec, ty)| response_variant_def(*spec, *ty, names, options));
+            // `Display` names the status the variant was dispatched on. The body is deliberately
+            // not rendered: it is an arbitrary decoded model with no `Display` of its own, and it
+            // is already reachable on the variant.
+            let display_arms = entries.iter().map(|(spec, ty)| {
+                let variant_ident = status_variant_ident(*spec);
+                let label = format!("documented `{}` error response", status_label(*spec));
+                match ty {
+                    Some(_) => quote! { #error_ident::#variant_ident(_) => #label, },
+                    None => quote! { #error_ident::#variant_ident => #label, },
+                }
+            });
             quote! {
                 #[allow(dead_code)]
                 #[derive(Debug, Clone)]
                 pub enum #error_ident {
                     #(#variants)*
                 }
+
+                impl std::fmt::Display for #error_ident {
+                    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        formatter.write_str(match self {
+                            #(#display_arms)*
+                        })
+                    }
+                }
+
+                impl std::error::Error for #error_ident {}
             }
         }
-        // A single documented error body: a plain alias to that type.
+        // A single documented error body: a transparent newtype over that type.
+        //
+        // A newtype rather than an alias, because `Error<E>` is only `Display`/`std::error::Error`
+        // when `E` is, and an alias cannot carry those impls: the aliased type may be foreign
+        // (`String`, `bytes::Bytes`), where the orphan rule forbids implementing them, and even a
+        // local model type is shared with success bodies that are not errors. `serde(transparent)`
+        // keeps the wire representation identical, and `Deref` plus `From` in both directions keep
+        // the inner value one step away.
         ErrorShape::Single(ty) => {
             let ty = ty_tokens(ty, names, options, true);
+            let doc = format!(
+                "The documented error body of this operation, wrapped so `Error<{error_ident}>` \
+                 is a `std::error::Error`. Derefs and converts to the inner type."
+            );
             quote! {
+                #[doc = #doc]
                 #[allow(dead_code)]
-                pub type #error_ident = #ty;
+                #[derive(Debug, Clone, serde::Deserialize)]
+                #[serde(transparent)]
+                pub struct #error_ident(pub #ty);
+
+                #[allow(dead_code)]
+                impl #error_ident {
+                    /// Unwrap to the documented error body.
+                    pub fn into_inner(self) -> #ty {
+                        self.0
+                    }
+                }
+
+                impl std::ops::Deref for #error_ident {
+                    type Target = #ty;
+                    fn deref(&self) -> &Self::Target {
+                        &self.0
+                    }
+                }
+
+                impl std::ops::DerefMut for #error_ident {
+                    fn deref_mut(&mut self) -> &mut Self::Target {
+                        &mut self.0
+                    }
+                }
+
+                impl From<#ty> for #error_ident {
+                    fn from(inner: #ty) -> Self {
+                        Self(inner)
+                    }
+                }
+
+                impl From<#error_ident> for #ty {
+                    fn from(outer: #error_ident) -> Self {
+                        outer.0
+                    }
+                }
+
+                impl std::fmt::Display for #error_ident {
+                    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        formatter.write_str("documented error response")
+                    }
+                }
+
+                impl std::error::Error for #error_ident {}
             }
         }
         // No documented error body: every non-success status is Error::UnexpectedStatus, and the
