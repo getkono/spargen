@@ -3260,3 +3260,131 @@ fn the_unoverridden_operation_still_uses_the_client_base_url() {
         "the request must carry the override host, not the document server: {seen}"
     );
 }
+
+/// RFC 6570-mode `multipart/form-data` parts must carry literal delimiters, not percent-encoded
+/// ones.
+///
+/// The specification is explicit that "when using RFC6570-style serialization for
+/// `multipart/form-data`, URI percent-encoding MUST NOT be applied", but the part values were built
+/// from the query-fragment builders, whose delimiters are pre-encoded `%20` / `%7C` triples. Only a
+/// look at the raw body catches that; the existing multipart fixtures all use `contentType` mode.
+#[test]
+fn multipart_rfc6570_parts_carry_literal_delimiters() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        r##"
+openapi: 3.1.0
+info: { title: Multipart, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [tags, paths, names]
+              properties:
+                tags:
+                  type: array
+                  items: { type: string }
+                paths:
+                  type: array
+                  items: { type: string }
+                names:
+                  type: array
+                  items: { type: string }
+            encoding:
+              tags:
+                style: spaceDelimited
+                explode: false
+              paths:
+                style: pipeDelimited
+                explode: false
+              names:
+                style: form
+                explode: true
+      responses:
+        "204": { description: No Content }
+"##,
+    )
+    .unwrap();
+    let out = temp.path().join("client");
+    let report = generate_fixture_crate(&spec, &out, "multipart_client");
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/multipart.rs"),
+        r##"#![cfg(feature = "blocking")]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+#[test]
+fn rfc6570_multipart_parts_are_not_percent_encoded() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]).to_string();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream.flush().unwrap();
+        request
+    });
+
+    let base = format!("http://{addr}");
+    let client = multipart_client::BlockingClient::new(&base).unwrap();
+    let body = multipart_client::types::RequestBody {
+        tags: vec!["blue".into(), "black".into()],
+        paths: vec!["a/b".into(), "c".into()],
+        names: vec!["ada".into(), "grace".into()],
+    };
+    client.upload(&body).expect("upload round-trips");
+
+    let request = server.join().unwrap();
+
+    // `spaceDelimited` joins with a literal space, `pipeDelimited` with a literal `|`.
+    assert!(
+        request.contains("blue black"),
+        "spaceDelimited must join with a literal space: {request}"
+    );
+    assert!(
+        request.contains("a/b|c"),
+        "pipeDelimited must join with a literal pipe: {request}"
+    );
+    // The encoded forms are exactly the defect.
+    assert!(
+        !request.contains("blue%20black"),
+        "a part value must not be percent-encoded: {request}"
+    );
+    assert!(
+        !request.contains("%7C"),
+        "a part delimiter must not be percent-encoded: {request}"
+    );
+    // `form` + `explode` sends one part per item, under the same name (RFC 7578 s4.3).
+    assert_eq!(
+        request.matches(r#"name="names""#).count(),
+        2,
+        "an exploded array must send one part per item: {request}"
+    );
+}
+"##,
+    )
+    .unwrap();
+
+    let status = Command::new("cargo")
+        .args(["test", "--features", "blocking", "--test", "multipart"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(status.success(), "the multipart wire round-trip must pass");
+}

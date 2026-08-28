@@ -4348,3 +4348,140 @@ paths:
         assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
     }
 }
+
+#[test]
+fn e009_multipart_deep_object_encoding_rejected() {
+    // `deepObject` builds `name[key]=value` query fragments. A multipart part carries its name in
+    // `Content-Disposition` and its value alone, so the style has no representation there — it used
+    // to generate parts holding only the values, with the keys dropped.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                filter:
+                  type: object
+                  properties:
+                    a: { type: string }
+            encoding:
+              filter:
+                style: deepObject
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_multipart_rfc6570_object_property_rejected() {
+    // The specification applies the Encoding Object to the entire value for a non-array property,
+    // but defines no part representation for an object. Reusing the query builders silently emitted
+    // one part per member carrying only the value.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                meta:
+                  type: object
+                  properties:
+                    a: { type: string }
+            encoding:
+              meta:
+                style: form
+                explode: true
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_encoding_delimited_style_with_explode_rejected() {
+    // The specification's serialization table marks `spaceDelimited`/`pipeDelimited` with
+    // `explode: true` as *n/a*. The identical parameter-side construct is already `E010`; an
+    // Encoding Object used to accept it and then ignore the `explode`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                tags:
+                  type: array
+                  items: { type: string }
+            encoding:
+              tags:
+                style: pipeDelimited
+                explode: true
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn multipart_rfc6570_array_encoding_generates() {
+    // The shapes that *are* defined stay supported: an array property under a delimited or form
+    // style, exploded or not.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                tags:
+                  type: array
+                  items: { type: string }
+                names:
+                  type: array
+                  items: { type: string }
+            encoding:
+              tags:
+                style: spaceDelimited
+                explode: false
+              names:
+                style: form
+                explode: true
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    }
+}

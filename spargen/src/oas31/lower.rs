@@ -2697,6 +2697,60 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let explode = encoding
                     .explode
                     .unwrap_or(matches!(style, ParamStyle::Form));
+                // The specification's own serialization table marks the delimited styles with
+                // `explode: true` as *n/a* — undefined. The identical parameter-side construct is
+                // already `E010`; without this an Encoding Object could declare it and have the
+                // `explode` silently ignored.
+                if explode && matches!(style, ParamStyle::Delimited(_)) {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.style: {style_name}` with `explode: true` is \
+                             undefined: the specification's serialization table gives no value for \
+                             that combination"
+                        ))
+                        .remedy("set `explode: false`, or use `style: form`")
+                        .emit(self.diags);
+                    return None;
+                }
+                // `deepObject` builds `name[key]=value` query fragments. A multipart part carries
+                // its name in `Content-Disposition` and its value alone, so there is nowhere for
+                // that syntax to go and no defined representation to fall back on.
+                if media == MediaType::Multipart && style == ParamStyle::DeepObject {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}.style: deepObject` is defined only for `in: query`; \
+                             it has no `multipart/form-data` part representation"
+                        ))
+                        .remedy(
+                            "use `style: form`, give the property a `contentType` such as \
+                             `application/json`, or omit this API segment with spargen::omit!",
+                        )
+                        .emit(self.diags);
+                    return None;
+                }
+                // An object property under RFC 6570 serialization: the specification says the
+                // Encoding Object applies to the *entire value* for a non-array property, but
+                // defines no part representation for an object, so there is nothing to generate.
+                if media == MediaType::Multipart
+                    && matches!(
+                        self.graph.get(field_ty.id).map(|def| &def.kind),
+                        Some(TypeKind::Struct(_))
+                    )
+                {
+                    Diagnostic::error(Code::UnsupportedMediaType, encoding.provenance.clone())
+                        .message(format!(
+                            "`encoding.{name}` selects RFC 6570 serialization for an object \
+                             property, which has no defined `multipart/form-data` part \
+                             representation"
+                        ))
+                        .remedy(
+                            "give the property a `contentType` such as `application/json` instead \
+                             of `style`/`explode`/`allowReserved`, or omit this API segment with \
+                             spargen::omit!",
+                        )
+                        .emit(self.diags);
+                    return None;
+                }
                 // Multipart part values are never percent-encoded, so `allowReserved` is inert.
                 let allow_reserved = encoding.allow_reserved.unwrap_or(false);
                 if allow_reserved && media == MediaType::Multipart {

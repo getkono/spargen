@@ -1431,7 +1431,7 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
     }
 }
 
-/// Emit a `multipart/form-data` body./// Emit a `multipart/form-data` body.
+/// Emit a `multipart/form-data` body.
 ///
 /// Every part carries the Content-Type its Encoding Object resolves to — explicit, or defaulted
 /// from the property's type by the specification's table — and any header the Encoding Object pins
