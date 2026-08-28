@@ -18,6 +18,17 @@ does not generate clients.
 
 ## Generate a client
 
+`Spec` decides **what** is generated; `Build` adds **where**. Only `generate` writes a file, so
+only `generate` takes a `Build`; `check`, `diff`, `requirements`, and `vendor` take a `Spec` and
+never ask for an output path they would not use. Both types have private fields and chained
+setters, so a new knob is additive rather than breaking.
+
+`Spec`'s knobs are `uuid`, `time`, `omit`/`omit_rule`, `error_body_cap`, `batch_cap`, and
+`carve`. They can equally be read from a `spargen.toml` (`Spec::config_file`,
+`Spec::discover_config_file`) — the same file the CLI and the macro read, parsed by the library
+so the three cannot drift. Setters called afterwards still win, so build code stays
+authoritative.
+
 ### `build.rs` mode
 
 ```rust
@@ -72,6 +83,21 @@ therefore checks the manifest, Cargo performs resolution, and rustc provides the
 the selected versions expose every API and trait the generated client uses. Extra application
 dependencies and features are allowed.
 
+#### Cargo integration
+
+Rebuild triggers and the consumer-manifest dependency audit (`E023`) both need a real
+build-script process. `Build::cargo` decides what happens when there is not one:
+
+| Value | Under a build script | Anywhere else |
+| --- | --- | --- |
+| `Auto` (default) | emit directives, run the audit | `W013` — no rebuild triggers, no audit |
+| `Required` | emit directives, run the audit | `E024` — generation fails |
+| `Off` | nothing, silently | nothing, silently |
+
+A build script wants `Required`; a test or code-generation script wants `Off`. `W012` covers
+the narrower case of a build script whose consuming manifest cannot be located, so the audit is
+skipped even though directives were emitted.
+
 ### Macro mode
 
 ```rust
@@ -80,7 +106,10 @@ mod api {
 }
 ```
 
-The macro supports the same feature, cap, carve, and omit controls as `Config`; see the
+It accepts a positional schema path or `spec = "..."`, plus the same controls as `Spec`:
+`no_uuid`, `no_time`, `carve`, `error_body_cap = N`, `batch_cap = N`, and an `omit { ... }`
+profile. Cargo and rustc track the root schema, every transitive source file, and
+`spargen.lock` through the expansion. See the
 [`spargen-macro` README](https://github.com/getkono/spargen/tree/master/spargen-macro).
 
 ## The generated client API
@@ -129,6 +158,7 @@ Key points of the surface:
 
 ## Next steps
 
+- [CLI Reference](./cli.md) — `check`, `deps`, `lock`, `diff`, and `explain`.
 - [Runtime & Ergonomics](./runtime.md) — retry, middleware, blocking, wasm, pagination, streaming.
 - [Framework Recipes](./recipes.md) — generating from utoipa / aide / poem-openapi output.
 - [OpenAPI 3.2 Scope](./openapi-3.2.md) — the focused delta from 3.1 and its disposition.

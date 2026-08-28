@@ -128,11 +128,10 @@ generating and intentionally rejecting real-world cases.
 ## Documentation
 
 The full documentation site is an [mdBook](https://rust-lang.github.io/mdBook/) under
-[`docs/book/`](docs/book) — an Introduction, Getting Started, and generator/CLI/runtime references,
-wired together with the [generator API](docs/generator-api.md), [OpenAPI 3.2 scope](docs/openapi-3.2.md),
-[support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
-[compatibility](docs/compatibility.md), and [recipes](docs/recipes.md) docs
-(included, not duplicated).
+[`docs/book/`](docs/book) — an Introduction, Getting Started, and CLI/runtime references, wired
+together with the [OpenAPI 3.2 scope](docs/openapi-3.2.md), [support matrix](docs/support-matrix.md),
+[diagnostic index](docs/errors.md), [compatibility](docs/compatibility.md), and
+[recipes](docs/recipes.md) docs (included, not duplicated).
 Build it locally:
 
 ```bash

@@ -1,1 +1,0 @@
-{{#include ../../generator-api.md}}
