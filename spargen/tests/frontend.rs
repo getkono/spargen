@@ -4838,3 +4838,79 @@ PetBody:
     assert!(code.contains("x_request_id"), "{code}");
     assert!(code.contains("pub id"), "{code}");
 }
+
+/// `encoding.headers` accepts a Header Object or a `$ref` to one. The reference was never
+/// resolved, so a target that pins a `const` was reported as pinning no value (`W011`) and the
+/// part shipped without the header. Resolving it makes the two spellings equivalent.
+#[test]
+fn encoding_header_ref_is_resolved_and_pins_its_const() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                profile: { type: string }
+            encoding:
+              profile:
+                contentType: text/plain
+                headers:
+                  X-Part-Kind: { $ref: '#/components/headers/PartKind' }
+      responses:
+        '204': { description: ok }
+components:
+  headers:
+    PartKind:
+      description: which part this is
+      schema: { type: string, const: profile }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::DeclarationHasNoEffect),
+        "a resolved header that pins a const has an effect: {report:#?}"
+    );
+    assert!(code.contains("X-Part-Kind"), "{code}");
+    assert!(code.contains("profile"), "{code}");
+}
+
+/// An `encoding.headers` reference that resolves to nothing is `E004` — and only `E004`, so one
+/// defect does not also collect a "pins no value" warning naming a second, wrong reason.
+#[test]
+fn e004_unresolvable_encoding_header_ref_does_not_also_warn() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                profile: { type: string }
+            encoding:
+              profile:
+                contentType: text/plain
+                headers:
+                  X-Part-Kind: { $ref: '#/components/headers/Missing' }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}

@@ -2896,12 +2896,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if header_name.eq_ignore_ascii_case("content-type") {
                 continue;
             }
+            // A `$ref` here is resolved rather than treated as pinning nothing: the target may
+            // well declare the `const` that gives the client something to send, and reporting
+            // "pins no value" without looking would name the wrong reason. An unresolvable
+            // reference is `E004` from `resolve_header`, not a warning.
             let literal = match header {
                 RefOr::Item(header) => header
                     .schema
                     .as_ref()
                     .and_then(|schema| self.literal_header_value(schema)),
-                RefOr::Ref(_) => None,
+                RefOr::Ref(_) => match self.resolve_header(header) {
+                    Some(resolved) => resolved
+                        .schema
+                        .as_ref()
+                        .and_then(|schema| self.literal_header_value(schema)),
+                    // `resolve_header` already reported the unresolvable reference; adding
+                    // "pins no value" would name a second, wrong reason for one defect.
+                    None => continue,
+                },
             };
             match literal {
                 Some(value) => headers.push((header_name.clone(), value)),
