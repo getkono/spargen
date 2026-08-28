@@ -70,7 +70,12 @@ impl std::fmt::Display for Diagnostic {
 
 impl Diagnostic {
     /// Begin building an error diagnostic for `code` at `at`.
-    pub fn error(code: Code, at: Provenance) -> DiagnosticBuilder {
+    ///
+    /// Crate-internal: a [`Diagnostic`] is something spargen hands *out*, so the facade re-exports
+    /// the type for its public fields, not for construction. `Provenance` and `DiagnosticBuilder`
+    /// are deliberately not part of that facade, which would leave these constructors unnameable
+    /// — and so uncallable — from outside anyway.
+    pub(crate) fn error(code: Code, at: Provenance) -> DiagnosticBuilder {
         DiagnosticBuilder {
             code,
             severity: Severity::Error,
@@ -81,8 +86,8 @@ impl Diagnostic {
         }
     }
 
-    /// Begin building a warning diagnostic for `code` at `at`.
-    pub fn warning(code: Code, at: Provenance) -> DiagnosticBuilder {
+    /// Begin building a warning diagnostic for `code` at `at`. Crate-internal, as [`Self::error`].
+    pub(crate) fn warning(code: Code, at: Provenance) -> DiagnosticBuilder {
         DiagnosticBuilder {
             code,
             severity: Severity::Warning,
@@ -97,7 +102,7 @@ impl Diagnostic {
 /// Fluent builder for a [`Diagnostic`]; attaches the message, remedy, and interpretation before
 /// the diagnostic is recorded into a [`Diagnostics`] batch.
 #[derive(Debug)]
-pub struct DiagnosticBuilder {
+pub(crate) struct DiagnosticBuilder {
     code: Code,
     severity: Severity,
     provenance: Provenance,
@@ -108,25 +113,19 @@ pub struct DiagnosticBuilder {
 
 impl DiagnosticBuilder {
     /// Set the one-line explanation.
-    pub fn message(mut self, message: impl Into<String>) -> Self {
+    pub(crate) fn message(mut self, message: impl Into<String>) -> Self {
         self.message = Some(message.into());
         self
     }
 
     /// Attach a remedy suggestion (rendered as a `help:` line).
-    pub fn remedy(mut self, remedy: impl Into<String>) -> Self {
+    pub(crate) fn remedy(mut self, remedy: impl Into<String>) -> Self {
         self.remedy = Some(remedy.into());
         self
     }
 
-    /// Link the governing interpretation.
-    pub fn interpretation(mut self, id: InterpId) -> Self {
-        self.interpretation = Some(id);
-        self
-    }
-
     /// Finish building the diagnostic.
-    pub fn build(self) -> Diagnostic {
+    pub(crate) fn build(self) -> Diagnostic {
         Diagnostic {
             code: self.code,
             severity: self.severity,
@@ -139,7 +138,7 @@ impl DiagnosticBuilder {
     }
 
     /// Build the diagnostic and record it into `diags` in one step.
-    pub fn emit(self, diags: &mut Diagnostics) {
+    pub(crate) fn emit(self, diags: &mut Diagnostics) {
         diags.emit(self.build());
     }
 }
