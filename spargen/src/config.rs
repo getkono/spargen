@@ -58,7 +58,7 @@ pub(crate) const DEFAULT_BATCH_CAP: usize = 100;
 /// let spec = spargen::Spec::new("api/openapi.yaml").uuid(false);
 /// let report = spargen::check(&spec);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Spec {
     pub(crate) path: Utf8PathBuf,
     pub(crate) uuid: bool,
@@ -238,7 +238,7 @@ pub enum CargoIntegration {
 /// let build = spargen::Spec::new("api/openapi.yaml").build("src/api.rs");
 /// spargen::generate(&build).expect_success();
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Build {
     pub(crate) spec: Spec,
     pub(crate) output: Utf8PathBuf,

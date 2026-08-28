@@ -412,3 +412,260 @@ fn check_command_supports_carve() {
         "check reports the carved op: {stdout}"
     );
 }
+
+// --- (d) OpenAPI 3.2 constructs are omittable ----------------------------------------------------
+
+/// A 3.2 path whose supported `get` sits beside an operation spargen cannot generate (a response
+/// whose only content entry is an unregistered media type). The unsupported operation is reachable
+/// only through a 3.2 Path Item field, so it exercises the carve mapping for those fields.
+fn oas32_sibling_spec(unsupported: &str) -> String {
+    format!(
+        r#"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json: {{ schema: {{ type: string }} }}
+{unsupported}
+"#
+    )
+}
+
+#[test]
+fn carve_targets_a_query_operation_without_taking_its_path() {
+    // `query` is a 3.2 Path Item fixed field. Before `OmitMethod::Query` existed, the carve mapping
+    // could not name it and fell back to omitting the whole path — taking the supported `get` with
+    // it. Carving must remove the one operation it cannot generate and nothing else.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        &oas32_sibling_spec(
+            r#"    query:
+      operationId: searchItems
+      responses:
+        "200":
+          description: OK
+          content:
+            application/sdp: { schema: { type: string } }"#,
+        ),
+    );
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        generated.contains("fn list_items"),
+        "the supported sibling must survive: {generated}"
+    );
+    assert!(
+        !generated.contains("fn search_items"),
+        "the unsupported `query` operation must be carved: {generated}"
+    );
+    assert_eq!(w009_count(&report), 1, "exactly one construct: {report:#?}");
+}
+
+#[test]
+fn carve_targets_an_additional_operation_without_taking_its_path() {
+    // A 3.2 `additionalOperations` method is not a Path Item fixed field, so no `OmitMethod` names
+    // it; it is carved as a JSON Pointer instead. Same requirement: the sibling `get` survives.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        &oas32_sibling_spec(
+            r#"    additionalOperations:
+      PURGE:
+        operationId: purgeItems
+        responses:
+          "200":
+            description: OK
+            content:
+              application/sdp: { schema: { type: string } }"#,
+        ),
+    );
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        generated.contains("fn list_items"),
+        "the supported sibling must survive: {generated}"
+    );
+    assert!(
+        !generated.contains("fn purge_items"),
+        "the unsupported `additionalOperations` method must be carved: {generated}"
+    );
+    assert_eq!(w009_count(&report), 1, "exactly one construct: {report:#?}");
+}
+
+#[test]
+fn omit_rules_reach_the_component_maps_the_frontend_models() {
+    // `components.pathItems` and 3.2's `components.mediaTypes` are both modeled by the frontend and
+    // both reachable by `$ref`, so an omit profile has to be able to name them. Neither spelling
+    // parsed as a `ComponentKind` before, so both were `E019` "invalid omit rule".
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r#"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json: { schema: { type: string } }
+components:
+  pathItems:
+    Unused:
+      get:
+        operationId: unusedOp
+        responses: { "204": { description: No Content } }
+  mediaTypes:
+    UnusedMedia:
+      schema: { type: string }
+"#,
+    );
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&omitting(
+        &spec,
+        &out,
+        spargen::omit! {
+            components {
+                path_items { "Unused"; }
+                media_types { "UnusedMedia"; }
+            }
+        },
+    ));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(w009_count(&report), 2, "one W009 per removal: {report:#?}");
+}
+
+#[test]
+fn an_omit_profile_does_not_invent_a_paths_requirement() {
+    // Both official schemas `require` only `openapi` and `info`, then place `paths`, `components`,
+    // and `webhooks` in an `anyOf`. A components-only document is therefore valid OpenAPI, and
+    // spargen already accepts it — until any omit profile is attached, at which point the
+    // post-omit check demanded `paths` and reported `E020` for a field the profile never touched.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+components:
+  schemas:
+    Item: { type: object, properties: { id: { type: string } } }
+    Legacy: { type: object, properties: { x: { type: string } } }
+"#,
+    );
+    let out = temp.path().join("client.rs");
+
+    // The same document with no profile is already accepted, so the profile is the only difference.
+    assert_eq!(
+        spargen::generate(&config(&spec, &out)).outcome,
+        Outcome::Generated
+    );
+
+    let report = spargen::generate(&omitting(
+        &spec,
+        &out,
+        spargen::omit! { components { schemas { "Legacy"; } } },
+    ));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == Code::OmitCreatedInvalidDocument),
+        "a components-only document is valid OpenAPI: {report:#?}"
+    );
+}
+
+#[test]
+fn omitting_the_last_root_collection_is_still_rejected() {
+    // The other half of the `anyOf`: strip the only surviving member and the document really is
+    // invalid, so `E020` must still fire.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses: { "204": { description: No Content } }
+"#,
+    );
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&omitting(
+        &spec,
+        &out,
+        spargen::omit! { pointers { "/paths"; } },
+    ));
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == Code::OmitCreatedInvalidDocument),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn every_omit_spelling_reaches_the_same_rule() {
+    // The Rust macro, the CLI flags, `spargen.toml`, and the proc-macro must all name the same
+    // construct set. `query` and the two new component maps were each added to only some of them
+    // before this was pinned.
+    let macro_rules = spargen::omit! {
+        operations { query "/items"; get "/other"; }
+        components { path_items { "Unused"; } media_types { "UnusedMedia"; } }
+    };
+    let built = spargen::Omit {
+        rules: vec![
+            spargen::OmitRule::operation(spargen::OmitMethod::Query, "/items"),
+            spargen::OmitRule::operation(spargen::OmitMethod::Get, "/other"),
+            spargen::OmitRule::component(spargen::ComponentKind::PathItems, "Unused"),
+            spargen::OmitRule::component(spargen::ComponentKind::MediaTypes, "UnusedMedia"),
+        ],
+    };
+    assert_eq!(macro_rules, built);
+
+    // The CLI/`spargen.toml` spellings parse to the same variants.
+    assert_eq!(
+        "query".parse::<spargen::OmitMethod>().unwrap(),
+        spargen::OmitMethod::Query
+    );
+    for token in ["path_items", "pathItems", "path_item"] {
+        assert_eq!(
+            token.parse::<spargen::ComponentKind>().unwrap(),
+            spargen::ComponentKind::PathItems,
+            "{token}"
+        );
+    }
+    for token in ["media_types", "mediaTypes", "media_type"] {
+        assert_eq!(
+            token.parse::<spargen::ComponentKind>().unwrap(),
+            spargen::ComponentKind::MediaTypes,
+            "{token}"
+        );
+    }
+}

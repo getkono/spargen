@@ -322,17 +322,13 @@ fn parse_operations(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
     braced!(body in input);
     while !body.is_empty() {
         let method: Ident = body.parse()?;
-        let method = match method.to_string().as_str() {
-            "get" => spargen::OmitMethod::Get,
-            "put" => spargen::OmitMethod::Put,
-            "post" => spargen::OmitMethod::Post,
-            "delete" => spargen::OmitMethod::Delete,
-            "options" => spargen::OmitMethod::Options,
-            "head" => spargen::OmitMethod::Head,
-            "patch" => spargen::OmitMethod::Patch,
-            "trace" => spargen::OmitMethod::Trace,
-            _ => return Err(syn::Error::new(method.span(), "unsupported HTTP method")),
-        };
+        // Delegated to `OmitMethod`'s own `FromStr` rather than matched here, so the macro cannot
+        // fall behind the method set the generator supports — as it did when OpenAPI 3.2's `query`
+        // was added.
+        let method = method
+            .to_string()
+            .parse::<spargen::OmitMethod>()
+            .map_err(|error| syn::Error::new(method.span(), format!("{error}")))?;
         let path: LitStr = body.parse()?;
         body.parse::<Token![;]>()?;
         omit.rules.push(spargen::OmitRule::Operation {
@@ -370,7 +366,8 @@ fn parse_components(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
                     kind.span(),
                     format!(
                         "{error}; expected one of \
-                         schemas/responses/parameters/request_bodies/headers/security_schemes"
+                         schemas/responses/parameters/request_bodies/headers/security_schemes/\
+                         path_items/media_types"
                     ),
                 )
             })?;

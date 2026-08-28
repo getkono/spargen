@@ -74,7 +74,7 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
     let errors = api
         .operations
         .iter()
-        .map(|operation| emit_error_enum(operation, names, options));
+        .map(|operation| emit_error_enum(operation, api, names, options));
     let response_enums = api
         .operations
         .iter()
@@ -107,6 +107,11 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
         #servers
 
         #client_docs
+        // `ClientCore` is `Debug + Clone` (its `reqwest::Client` and backend are handle types, and
+        // `Credential`'s `Debug` redacts every secret), so both derives are free here and both are
+        // routinely wanted: `Clone` to hand the client to several tasks without an `Arc`, `Debug`
+        // to put it in a struct that derives `Debug`.
+        #[derive(Debug, Clone)]
         #[allow(dead_code)]
         pub struct Client {
             core: support::ClientCore,
@@ -185,7 +190,7 @@ pub(crate) fn emit_operation(
         .operations
         .get(&operation.id)
         .expect("operation name allocated");
-    let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
+    let error_ident = error_type_ident(method_ident.as_str());
     let reqwest_method = reqwest_method(&operation.method);
     let success_ty = success_type(operation, names, options);
     let error_ty = quote! { #error_ident };
@@ -197,7 +202,7 @@ pub(crate) fn emit_operation(
 
     // The typed argument list (required params, the optional-params struct, the body) is shared
     // verbatim with the blocking shim so the two signatures can never drift.
-    let (args, _arg_names) = operation_args(operation, names, options);
+    let (args, _arg_names) = operation_args(operation, api, names, options);
 
     let path_init = operation.path.raw.clone();
     let path_replacements = operation
@@ -799,6 +804,8 @@ pub(crate) fn emit_operation(
         }
     };
 
+    let arg_normalizations = operation_arg_normalizations(operation, api, names, options);
+
     quote! {
         #docs
         #(#param_default_docs)*
@@ -808,6 +815,7 @@ pub(crate) fn emit_operation(
             &self,
             #(#args),*
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
+            #(#arg_normalizations)*
             let mut #path_binding = #path_init.to_owned();
             #(#path_replacements)*
             let mut #query_binding: Vec<String> = Vec::new();
@@ -843,6 +851,48 @@ pub(crate) fn emit_operation(
     }
 }
 
+/// Whether a required parameter is emitted as `impl Into<String>` rather than its concrete type.
+///
+/// Exactly a non-nullable, unboxed `String`. `Option<String>` and `Box<String>` positions stay
+/// concrete: `Into` would make `None` ambiguous at the call site for no gain.
+fn takes_into_string(api: &Api, ty: Ty) -> bool {
+    !ty.nullable
+        && !ty.boxed
+        && matches!(
+            api.types.get(ty.id).map(|definition| &definition.kind),
+            Some(TypeKind::Primitive(crate::ir::Prim::String))
+        )
+}
+
+/// Convert every `impl Into<..>` argument to its concrete type once, at the top of the method body,
+/// so the rest of the emitted body is written against concrete types exactly as before.
+fn operation_arg_normalizations(
+    operation: &Operation,
+    api: &Api,
+    names: &Names,
+    options: &CodegenOptions,
+) -> Vec<TokenStream> {
+    let bindings = operation_bindings(operation, names);
+    let params_ident = names
+        .params_structs
+        .get(&operation.id)
+        .expect("params name allocated");
+    let mut statements = Vec::new();
+    for param in operation.params.iter().filter(|param| param.required) {
+        if takes_into_string(api, param.ty) {
+            let ident = param_ident(param, crate::name::IdentRole::Param);
+            let ty = ty_tokens(param.ty, names, options, true);
+            statements.push(quote! { let #ident: #ty = #ident.into(); });
+        }
+    }
+    if let Some(params_binding) = &bindings.params {
+        statements.push(quote! {
+            let #params_binding: Option<#params_ident> = #params_binding.into();
+        });
+    }
+    statements
+}
+
 /// The typed method arguments and their bare forwarding names for an operation. Shared by
 /// [`emit_operation`] (the async method) and [`emit_blocking_operation`] (its synchronous shim) so
 /// the two signatures are constructed from one source and can never drift. The first vector holds
@@ -851,6 +901,7 @@ pub(crate) fn emit_operation(
 /// name (`body`) passes the reference straight through.
 fn operation_args(
     operation: &Operation,
+    api: &Api,
     names: &Names,
     options: &CodegenOptions,
 ) -> (Vec<TokenStream>, Vec<TokenStream>) {
@@ -863,12 +914,24 @@ fn operation_args(
     let mut forwards = Vec::new();
     for param in operation.params.iter().filter(|param| param.required) {
         let ident = param_ident(param, crate::name::IdentRole::Param);
+        // A plain `String` parameter accepts anything that converts, so a call site passes a
+        // literal without `.to_owned()`. Narrowed to exactly `String`: every other generated type
+        // keeps its concrete position, where `impl Into<T>` would buy nothing and cost inference.
         let ty = ty_tokens(param.ty, names, options, true);
-        args.push(quote! { #ident: #ty });
+        if takes_into_string(api, param.ty) {
+            // `Into<#ty>`, not `Into<String>`: a `$ref`'d string component lowers to a transparent
+            // `pub type WorkflowId = String`, so the bound is the same one either way — but naming
+            // the component keeps the generated signature as self-describing as it was.
+            args.push(quote! { #ident: impl Into<#ty> });
+        } else {
+            args.push(quote! { #ident: #ty });
+        }
         forwards.push(quote! { #ident });
     }
     if let Some(params_binding) = &bindings.params {
-        args.push(quote! { #params_binding: Option<#params_ident> });
+        // `impl Into<Option<..>>` accepts the bundle directly as well as `None`/`Some(..)`, so a
+        // caller who sets optional parameters no longer wraps them in `Some`.
+        args.push(quote! { #params_binding: impl Into<Option<#params_ident>> });
         forwards.push(quote! { #params_binding });
     }
     if let Some((ty, required)) = operation.request_body.as_ref().and_then(|body| {
@@ -903,7 +966,7 @@ fn operation_return_ty(
         .operations
         .get(&operation.id)
         .expect("operation name allocated");
-    let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
+    let error_ident = error_type_ident(method_ident.as_str());
     let success_ty = success_type(operation, names, options);
     let return_ok_ty = match operation.responses.stream_success() {
         Some(_) => quote! { support::EventStream<#success_ty> },
@@ -946,7 +1009,7 @@ pub(crate) fn emit_blocking_client(
     let methods = api
         .operations
         .iter()
-        .map(|operation| emit_blocking_operation(operation, names, options));
+        .map(|operation| emit_blocking_operation(operation, api, names, options));
     let doc = "A synchronous client: owns the async `Client` plus a current-thread tokio runtime \
         and `block_on`s each operation. Enable the crate's `blocking` feature to use it.\n\n\
         Must NOT be constructed or called from inside another async runtime — tokio's `block_on` \
@@ -960,8 +1023,11 @@ pub(crate) fn emit_blocking_client(
         mod __spargen_blocking {
             use super::*;
 
+            // `Debug` only: the owned current-thread `tokio::runtime::Runtime` is not `Clone`,
+            // and cloning a blocking client would have to mean sharing or duplicating a reactor.
             #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
             #[doc = #doc]
+            #[derive(Debug)]
             #[allow(dead_code)]
             pub struct BlockingClient {
                 inner: Client,
@@ -1037,6 +1103,7 @@ pub(crate) fn emit_blocking_client(
 /// return types as the async method (all built from the shared signature helpers).
 fn emit_blocking_operation(
     operation: &Operation,
+    api: &Api,
     names: &Names,
     options: &CodegenOptions,
 ) -> TokenStream {
@@ -1047,7 +1114,7 @@ fn emit_blocking_operation(
     let docs = doc_tokens(&operation.docs);
     let param_default_docs = param_default_docs_tokens(operation);
     let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
-    let (args, forwards) = operation_args(operation, names, options);
+    let (args, forwards) = operation_args(operation, api, names, options);
     let (return_ok_ty, error_ty) = operation_return_ty(operation, names, options);
     quote! {
         #docs
@@ -2097,9 +2164,21 @@ fn response_variant_def(
     }
 }
 
-/// Emit an operation's typed error enum (or type alias for a single error body).
+/// The status a response variant was dispatched on, as it reads in a `Display` message:
+/// `404`, `5XX`, or `default`.
+fn status_label(spec: crate::ir::StatusSpec) -> String {
+    match spec {
+        crate::ir::StatusSpec::Exact(code) => code.to_string(),
+        crate::ir::StatusSpec::Range(0) => "default".to_owned(),
+        crate::ir::StatusSpec::Range(prefix) => format!("{prefix}XX"),
+    }
+}
+
+/// Emit an operation's typed error type: a payload-carrying enum for several documented error
+/// bodies, a transparent newtype for one, and the uninhabited alias for none.
 pub(crate) fn emit_error_enum(
     operation: &Operation,
+    api: &Api,
     names: &Names,
     options: &CodegenOptions,
 ) -> TokenStream {
@@ -2107,7 +2186,7 @@ pub(crate) fn emit_error_enum(
         .operations
         .get(&operation.id)
         .expect("operation name allocated");
-    let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
+    let error_ident = error_type_ident(method_ident.as_str());
     match operation.responses.error() {
         // Multiple documented error bodies → a payload-carrying enum, one variant per status. The
         // variant is chosen by HTTP status at classification time, so it derives no whole-enum
@@ -2116,20 +2195,104 @@ pub(crate) fn emit_error_enum(
             let variants = entries
                 .iter()
                 .map(|(spec, ty)| response_variant_def(*spec, *ty, names, options));
+            // `Display` names the status the variant was dispatched on. The body is deliberately
+            // not rendered: it is an arbitrary decoded model with no `Display` of its own, and it
+            // is already reachable on the variant.
+            let display_arms = entries.iter().map(|(spec, ty)| {
+                let variant_ident = status_variant_ident(*spec);
+                let label = format!("documented `{}` error response", status_label(*spec));
+                match ty {
+                    Some(_) => quote! { #error_ident::#variant_ident(_) => #label, },
+                    None => quote! { #error_ident::#variant_ident => #label, },
+                }
+            });
             quote! {
                 #[allow(dead_code)]
                 #[derive(Debug, Clone)]
                 pub enum #error_ident {
                     #(#variants)*
                 }
+
+                impl std::fmt::Display for #error_ident {
+                    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        formatter.write_str(match self {
+                            #(#display_arms)*
+                        })
+                    }
+                }
+
+                impl std::error::Error for #error_ident {}
             }
         }
-        // A single documented error body: a plain alias to that type.
-        ErrorShape::Single(ty) => {
-            let ty = ty_tokens(ty, names, options, true);
+        // A single documented error body: a transparent newtype over that type.
+        //
+        // A newtype rather than an alias, because `Error<E>` is only `Display`/`std::error::Error`
+        // when `E` is, and an alias cannot carry those impls: the aliased type may be foreign
+        // (`String`, `bytes::Bytes`), where the orphan rule forbids implementing them, and even a
+        // local model type is shared with success bodies that are not errors. `serde(transparent)`
+        // keeps the wire representation identical, and `Deref` plus `From` in both directions keep
+        // the inner value one step away.
+        ErrorShape::Single(body_ty) => {
+            let ty = ty_tokens(body_ty, names, options, true);
+            // The derive is emitted exactly when the decode path actually uses serde. A binary body
+            // is classified by `classify_error_bytes`, which builds the newtype through
+            // `From<Bytes>` — so deriving `Deserialize` there would demand `bytes/serde` of the
+            // consumer for an impl nothing calls, and the runtime dependency contract deliberately
+            // does not require that feature for a top-level bytes body. This predicate is the same
+            // one the error branch in `emit_operation` dispatches on, so the two cannot drift.
+            let deserialize = (!is_bytes_ty(api, body_ty))
+                .then(|| quote! { #[derive(serde::Deserialize)] #[serde(transparent)] });
+            let doc = format!(
+                "The documented error body of this operation, wrapped so `Error<{error_ident}>` \
+                 is a `std::error::Error`. Derefs and converts to the inner type."
+            );
             quote! {
+                #[doc = #doc]
                 #[allow(dead_code)]
-                pub type #error_ident = #ty;
+                #[derive(Debug, Clone)]
+                #deserialize
+                pub struct #error_ident(pub #ty);
+
+                #[allow(dead_code)]
+                impl #error_ident {
+                    /// Unwrap to the documented error body.
+                    pub fn into_inner(self) -> #ty {
+                        self.0
+                    }
+                }
+
+                impl std::ops::Deref for #error_ident {
+                    type Target = #ty;
+                    fn deref(&self) -> &Self::Target {
+                        &self.0
+                    }
+                }
+
+                impl std::ops::DerefMut for #error_ident {
+                    fn deref_mut(&mut self) -> &mut Self::Target {
+                        &mut self.0
+                    }
+                }
+
+                impl From<#ty> for #error_ident {
+                    fn from(inner: #ty) -> Self {
+                        Self(inner)
+                    }
+                }
+
+                impl From<#error_ident> for #ty {
+                    fn from(outer: #error_ident) -> Self {
+                        outer.0
+                    }
+                }
+
+                impl std::fmt::Display for #error_ident {
+                    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                        formatter.write_str("documented error response")
+                    }
+                }
+
+                impl std::error::Error for #error_ident {}
             }
         }
         // No documented error body: every non-success status is Error::UnexpectedStatus, and the
@@ -3019,6 +3182,66 @@ fn reqwest_method(method: &crate::ir::Method) -> TokenStream {
                     .expect("validated additionalOperations key is a valid HTTP method token")
             }
         }
+    }
+}
+
+/// Every name the generated module re-exports from the embedded runtime into its root.
+///
+/// Generated error types live in that same root, so a name taken from this list would be defined
+/// twice (`E0255`) and the output would not compile. The list is deliberately the *union* of the
+/// conditional re-exports too (streaming, dates), so an operation's type name never changes because
+/// an unrelated part of the spec started or stopped using streams.
+const RUNTIME_PRELUDE: &[&str] = &[
+    "AuthError",
+    "ClientConfig",
+    "ClientCore",
+    "Credential",
+    "Date",
+    "DateTime",
+    "Error",
+    "EventStream",
+    "ExecuteFuture",
+    "ExposeSecret",
+    "HeaderError",
+    "HeaderShape",
+    "HttpBackend",
+    "LinkPaginator",
+    "Middleware",
+    "MiddlewareBackend",
+    "Next",
+    "ProtocolError",
+    "ReconnectPolicy",
+    "ReconnectReason",
+    "ReconnectWait",
+    "RedirectError",
+    "RequestError",
+    "ReqwestBackend",
+    "ResponseValue",
+    "RetryBackend",
+    "RetryOutcome",
+    "RetryPolicy",
+    "RetryWait",
+    "SecretString",
+    "StreamError",
+    "TimeoutKind",
+    "TokenFuture",
+    "TokenProvider",
+    "TransportError",
+];
+
+/// The name of an operation's error type: `{Operation}Error`, widened to
+/// `{Operation}OperationError` when the first form would shadow a runtime re-export.
+///
+/// An `operationId` of `request`, `transport`, or `header` otherwise produces `RequestError`,
+/// `TransportError`, or `HeaderError` beside the `pub use` of the same name, and the emitted module
+/// fails to compile. Operation IDs are unique, so both forms stay unique across operations.
+fn error_type_ident(method_ident: &str) -> proc_macro2::Ident {
+    let base = to_pascal(method_ident);
+    let name = format!("{base}Error");
+    if RUNTIME_PRELUDE.contains(&name.as_str()) {
+        format_ident!("{}OperationError", base)
+    } else {
+        format_ident!("{}", name)
     }
 }
 

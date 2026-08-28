@@ -93,12 +93,19 @@ pub fn generate(
         }
     });
     let tokens = quote! {
+        // The embedded `support` module is private, so this list is the whole nameable runtime
+        // surface. It therefore has to cover every type that appears in a signature this output
+        // emits: `HeaderError` is the return type of each `…Headers::from_headers`, `RetryWait` is
+        // what a caller's `RetryPolicy` must return, `ClientCore` is what `Client::core` hands
+        // back, and the taxonomy's payload types are matched on. Anything short of that leaves a
+        // generated signature a caller can call but cannot write down.
         #[allow(unused_imports)]
         pub use support::{
-            AuthError, Credential, Error, ExecuteFuture, ExposeSecret, HttpBackend, LinkPaginator,
-            Middleware, MiddlewareBackend, Next, ReqwestBackend, ResponseValue, RetryBackend,
-            RetryOutcome, RetryPolicy, SecretString, TokenFuture, TokenProvider, TransportError,
-            exponential_backoff, next_link,
+            AuthError, ClientConfig, ClientCore, Credential, Error, ExecuteFuture, ExposeSecret,
+            HeaderError, HeaderShape, HttpBackend, LinkPaginator, Middleware, MiddlewareBackend,
+            Next, ProtocolError, RedirectError, ReqwestBackend, RequestError, ResponseValue,
+            RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
+            TokenFuture, TokenProvider, TransportError, exponential_backoff, next_link,
         };
 
         #stream_exports

@@ -393,10 +393,11 @@ fn glob_match_at(
 }
 
 /// One exact compatibility omission.
-/// Strings are `Cow` so a rule can be written as a literal in [`omit!`] with no allocation and
+/// Strings are `Cow` so a rule can be written as a literal in [`omit!`](crate::omit) with no allocation and
 /// still be built from data at runtime — the CLI, the config file, and the carve driver all derive
 /// rules dynamically, and each previously leaked a `String` to fake a `&'static str`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum OmitRule {
     /// Remove a path item and every operation beneath it.
     Path {
@@ -475,7 +476,7 @@ impl std::error::Error for UnknownOmitToken {}
 impl std::str::FromStr for ComponentKind {
     type Err = UnknownOmitToken;
 
-    /// Accepts the canonical snake_case plural spelling used by [`omit!`], plus the singular and
+    /// Accepts the canonical snake_case plural spelling used by [`omit!`](crate::omit), plus the singular and
     /// the camelCase OAS key, so a rule reads the same whether it was written in Rust, on the
     /// command line, or in `spargen.toml`.
     fn from_str(token: &str) -> Result<Self, Self::Err> {
@@ -490,6 +491,8 @@ impl std::str::FromStr for ComponentKind {
             "security_scheme" | "security_schemes" | "securityScheme" | "securitySchemes" => {
                 ComponentKind::SecuritySchemes
             }
+            "path_item" | "path_items" | "pathItem" | "pathItems" => ComponentKind::PathItems,
+            "media_type" | "media_types" | "mediaType" | "mediaTypes" => ComponentKind::MediaTypes,
             _ => {
                 return Err(UnknownOmitToken {
                     token: token.to_owned(),
@@ -519,6 +522,7 @@ impl std::str::FromStr for OmitMethod {
             "head" => OmitMethod::Head,
             "patch" => OmitMethod::Patch,
             "trace" => OmitMethod::Trace,
+            "query" => OmitMethod::Query,
             _ => {
                 return Err(UnknownOmitToken {
                     token: token.to_owned(),
@@ -535,7 +539,7 @@ impl std::fmt::Display for OmitMethod {
     }
 }
 
-/// The maximum number of carve rounds./// The maximum number of carve rounds. Each round adds at least one omit rule (or stops), and a
+/// The maximum number of carve rounds. Each round adds at least one omit rule (or stops), and a
 /// spec has finitely many constructs, so any spec terminates; this cap is a belt-and-suspenders
 /// bound that also keeps a pathological ref cascade from re-parsing without end.
 pub(crate) const MAX_CARVE_ROUNDS: usize = 64;
@@ -576,6 +580,23 @@ fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
     match tokens.first()?.as_str() {
         "paths" => {
             let path = tokens.get(1)?.clone();
+            // An OpenAPI 3.2 `additionalOperations` method is not a Path Item fixed field, so no
+            // `OmitMethod` names it. Carving it as a pointer keeps the blast radius at the one
+            // operation; falling through to the path rule would take its supported siblings too.
+            if tokens
+                .get(2)
+                .is_some_and(|token| token == "additionalOperations")
+            {
+                let method = tokens.get(3)?;
+                return Some(OmitRule::pointer(
+                    None,
+                    format!(
+                        "/paths/{}/additionalOperations/{}",
+                        escape_pointer_token(&path),
+                        escape_pointer_token(method)
+                    ),
+                ));
+            }
             match tokens
                 .get(2)
                 .and_then(|token| token.parse::<OmitMethod>().ok())
@@ -590,6 +611,11 @@ fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
         }
         _ => None,
     }
+}
+
+/// Escape one RFC 6901 reference token, the inverse of the unescaping in [`pointer_tokens`].
+fn escape_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
 }
 
 /// Split a JSON Pointer into its unescaped reference tokens (`~1`→`/`, `~0`→`~`).
@@ -621,6 +647,7 @@ impl OmitRule {
 
 /// HTTP method used by compatibility omit rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum OmitMethod {
     Get,
     Put,
@@ -630,6 +657,9 @@ pub enum OmitMethod {
     Head,
     Patch,
     Trace,
+    /// OpenAPI 3.2's `query` Path Item field. A method declared under `additionalOperations` has
+    /// no fixed field to name, so it is targeted with an [`OmitRule::Pointer`] instead.
+    Query,
 }
 
 impl OmitMethod {
@@ -644,12 +674,14 @@ impl OmitMethod {
             OmitMethod::Head => "head",
             OmitMethod::Patch => "patch",
             OmitMethod::Trace => "trace",
+            OmitMethod::Query => "query",
         }
     }
 }
 
 /// Component map used by compatibility omit rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ComponentKind {
     Schemas,
     Responses,
@@ -657,6 +689,10 @@ pub enum ComponentKind {
     RequestBodies,
     Headers,
     SecuritySchemes,
+    /// `components.pathItems`, reachable from a Path Item `$ref`.
+    PathItems,
+    /// OpenAPI 3.2's `components.mediaTypes`, reachable from a Media Type Object `$ref`.
+    MediaTypes,
 }
 
 impl ComponentKind {
@@ -669,6 +705,8 @@ impl ComponentKind {
             ComponentKind::RequestBodies => "requestBodies",
             ComponentKind::Headers => "headers",
             ComponentKind::SecuritySchemes => "securitySchemes",
+            ComponentKind::PathItems => "pathItems",
+            ComponentKind::MediaTypes => "mediaTypes",
         }
     }
 }
@@ -688,23 +726,49 @@ fn emit_invalid_rule(
     .emit(diags);
 }
 
+/// Check that what survives an omit profile is still a valid OpenAPI root.
+///
+/// This mirrors the official schemas, which `require` only `openapi` and `info` and then place
+/// `paths`, `components`, and `webhooks` in an `anyOf` — a document carrying any one of the three
+/// is valid. Demanding `paths` outright reported a document the specification accepts as
+/// `E020` "omit profile created an invalid document".
 fn validate_remaining(bundle: &InputBundle, diags: &mut Diagnostics) {
     let root = bundle.root();
-    let missing = ["openapi", "info", "paths"]
-        .into_iter()
-        .filter(|key| root.get(key).is_none())
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
+    let reject = |message: String, diags: &mut Diagnostics| {
         Diagnostic::error(
             Code::OmitCreatedInvalidDocument,
             Provenance::new(JsonPointer::root(), Some(root.span())),
         )
-        .message(format!(
-            "omit profile removed required OpenAPI root fields: {}",
-            missing.join(", ")
-        ))
+        .message(message)
         .remedy("do not omit required OpenAPI root fields")
         .emit(diags);
+    };
+
+    let missing = ["openapi", "info"]
+        .into_iter()
+        .filter(|key| root.get(key).is_none())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        reject(
+            format!(
+                "omit profile removed required OpenAPI root fields: {}",
+                missing.join(", ")
+            ),
+            diags,
+        );
+        return;
+    }
+
+    if !["paths", "components", "webhooks"]
+        .into_iter()
+        .any(|key| root.get(key).is_some())
+    {
+        reject(
+            "omit profile left no `paths`, `components`, or `webhooks`; an OpenAPI root requires \
+             at least one of the three"
+                .to_owned(),
+            diags,
+        );
     }
 }
 
@@ -787,6 +851,10 @@ macro_rules! omit {
         $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Trace, $path));
         $crate::omit!(@operations $omit; $($rest)*);
     }};
+    (@operations $omit:ident; query $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Query, $path));
+        $crate::omit!(@operations $omit; $($rest)*);
+    }};
     (@paths $omit:ident;) => {};
     (@paths $omit:ident; $path:literal; $($rest:tt)*) => {{
         $omit.rules.push($crate::OmitRule::path($path));
@@ -815,6 +883,14 @@ macro_rules! omit {
     }};
     (@components $omit:ident; security_schemes { $($names:tt)* } $($rest:tt)*) => {{
         $crate::omit!(@component_names $omit; $crate::ComponentKind::SecuritySchemes; $($names)*);
+        $crate::omit!(@components $omit; $($rest)*);
+    }};
+    (@components $omit:ident; path_items { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::ComponentKind::PathItems; $($names)*);
+        $crate::omit!(@components $omit; $($rest)*);
+    }};
+    (@components $omit:ident; media_types { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::ComponentKind::MediaTypes; $($names)*);
         $crate::omit!(@components $omit; $($rest)*);
     }};
     (@component_names $omit:ident; $kind:expr;) => {};

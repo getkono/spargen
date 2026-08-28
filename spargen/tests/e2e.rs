@@ -46,6 +46,119 @@ tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
     )
 }
 
+/// One operation per runtime name that a `{Operation}Error` could shadow. Each documents an error
+/// body, so each emits an error type into the same module as the runtime `pub use`.
+const PRELUDE_COLLISION_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /request:
+    get: { operationId: request, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /transport:
+    get: { operationId: transport, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /header:
+    get: { operationId: header, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /protocol:
+    get: { operationId: protocol, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /redirect:
+    get: { operationId: redirect, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /auth:
+    get: { operationId: auth, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /stream:
+    get: { operationId: stream, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+"#;
+
+/// An `operationId` that collides with a runtime re-export must still produce a module that
+/// compiles. `operationId: request` otherwise emits `pub struct RequestError` beside
+/// `pub use support::{… RequestError …}` in the same module, which is `E0255`.
+#[test]
+fn an_operation_named_after_a_runtime_type_still_compiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, PRELUDE_COLLISION_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "collide_client");
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("pub struct RequestOperationError"),
+        "a colliding error type must be widened, not shadowed:\n{generated}"
+    );
+
+    let status = Command::new("cargo")
+        .arg("check")
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "an operationId matching a runtime re-export must still generate compiling code"
+    );
+}
+
+/// A spec whose only binary payload is one documented error body. `ErrorShape::Single` over a
+/// `TypeKind::Bytes` is the shape where generated code and the dependency contract can most easily
+/// disagree: the body never travels through serde (it is classified by `classify_error_bytes`), so
+/// the contract does not require `bytes/serde` — and codegen must not emit anything that does.
+const BYTES_ERROR_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /blob:
+    get:
+      operationId: getBlob
+      responses:
+        "200": { description: ok }
+        "404":
+          description: raw failure
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+"#;
+
+/// Generated output must compile against exactly the `[dependencies]` block `spargen deps` prints
+/// for the same spec — not against a superset. Building the manifest from `requirements()` rather
+/// than a fixed fat manifest is the point: a fat manifest hides a missing feature.
+#[test]
+fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(&spec_path, BYTES_ERROR_SPEC).unwrap();
+    let spec = Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap());
+
+    let requirements = spargen::requirements(&spec).expect("spec lowers");
+    let out = temp.path().join("client");
+    std::fs::create_dir_all(out.join("src")).unwrap();
+    std::fs::write(
+        out.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"deps_exact\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n{}",
+            requirements.manifest_block()
+        ),
+    )
+    .unwrap();
+
+    let report = spargen::generate(
+        &spec
+            .clone()
+            .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
+            .cargo(CargoIntegration::Off),
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let status = Command::new("cargo")
+        .arg("check")
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "generated output must compile against the block `spargen deps` prints"
+    );
+}
+
 #[test]
 fn cargo_build_rejects_a_runtime_requirement_below_the_supported_floor() {
     let temp = tempfile::tempdir().unwrap();
@@ -629,7 +742,11 @@ fn textual_documented_errors_decode_without_json_quotes() {
     let (base, server) = serve_once("text/plain", "400 Bad Request", b"plain failure");
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_text_error().unwrap_err() {
-        basic_client::Error::Api(response) => assert_eq!(response.into_inner(), "plain failure"),
+        // `.0` unwraps the documented-error newtype; the same value is one `Deref` away, and
+        // `String::from(..)` converts. The newtype is what makes `Error<E>` a `std::error::Error`.
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.into_inner().0, "plain failure")
+        }
         other => panic!("expected typed textual API error, got {other:?}"),
     }
     server.join().unwrap();
@@ -1208,6 +1325,135 @@ fn middleware_backend_wraps_an_inner_backend() {
         "generated crate must pass clippy -D warnings with --features blocking"
     );
 
+    // Every generated error type is a real `std::error::Error`, for both shapes the frontend
+    // produces. This is the bound `Error<E>` has always carried and no generated `E` used to
+    // satisfy, so `?` into `Box<dyn Error>` (the pattern the book's own snippet uses), `anyhow`,
+    // `thiserror`'s `#[from]`, and `to_string()` were all unavailable on a client with a
+    // documented error body.
+    std::fs::write(
+        out.join("tests/errors.rs"),
+        r##"fn assert_error<E: std::error::Error + 'static>() {}
+
+// Every runtime type a generated signature mentions must also be nameable, because the embedded
+// `support` module is private and the root re-export list is the whole surface. Naming each one in
+// a type position is the assertion.
+#[test]
+fn every_runtime_type_in_a_signature_is_nameable() {
+    fn header_result() -> Result<(), basic_client::HeaderError> {
+        Ok(())
+    }
+    fn core(client: &basic_client::Client) -> &basic_client::ClientCore {
+        client.core()
+    }
+    fn timeout_kind(kind: basic_client::TimeoutKind) -> basic_client::TimeoutKind {
+        kind
+    }
+    fn config(config: &basic_client::ClientConfig) -> usize {
+        config.max_error_body
+    }
+    // `RetryWait` is what a caller's own `RetryPolicy` has to return; before it was re-exported the
+    // only way to write this was to spell out `Pin<Box<dyn Future<Output = ()> + Send + 'a>>`.
+    struct NeverRetry;
+    impl basic_client::RetryPolicy for NeverRetry {
+        fn retry<'a>(
+            &'a self,
+            _attempt: u32,
+            _outcome: &basic_client::RetryOutcome<'_>,
+        ) -> Option<basic_client::RetryWait<'a>> {
+            None
+        }
+    }
+    fn shape(shape: basic_client::HeaderShape) -> basic_client::HeaderShape {
+        shape
+    }
+    // Naming each type above is the assertion; binding the items keeps them from reading as dead.
+    let _ = (header_result, core, timeout_kind, config, shape);
+    let _: &dyn basic_client::RetryPolicy = &NeverRetry;
+}
+
+// The call-site shapes `impl Into<..>` / `impl Into<Option<..>>` are meant to widen, never to
+// narrow: everything that compiled against the concrete signatures still compiles, and the shorter
+// spellings compile too.
+#[test]
+fn required_string_params_and_the_params_bundle_accept_conversions() {
+    fn call(client: &basic_client::Client) {
+        let owned = String::from("k");
+        // Widened: a literal and a `&String` now work where only `String` did.
+        let _ = client.read_file("k");
+        let _ = client.read_file(&owned);
+        // Still accepted, so no existing call site breaks.
+        let _ = client.read_file(owned.clone());
+        // The params bundle takes `None` and `Some(..)` as before, and now the bundle itself.
+        let _ = client.get_user("1", None);
+        let _ = client.get_user("1", basic_client::GetUserParams::default());
+        let _ = client.get_user("1", Some(basic_client::GetUserParams::default()));
+    }
+    let _ = call;
+}
+
+#[test]
+fn the_client_is_debug_and_clone() {
+    fn assert_debug<T: std::fmt::Debug>() {}
+    fn assert_clone<T: Clone>() {}
+    assert_debug::<basic_client::Client>();
+    assert_clone::<basic_client::Client>();
+    // A `Debug` client must never render a registered secret.
+    let client = basic_client::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_credential(
+            "bearerAuth",
+            basic_client::Credential::Bearer(basic_client::SecretString::from("hunter2")),
+        );
+    let rendered = format!("{:?}", client.clone());
+    assert!(!rendered.contains("hunter2"), "secret leaked: {rendered}");
+}
+
+#[test]
+fn generated_error_types_are_std_errors() {
+    // `GetMultiError` is the multi-status enum; `GetTextErrorError` the single-body newtype.
+    assert_error::<basic_client::Error<basic_client::GetMultiError>>();
+    assert_error::<basic_client::Error<basic_client::GetTextErrorError>>();
+    // The no-documented-error shape stays the uninhabited alias.
+    assert_error::<basic_client::Error<std::convert::Infallible>>();
+}
+
+#[test]
+fn a_generated_error_boxes_and_renders() -> Result<(), Box<dyn std::error::Error>> {
+    let error: basic_client::Error<basic_client::GetTextErrorError> =
+        basic_client::Error::request_message("boom");
+    let boxed: Box<dyn std::error::Error> = Box::new(error);
+    assert!(!boxed.to_string().is_empty());
+    Ok(())
+}
+
+#[test]
+fn the_single_error_body_stays_one_deref_away() {
+    let wrapped = basic_client::GetTextErrorError("nope".to_owned());
+    assert_eq!(wrapped.len(), 4); // through `Deref` to `String`
+    assert_eq!(wrapped.into_inner(), "nope");
+    assert_eq!(String::from(basic_client::GetTextErrorError("x".to_owned())), "x");
+}
+
+#[test]
+fn a_multi_status_error_names_its_status() {
+    let error = basic_client::GetMultiError::Status404(Box::new(
+        basic_client::types::NotFoundError { reason: "gone".to_owned() },
+    ));
+    assert!(error.to_string().contains("404"), "{error}");
+}
+"##,
+    )
+    .unwrap();
+    let status = Command::new("cargo")
+        .args(["test", "--test", "errors"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "generated error types must be usable as `std::error::Error`"
+    );
+
     // Drive the blocking round-trip test under the feature (it is `#![cfg(feature = "blocking")]`, so
     // it only exists here). This exercises a real HTTP round-trip through a blocking method.
     let status = Command::new("cargo")
@@ -1299,6 +1545,16 @@ fn assert_reconnect_policy_is_public<P: ReconnectPolicy>() {}
         generated.contains("reqwest::Method::from_bytes(b\"QUERY\")"),
         "QUERY method should be built from its token bytes"
     );
+    // 3.2 `additionalOperations`: a custom method token also emits a real client method, built
+    // from its exact bytes rather than mapped onto a fixed `reqwest::Method` constant.
+    assert!(
+        generated.contains("pub async fn purge_cache"),
+        "an additionalOperations method should emit a client method"
+    );
+    assert!(
+        generated.contains("reqwest::Method::from_bytes(b\"PURGE\")"),
+        "a custom method should be built from its token bytes"
+    );
 
     // The OpenAPI 3.2 streaming response recognizes the standard SSE envelope annotation and types
     // the stream as its JSON `data.contentSchema`, not as the envelope object.
@@ -1376,6 +1632,65 @@ fn oas32_constructs_reach_the_wire() {
     assert_eq!(response.into_inner()[0].id, "r1");
 
     server.join().unwrap();
+}
+
+/// `additionalOperations` on the wire, plus the two constructs its operation is built from: a
+/// `components.mediaTypes` reference supplying the request body, and a discriminated union whose
+/// `defaultMapping` catches an unrecognized tag.
+#[test]
+fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
+    for (tag, expect_unknown) in [("purged", false), ("something-else", true)] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let read = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..read]);
+
+            // The custom method token travels verbatim; nothing maps it onto a fixed method.
+            assert!(
+                request.starts_with("PURGE /records/cache "),
+                "custom method must reach the wire unchanged: {request}"
+            );
+            // The body came from the reusable `components.mediaTypes` entry, typed as `Query`.
+            assert!(request.contains(r#"{"term":"drop"}"#), "{request}");
+
+            let body = if expect_unknown {
+                format!(r#"{{"outcome":"{tag}","detail":"not recognized"}}"#)
+            } else {
+                r#"{"outcome":"purged","entries":7}"#.to_owned()
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let client = oas32_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+        let outcome = client
+            .purge_cache(&oas32_client::types::Query { term: Some("drop".to_owned()) })
+            .unwrap()
+            .into_inner();
+
+        match outcome {
+            // An unmapped discriminator value decodes into the `defaultMapping` branch rather
+            // than failing, which is the whole point of the 3.2 field.
+            oas32_client::types::CacheOutcome::CacheUnknown(unknown) => {
+                assert!(expect_unknown, "mapped tag must not fall back: {unknown:?}");
+                assert_eq!(unknown.detail, "not recognized");
+            }
+            oas32_client::types::CacheOutcome::CachePurged(purged) => {
+                assert!(!expect_unknown, "unmapped tag must fall back");
+                assert_eq!(purged.entries, 7);
+            }
+        }
+
+        server.join().unwrap();
+    }
 }
 "##,
     )
@@ -2698,6 +3013,26 @@ paths:
             text/event-stream:
               itemSchema:
                 $ref: "#/components/schemas/SseEnvelope"
+  # 3.2 `additionalOperations`: a custom method token generates a client method and must reach the
+  # wire verbatim. The reusable `components.mediaTypes` reference supplies its request body, and the
+  # response is a discriminated union with `defaultMapping` — three constructs that each emit code
+  # and, until now, were only ever checked for diagnostics.
+  /records/cache:
+    additionalOperations:
+      PURGE:
+        operationId: purgeCache
+        requestBody:
+          required: true
+          content:
+            application/json:
+              $ref: "#/components/mediaTypes/QueryBody"
+        responses:
+          "200":
+            description: ok
+            content:
+              application/json:
+                schema:
+                  $ref: "#/components/schemas/CacheOutcome"
 components:
   schemas:
     Record:
@@ -2727,6 +3062,32 @@ components:
       properties:
         kind: { type: string }
         resource: { type: [string, "null"] }
+    CacheOutcome:
+      oneOf:
+        - $ref: "#/components/schemas/CachePurged"
+        - $ref: "#/components/schemas/CacheUnknown"
+      discriminator:
+        propertyName: outcome
+        mapping:
+          purged: "#/components/schemas/CachePurged"
+        # 3.2: an absent or unrecognized discriminator value decodes into this branch instead of
+        # failing, and spargen generates exactly that fallback.
+        defaultMapping: "#/components/schemas/CacheUnknown"
+    CachePurged:
+      type: object
+      required: [outcome, entries]
+      properties:
+        outcome: { type: string }
+        entries: { type: integer }
+    CacheUnknown:
+      type: object
+      required: [detail]
+      properties:
+        detail: { type: string }
+  mediaTypes:
+    QueryBody:
+      schema:
+        $ref: "#/components/schemas/Query"
 "##;
 
 /// Whether the `wasm32-unknown-unknown` target's std is installed, so the wasm gate can run. When

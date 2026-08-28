@@ -128,6 +128,7 @@ impl Impact {
 /// The kind of a single surface change. Each kind maps to a fixed [`Impact`] and a stable
 /// machine-readable code; the mapping is the documented classification policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[non_exhaustive]
 pub enum ChangeKind {
     /// A new operation (client method) appeared. **Minor** — additive.
     OperationAdded,

@@ -4,8 +4,11 @@ use super::Diagnostic;
 ///
 /// Generation collects all diagnostics rather than stopping at the first error (batch
 /// reporting); the cap bounds memory under pathological inputs. Once the cap is reached, further
-/// diagnostics are dropped but [`cap_reached`](Diagnostics::cap_reached) is set so the renderer
-/// can note the truncation.
+/// diagnostics are dropped and `cap_reached` records that it happened.
+///
+/// Nothing outside this module reads `cap_reached` yet, so a run that hits `batch_cap` currently
+/// presents a truncated list with no marker on it. Surfacing that on `Report` is a public-API
+/// change and is tracked separately; the flag is kept because it is the input that change needs.
 #[derive(Debug)]
 pub struct Diagnostics {
     items: Vec<Diagnostic>,
@@ -53,11 +56,6 @@ impl Diagnostics {
     /// Whether any error-severity diagnostic has been recorded.
     pub fn has_errors(&self) -> bool {
         self.error_count > 0
-    }
-
-    /// Whether the retention cap has been hit and diagnostics dropped.
-    pub fn cap_reached(&self) -> bool {
-        self.cap_reached
     }
 
     /// The collected diagnostics, in emission order.
@@ -114,7 +112,7 @@ mod tests {
 
         assert_eq!(diagnostics.items().len(), 1);
         assert!(diagnostics.has_errors());
-        assert!(!diagnostics.cap_reached());
+        assert!(!diagnostics.cap_reached);
     }
 
     #[test]
@@ -178,10 +176,10 @@ mod tests {
         diagnostics.emit(diagnostic("invalid operation"));
         diagnostics.emit(diagnostic("invalid operation"));
 
-        assert!(!diagnostics.cap_reached());
+        assert!(!diagnostics.cap_reached);
 
         diagnostics.emit(diagnostic("another failure"));
 
-        assert!(diagnostics.cap_reached());
+        assert!(diagnostics.cap_reached);
     }
 }

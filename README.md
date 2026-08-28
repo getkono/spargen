@@ -69,17 +69,27 @@ the version it emits, and the idioms spargen handles.
 ### Generated surface
 
 - `Client::new(base_url)` / `Client::with_client(reqwest::Client, base_url)` — the injected
-  client is the extension point for TLS choice, proxies, middleware, and timeouts.
+  client is the extension point for TLS choice, proxies, and timeouts. `Client` is `Debug` and
+  `Clone`.
 - One `async` method per operation: required parameters positional, optional parameters in a
   per-operation `…Params` struct deriving `Default`, `Result<ResponseValue<T>, Error<E>>` out.
+  String parameters and the params bundle take `impl Into<…>`, so `client.get_pet("1")` and
+  `client.list_pets(params)` need no `to_owned()` or `Some`.
 - `Client::with_credential(scheme, credential)` registers static secrets (via
   [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
   requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.
   A missing required credential is a request-construction error, never a silent 401.
 - A closed error taxonomy, identical across all spargen output: request-construction, transport,
   timeout, protocol, redirect, documented API error (typed `E`), undocumented status (raw body
-  preserved), decode failure (serde path + capped body), interrupted body. `Error::is_transient()`
-  classifies retry-worthy failures so any caller-side retry policy is trivial; spargen ships none.
+  preserved), decode failure (serde path + capped body), interrupted body. Every generated error
+  type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
+  `thiserror`. `Error::is_transient()` classifies retry-worthy failures.
+- Beyond the request/response path, the embedded runtime carries a swappable transport seam
+  (`HttpBackend`) with composable retry and middleware adapters, `Link:`-header pagination, typed
+  SSE/NDJSON/JSON-sequence streams, an opt-in `blocking` client, and `wasm32-unknown-unknown`
+  support. Each is opt-in and adds no dependency; spargen ships no retry *policy* and no async
+  timer — the caller supplies both. See the
+  [runtime reference](docs/book/src/runtime.md).
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ### Design guarantees

@@ -3426,7 +3426,7 @@ components:
 }
 
 #[test]
-fn multi_status_success_bodies_generate_a_typed_enum_without_w003() {
+fn multi_status_success_bodies_generate_a_typed_enum_not_a_degraded_value() {
     // Two success statuses with DIFFERENT bodies used to degrade to `serde_json::Value` (W003).
     // W003 is retired: the success type is now a typed per-operation response enum, generated with
     // no diagnostic at all.
@@ -3466,7 +3466,7 @@ components:
 }
 
 #[test]
-fn multi_status_error_bodies_generate_a_typed_enum_without_w003() {
+fn multi_status_error_bodies_generate_a_typed_enum_not_a_degraded_value() {
     // Two error statuses with DIFFERENT bodies likewise generate a typed error enum, no W003.
     let report = generate(
         r##"
@@ -3862,7 +3862,11 @@ components:
 
 #[test]
 fn path_item_ref_keeps_documentation_siblings() {
-    // `summary`/`description` cannot change the wire, so they are allowed beside a `$ref`.
+    // `summary`/`description` cannot change the wire, so they are allowed beside a `$ref` — and
+    // "allowed" has to mean applied. A Path Item resolves to one generated construct per path, so
+    // the reference site's documentation has a unique home and must reach the rustdoc. Each field
+    // overrides independently: `summary` is declared here and wins, `description` is not and so
+    // stays the referenced item's.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -3873,14 +3877,28 @@ paths:
 components:
   pathItems:
     Pets:
+      summary: Component-owned summary
+      description: Component-owned description
       get:
         operationId: listPets
         responses:
           "204": { description: No Content }
 "##;
-    for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
-    }
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("Everything about pets"),
+        "the reference site's `summary` never reached the generated docs:\n{code}"
+    );
+    assert!(
+        !code.contains("Component-owned summary"),
+        "the reference site's `summary` did not override the target's:\n{code}"
+    );
+    assert!(
+        code.contains("Component-owned description"),
+        "an undeclared `description` must stay the referenced item's:\n{code}"
+    );
+    assert_ne!(check(spec).outcome, Outcome::Rejected);
 }
 
 #[test]

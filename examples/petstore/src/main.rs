@@ -3,10 +3,8 @@
 //! handling, the transient-failure classifier, and the bring-your-own-policy retry adapter.
 //! Everything runs on 127.0.0.1 — no external API, no real credentials.
 
-use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +19,7 @@ mod petstore {
 
 use petstore::{
     exponential_backoff, types, Client, Credential, Error, HttpBackend, ReqwestBackend,
-    RetryBackend, RetryOutcome, RetryPolicy,
+    RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
 };
 
 const TOKEN: &str = "let-me-in";
@@ -33,19 +31,21 @@ static FLAKY_HITS: AtomicU32 = AtomicU32::new(0);
 /// A bring-your-own retry policy: retry transient outcomes with exponential backoff, up to a cap.
 /// The wait is built from the caller's own async timer (`tokio::time::sleep`) — the spargen runtime
 /// ships no timer and never depends on tokio; timing is supplied here.
+///
+/// `RetryWait` is re-exported by the generated client, so the policy names the runtime's own alias
+/// rather than spelling out `Pin<Box<dyn Future<Output = ()> + Send + 'a>>` by hand.
 struct ExponentialBackoff {
     max_retries: u32,
 }
 
 impl RetryPolicy for ExponentialBackoff {
-    fn retry<'a>(
-        &'a self,
-        attempt: u32,
-        outcome: &RetryOutcome<'_>,
-    ) -> Option<Pin<Box<dyn Future<Output = ()> + Send + 'a>>> {
+    fn retry<'a>(&'a self, attempt: u32, outcome: &RetryOutcome<'_>) -> Option<RetryWait<'a>> {
         if attempt < self.max_retries && outcome.is_transient() {
-            let wait =
-                exponential_backoff(attempt, Duration::from_millis(10), Duration::from_millis(200));
+            let wait = exponential_backoff(
+                attempt,
+                Duration::from_millis(10),
+                Duration::from_millis(200),
+            );
             Some(Box::pin(tokio::time::sleep(wait)))
         } else {
             None
@@ -78,7 +78,7 @@ async fn main() {
     // List with query + header parameters, built via the fluent optional-param setters. `filter` is
     // a `deepObject`, so each member travels as its own `filter[member]=value` pair.
     let pets = client
-        .list_pets(Some(
+        .list_pets(
             petstore::ListPetsParams::default()
                 .limit(10)
                 .status(types::Status::Available)
@@ -87,7 +87,7 @@ async fn main() {
                     name: Some("Rex".to_owned()),
                     tag: None,
                 }),
-        ))
+        )
         .await
         .expect("list_pets");
     assert_eq!(pets.status(), 200);
@@ -117,12 +117,12 @@ async fn main() {
     println!("created pet #{} ({})", created.id, created.name);
 
     // Fetch by path parameter.
-    let pet = client.get_pet("1".to_owned()).await.expect("get_pet");
+    let pet = client.get_pet("1").await.expect("get_pet");
     assert_eq!(pet.into_inner().status, types::Status::Available);
     println!("fetched pet #1");
 
     // A documented 404 arrives as the operation's typed error body.
-    match client.get_pet("999".to_owned()).await {
+    match client.get_pet("999").await {
         Err(Error::Api(response)) => {
             assert_eq!(response.status(), 404);
             println!("typed 404: {}", response.into_inner().message);
@@ -135,7 +135,7 @@ async fn main() {
     // object — rather than one blanket type for the whole form.
     let stored = client
         .upload_photo(
-            "1".to_owned(),
+            "1",
             &types::RequestBody {
                 photo: bytes::Bytes::from_static(b"\x89PNG\r\n\x1a\n"),
                 meta: types::PhotoMeta {
@@ -150,13 +150,13 @@ async fn main() {
     println!("uploaded a photo with typed multipart part Content-Types");
 
     // 204 maps to a unit body.
-    let deleted = client.delete_pet("1".to_owned()).await.expect("delete_pet");
+    let deleted = client.delete_pet("1").await.expect("delete_pet");
     assert_eq!(deleted.status(), 204);
     println!("deleted pet #1");
 
     // A missing credential fails before anything is sent — never a silent 401.
     let unauthenticated = Client::new(&base_url).unwrap();
-    match unauthenticated.get_pet("1".to_owned()).await {
+    match unauthenticated.get_pet("1").await {
         Err(Error::RequestConstruction(error)) => {
             println!("missing credential rejected up front: {error}");
         }
@@ -167,7 +167,7 @@ async fn main() {
     let wrong = Client::new(&base_url)
         .unwrap()
         .with_credential("bearerAuth", Credential::Bearer(SecretString::from("nope")));
-    match wrong.get_pet("1".to_owned()).await {
+    match wrong.get_pet("1").await {
         Err(error @ Error::UnexpectedStatus { status, .. }) if status == 401 => {
             assert!(!error.is_transient());
             println!("undocumented 401 preserved for forensics");
@@ -187,7 +187,7 @@ async fn main() {
         .unwrap()
         .with_credential("bearerAuth", Credential::Bearer(SecretString::from(TOKEN)));
     let recovered = retrying
-        .get_pet("flaky".to_owned())
+        .get_pet("flaky")
         .await
         .expect("retry recovers from the transient 503");
     assert_eq!(recovered.status(), 200);
@@ -257,7 +257,10 @@ fn handle(mut stream: TcpStream) {
     let mut extra_headers = String::new();
 
     let (status, response_body) = if authorization != format!("Bearer {TOKEN}") {
-        ("401 Unauthorized", r#"{"message":"unauthorized"}"#.to_owned())
+        (
+            "401 Unauthorized",
+            r#"{"message":"unauthorized"}"#.to_owned(),
+        )
     } else {
         match (method, path) {
             ("GET", "/pets") => {
