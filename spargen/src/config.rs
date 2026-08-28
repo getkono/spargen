@@ -51,8 +51,9 @@ pub(crate) const DEFAULT_BATCH_CAP: usize = 100;
 
 /// What to generate: the spec to read plus every knob that can change the generated API.
 ///
-/// Two `Spec`s that compare equal produce byte-identical output for a given spargen version —
-/// the build cache fingerprints exactly these fields.
+/// Two `Spec`s that compare equal produce byte-identical output for a given spargen version *and
+/// identical spec-file contents*. Equality covers the knobs below, including the spec's path; it
+/// cannot see the bytes at that path, which the build cache fingerprints separately.
 ///
 /// ```no_run
 /// let spec = spargen::Spec::new("api/openapi.yaml").uuid(false);

@@ -695,6 +695,16 @@ paths:
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedDialect), "{report:#?}");
 
+    // A Schema Object's own `$schema` names a dialect outright, so both spellings are accepted
+    // there. The version rule belongs to `jsonSchemaDialect`, the document-level default.
+    let per_schema = accepted.replace(
+        "        '200': { description: ok }",
+        "        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                $schema: https://spec.openapis.org/oas/3.2/dialect/2025-09-17\n                type: object",
+    );
+    let report = generate(&per_schema);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
+
     // A URI that no version of the specification defines stays `E002` either way.
     let nonexistent = accepted.replace("oas/3.1/dialect", "oas/3.2/dialect");
     let report = generate(&nonexistent);
@@ -4968,4 +4978,38 @@ fn a_report_that_hit_the_batch_cap_says_it_is_truncated() {
         capped.to_string().contains("truncated at batch_cap"),
         "{capped}"
     );
+}
+
+/// The support matrix says homogeneous scalar enums are supported; floats are the boundary. They
+/// have no representable Rust enum discriminant, so they are `E008` rather than a silent demotion,
+/// and the matrix now states the boundary rather than implying floats are included.
+#[test]
+fn e008_float_enum_members_are_the_documented_boundary() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Ratio:
+      type: number
+      enum: [1.5, 2.5]
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::NonScalarEnum), "{report:#?}");
+    }
+
+    // Strings, integers, and booleans stay supported.
+    for (kind, values) in [
+        ("string", "[a, b]"),
+        ("integer", "[1, 2]"),
+        ("boolean", "[true, false]"),
+    ] {
+        let ok = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  schemas:\n    Kind:\n      type: {kind}\n      enum: {values}\n"
+        );
+        let report = generate(&ok);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{kind}: {report:#?}");
+    }
 }

@@ -22,6 +22,17 @@ const OAS31_DIALECT: &str = "https://spec.openapis.org/oas/3.1/dialect/base";
 /// purposes, so a 3.2 document may spell it either way; anything else is still `E002`.
 const OAS32_DIALECT: &str = "https://spec.openapis.org/oas/3.2/dialect/2025-09-17";
 
+/// Whether a URI names the OAS Schema Object dialect under either of its two published spellings.
+///
+/// This is the rule for a Schema Object's own `$schema`, which names a dialect outright. The
+/// document-level `jsonSchemaDialect` default is additionally scoped by version in
+/// [`parse_document`], where the document version is known; a Schema Object is parsed through
+/// function pointers with a fixed signature, so it does not carry that version, and the root gate
+/// is what stops a 3.1 document from adopting the 3.2 spelling as its default.
+fn is_oas_dialect(uri: &str) -> bool {
+    uri == OAS31_DIALECT || uri == OAS32_DIALECT
+}
+
 /// Build the typed [`Document`] from a loaded [`InputBundle`], carrying spans through.
 pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<Document, Aborted> {
     let root = bundle.root();
@@ -1037,10 +1048,17 @@ fn parse_schema_or(
     if map.get("$id").is_some() || map.get("$anchor").is_some() {
         Diagnostic::error(Code::UnresolvedRef, provenance(pointer, value))
             .message("static `$id`/`$anchor` schema resource scopes are not yet supported")
+            // The code reads "unresolved $ref" because scope-aware resolution is what is missing;
+            // say so, since nothing here is literally an unresolved reference.
+            .remedy(
+                "spargen resolves references against the document and its files, not against \
+                 `$id`/`$anchor` schema resource scopes; inline the subschema or reference it by \
+                 JSON Pointer",
+            )
             .emit(diags);
     }
     if let Some(dialect) = map.get("$schema").and_then(string) {
-        if dialect != OAS31_DIALECT {
+        if !is_oas_dialect(dialect) {
             Diagnostic::error(
                 Code::UnsupportedDialect,
                 provenance(
