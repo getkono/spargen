@@ -3,10 +3,8 @@
 //! handling, the transient-failure classifier, and the bring-your-own-policy retry adapter.
 //! Everything runs on 127.0.0.1 — no external API, no real credentials.
 
-use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::pin::Pin;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +19,7 @@ mod petstore {
 
 use petstore::{
     exponential_backoff, types, Client, Credential, Error, HttpBackend, ReqwestBackend,
-    RetryBackend, RetryOutcome, RetryPolicy,
+    RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
 };
 
 const TOKEN: &str = "let-me-in";
@@ -33,19 +31,21 @@ static FLAKY_HITS: AtomicU32 = AtomicU32::new(0);
 /// A bring-your-own retry policy: retry transient outcomes with exponential backoff, up to a cap.
 /// The wait is built from the caller's own async timer (`tokio::time::sleep`) — the spargen runtime
 /// ships no timer and never depends on tokio; timing is supplied here.
+///
+/// `RetryWait` is re-exported by the generated client, so the policy names the runtime's own alias
+/// rather than spelling out `Pin<Box<dyn Future<Output = ()> + Send + 'a>>` by hand.
 struct ExponentialBackoff {
     max_retries: u32,
 }
 
 impl RetryPolicy for ExponentialBackoff {
-    fn retry<'a>(
-        &'a self,
-        attempt: u32,
-        outcome: &RetryOutcome<'_>,
-    ) -> Option<Pin<Box<dyn Future<Output = ()> + Send + 'a>>> {
+    fn retry<'a>(&'a self, attempt: u32, outcome: &RetryOutcome<'_>) -> Option<RetryWait<'a>> {
         if attempt < self.max_retries && outcome.is_transient() {
-            let wait =
-                exponential_backoff(attempt, Duration::from_millis(10), Duration::from_millis(200));
+            let wait = exponential_backoff(
+                attempt,
+                Duration::from_millis(10),
+                Duration::from_millis(200),
+            );
             Some(Box::pin(tokio::time::sleep(wait)))
         } else {
             None
@@ -257,7 +257,10 @@ fn handle(mut stream: TcpStream) {
     let mut extra_headers = String::new();
 
     let (status, response_body) = if authorization != format!("Bearer {TOKEN}") {
-        ("401 Unauthorized", r#"{"message":"unauthorized"}"#.to_owned())
+        (
+            "401 Unauthorized",
+            r#"{"message":"unauthorized"}"#.to_owned(),
+        )
     } else {
         match (method, path) {
             ("GET", "/pets") => {

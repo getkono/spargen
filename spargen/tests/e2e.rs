@@ -1221,6 +1221,43 @@ fn middleware_backend_wraps_an_inner_backend() {
         out.join("tests/errors.rs"),
         r##"fn assert_error<E: std::error::Error + 'static>() {}
 
+// Every runtime type a generated signature mentions must also be nameable, because the embedded
+// `support` module is private and the root re-export list is the whole surface. Naming each one in
+// a type position is the assertion.
+#[test]
+fn every_runtime_type_in_a_signature_is_nameable() {
+    fn header_result() -> Result<(), basic_client::HeaderError> {
+        Ok(())
+    }
+    fn core(client: &basic_client::Client) -> &basic_client::ClientCore {
+        client.core()
+    }
+    fn timeout_kind(kind: basic_client::TimeoutKind) -> basic_client::TimeoutKind {
+        kind
+    }
+    fn config(config: &basic_client::ClientConfig) -> usize {
+        config.max_error_body
+    }
+    // `RetryWait` is what a caller's own `RetryPolicy` has to return; before it was re-exported the
+    // only way to write this was to spell out `Pin<Box<dyn Future<Output = ()> + Send + 'a>>`.
+    struct NeverRetry;
+    impl basic_client::RetryPolicy for NeverRetry {
+        fn retry<'a>(
+            &'a self,
+            _attempt: u32,
+            _outcome: &basic_client::RetryOutcome<'_>,
+        ) -> Option<basic_client::RetryWait<'a>> {
+            None
+        }
+    }
+    fn shape(shape: basic_client::HeaderShape) -> basic_client::HeaderShape {
+        shape
+    }
+    // Naming each type above is the assertion; binding the items keeps them from reading as dead.
+    let _ = (header_result, core, timeout_kind, config, shape);
+    let _: &dyn basic_client::RetryPolicy = &NeverRetry;
+}
+
 #[test]
 fn generated_error_types_are_std_errors() {
     // `GetMultiError` is the multi-status enum; `GetTextErrorError` the single-body newtype.
