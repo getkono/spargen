@@ -149,6 +149,3 @@ let spec = spargen::Spec::new("api/openapi.yaml")
     .discover_config_file()?
     .carve(false);   // overrides the file
 ```
-
-> The keys above lived under a `[features]` table before 0.3. They are top-level now, and the old
-> spelling is a clear migration error rather than an "unknown field".

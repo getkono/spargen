@@ -131,8 +131,8 @@ The full documentation site is an [mdBook](https://rust-lang.github.io/mdBook/) 
 [`docs/book/`](docs/book) — an Introduction, Getting Started, and generator/CLI/runtime references,
 wired together with the [generator API](docs/generator-api.md), [OpenAPI 3.2 scope](docs/openapi-3.2.md),
 [support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
-[compatibility](docs/compatibility.md), [0.3 migration](docs/migration-0.3.md), and
-[recipes](docs/recipes.md) docs (included, not duplicated).
+[compatibility](docs/compatibility.md), and [recipes](docs/recipes.md) docs
+(included, not duplicated).
 Build it locally:
 
 ```bash

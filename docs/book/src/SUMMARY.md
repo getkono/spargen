@@ -15,5 +15,4 @@
 - [Feature Support](./support-matrix.md)
 - [Diagnostics](./errors.md)
 - [Compatibility & Omit Profiles](./compatibility.md)
-- [Migrating to 0.3](./migration-0.3.md)
 - [Framework Recipes](./recipes.md)
