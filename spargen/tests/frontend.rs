@@ -5423,3 +5423,85 @@ paths:
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
+
+// --- additionalOperations method tokens -----------------------------------------------------
+//
+// The official document schema pins these keys to an RFC 9110 token and forbids restating a fixed
+// field, but it validates the *root* document only. A Path Item reached by `$ref` into another
+// file never meets it, so both fixtures below route through a sub-file — the path that was
+// previously unguarded, and on which a non-token key reached codegen and was emitted as
+// `Method::from_bytes(..).expect(..)`, panicking inside the consumer's client at request time.
+
+#[test]
+fn e011_additional_operations_method_must_be_an_http_token() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    $ref: './sub.yaml#/item'
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sub.yaml"),
+        r##"
+item:
+  additionalOperations:
+    "pu rge":
+      operationId: purgeIt
+      responses:
+        '204': { description: ok }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out));
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+#[test]
+fn e011_additional_operations_method_must_not_restate_a_fixed_field_method() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    $ref: './sub.yaml#/item'
+"##,
+    )
+    .unwrap();
+    // Compared case-insensitively: `Get` is strictly a distinct RFC 9110 token, but no server
+    // implements it and generating a second method shadowing `get` is worse than refusing.
+    std::fs::write(
+        dir.join("sub.yaml"),
+        r##"
+item:
+  additionalOperations:
+    Get:
+      operationId: getIt
+      responses:
+        '204': { description: ok }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out));
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
