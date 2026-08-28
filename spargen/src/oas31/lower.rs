@@ -3126,6 +3126,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             } else {
                 continue;
             };
+            // `Set-Cookie` is the one field RFC 9110 §5.3 exempts from the comma-joined field-list
+            // rule, and 3.2 gives it a section of its own saying each value must be kept on its own
+            // line. The declared schema therefore describes ONE cookie, and the accessor is a list
+            // of them — a schema that is already a list is taken to be that list.
+            let (ty, shape) = if name.eq_ignore_ascii_case("set-cookie") {
+                let list = match self.graph.get(ty.id).map(|def| &def.kind) {
+                    Some(TypeKind::Array(_)) => ty,
+                    _ => self.insert_type(
+                        &format!("Header{name}"),
+                        TypeKind::Array(Box::new(ty)),
+                        Docs::default(),
+                        Some(header.provenance.clone()),
+                    ),
+                };
+                (list, crate::ir::HeaderShape::SetCookie)
+            } else {
+                (ty, shape)
+            };
             headers.push(ResponseHeader {
                 name: name.clone(),
                 ty,

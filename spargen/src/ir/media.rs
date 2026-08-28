@@ -186,6 +186,9 @@ pub enum HeaderShape {
     Object,
     /// A `content`-typed header carrying JSON.
     Json,
+    /// `Set-Cookie`: one value per occurrence, never comma-joined (RFC 9110 §5.3 exempts it from
+    /// the field-list rule), decoded into a list of the declared per-line type.
+    SetCookie,
 }
 
 /// The full set of responses for an operation: per-status entries plus an optional `default`.

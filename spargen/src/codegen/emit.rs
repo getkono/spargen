@@ -1157,6 +1157,7 @@ fn emit_response_headers(
                 crate::ir::HeaderShape::Array => quote! { support::HeaderShape::Array },
                 crate::ir::HeaderShape::Object => quote! { support::HeaderShape::Object },
                 crate::ir::HeaderShape::Json => quote! { support::HeaderShape::Json },
+                crate::ir::HeaderShape::SetCookie => quote! { support::HeaderShape::SetCookie },
             };
             let explode = header.explode;
             let call = if header.required {

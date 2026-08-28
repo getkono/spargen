@@ -25,6 +25,13 @@ pub enum HeaderShape {
     Object,
     /// A `content`-typed header carrying JSON.
     Json,
+    /// `Set-Cookie`: one value per occurrence, never joined, decoded into a list.
+    ///
+    /// [[RFC9110]] §5.3 exempts this one field from the rule that lets a repeated header be folded
+    /// into a comma-separated line: its values may contain unescaped commas, so it is
+    /// one-value-per-line only. Joining and re-splitting on `,` would cut cookie values in half —
+    /// an `Expires=Wed, 09 Jun 2021 …` attribute is enough to trigger it.
+    SetCookie,
 }
 
 /// Why a documented response header could not be read.
@@ -86,6 +93,20 @@ pub fn parse_header<T: DeserializeOwned>(
     for value in values {
         parts.push(value.to_str().map_err(|_| HeaderError::NotUtf8 { name })?);
     }
+    // `Set-Cookie` is decoded per occurrence and never joined; see [`HeaderShape::SetCookie`].
+    if shape == HeaderShape::SetCookie {
+        let lines =
+            |scalars| Value::Array(parts.iter().map(|part| scalar(part, scalars)).collect());
+        if let Ok(value) = serde_json::from_value(lines(Scalars::Text)) {
+            return Ok(Some(value));
+        }
+        return serde_json::from_value(lines(Scalars::Json))
+            .map(Some)
+            .map_err(|error| HeaderError::Parse {
+                name,
+                message: error.to_string(),
+            });
+    }
     let raw = parts.join(",");
     // `simple` is plain text, so a token like `1` is ambiguous between the string "1" and the
     // number 1 — the encoding cannot tell them apart. The target type can: try the text as-is
@@ -127,7 +148,8 @@ pub fn require_header<T: DeserializeOwned>(
 fn reconstruct(raw: &str, shape: HeaderShape, explode: bool, scalars: Scalars) -> Value {
     match shape {
         HeaderShape::Json => serde_json::from_str(raw).unwrap_or(Value::Null),
-        HeaderShape::Scalar => scalar(raw, scalars),
+        // Handled before any joining happens, in `parse_header`.
+        HeaderShape::SetCookie | HeaderShape::Scalar => scalar(raw, scalars),
         HeaderShape::Array => {
             Value::Array(raw.split(',').map(|part| scalar(part, scalars)).collect())
         }
@@ -166,6 +188,61 @@ fn scalar(raw: &str, scalars: Scalars) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Set-Cookie` carries unescaped commas (an `Expires=Wed, 09 Jun 2021 …` attribute is the
+    /// everyday case), so the comma-joined field-list rule cuts its values in half. RFC 9110 §5.3
+    /// exempts it, and so does this shape: one value per occurrence, never joined.
+    #[test]
+    fn set_cookie_is_never_comma_joined() {
+        let mut map = HeaderMap::new();
+        map.append(
+            "set-cookie",
+            "lang=en; Expires=Wed, 09 Jun 2021 10:18:14 GMT"
+                .parse()
+                .unwrap(),
+        );
+        map.append("set-cookie", "sessionId=38afes7a8".parse().unwrap());
+        let cookies: Vec<String> =
+            require_header(&map, "set-cookie", HeaderShape::SetCookie, false).unwrap();
+        assert_eq!(
+            cookies,
+            [
+                "lang=en; Expires=Wed, 09 Jun 2021 10:18:14 GMT",
+                "sessionId=38afes7a8"
+            ]
+        );
+    }
+
+    /// The same headers under the ordinary list rule are what the defect produced: joined, then
+    /// split back apart on every comma, yielding four fragments from two cookies.
+    #[test]
+    fn the_array_shape_would_have_split_set_cookie_values() {
+        let mut map = HeaderMap::new();
+        map.append(
+            "set-cookie",
+            "lang=en; Expires=Wed, 09 Jun 2021 10:18:14 GMT"
+                .parse()
+                .unwrap(),
+        );
+        map.append("set-cookie", "sessionId=38afes7a8".parse().unwrap());
+        let split: Vec<String> =
+            require_header(&map, "set-cookie", HeaderShape::Array, false).unwrap();
+        assert_eq!(
+            split.len(),
+            3,
+            "the joined form fragments the cookie: {split:?}"
+        );
+    }
+
+    #[test]
+    fn a_single_set_cookie_still_yields_a_one_element_list() {
+        let mut map = HeaderMap::new();
+        map.append("set-cookie", "a=1".parse().unwrap());
+        let cookies: Vec<String> =
+            require_header(&map, "set-cookie", HeaderShape::SetCookie, false).unwrap();
+        assert_eq!(cookies, ["a=1"]);
+    }
+
     use crate::parameter::{serialize_simple, PercentEncoding};
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {

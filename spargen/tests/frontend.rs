@@ -4485,3 +4485,38 @@ paths:
         assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
     }
 }
+
+#[test]
+fn set_cookie_response_header_is_a_list_of_lines() {
+    // RFC 9110 s5.3 exempts `Set-Cookie` from the rule that lets a repeated header be folded into a
+    // comma-separated line, and OpenAPI 3.2 gives it a section saying each value stays on its own
+    // line. The declared schema describes one cookie, so the accessor is a list of them — the
+    // generic path would have joined the occurrences and split them back apart on every comma,
+    // fragmenting any cookie with an `Expires=Wed, 09 Jun ...` attribute.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "204":
+          description: No Content
+          headers:
+            Set-Cookie:
+              required: true
+              schema: { type: string }
+"##,
+    );
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("support::HeaderShape::SetCookie"),
+        "a documented Set-Cookie header must use the non-joining shape: {code}"
+    );
+    assert!(
+        code.contains("Vec<String>"),
+        "the accessor must be a list of per-line values: {code}"
+    );
+}
