@@ -46,6 +46,58 @@ tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
     )
 }
 
+/// One operation per runtime name that a `{Operation}Error` could shadow. Each documents an error
+/// body, so each emits an error type into the same module as the runtime `pub use`.
+const PRELUDE_COLLISION_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /request:
+    get: { operationId: request, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /transport:
+    get: { operationId: transport, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /header:
+    get: { operationId: header, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /protocol:
+    get: { operationId: protocol, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /redirect:
+    get: { operationId: redirect, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /auth:
+    get: { operationId: auth, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+  /stream:
+    get: { operationId: stream, responses: { "200": { description: ok }, "404": { description: nf, content: { application/json: { schema: { type: string } } } } } }
+"#;
+
+/// An `operationId` that collides with a runtime re-export must still produce a module that
+/// compiles. `operationId: request` otherwise emits `pub struct RequestError` beside
+/// `pub use support::{… RequestError …}` in the same module, which is `E0255`.
+#[test]
+fn an_operation_named_after_a_runtime_type_still_compiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, PRELUDE_COLLISION_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "collide_client");
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("pub struct RequestOperationError"),
+        "a colliding error type must be widened, not shadowed:\n{generated}"
+    );
+
+    let status = Command::new("cargo")
+        .arg("check")
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "an operationId matching a runtime re-export must still generate compiling code"
+    );
+}
+
 /// A spec whose only binary payload is one documented error body. `ErrorShape::Single` over a
 /// `TypeKind::Bytes` is the shape where generated code and the dependency contract can most easily
 /// disagree: the body never travels through serde (it is classified by `classify_error_bytes`), so

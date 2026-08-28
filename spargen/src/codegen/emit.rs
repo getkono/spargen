@@ -190,7 +190,7 @@ pub(crate) fn emit_operation(
         .operations
         .get(&operation.id)
         .expect("operation name allocated");
-    let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
+    let error_ident = error_type_ident(method_ident.as_str());
     let reqwest_method = reqwest_method(&operation.method);
     let success_ty = success_type(operation, names, options);
     let error_ty = quote! { #error_ident };
@@ -966,7 +966,7 @@ fn operation_return_ty(
         .operations
         .get(&operation.id)
         .expect("operation name allocated");
-    let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
+    let error_ident = error_type_ident(method_ident.as_str());
     let success_ty = success_type(operation, names, options);
     let return_ok_ty = match operation.responses.stream_success() {
         Some(_) => quote! { support::EventStream<#success_ty> },
@@ -2186,7 +2186,7 @@ pub(crate) fn emit_error_enum(
         .operations
         .get(&operation.id)
         .expect("operation name allocated");
-    let error_ident = format_ident!("{}Error", to_pascal(method_ident.as_str()));
+    let error_ident = error_type_ident(method_ident.as_str());
     match operation.responses.error() {
         // Multiple documented error bodies → a payload-carrying enum, one variant per status. The
         // variant is chosen by HTTP status at classification time, so it derives no whole-enum
@@ -3182,6 +3182,66 @@ fn reqwest_method(method: &crate::ir::Method) -> TokenStream {
                     .expect("validated additionalOperations key is a valid HTTP method token")
             }
         }
+    }
+}
+
+/// Every name the generated module re-exports from the embedded runtime into its root.
+///
+/// Generated error types live in that same root, so a name taken from this list would be defined
+/// twice (`E0255`) and the output would not compile. The list is deliberately the *union* of the
+/// conditional re-exports too (streaming, dates), so an operation's type name never changes because
+/// an unrelated part of the spec started or stopped using streams.
+const RUNTIME_PRELUDE: &[&str] = &[
+    "AuthError",
+    "ClientConfig",
+    "ClientCore",
+    "Credential",
+    "Date",
+    "DateTime",
+    "Error",
+    "EventStream",
+    "ExecuteFuture",
+    "ExposeSecret",
+    "HeaderError",
+    "HeaderShape",
+    "HttpBackend",
+    "LinkPaginator",
+    "Middleware",
+    "MiddlewareBackend",
+    "Next",
+    "ProtocolError",
+    "ReconnectPolicy",
+    "ReconnectReason",
+    "ReconnectWait",
+    "RedirectError",
+    "RequestError",
+    "ReqwestBackend",
+    "ResponseValue",
+    "RetryBackend",
+    "RetryOutcome",
+    "RetryPolicy",
+    "RetryWait",
+    "SecretString",
+    "StreamError",
+    "TimeoutKind",
+    "TokenFuture",
+    "TokenProvider",
+    "TransportError",
+];
+
+/// The name of an operation's error type: `{Operation}Error`, widened to
+/// `{Operation}OperationError` when the first form would shadow a runtime re-export.
+///
+/// An `operationId` of `request`, `transport`, or `header` otherwise produces `RequestError`,
+/// `TransportError`, or `HeaderError` beside the `pub use` of the same name, and the emitted module
+/// fails to compile. Operation IDs are unique, so both forms stay unique across operations.
+fn error_type_ident(method_ident: &str) -> proc_macro2::Ident {
+    let base = to_pascal(method_ident);
+    let name = format!("{base}Error");
+    if RUNTIME_PRELUDE.contains(&name.as_str()) {
+        format_ident!("{}OperationError", base)
+    } else {
+        format_ident!("{}", name)
     }
 }
 
