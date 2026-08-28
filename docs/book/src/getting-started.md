@@ -133,8 +133,10 @@ let pets = client
     .await?;
 let pets: Vec<types::Pet> = pets.into_inner(); // ResponseValue<T> → T
 
-// A path parameter is positional. Errors are a closed taxonomy of `Error<E>`.
-let pet = client.get_pet("1".to_owned()).await?.into_inner();
+// A path parameter is positional; a string one takes `impl Into<String>`. Errors are a closed
+// taxonomy of `Error<E>`, and every generated error type is a `std::error::Error` — which is what
+// lets the `?` above and here flow into this function's `Box<dyn std::error::Error>`.
+let pet = client.get_pet("1").await?.into_inner();
 assert_eq!(pet.status, types::Status::Available);
 # Ok(())
 # }
@@ -144,7 +146,9 @@ Key points of the surface:
 
 - `Client::new(base_url)` / `Client::with_client(reqwest::Client, base_url)`.
 - One `async` method per operation returning `Result<ResponseValue<T>, Error<E>>`;
-  `.into_inner()` unwraps the decoded body.
+  `.into_inner()` unwraps the decoded body. Required string parameters take `impl Into<String>`
+  and the `…Params` bundle takes `impl Into<Option<…>>`, so `None`, `Some(params)`, and `params`
+  all compile.
 - `Client::with_credential(scheme, credential)` registers static secrets (via `secrecy`) or async
   token providers. Operation `security` requirements pick the first satisfiable alternative and
   attach bearer/basic/apiKey credentials; a missing required credential is a
@@ -152,8 +156,10 @@ Key points of the surface:
 - A closed [error taxonomy](./errors.md), identical across all spargen output:
   request-construction, transport, timeout, protocol, redirect, documented API error (typed `E`),
   undocumented status (raw body preserved), decode failure, interrupted body.
-  `Error::is_transient()` classifies retry-worthy failures — spargen ships no retry policy, but
-  the runtime offers a bring-your-own [retry adapter](./runtime.md).
+  Every generated error type implements `Display` and `std::error::Error`, so `Error<E>` works
+  with `?` into `Box<dyn Error>`, `anyhow`, and `thiserror`. `Error::is_transient()` classifies
+  retry-worthy failures — spargen ships no retry policy, but the runtime offers a bring-your-own
+  [retry adapter](./runtime.md).
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ## Next steps

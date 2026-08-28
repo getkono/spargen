@@ -9,7 +9,8 @@ changes.
 
 - `spargen/` — the primary published crate (library + `cli`-gated binary). Internally partitioned
   into subsystems with a declared dependency DAG: `diag`, `source`, `ir`, `oas31`, `name`,
-  `support`, `codegen`, `emit`, `compat`, `cli`, and the `lib.rs` facade. Every subsystem
+  `support`, `codegen`, `emit`, `compat`, `surface`, `cli`, and the `lib.rs` facade
+  (`cache`, `config`, and `runtime_contract` are facade plumbing, not subsystems). Every subsystem
   `mod.rs` declares its allowed dependencies in a `//! layer-deps:` header — keep those honest.
 - `spargen-macro/` — the second published crate: a thin `proc-macro` shim exposing
   `generate_api!`, a shim over spargen's private in-memory renderer. It depends on `spargen` (host-only); `spargen`

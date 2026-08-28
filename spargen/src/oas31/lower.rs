@@ -3863,7 +3863,7 @@ fn resolve_external_security_schemes(
     }
 }
 
-/// Lower `components.securitySchemes`./// Lower `components.securitySchemes`./// Lower `components.securitySchemes`.
+/// Lower `components.securitySchemes`.
 ///
 /// Every declared scheme gets a disposition here rather than only when something references it: a
 /// scheme that silently vanished used to surface — if at all — as a confusing `E012` at the

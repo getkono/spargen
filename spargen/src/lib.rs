@@ -23,11 +23,17 @@
 //! | `support` | — (compiles standalone against reqwest/serde) |
 //! | `codegen` | `ir`, `name`, `support`, `diag` |
 //! | `emit`    | `codegen`, `diag` |
+//! | `compat`  | `source`, `diag` |
+//! | `surface` | `ir`, `name`  |
 //! | `cli`     | facade        |
 //! | facade (`lib.rs`) | all of the above |
 //!
 //! Pipeline: `source` → `oas31` → (`ir` + `name`) → `codegen` → `emit`, with `diag` as the
-//! only vocabulary shared across stages.
+//! only vocabulary shared across stages. `compat` preprocesses the bundle before `oas31` sees it;
+//! `surface` reads the lowered API for `diff` and never feeds generation.
+//!
+//! `cache`, `config`, and `runtime_contract` are facade plumbing rather than subsystems: they say
+//! so in their own module docs and carry no `layer-deps:` header for the lint to check.
 
 mod diag;
 

@@ -1,3 +1,10 @@
+//! # Subsystem: cli
+//! layer-deps: facade
+//!
+//! The optional analysis binary. It is not a `mod` of the library: `src/bin/spargen.rs` pulls these
+//! files in with `#[path]`, so the CLI depends on the published facade exactly as any other
+//! consumer would, and can reach nothing private.
+
 use std::process::ExitCode;
 
 use spargen::{check, explain, ConfigError, Spec};

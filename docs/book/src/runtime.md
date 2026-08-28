@@ -44,7 +44,9 @@ replayed.
   send a corrupt body.
 
 `Error::is_transient()` on the generated error type classifies retry-worthy failures, so a policy
-that retries only transient outcomes is a few lines. The
+that retries only transient outcomes is a few lines. `RetryWait` is re-exported by the generated
+client, so a policy names it rather than spelling out
+`Pin<Box<dyn Future<Output = ()> + Send + 'a>>`. The
 [petstore example](https://github.com/getkono/spargen/tree/master/examples/petstore) ships a
 complete `RetryPolicy` driven by a tokio timer.
 
@@ -128,7 +130,24 @@ dependency contract require `quick-xml` of the consumer — so an API without XM
 module nor the dependency. There is no consumer-side Cargo feature to turn it on or off: whether a
 generated client speaks XML is a property of its spec, decided at generation time.
 
-## Format mappings (`uuid` / `time`)
+## Format mappings
+
+Numeric and boolean types map from `type` and `format` alone, with no knob:
+
+| Schema | Rust |
+| --- | --- |
+| `type: integer, format: int32` | `i32` |
+| `type: integer` (any other or absent `format`, including `int64`) | `i64` |
+| `type: number` (any `format`, including `float` and `double`) | `f64` |
+| `type: boolean` | `bool` |
+| `type: string` (any unrecognized `format`) | `String` |
+
+`float` widens to `f64` rather than mapping to `f32`: the specification makes support for any
+registered format "strictly OPTIONAL" and lets a tool "default back to the `type` alone", and a
+narrower float would round-trip fewer values than the wire carries. An unrecognized `format` is a
+JSON Schema annotation, not an assertion, so it is likewise carried into the base type.
+
+### `uuid` and `time`
 
 `format: uuid` maps to the `uuid` crate and `format: date-time` / `date` to `time`, as opt-out
 mappings in generated code. Call `Spec::uuid(false)` / `Spec::time(false)` (or use

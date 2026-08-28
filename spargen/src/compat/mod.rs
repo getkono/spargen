@@ -393,7 +393,7 @@ fn glob_match_at(
 }
 
 /// One exact compatibility omission.
-/// Strings are `Cow` so a rule can be written as a literal in [`omit!`] with no allocation and
+/// Strings are `Cow` so a rule can be written as a literal in [`omit!`](crate::omit) with no allocation and
 /// still be built from data at runtime — the CLI, the config file, and the carve driver all derive
 /// rules dynamically, and each previously leaked a `String` to fake a `&'static str`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -476,7 +476,7 @@ impl std::error::Error for UnknownOmitToken {}
 impl std::str::FromStr for ComponentKind {
     type Err = UnknownOmitToken;
 
-    /// Accepts the canonical snake_case plural spelling used by [`omit!`], plus the singular and
+    /// Accepts the canonical snake_case plural spelling used by [`omit!`](crate::omit), plus the singular and
     /// the camelCase OAS key, so a rule reads the same whether it was written in Rust, on the
     /// command line, or in `spargen.toml`.
     fn from_str(token: &str) -> Result<Self, Self::Err> {
@@ -539,7 +539,7 @@ impl std::fmt::Display for OmitMethod {
     }
 }
 
-/// The maximum number of carve rounds./// The maximum number of carve rounds. Each round adds at least one omit rule (or stops), and a
+/// The maximum number of carve rounds. Each round adds at least one omit rule (or stops), and a
 /// spec has finitely many constructs, so any spec terminates; this cap is a belt-and-suspenders
 /// bound that also keeps a pathological ref cascade from re-parsing without end.
 pub(crate) const MAX_CARVE_ROUNDS: usize = 64;

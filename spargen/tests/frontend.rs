@@ -3426,7 +3426,7 @@ components:
 }
 
 #[test]
-fn multi_status_success_bodies_generate_a_typed_enum_without_w003() {
+fn multi_status_success_bodies_generate_a_typed_enum_not_a_degraded_value() {
     // Two success statuses with DIFFERENT bodies used to degrade to `serde_json::Value` (W003).
     // W003 is retired: the success type is now a typed per-operation response enum, generated with
     // no diagnostic at all.
@@ -3466,7 +3466,7 @@ components:
 }
 
 #[test]
-fn multi_status_error_bodies_generate_a_typed_enum_without_w003() {
+fn multi_status_error_bodies_generate_a_typed_enum_not_a_degraded_value() {
     // Two error statuses with DIFFERENT bodies likewise generate a typed error enum, no W003.
     let report = generate(
         r##"
