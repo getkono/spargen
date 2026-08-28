@@ -16,8 +16,4 @@
 - [Diagnostics](./errors.md)
 - [Compatibility & Omit Profiles](./compatibility.md)
 - [Migrating to 0.3](./migration-0.3.md)
-
-# Recipes & Validation
-
 - [Framework Recipes](./recipes.md)
-- [Testing & Contributing](./testing.md)

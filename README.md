@@ -131,9 +131,8 @@ The full documentation site is an [mdBook](https://rust-lang.github.io/mdBook/) 
 [`docs/book/`](docs/book) — an Introduction, Getting Started, and generator/CLI/runtime references,
 wired together with the [generator API](docs/generator-api.md), [OpenAPI 3.2 scope](docs/openapi-3.2.md),
 [support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
-[compatibility](docs/compatibility.md), [0.3 migration](docs/migration-0.3.md),
-[recipes](docs/recipes.md),
-and [testing](docs/testing.md) docs (included, not duplicated).
+[compatibility](docs/compatibility.md), [0.3 migration](docs/migration-0.3.md), and
+[recipes](docs/recipes.md) docs (included, not duplicated).
 Build it locally:
 
 ```bash
@@ -170,7 +169,8 @@ mise run hooks        # install git hooks
 | `mise run example` | Run the end-to-end petstore example |
 | `mise run deny` | Supply-chain audit (licenses, advisories, bans) |
 
-The validation strategy is documented per subsystem in [`docs/testing.md`](docs/testing.md).
+The validation strategy is documented per subsystem in
+[`AGENTS.md`](AGENTS.md#testing-strategy-by-subsystem).
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/), enforced by
 `convco` at commit time, pre-push, and in CI.
 
