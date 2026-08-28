@@ -133,7 +133,7 @@ wired together with the [generator API](docs/generator-api.md), [OpenAPI 3.2 sco
 [support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
 [compatibility](docs/compatibility.md), [0.3 migration](docs/migration-0.3.md),
 [recipes](docs/recipes.md),
-[benchmarks](docs/benchmarks.md), and [testing](docs/testing.md) docs (included, not duplicated).
+and [testing](docs/testing.md) docs (included, not duplicated).
 Build it locally:
 
 ```bash
@@ -165,6 +165,7 @@ mise run hooks        # install git hooks
 | `mise run lint` | Clippy with warnings denied |
 | `mise run test` | Full suite: unit, property, frontend-fixture, cache, determinism, and generated-code E2E tests |
 | `mise run corpus-smoke` | Fast checks against pinned real-world specs |
+| `mise run bench` | Criterion benchmarks over the generation pipeline |
 | `mise run github-api` | Generate and compile the full pinned GitHub API client (native strict Clippy + wasm) |
 | `mise run example` | Run the end-to-end petstore example |
 | `mise run deny` | Supply-chain audit (licenses, advisories, bans) |

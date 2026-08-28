@@ -20,5 +20,4 @@
 # Recipes & Validation
 
 - [Framework Recipes](./recipes.md)
-- [Benchmarks](./benchmarks.md)
 - [Testing & Contributing](./testing.md)

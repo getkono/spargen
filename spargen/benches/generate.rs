@@ -6,8 +6,8 @@
 //! - `generate/*` — the full pipeline through `codegen` + `emit`, writing to a scratch tempdir.
 //!
 //! Inputs: a tiny inline spec (fixed cost floor), the 3.1 petstore example, and the real-world
-//! Ollama spec (a mid-sized generating corpus case). Run with `cargo bench`; see
-//! `docs/benchmarks.md` for methodology and the external-tool comparison harness.
+//! Ollama spec (a mid-sized generating corpus case). Run with `cargo bench` or
+//! `mise run bench`; CI uploads the results as a release artifact.
 
 use std::hint::black_box;
 
