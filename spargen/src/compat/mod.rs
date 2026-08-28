@@ -723,23 +723,49 @@ fn emit_invalid_rule(
     .emit(diags);
 }
 
+/// Check that what survives an omit profile is still a valid OpenAPI root.
+///
+/// This mirrors the official schemas, which `require` only `openapi` and `info` and then place
+/// `paths`, `components`, and `webhooks` in an `anyOf` — a document carrying any one of the three
+/// is valid. Demanding `paths` outright reported a document the specification accepts as
+/// `E020` "omit profile created an invalid document".
 fn validate_remaining(bundle: &InputBundle, diags: &mut Diagnostics) {
     let root = bundle.root();
-    let missing = ["openapi", "info", "paths"]
-        .into_iter()
-        .filter(|key| root.get(key).is_none())
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
+    let reject = |message: String, diags: &mut Diagnostics| {
         Diagnostic::error(
             Code::OmitCreatedInvalidDocument,
             Provenance::new(JsonPointer::root(), Some(root.span())),
         )
-        .message(format!(
-            "omit profile removed required OpenAPI root fields: {}",
-            missing.join(", ")
-        ))
+        .message(message)
         .remedy("do not omit required OpenAPI root fields")
         .emit(diags);
+    };
+
+    let missing = ["openapi", "info"]
+        .into_iter()
+        .filter(|key| root.get(key).is_none())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        reject(
+            format!(
+                "omit profile removed required OpenAPI root fields: {}",
+                missing.join(", ")
+            ),
+            diags,
+        );
+        return;
+    }
+
+    if !["paths", "components", "webhooks"]
+        .into_iter()
+        .any(|key| root.get(key).is_some())
+    {
+        reject(
+            "omit profile left no `paths`, `components`, or `webhooks`; an OpenAPI root requires \
+             at least one of the three"
+                .to_owned(),
+            diags,
+        );
     }
 }
 

@@ -553,3 +553,79 @@ components:
     assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
     assert_eq!(w009_count(&report), 2, "one W009 per removal: {report:#?}");
 }
+
+#[test]
+fn an_omit_profile_does_not_invent_a_paths_requirement() {
+    // Both official schemas `require` only `openapi` and `info`, then place `paths`, `components`,
+    // and `webhooks` in an `anyOf`. A components-only document is therefore valid OpenAPI, and
+    // spargen already accepts it — until any omit profile is attached, at which point the
+    // post-omit check demanded `paths` and reported `E020` for a field the profile never touched.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+components:
+  schemas:
+    Item: { type: object, properties: { id: { type: string } } }
+    Legacy: { type: object, properties: { x: { type: string } } }
+"#,
+    );
+    let out = temp.path().join("client.rs");
+
+    // The same document with no profile is already accepted, so the profile is the only difference.
+    assert_eq!(
+        spargen::generate(&config(&spec, &out)).outcome,
+        Outcome::Generated
+    );
+
+    let report = spargen::generate(&omitting(
+        &spec,
+        &out,
+        spargen::omit! { components { schemas { "Legacy"; } } },
+    ));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == Code::OmitCreatedInvalidDocument),
+        "a components-only document is valid OpenAPI: {report:#?}"
+    );
+}
+
+#[test]
+fn omitting_the_last_root_collection_is_still_rejected() {
+    // The other half of the `anyOf`: strip the only surviving member and the document really is
+    // invalid, so `E020` must still fire.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses: { "204": { description: No Content } }
+"#,
+    );
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&omitting(
+        &spec,
+        &out,
+        spargen::omit! { pointers { "/paths"; } },
+    ));
+    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == Code::OmitCreatedInvalidDocument),
+        "{report:#?}"
+    );
+}
