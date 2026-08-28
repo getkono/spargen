@@ -122,7 +122,7 @@ metadata. See the concise
 Anything outside the documented surface is rejected or warned loudly, never silent; see the
 [support matrix](docs/support-matrix.md) for the exact boundary. Diagnostics carry file-level
 rather than line-precise spans for now. The pinned GitHub OpenAPI 3.1 description generates and its
-full emitted crate is compile-checked in CI; the remaining [corpus](docs/corpus.md) pins both
+full emitted crate is compile-checked in CI; the remaining [corpus](corpus/README.md) pins both
 generating and intentionally rejecting real-world cases.
 
 ## Documentation
@@ -132,7 +132,7 @@ The full documentation site is an [mdBook](https://rust-lang.github.io/mdBook/) 
 wired together with the [generator API](docs/generator-api.md), [OpenAPI 3.2 scope](docs/openapi-3.2.md),
 [support matrix](docs/support-matrix.md), [diagnostic index](docs/errors.md),
 [compatibility](docs/compatibility.md), [0.3 migration](docs/migration-0.3.md),
-[recipes](docs/recipes.md), [corpus](docs/corpus.md),
+[recipes](docs/recipes.md),
 [benchmarks](docs/benchmarks.md), and [testing](docs/testing.md) docs (included, not duplicated).
 Build it locally:
 
