@@ -439,6 +439,93 @@ mod tests {
         }
     }
 
+    /// Read every diagnostic code cited by a support document, paired with the 1-based index of
+    /// the table column it sits in (`1` = Supported, `2` = Warned, `3` = Rejected).
+    fn cited_codes(markdown: &str) -> Vec<(String, usize)> {
+        let mut cited = Vec::new();
+        for line in markdown.lines() {
+            if !line.starts_with("| ") {
+                continue;
+            }
+            // The leading `|` yields an empty first piece and the trailing one an empty last, so
+            // the data cells are everything between.
+            let cells: Vec<&str> = line.split('|').collect();
+            for (index, cell) in cells.iter().enumerate().skip(1) {
+                for token in cell.split('`') {
+                    let token = token.trim();
+                    let is_code = token.len() == 4
+                        && matches!(token.as_bytes()[0], b'E' | b'W')
+                        && token[1..].bytes().all(|byte| byte.is_ascii_digit());
+                    if is_code {
+                        cited.push((token.to_owned(), index));
+                    }
+                }
+            }
+        }
+        cited
+    }
+
+    /// `docs/errors.md` is machine-checked above; the two documents that describe *what spargen
+    /// does with a construct* were not, and drifted — a row claimed `prefixEncoding` was supported
+    /// while the code rejected it, and `E014` was described nowhere at all. A prose claim is not
+    /// checkable in general, but the code tokens in it are: every one must name a real code, every
+    /// declared code must be placed somewhere in the matrix, and a code must not be filed under a
+    /// column that disagrees with its own severity.
+    #[test]
+    fn the_support_documents_cite_the_codes_that_exist_where_they_belong() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+        let matrix_path = format!("{root}/docs/support-matrix.md");
+        let scope_path = format!("{root}/docs/openapi-3.2.md");
+        let (Ok(matrix), Ok(scope)) = (
+            std::fs::read_to_string(&matrix_path),
+            std::fs::read_to_string(&scope_path),
+        ) else {
+            eprintln!("skipping: {matrix_path} is not present");
+            return;
+        };
+
+        let matrix_cited = cited_codes(&matrix);
+        for (cited, _) in matrix_cited.iter().chain(cited_codes(&scope).iter()) {
+            assert!(
+                Code::from_str(cited).is_ok(),
+                "a support document cites `{cited}`, which is not a declared code"
+            );
+        }
+
+        // The matrix is the operational boundary: a construct spargen has an opinion about has a
+        // cell describing it. Without this, adding a code and forgetting the matrix is invisible.
+        for code in Code::all() {
+            assert!(
+                matrix_cited.iter().any(|(cited, _)| cited == code.as_str()),
+                "{} is declared but appears nowhere in docs/support-matrix.md",
+                code.as_str()
+            );
+        }
+
+        // The matrix columns are Area | Supported | Warned | Rejected, so a code's home column is
+        // 3 for a warning and 4 for a rejection. A code may *additionally* be named in the
+        // Supported cell's prose — several are, explaining the boundary they sit on — but it must
+        // appear in the column that matches its severity, or the table files it under an outcome
+        // the generator does not produce.
+        for code in Code::all() {
+            let home = if code.as_str().starts_with('W') { 3 } else { 4 };
+            let columns: Vec<usize> = matrix_cited
+                .iter()
+                .filter(|(cited, _)| cited == code.as_str())
+                .map(|(_, column)| *column)
+                .collect();
+            assert!(
+                columns.contains(&home),
+                "docs/support-matrix.md cites {} only in column(s) {:?}, but a {} belongs in \
+                 column {home} ({})",
+                code.as_str(),
+                columns,
+                if home == 3 { "warning" } else { "rejection" },
+                if home == 3 { "Warned" } else { "Rejected" }
+            );
+        }
+    }
+
     #[test]
     fn all_codes_round_trip_from_stable_strings() {
         for code in Code::all() {
