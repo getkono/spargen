@@ -4787,3 +4787,54 @@ paths:
     // The operation's own documentation is not displaced by it.
     assert!(code.contains("List them."), "{code}");
 }
+
+/// A Header Object and a Media Type Object reached by a relative-file `$ref` resolve through the
+/// input bundle, exactly as a Parameter or Response Object reference already did. Restricting these
+/// two to `#/components/...` aliases made an otherwise valid multi-file description an `E004`.
+#[test]
+fn relative_file_header_and_media_type_refs_resolve_like_parameters() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pet:
+    get:
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Request-Id: { $ref: 'shared.yaml#/RequestId' }
+          content:
+            application/json: { $ref: 'shared.yaml#/PetBody' }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("shared.yaml"),
+        r##"
+RequestId:
+  description: correlation id
+  schema: { type: string }
+PetBody:
+  schema:
+    type: object
+    properties:
+      id: { type: string }
+    required: [id]
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    let code = std::fs::read_to_string(&out).unwrap();
+    // The header became a typed accessor and the media type contributed the body type, so both
+    // references were genuinely followed rather than merely tolerated.
+    assert!(code.contains("x_request_id"), "{code}");
+    assert!(code.contains("pub id"), "{code}");
+}

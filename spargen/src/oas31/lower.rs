@@ -3193,14 +3193,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             .emit(self.diags);
                         return None;
                     }
-                    let target = reference
+                    let alias = reference
                         .reference
                         .strip_prefix("#/components/headers/")
-                        .and_then(|name| self.document.components.headers.get(name))
-                        .cloned();
-                    match target {
-                        Some(target) => current = target,
-                        None => {
+                        .map(|name| self.document.components.headers.get(name).cloned());
+                    match alias {
+                        Some(Some(target)) => current = target,
+                        Some(None) => {
                             Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
                                 .message(format!(
                                     "unresolved header reference `{}`",
@@ -3208,6 +3207,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 ))
                                 .emit(self.diags);
                             return None;
+                        }
+                        // Not a component alias: a multi-file description may reference a whole
+                        // file, which resolves through the input bundle exactly as a Parameter or
+                        // Response Object reference already does.
+                        None => {
+                            let from = reference
+                                .provenance
+                                .span
+                                .map(|span| span.file)
+                                .unwrap_or(crate::diag::FileId(0));
+                            return match self.resolver.resolve_component(
+                                &reference.reference,
+                                from,
+                                super::deserialize::parse_header_object,
+                                self.diags,
+                            ) {
+                                Some(resolved) => Some(resolved),
+                                None => {
+                                    Diagnostic::error(
+                                        Code::UnresolvedRef,
+                                        reference.provenance.clone(),
+                                    )
+                                    .message(format!(
+                                        "unresolved header reference `{}`",
+                                        reference.reference
+                                    ))
+                                    .emit(self.diags);
+                                    None
+                                }
+                            };
                         }
                     }
                 }
@@ -3430,13 +3459,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return None;
             }
             let Some(name) = reference.reference.strip_prefix("#/components/mediaTypes/") else {
-                Diagnostic::error(Code::UnresolvedRef, reference.provenance)
-                    .message(format!(
-                        "unsupported or unresolved Media Type Object reference `{}`",
-                        reference.reference
-                    ))
-                    .emit(self.diags);
-                return None;
+                // Not a component alias: a multi-file description may reference a whole file,
+                // which resolves through the input bundle exactly as a Parameter or Response
+                // Object reference already does.
+                let from = reference
+                    .provenance
+                    .span
+                    .map(|span| span.file)
+                    .unwrap_or(crate::diag::FileId(0));
+                let resolved = self.resolver.resolve_component(
+                    &reference.reference,
+                    from,
+                    |value, pointer, diags| {
+                        Some(super::deserialize::parse_media_type(value, pointer, diags))
+                    },
+                    self.diags,
+                );
+                match resolved {
+                    Some(resolved) => {
+                        current = resolved;
+                        continue;
+                    }
+                    None => {
+                        Diagnostic::error(Code::UnresolvedRef, reference.provenance)
+                            .message(format!(
+                                "unsupported or unresolved Media Type Object reference `{}`",
+                                reference.reference
+                            ))
+                            .emit(self.diags);
+                        return None;
+                    }
+                }
             };
             let Some(target) = self.document.components.media_types.get(name) else {
                 Diagnostic::error(Code::UnresolvedRef, reference.provenance)

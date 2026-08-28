@@ -587,7 +587,7 @@ fn parse_media_map(
         .unwrap_or_default()
 }
 
-fn parse_media_type(
+pub(super) fn parse_media_type(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
@@ -706,7 +706,7 @@ fn empty_encoding(provenance: Provenance) -> EncodingObject {
 }
 
 /// Parse one Header Object — the Parameter Object shape without `name`/`in`.
-fn parse_header_object(
+pub(super) fn parse_header_object(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
