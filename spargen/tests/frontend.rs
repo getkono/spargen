@@ -1317,6 +1317,99 @@ paths:
     assert!(code.contains("@id"), "{code}");
 }
 
+/// OpenAPI 3.2 says `attribute`/`wrapped` MUST NOT be present when `nodeType` is. The two
+/// spellings can disagree and the specification names no winner, so the document is rejected
+/// rather than resolved by a guess.
+#[test]
+fn e011_xml_deprecated_flag_beside_node_type_is_rejected() {
+    for (deprecated, node_type) in [("attribute: true", "element"), ("wrapped: true", "element")] {
+        let spec = format!(
+            r##"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /item:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: array
+                    items: {{ type: string }}
+                    xml: {{ nodeType: {node_type}, {deprecated} }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome,
+                Outcome::Rejected,
+                "{deprecated}: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::InvalidInput),
+                "{deprecated}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The specification enumerates exactly five `nodeType` values, and the document schema does not
+/// validate Schema Objects, so nothing else catches an unknown one. It must take a disposition
+/// rather than being ignored — `E009` on a type actually serialized as XML.
+#[test]
+fn e009_unknown_xml_node_type_is_dispositioned_not_ignored() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /item:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, xml: { nodeType: fragment } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+/// The same unknown hint on a type that is never serialized as XML genuinely has no effect, so it
+/// warns rather than rejecting — the existing `W006` path, now reached by unknown values too.
+#[test]
+fn w006_unknown_xml_node_type_on_a_never_xml_type_warns() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /item:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, xml: { nodeType: fragment } }
+"##;
+    let report = generate(spec);
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+}
+
 #[test]
 fn conditional_schema_keywords_warn_and_their_children_are_audited() {
     let warned = r##"

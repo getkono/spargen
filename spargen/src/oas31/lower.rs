@@ -1301,7 +1301,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if hints.wrapped {
             unsupported.push("wrapped".to_owned());
         }
-        if matches!(hints.node_type.as_deref(), Some("text" | "cdata" | "none")) {
+        // `element` and `attribute` are the two node types spargen's XML representation can
+        // express. Every other value — the specification's `text`/`cdata`/`none`, and anything
+        // outside the enumeration, which the document schema does not validate because it does not
+        // validate Schema Objects — changes the XML on the wire, so it takes a disposition rather
+        // than being ignored.
+        if matches!(hints.node_type.as_deref(), Some(node_type)
+            if !matches!(node_type, "element" | "attribute"))
+        {
             unsupported.push("nodeType".to_owned());
         }
         XmlField {

@@ -1129,7 +1129,9 @@ fn parse_schema_or(
         content_schema: map.get("contentSchema").and_then(|value| {
             parse_schema_or(value, &pointer.push("contentSchema"), diags).map(Box::new)
         }),
-        xml: map.get("xml").and_then(parse_xml),
+        xml: map
+            .get("xml")
+            .and_then(|value| parse_xml(value, &pointer.push("xml"), diags)),
         validation: parse_validation(map),
         deprecated: map
             .get("deprecated")
@@ -1197,8 +1199,34 @@ fn parse_discriminator(
 /// Parse the OpenAPI `xml` object. Malformed shapes (a non-object `xml`) yield `None`; individual
 /// missing keys default. Lowering later warns (`W006`) on the unsupported namespace/prefix/wrapped
 /// hints, so they are captured here rather than dropped at parse time.
-fn parse_xml(value: &SpannedValue) -> Option<XmlHints> {
+///
+/// OpenAPI 3.2 deprecates `attribute`/`wrapped` in favour of `nodeType` and states that if
+/// `nodeType` is present, neither field MUST be present. The two spellings can disagree
+/// (`nodeType: element` beside `attribute: true`), and the specification defines no winner, so a
+/// document that carries both is rejected rather than resolved by a guess.
+fn parse_xml(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<XmlHints> {
     let _ = value.as_object()?;
+    if value.get("nodeType").is_some() {
+        for deprecated in ["attribute", "wrapped"] {
+            if let Some(sibling) = value.get(deprecated) {
+                Diagnostic::error(
+                    Code::InvalidInput,
+                    provenance(&pointer.push(deprecated), sibling),
+                )
+                .message(format!(
+                    "xml.{deprecated} must not be present beside xml.nodeType"
+                ))
+                .remedy(format!(
+                    "drop `{deprecated}` and express it through `nodeType` alone"
+                ))
+                .emit(diags);
+            }
+        }
+    }
     Some(XmlHints {
         name: value.get("name").and_then(string).map(str::to_owned),
         attribute: value.get("nodeType").and_then(string) == Some("attribute")
