@@ -11,8 +11,10 @@
 //!   [`OmitRule::Component`] path/name — and an [`OmitRule::Pointer`] string — that contains a glob
 //!   metacharacter (`*`, `**`, or `?`) is matched as a glob over the construct's path/name (or the
 //!   whole pointer string). A glob rule removes **every** matching construct (bulk); a rule with no
-//!   metacharacter is an exact rule and behaves exactly as before. See [`glob_match`] for the
-//!   semantics.
+//!   metacharacter is an exact rule and behaves exactly as before. A metacharacter is escapable
+//!   with a backslash (`\*`, `\?`), because a URI path may legitimately contain one; rules that
+//!   auto-carve builds from literal document text are escaped for exactly that reason. See
+//!   [`glob_match`] for the semantics.
 //! * **Auto-carve.** [`carve_rules`] maps error diagnostics to the smallest enclosing *omittable*
 //!   construct, so the facade can iteratively omit the unsupported islands of a spec and generate
 //!   the rest. The fixpoint driver lives in the facade (it must re-run the pipeline); this module
@@ -135,7 +137,7 @@ impl Omit {
             }
             OmitRule::Path { path } => RuleMatch::Exact {
                 file: root,
-                pointer: JsonPointer::root().push("paths").push(path),
+                pointer: JsonPointer::root().push("paths").push(&unescape_glob(path)),
             },
             OmitRule::Operation { method, path } if has_glob_meta(path) => {
                 let paths = bundle.root().get("paths");
@@ -161,7 +163,7 @@ impl Omit {
                 file: root,
                 pointer: JsonPointer::root()
                     .push("paths")
-                    .push(path)
+                    .push(&unescape_glob(path))
                     .push(method.as_oas_key()),
             },
             OmitRule::Component { kind, name } if has_glob_meta(name) => {
@@ -184,7 +186,7 @@ impl Omit {
                 pointer: JsonPointer::root()
                     .push("components")
                     .push(kind.as_oas_key())
-                    .push(name),
+                    .push(&unescape_glob(name)),
             },
             OmitRule::Pointer { file, pointer } => {
                 if pointer.is_empty() {
@@ -219,7 +221,7 @@ impl Omit {
                 } else {
                     RuleMatch::Exact {
                         file: file_id,
-                        pointer: JsonPointer::from(pointer.to_string()),
+                        pointer: JsonPointer::from(unescape_glob(pointer)),
                     }
                 }
             }
@@ -303,10 +305,60 @@ fn last_segment_index(pointer: &JsonPointer) -> Option<usize> {
     pointer.as_str().rsplit('/').next()?.parse::<usize>().ok()
 }
 
-/// Whether `pattern` contains a glob metacharacter (`*` or `?`) and should be matched as a glob
-/// rather than compared exactly.
+/// Whether `pattern` contains an *unescaped* glob metacharacter (`*` or `?`) and should be matched
+/// as a glob rather than compared exactly.
+///
+/// A metacharacter is escapable with a backslash, because a URI path may legitimately contain `*`
+/// (RFC 3986 lists it as a sub-delimiter) and without an escape such a path is unaddressable: an
+/// exact rule for it cannot be written, and auto-carve would silently widen into a bulk rule.
 fn has_glob_meta(pattern: &str) -> bool {
-    pattern.contains('*') || pattern.contains('?')
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' => {
+                chars.next();
+            }
+            '*' | '?' => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Resolve the escapes in a pattern with no unescaped metacharacter, so an exact rule compares
+/// against the literal text the author meant. `\*` → `*`, `\?` → `?`, `\\` → `\`; a backslash
+/// before anything else is kept, since it is an ordinary character in a URI path.
+fn unescape_glob(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let mut chars = pattern.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some(escaped @ ('*' | '?' | '\\')) => out.push(escaped),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+/// Escape every glob metacharacter in literal document text, so a rule built from it targets that
+/// one construct instead of being reinterpreted as a bulk pattern.
+fn escape_glob_meta(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if matches!(ch, '*' | '?' | '\\') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// One compiled glob token.
@@ -328,6 +380,11 @@ fn compile_glob(pattern: &str) -> Vec<GlobToken> {
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
+            // A backslash escapes the next character, so a literal `*`/`?` in a path stays literal.
+            '\\' if i + 1 < chars.len() => {
+                tokens.push(GlobToken::Lit(chars[i + 1]));
+                i += 2;
+            }
             '*' if i + 1 < chars.len() && chars[i + 1] == '*' => {
                 tokens.push(GlobToken::DoubleStar);
                 i += 2;
@@ -575,11 +632,15 @@ pub(crate) fn carve_rules(diagnostics: &[Diagnostic]) -> Vec<OmitRule> {
 }
 
 /// The smallest omittable construct enclosing `pointer`, or `None` if none is (root / unmodelled).
+///
+/// Every path and component name here is literal text lifted out of the document, so its glob
+/// metacharacters are escaped: a path such as `/files/*` is a legal URI path, and an unescaped rule
+/// for it would be reinterpreted as a bulk pattern and carve away its supported siblings too.
 fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
     let tokens = pointer_tokens(pointer);
     match tokens.first()?.as_str() {
         "paths" => {
-            let path = tokens.get(1)?.clone();
+            let path = escape_glob_meta(tokens.get(1)?);
             // An OpenAPI 3.2 `additionalOperations` method is not a Path Item fixed field, so no
             // `OmitMethod` names it. Carving it as a pointer keeps the blast radius at the one
             // operation; falling through to the path rule would take its supported siblings too.
@@ -593,7 +654,7 @@ fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
                     format!(
                         "/paths/{}/additionalOperations/{}",
                         escape_pointer_token(&path),
-                        escape_pointer_token(method)
+                        escape_glob_meta(&escape_pointer_token(method))
                     ),
                 ));
             }
@@ -607,7 +668,7 @@ fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
         }
         "components" => {
             let kind = tokens.get(1)?.parse::<ComponentKind>().ok()?;
-            Some(OmitRule::component(kind, tokens.get(2)?.clone()))
+            Some(OmitRule::component(kind, escape_glob_meta(tokens.get(2)?)))
         }
         _ => None,
     }

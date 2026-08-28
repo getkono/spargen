@@ -669,3 +669,96 @@ fn every_omit_spelling_reaches_the_same_rule() {
         );
     }
 }
+
+// --- (c) Literal glob metacharacters in document text -------------------------------------------
+
+/// A path containing `*` is a legal URI path (RFC 3986 lists `*` as a sub-delimiter). Auto-carve
+/// builds its rules from literal document text, so before metacharacters were escaped a rejection
+/// under `/files/*` produced a *bulk* rule that also carved away every sibling `/files/<x>` — the
+/// carve removed operations that generate perfectly well.
+#[test]
+fn carve_of_a_path_containing_a_metacharacter_does_not_take_its_siblings() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let spec = write_spec(
+        dir,
+        "openapi.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: Files, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /files/*:
+    get:
+      operationId: getGlobFile
+      responses:
+        "200":
+          description: OK
+          content:
+            application/vnd.unsupported: { schema: { type: string } }
+  /files/keep:
+    get: { operationId: getKeptFile, responses: { "204": { description: OK } } }
+  /files/alsokeep:
+    get: { operationId: getOtherFile, responses: { "204": { description: OK } } }
+"#,
+    );
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+
+    let code = std::fs::read_to_string(&out).unwrap();
+    // The one unsupported operation is carved...
+    assert!(!code.contains("get_glob_file"), "{code}");
+    // ...and both siblings that merely share its first path segment survive.
+    assert!(code.contains("get_kept_file"), "{code}");
+    assert!(code.contains("get_other_file"), "{code}");
+    assert_eq!(w009_count(&report), 1, "{report:#?}");
+}
+
+/// The same escape makes such a path addressable by hand: `\*` is a literal `*`, so an exact rule
+/// can name it, while an unescaped `*` keeps its bulk meaning.
+#[test]
+fn an_escaped_metacharacter_is_an_exact_rule_and_an_unescaped_one_is_a_glob() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let spec = write_spec(
+        dir,
+        "openapi.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: Files, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /files/*:
+    get: { operationId: getGlobFile, responses: { "204": { description: OK } } }
+  /files/keep:
+    get: { operationId: getKeptFile, responses: { "204": { description: OK } } }
+"#,
+    );
+
+    let exact = dir.join("exact.rs");
+    let report = spargen::generate(&omitting(
+        &spec,
+        &exact,
+        spargen::Omit {
+            rules: vec![spargen::OmitRule::path(r"/files/\*")],
+        },
+    ));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    let code = std::fs::read_to_string(&exact).unwrap();
+    assert!(!code.contains("get_glob_file"), "{code}");
+    assert!(code.contains("get_kept_file"), "{code}");
+
+    let bulk = dir.join("bulk.rs");
+    let report = spargen::generate(&omitting(
+        &spec,
+        &bulk,
+        spargen::Omit {
+            rules: vec![spargen::OmitRule::path("/files/*")],
+        },
+    ));
+    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    let code = std::fs::read_to_string(&bulk).unwrap();
+    assert!(!code.contains("get_glob_file"), "{code}");
+    assert!(!code.contains("get_kept_file"), "{code}");
+}
