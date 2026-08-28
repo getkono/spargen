@@ -67,7 +67,10 @@ pub fn generate(
     // per-operation response enums rather than degraded (the retired W003).
     let _ = diags;
     let uses_streams = api.uses_streams();
-    let support = emit::emit_support(api.uses_xml(), uses_streams);
+    // The date mapping is off when the `time` knob is, in which case those primitives stay `String`
+    // and the newtypes would be dead weight.
+    let uses_time = options.feature_time && api.uses_time();
+    let support = emit::emit_support(api.uses_xml(), uses_streams, uses_time);
     let models = emit::emit_models(api, names, options);
     let client = emit::emit_client(api, names, options);
     // The synchronous facade is always emitted, gated on the user-opt-in `blocking` feature; a
@@ -83,6 +86,12 @@ pub fn generate(
             };
         }
     });
+    let datetime_exports = uses_time.then(|| {
+        quote! {
+            #[allow(unused_imports)]
+            pub use support::{Date, DateTime};
+        }
+    });
     let tokens = quote! {
         #[allow(unused_imports)]
         pub use support::{
@@ -93,6 +102,7 @@ pub fn generate(
         };
 
         #stream_exports
+        #datetime_exports
 
         #support
         #models

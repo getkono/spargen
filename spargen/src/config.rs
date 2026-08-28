@@ -97,8 +97,9 @@ impl Spec {
         self
     }
 
-    /// Map `format: date-time`/`date` to `time::OffsetDateTime`/`time::Date` (default `true`).
-    /// Turning this off falls back to `String` and drops `time` from the required dependencies.
+    /// Map `format: date-time`/`date` to the embedded RFC 3339 `DateTime`/`Date` newtypes over
+    /// `time::OffsetDateTime`/`time::Date` (default `true`). Turning this off falls back to `String`
+    /// and drops `time` from the required dependencies.
     pub fn time(mut self, enabled: bool) -> Self {
         self.time = enabled;
         self

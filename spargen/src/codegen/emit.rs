@@ -19,12 +19,18 @@ pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) ->
         .types
         .iter()
         .map(|(id, def)| emit_type_def(id, def, api, names, options));
+    // The RFC 3339 newtypes live beside `types`, so bring them into scope under the same bare names
+    // `prim_tokens` emits; at the generated root the prelude re-export supplies them instead.
+    let datetime_import = (options.feature_time && api.uses_time()).then(|| {
+        quote! { use super::{Date, DateTime}; }
+    });
     quote! {
         #[forbid(unsafe_code)]
         #[allow(dead_code, unused_imports)]
         pub mod types {
             use serde::{Deserialize, Serialize};
             use std::collections::BTreeMap;
+            #datetime_import
 
             #(#items)*
         }
@@ -2099,8 +2105,9 @@ pub(crate) fn emit_error_enum(
 /// Emit the private `support` module by embedding the freestanding runtime source verbatim, under
 /// `#![forbid(unsafe_code)]`. When `uses_xml` is set (the API has an `application/xml` / `text/xml`
 /// body), the feature-gated XML codec module is embedded and its helpers re-exported; otherwise it
-/// is omitted entirely, so a non-XML output carries no `quick-xml` reference.
-pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
+/// is omitted entirely, so a non-XML output carries no `quick-xml` reference. `uses_time` embeds
+/// the RFC 3339 `DateTime`/`Date` newtypes on the same terms.
+pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) -> TokenStream {
     let embed = |file: &crate::support::SupportFile| {
         let stem = file.name.trim_end_matches(".rs");
         let ident = format_ident!("{}", stem);
@@ -2137,6 +2144,12 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
     let xml_reexport = uses_xml.then(|| {
         quote! { pub use xml::{classify_error_xml, decode_success_xml, to_xml}; }
     });
+    // The RFC 3339 newtypes are embedded only when a date-typed primitive survives lowering with the
+    // `time` mapping enabled; only then does the audit require `time` of the consumer.
+    let datetime_module = uses_time.then(|| embed(&crate::support::datetime_runtime_file()));
+    let datetime_reexport = uses_time.then(|| {
+        quote! { pub use datetime::{Date, DateTime}; }
+    });
     // The blocking facade (`BlockingRuntime`) is embedded unconditionally but gated on the
     // `blocking` feature AND `not(target_arch = "wasm32")` at the module level: the tokio-dependent
     // code compiles only when a consumer opts in on a native target, so a default build carries no
@@ -2162,6 +2175,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
             #(#modules)*
             #stream_module
             #xml_module
+            #datetime_module
             #blocking_module
 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
@@ -2178,6 +2192,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool) -> TokenStream {
             pub use wasm::{MaybeSend, MaybeSync};
             #stream_reexport
             #xml_reexport
+            #datetime_reexport
             #blocking_reexport
         }
     }
@@ -2863,8 +2878,11 @@ fn prim_tokens(prim: Prim, options: &CodegenOptions) -> TokenStream {
         Prim::I64 => quote! { i64 },
         Prim::F64 => quote! { f64 },
         Prim::Uuid if options.feature_uuid => quote! { uuid::Uuid },
-        Prim::DateTime if options.feature_time => quote! { time::OffsetDateTime },
-        Prim::Date if options.feature_time => quote! { time::Date },
+        // The embedded newtypes, not `time`'s own types: OpenAPI fixes these to RFC 3339, which is
+        // not what `time`'s `Serialize`/`Display` produce. Named bare so one spelling works at the
+        // generated root (via the prelude re-export) and inside `types` (via its `use super::`).
+        Prim::DateTime if options.feature_time => quote! { DateTime },
+        Prim::Date if options.feature_time => quote! { Date },
         Prim::Uuid | Prim::DateTime | Prim::Date => quote! { String },
     }
 }

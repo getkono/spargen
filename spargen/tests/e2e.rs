@@ -2976,3 +2976,165 @@ fn preview_of_rejected_spec_has_no_files() {
         .iter()
         .any(|d| d.code == Code::UnsupportedOpenApiVersion));
 }
+
+/// `format: date-time` and `format: date` must reach the wire as RFC 3339 strings.
+///
+/// This is the test whose absence let a wire defect ship: every other date fixture only
+/// *compile*-checks the mapping, and `time`'s own serde representation compiles perfectly well
+/// while emitting a nine-element integer sequence (without its `serde-human-readable` feature) or a
+/// space-separated `2023-11-14 22:13:20.0 +00:00:00` (with it). Neither is RFC 3339, which is what
+/// JSON Schema 2020-12 — and therefore OpenAPI 3.1/3.2 — defines these formats to be. So the
+/// assertions here are on the bytes, in a request body, a response body, and two query parameters.
+#[test]
+fn date_and_date_time_reach_the_wire_as_rfc3339() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, DATE_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "dates_client");
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    // The model resolves to the embedded newtypes, not to `time`'s own types — naming those in a
+    // model is exactly the defect, since they carry the non-RFC-3339 serde implementation. (The
+    // newtype *definitions* name them, which is why this checks the aliases rather than the file.)
+    assert!(
+        generated.contains("pub type Eventat = DateTime;"),
+        "a date-time property must resolve to the RFC 3339 newtype: {generated}"
+    );
+    assert!(
+        generated.contains("pub type Eventday = Date;"),
+        "a date property must resolve to the RFC 3339 newtype: {generated}"
+    );
+    assert!(
+        !generated.contains("pub type Eventat = time::")
+            && !generated.contains("pub type Eventday = time::"),
+        "no model alias may name time's own serde types"
+    );
+    assert!(
+        generated.contains("pub struct DateTime(pub time::OffsetDateTime)"),
+        "the RFC 3339 newtype module must be embedded for a spec that uses dates"
+    );
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(out.join("tests/dates.rs"), DATE_WIRE_TEST).unwrap();
+
+    let status = Command::new("cargo")
+        .args(["test", "--features", "blocking", "--test", "dates"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(status.success(), "the date-time wire round-trip must pass");
+}
+
+/// A spec that puts both date formats in a request body, a response body, and query parameters —
+/// the four positions a date value can reach the wire from.
+const DATE_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: Dates, version: 1.0.0 }
+paths:
+  /events:
+    post:
+      operationId: createEvent
+      parameters:
+        - name: since
+          in: query
+          schema: { type: string, format: date-time }
+        - name: on
+          in: query
+          schema: { type: string, format: date }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Event" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Event" }
+components:
+  schemas:
+    Event:
+      type: object
+      required: [at, day]
+      properties:
+        at: { type: string, format: date-time }
+        day: { type: string, format: date }
+"##;
+
+const DATE_WIRE_TEST: &str = r##"#![cfg(feature = "blocking")]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+#[test]
+fn dates_are_rfc3339_on_the_wire_in_both_directions() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+        let request_line = request.lines().next().unwrap();
+        let body = request.split("\r\n\r\n").nth(1).unwrap_or("");
+
+        // Query parameters: RFC 3339 text, percent-encoded as query data (`:` -> `%3A`). A
+        // sequence-serialized datetime could not appear here at all.
+        assert!(
+            request_line.contains("since=2023-11-14T22%3A13%3A20Z"),
+            "date-time query parameter must be RFC 3339: {request_line}"
+        );
+        assert!(
+            request_line.contains("on=2023-11-14"),
+            "date query parameter must be a full-date: {request_line}"
+        );
+
+        // Request body: JSON strings, not the nine- and two-element integer arrays `time`'s own
+        // `Serialize` produces without `serde-human-readable`.
+        assert_eq!(
+            body, r#"{"at":"2023-11-14T22:13:20Z","day":"2023-11-14"}"#,
+            "date fields must serialize as RFC 3339 strings: {body}"
+        );
+
+        let payload = r#"{"at":"2024-02-29T01:02:03.5+05:30","day":"2024-02-29"}"#;
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            payload.len(),
+            payload
+        );
+        stream.write_all(response.as_bytes()).unwrap();
+        stream.flush().unwrap();
+    });
+
+    let base = format!("http://{addr}");
+    let client = dates_client::BlockingClient::new(&base).unwrap();
+
+    let at = dates_client::DateTime(
+        time::OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap(),
+    );
+    let day = dates_client::Date(
+        time::Date::from_calendar_date(2023, time::Month::November, 14).unwrap(),
+    );
+    let event = dates_client::types::Event { at, day };
+
+    let params = dates_client::CreateEventParams::default()
+        .since(at)
+        .on(day);
+    let response = client
+        .create_event(Some(params), &event)
+        .expect("create_event round-trips");
+
+    // Decoding: an offset and a subsecond survive the round trip as the server wrote them.
+    let decoded = response.into_inner();
+    assert_eq!(decoded.day.to_string(), "2024-02-29");
+    assert_eq!(decoded.at.to_string(), "2024-02-29T01:02:03.5+05:30");
+    // The newtype is transparent: `time`'s API is one deref away.
+    assert_eq!(decoded.at.year(), 2024);
+
+    server.join().unwrap();
+}
+"##;

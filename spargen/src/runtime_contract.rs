@@ -99,13 +99,7 @@ impl RuntimeRequirements {
                 && api.types.iter().any(|(_, definition)| {
                     matches!(definition.kind, TypeKind::Primitive(Prim::Uuid))
                 }),
-            time: spec.time
-                && api.types.iter().any(|(_, definition)| {
-                    matches!(
-                        definition.kind,
-                        TypeKind::Primitive(Prim::Date | Prim::DateTime)
-                    )
-                }),
+            time: spec.time && api.uses_time(),
         }
     }
 }
@@ -318,7 +312,11 @@ fn requirement_table(requirements: &RuntimeRequirements) -> Vec<Requirement> {
         push(UUID, &["serde"], false);
     }
     if requirements.time {
-        push(TIME, &["serde", "formatting", "parsing"], false);
+        // NOT `serde`: the embedded `DateTime`/`Date` newtypes write RFC 3339 themselves, because
+        // `time`'s own serde representation is a nine-integer sequence without
+        // `serde-human-readable` and a space-separated form with it — neither is what OpenAPI's
+        // `format: date-time` means. `formatting`/`parsing` are what the RFC 3339 codec needs.
+        push(TIME, &["formatting", "parsing"], false);
     }
     // The blocking client is opt-in: it is required only from a consumer that declares its own
     // `blocking` Cargo feature, and then only off wasm, where no thread-blocking runtime exists.

@@ -13,16 +13,21 @@ publish = false
 # surface is the audited set used by generated clients — no spargen crate, and nothing
 # project-specific. The generator embeds stream.rs and requires futures-core only for sequential
 # APIs. Generated models may additionally reference the separately audited
-# `uuid` / `time` dependencies; this crate holds only the embedded runtime, not those models.
+# `uuid` dependency; this crate holds only the embedded runtime, not those models. `time` is the
+# exception: the RFC 3339 newtypes a model uses for `format: date-time`/`date` are runtime code, so
+# they live here behind the `time` feature.
 # The `xml` feature adds an XML request/response body codec backed by `quick-xml`. It is OFF by
 # default; a generated client turns it on only when its spec uses an `application/xml` / `text/xml`
 # body.
 # The `blocking` feature adds a synchronous client facade backed by a current-thread `tokio`
 # runtime. It is OFF by default (tokio is already in the graph transitively via reqwest, but stays
 # an *optional direct* dependency here); a consumer opts in to get the `BlockingClient`.
+# The `time` feature adds the RFC 3339 `DateTime`/`Date` newtypes backed by `time`. It is OFF by
+# default; the generator embeds that module only when the API has a `format: date-time`/`date`.
 [features]
 xml = ["dep:quick-xml"]
 blocking = ["dep:tokio"]
+time = ["dep:time"]
 
 [dependencies]
 reqwest = { workspace = true, features = ["stream"] }
@@ -36,6 +41,10 @@ quick-xml = { workspace = true, features = ["serialize"], optional = true }
 # feature is needed directly (reqwest brings tokio's net/time drivers, which feature unification
 # folds in so `enable_all()` wires up a working reactor).
 tokio = { workspace = true, features = ["rt"], optional = true }
+# Only `formatting`/`parsing` are needed: the RFC 3339 rendering is hand-written in `datetime.rs`
+# rather than delegated to `time/serde`, whose representation is not RFC 3339 with or without its
+# `serde-human-readable` feature. Keeping `serde` off is what makes that impossible to regress into.
+time = { workspace = true, features = ["formatting", "parsing"], optional = true }
 
 # Test-only: synthesize in-memory `reqwest::Response`s (via `http::Response`) to exercise the body
 # readers with a poll-once noop waker — no async runtime, and never embedded (the test module is

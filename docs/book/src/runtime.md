@@ -134,3 +134,21 @@ mappings in generated code. Call `Spec::uuid(false)` / `Spec::time(false)` (or u
 the macro's `no_uuid` / `no_time`, or `uuid = false` / `time = false` in `spargen.toml`) to fall
 back to `String`. The corresponding dependency is
 required only when that mapping is enabled and actually occurs in the compiled API.
+
+Dates are emitted as the embedded `DateTime` and `Date` newtypes rather than `time`'s own types,
+because JSON Schema 2020-12 — and so OpenAPI 3.1/3.2 — defines these formats as RFC 3339, which is
+not what `time`'s `Serialize` or `Display` produce: without its `serde-human-readable` feature an
+`OffsetDateTime` serializes as a nine-element integer sequence, and with it as
+`2023-11-14 22:13:20.0 +00:00:00` — a space separator where RFC 3339 requires `T`. The newtypes
+carry a hand-written RFC 3339 codec, so only `time`'s `formatting` and `parsing` features are
+needed, never `serde`.
+
+They are transparent wrappers: `DateTime(pub time::OffsetDateTime)` and `Date(pub time::Date)`,
+both `Deref`ing to the inner type and converting with `From` in both directions, so the whole `time`
+API stays one deref away.
+
+```rust
+let at = DateTime(time::OffsetDateTime::now_utc());
+let year = at.year();                  // through `Deref`
+let inner: time::OffsetDateTime = at.into();
+```

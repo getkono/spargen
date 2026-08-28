@@ -240,9 +240,11 @@ pub enum Prim {
     F64,
     /// `format: uuid` → `uuid::Uuid` (feature `uuid`, else `String`).
     Uuid,
-    /// `format: date-time` → `time::OffsetDateTime` (feature `time`, else `String`).
+    /// `format: date-time` → the embedded RFC 3339 `DateTime` newtype over `time::OffsetDateTime`
+    /// (feature `time`, else `String`).
     DateTime,
-    /// `format: date` → `time::Date` (feature `time`, else `String`).
+    /// `format: date` → the embedded RFC 3339 `Date` newtype over `time::Date` (feature `time`,
+    /// else `String`).
     Date,
 }
 

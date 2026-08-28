@@ -66,6 +66,21 @@ impl Api {
         })
     }
 
+    /// Whether the type graph contains a `format: date-time` or `format: date` primitive. Drives
+    /// the conditional embedding of the RFC 3339 `DateTime`/`Date` runtime newtypes and the `time`
+    /// requirement.
+    ///
+    /// This is a property of the API alone; whether those primitives actually *become* the newtypes
+    /// additionally depends on the `time` config knob, which callers apply themselves.
+    pub fn uses_time(&self) -> bool {
+        self.types.iter().any(|(_, definition)| {
+            matches!(
+                definition.kind,
+                TypeKind::Primitive(Prim::Date | Prim::DateTime)
+            )
+        })
+    }
+
     /// Whether any operation returns a sequential response as a typed stream. Drives conditional
     /// stream-runtime embedding and the `futures-core` / reqwest `stream` requirements.
     pub fn uses_streams(&self) -> bool {
