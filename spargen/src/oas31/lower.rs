@@ -4163,6 +4163,26 @@ fn choose_media<'a, T>(
         }
     }
     if let Some((_, _, media, value)) = selected {
+        // A generated method sends and decodes exactly one media type, so the alternatives are not
+        // generated. That narrows the documented surface — a server that also accepts XML will only
+        // ever be sent JSON — so it is reported rather than dropped in silence.
+        let ignored: Vec<&str> = content
+            .keys()
+            .map(String::as_str)
+            .filter(|candidate| *candidate != media)
+            .collect();
+        if !ignored.is_empty() {
+            Diagnostic::warning(Code::AlternativeMediaIgnored, provenance.clone())
+                .message(format!(
+                    "`{media}` is generated; the alternative media type(s) `{}` are not",
+                    ignored.join("`, `")
+                ))
+                .remedy(
+                    "remove the alternatives, or omit this API segment with spargen::omit! and \
+                     hand-write the call",
+                )
+                .emit(diags);
+        }
         return Some((media, value));
     }
     let (media, _) = content.first()?;

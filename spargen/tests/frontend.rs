@@ -4520,3 +4520,58 @@ paths:
         "the accessor must be a list of per-line values: {code}"
     );
 }
+
+#[test]
+fn w014_alternative_media_type_is_not_generated() {
+    // A generated method sends and decodes exactly one media type, so a body offering both JSON and
+    // XML narrows to JSON. That is a real reduction of the documented surface and used to happen
+    // with no diagnostic at all — the one silent disposition left in the media path.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: string }
+          application/xml:
+            schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_single_media_type_draws_no_alternative_warning() {
+    // The warning must fire only when something is actually dropped.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: string }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}

@@ -69,6 +69,9 @@ pub enum Code {
     XmlHintIgnored,
     /// OpenAPI 3.2 `itemSchema` appeared on non-sequential media, where it has no wire meaning.
     Oas32ConstructIgnored,
+    /// A body or response offered several media types; one was generated and the alternatives were
+    /// not (matrix: Media → W).
+    AlternativeMediaIgnored,
     /// Schema composition nests deeper than spargen will lower (a very long `$ref` chain or a
     /// pathologically nested inline schema), so lowering is stopped before it could exhaust the
     /// stack. Rejected rather than risk a crash on adversarial or machine-generated input.
@@ -123,6 +126,7 @@ impl Code {
             Code::SchemaDefaultNotApplied => "W005",
             Code::XmlHintIgnored => "W006",
             Code::Oas32ConstructIgnored => "W010",
+            Code::AlternativeMediaIgnored => "W014",
             Code::SchemaNestingTooDeep => "E014",
             Code::RuntimeDependencyContract => "E023",
             Code::SpecUndefinedBehavior => "E016",
@@ -169,6 +173,7 @@ impl Code {
             Code::SchemaDefaultNotApplied => "schema default not applied",
             Code::XmlHintIgnored => "unsupported XML hint ignored",
             Code::Oas32ConstructIgnored => "non-sequential itemSchema ignored",
+            Code::AlternativeMediaIgnored => "alternative media type not generated",
             Code::SchemaNestingTooDeep => "schema nesting is too deep to lower",
             Code::RuntimeDependencyContract => "invalid generated-runtime dependency contract",
             Code::SpecUndefinedBehavior => "specification-undefined construct",
@@ -249,6 +254,9 @@ impl Code {
             Code::Oas32ConstructIgnored => {
                 "OpenAPI 3.2 `itemSchema` describes one item of sequential media. On a non-sequential media type it does not define any wire behavior, so spargen acknowledges and ignores it while continuing to use the complete-body `schema`. Move the item schema to sequential media such as `application/x-ndjson`, `application/json-seq`, or `text/event-stream`, or use only `schema` for ordinary media."
             }
+            Code::AlternativeMediaIgnored => {
+                "A request body or response offered more than one media type. A generated method sends and decodes exactly one, so spargen picks the one it can represent best — JSON first, then XML, multipart, form-urlencoded, octet-stream, text, and finally the sequential media — breaking ties by source order. The alternatives are not generated. That is a real narrowing of the documented API surface: a server willing to accept XML as well as JSON will only ever be sent JSON by this client. It is reported rather than left silent so the choice is visible, and it is a warning rather than an error because the selected media type is genuinely supported and the generated client is correct for it. To generate against a different one, remove the alternatives from the document, or omit this API segment with `spargen::omit!` and hand-write the call."
+            }
             Code::SchemaNestingTooDeep => {
                 "Lowering a schema into a Rust type is recursive: each nested object property, array item, `allOf`/`oneOf`/`anyOf` member, and `$ref` target descends one level. Spargen caps that descent so a pathologically deep composition — a very long chain of components that each `$ref` the next, or a deeply nested inline schema — is rejected with this error instead of being allowed to exhaust the call stack and abort the process. A genuine API surface never approaches the limit; hitting it almost always means the spec was machine-generated or adversarial. Flatten the offending chain, or omit that API segment with `spargen::omit!`."
             }
@@ -315,6 +323,7 @@ impl Code {
             Code::SchemaDefaultNotApplied,
             Code::XmlHintIgnored,
             Code::Oas32ConstructIgnored,
+            Code::AlternativeMediaIgnored,
             Code::SchemaNestingTooDeep,
             Code::RuntimeDependencyContract,
             Code::SpecUndefinedBehavior,

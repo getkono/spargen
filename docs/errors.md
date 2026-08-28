@@ -36,3 +36,4 @@ the library API.
 | `W011` | Warning | declared construct has no effect |
 | `W012` | Warning | runtime-dependency audit skipped |
 | `W013` | Warning | cargo integration degraded |
+| `W014` | Warning | alternative media type not generated |

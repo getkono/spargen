@@ -53,7 +53,7 @@ Fast corpus smoke checks:
 ```bash
 cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json  # reject:E001
 cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config <(printf '[features]\nbatch_cap = 100000\n')  # clean
-cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json  # expected: generates (W001 only)
+cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json  # expected: generates (W001, W014)
 cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
 cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json  # reject:E001 (3.0.0)
 cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json  # reject:E001 (3.0.1)
