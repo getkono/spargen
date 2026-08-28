@@ -107,6 +107,11 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
         #servers
 
         #client_docs
+        // `ClientCore` is `Debug + Clone` (its `reqwest::Client` and backend are handle types, and
+        // `Credential`'s `Debug` redacts every secret), so both derives are free here and both are
+        // routinely wanted: `Clone` to hand the client to several tasks without an `Arc`, `Debug`
+        // to put it in a struct that derives `Debug`.
+        #[derive(Debug, Clone)]
         #[allow(dead_code)]
         pub struct Client {
             core: support::ClientCore,
@@ -960,8 +965,11 @@ pub(crate) fn emit_blocking_client(
         mod __spargen_blocking {
             use super::*;
 
+            // `Debug` only: the owned current-thread `tokio::runtime::Runtime` is not `Clone`,
+            // and cloning a blocking client would have to mean sharing or duplicating a reactor.
             #[cfg(all(feature = "blocking", not(target_arch = "wasm32")))]
             #[doc = #doc]
+            #[derive(Debug)]
             #[allow(dead_code)]
             pub struct BlockingClient {
                 inner: Client,

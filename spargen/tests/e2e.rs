@@ -1259,6 +1259,23 @@ fn every_runtime_type_in_a_signature_is_nameable() {
 }
 
 #[test]
+fn the_client_is_debug_and_clone() {
+    fn assert_debug<T: std::fmt::Debug>() {}
+    fn assert_clone<T: Clone>() {}
+    assert_debug::<basic_client::Client>();
+    assert_clone::<basic_client::Client>();
+    // A `Debug` client must never render a registered secret.
+    let client = basic_client::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_credential(
+            "bearerAuth",
+            basic_client::Credential::Bearer(basic_client::SecretString::from("hunter2")),
+        );
+    let rendered = format!("{:?}", client.clone());
+    assert!(!rendered.contains("hunter2"), "secret leaked: {rendered}");
+}
+
+#[test]
 fn generated_error_types_are_std_errors() {
     // `GetMultiError` is the multi-status enum; `GetTextErrorError` the single-body newtype.
     assert_error::<basic_client::Error<basic_client::GetMultiError>>();
