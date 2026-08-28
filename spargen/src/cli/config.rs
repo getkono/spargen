@@ -111,7 +111,7 @@ fn parse_pointer_flag(value: &str) -> OmitRule {
 fn parse_method(method: &str) -> Result<OmitMethod, ConfigError> {
     method.parse().map_err(|parse_error| {
         error(format!(
-            "{parse_error}; expected one of get/put/post/delete/options/head/patch/trace"
+            "{parse_error}; expected one of get/put/post/delete/options/head/patch/trace/query"
         ))
     })
 }
@@ -122,7 +122,7 @@ fn parse_component_kind(kind: &str) -> Result<ComponentKind, ConfigError> {
     kind.parse().map_err(|parse_error| {
         error(format!(
             "{parse_error}; expected one of \
-             schemas/responses/parameters/request_bodies/headers/security_schemes"
+             schemas/responses/parameters/request_bodies/headers/security_schemes/path_items/media_types"
         ))
     })
 }

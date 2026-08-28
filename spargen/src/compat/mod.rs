@@ -851,6 +851,10 @@ macro_rules! omit {
         $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Trace, $path));
         $crate::omit!(@operations $omit; $($rest)*);
     }};
+    (@operations $omit:ident; query $path:literal; $($rest:tt)*) => {{
+        $omit.rules.push($crate::OmitRule::operation($crate::OmitMethod::Query, $path));
+        $crate::omit!(@operations $omit; $($rest)*);
+    }};
     (@paths $omit:ident;) => {};
     (@paths $omit:ident; $path:literal; $($rest:tt)*) => {{
         $omit.rules.push($crate::OmitRule::path($path));

@@ -629,3 +629,43 @@ paths:
         "{report:#?}"
     );
 }
+
+#[test]
+fn every_omit_spelling_reaches_the_same_rule() {
+    // The Rust macro, the CLI flags, `spargen.toml`, and the proc-macro must all name the same
+    // construct set. `query` and the two new component maps were each added to only some of them
+    // before this was pinned.
+    let macro_rules = spargen::omit! {
+        operations { query "/items"; get "/other"; }
+        components { path_items { "Unused"; } media_types { "UnusedMedia"; } }
+    };
+    let built = spargen::Omit {
+        rules: vec![
+            spargen::OmitRule::operation(spargen::OmitMethod::Query, "/items"),
+            spargen::OmitRule::operation(spargen::OmitMethod::Get, "/other"),
+            spargen::OmitRule::component(spargen::ComponentKind::PathItems, "Unused"),
+            spargen::OmitRule::component(spargen::ComponentKind::MediaTypes, "UnusedMedia"),
+        ],
+    };
+    assert_eq!(macro_rules, built);
+
+    // The CLI/`spargen.toml` spellings parse to the same variants.
+    assert_eq!(
+        "query".parse::<spargen::OmitMethod>().unwrap(),
+        spargen::OmitMethod::Query
+    );
+    for token in ["path_items", "pathItems", "path_item"] {
+        assert_eq!(
+            token.parse::<spargen::ComponentKind>().unwrap(),
+            spargen::ComponentKind::PathItems,
+            "{token}"
+        );
+    }
+    for token in ["media_types", "mediaTypes", "media_type"] {
+        assert_eq!(
+            token.parse::<spargen::ComponentKind>().unwrap(),
+            spargen::ComponentKind::MediaTypes,
+            "{token}"
+        );
+    }
+}
