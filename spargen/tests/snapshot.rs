@@ -44,10 +44,10 @@ fn config_for(spec: Utf8PathBuf, out: Utf8PathBuf, carve: bool) -> Build {
 /// histogram over its diagnostics. Codes are `E###`/`W###`, so severity is visible in the prefix.
 fn summary(report: &Report) -> String {
     let mut histogram: BTreeMap<&'static str, usize> = BTreeMap::new();
-    for diagnostic in &report.diagnostics {
+    for diagnostic in report.diagnostics() {
         *histogram.entry(diagnostic.code.as_str()).or_insert(0) += 1;
     }
-    let mut out = format!("outcome: {:?}\n", report.outcome);
+    let mut out = format!("outcome: {:?}\n", report.outcome());
     out.push_str("diagnostics (code: count):\n");
     if histogram.is_empty() {
         out.push_str("  (none)\n");
@@ -187,7 +187,7 @@ fn generate_corpus(rel: &str, carve: bool) -> (Report, Option<String>) {
     let temp = tempfile::tempdir().unwrap();
     let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
     let report = spargen::generate(&config_for(corpus_path(rel), out.clone(), carve));
-    let source = (report.outcome == Outcome::Generated)
+    let source = (report.outcome() == Outcome::Generated)
         .then(|| std::fs::read_to_string(&out).expect("generated module written"));
     (report, source)
 }
@@ -198,7 +198,7 @@ fn generate_corpus(rel: &str, carve: bool) -> (Report, Option<String>) {
 fn github_api_3_0_rejects() {
     // Manifest expectation: `reject:E001` — a 3.0 document is refused before lowering.
     let (report, _) = generate_corpus("github-api-3-0/api.github.com.json", false);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     insta::assert_snapshot!("github_api_3_0", summary(&report));
 }
 
@@ -207,7 +207,7 @@ fn github_api_3_1_generates() {
     // Manifest expectation: `generate`. Keep the large surface out of the snapshot; the dedicated
     // corpus gate compile-checks every emitted item, while this pins the complete diagnostic set.
     let (report, source) = generate_corpus("github-api-3-1/api.github.com.json", false);
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(source.is_some(), "GitHub generation must emit a module");
     insta::assert_snapshot!("github_api_3_1", summary(&report));
 }
@@ -216,7 +216,7 @@ fn github_api_3_1_generates() {
 fn openai_openapi_rejects() {
     // Manifest expectation: `reject`.
     let (report, _) = generate_corpus("openai-openapi/openapi.yaml", false);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     insta::assert_snapshot!("openai_openapi", summary(&report));
 }
 
@@ -227,7 +227,7 @@ fn ollama_generates() {
     // Manifest expectation: `generate` (its disjoint oneOf unions lower via custom deserialize;
     // one W001 for a validation-only keyword).
     let (report, source) = generate_corpus("ollama/openapi.yaml", false);
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     insta::assert_snapshot!("ollama", summary(&report));
     let source = source.expect("ollama generates a module");
     insta::assert_snapshot!("ollama_surface", api_surface(&source));
@@ -237,7 +237,7 @@ fn ollama_generates() {
 fn openapi_boilerplate_generates() {
     // Manifest expectation: `generate` (a template document — components/types only, no operations).
     let (report, source) = generate_corpus("openapi-boilerplate/src/openapi.yaml", false);
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     insta::assert_snapshot!("openapi_boilerplate", summary(&report));
     let source = source.expect("openapi-boilerplate generates a module");
     insta::assert_snapshot!("openapi_boilerplate_surface", api_surface(&source));

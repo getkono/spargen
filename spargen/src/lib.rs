@@ -106,15 +106,42 @@ impl std::fmt::Display for Outcome {
 }
 
 /// The result of a pipeline run: the collected diagnostics plus the outcome.
+///
+/// Fields are private and read through accessors, matching [`Spec`], [`Build`], [`Diagnostic`],
+/// and [`DiffRejection`]. That is what let [`Self::truncated`] be added without a second breaking
+/// change the next time the shape grows.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Report {
     /// Every diagnostic emitted during the run (batch reporting).
-    pub diagnostics: Vec<Diagnostic>,
+    diagnostics: Vec<Diagnostic>,
     /// What happened.
-    pub outcome: Outcome,
+    outcome: Outcome,
+    /// Whether the run hit `batch_cap` and dropped diagnostics past it.
+    truncated: bool,
 }
 
 impl Report {
+    /// Every diagnostic emitted during the run, in emission order.
+    ///
+    /// This is the whole list only when [`Self::truncated`] is `false`.
+    pub fn diagnostics(&self) -> &[Diagnostic] {
+        &self.diagnostics
+    }
+
+    /// What happened.
+    pub fn outcome(&self) -> Outcome {
+        self.outcome
+    }
+
+    /// Whether the run reached `batch_cap` and dropped the diagnostics past it.
+    ///
+    /// A truncated report is a partial view: the constructs behind the dropped diagnostics were
+    /// still diagnosed, so fixing every diagnostic listed here may not be enough to make the run
+    /// clean. Raise [`Spec::batch_cap`] to see the rest.
+    pub fn truncated(&self) -> bool {
+        self.truncated
+    }
+
     /// Every error-severity diagnostic.
     pub fn errors(&self) -> impl Iterator<Item = &Diagnostic> + '_ {
         self.diagnostics
@@ -186,6 +213,13 @@ impl std::fmt::Display for Report {
         for diagnostic in &self.diagnostics {
             writeln!(formatter, "{diagnostic}")?;
         }
+        if self.truncated {
+            writeln!(
+                formatter,
+                "spargen: diagnostic list truncated at batch_cap ({} shown); raise batch_cap to see the rest",
+                self.diagnostics.len()
+            )?;
+        }
         Ok(())
     }
 }
@@ -213,6 +247,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
         return Report {
             diagnostics: cargo_diagnostics,
             outcome: Outcome::Rejected,
+            truncated: false,
         };
     }
     let consumer_manifest = cargo.manifest;
@@ -223,10 +258,12 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
             if emit_cargo_directives {
                 cache::cargo_directives(build, None);
             }
-            cargo_diagnostics.extend(diagnostics);
+            let truncated = diagnostics.cap_reached();
+            cargo_diagnostics.extend(diagnostics.items().to_vec());
             return Report {
                 diagnostics: cargo_diagnostics,
                 outcome: Outcome::Rejected,
+                truncated,
             };
         }
     };
@@ -256,6 +293,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                     return Report {
                         diagnostics: cargo_diagnostics,
                         outcome: Outcome::Rejected,
+                        truncated: false,
                     };
                 }
                 // A verified cache hit did not rewrite anything, and saying `Generated` made
@@ -263,6 +301,7 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
                 return Report {
                     diagnostics: cargo_diagnostics,
                     outcome: Outcome::Cached,
+                    truncated: false,
                 };
             }
         }
@@ -288,11 +327,15 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
             }
             if !audit.diagnostics.is_empty() {
                 let mut diagnostics = cargo_diagnostics;
+                // The inner run's truncation carries: merging its diagnostics into a wider list
+                // does not make the dropped ones reappear.
+                let truncated = preview.report.truncated;
                 diagnostics.extend(preview.report.diagnostics);
                 diagnostics.extend(audit.diagnostics);
                 return Report {
                     diagnostics,
                     outcome: Outcome::Rejected,
+                    truncated,
                 };
             }
         }
@@ -300,10 +343,12 @@ fn generate_with_cache_dir(build: &Build, cache_dir: Option<&Utf8Path>) -> Repor
         let after = match run_on_frontend_stack(|| cache::InputSnapshot::load(spec)) {
             Ok(snapshot) => snapshot,
             Err(diagnostics) => {
-                cargo_diagnostics.extend(diagnostics);
+                let truncated = diagnostics.cap_reached();
+                cargo_diagnostics.extend(diagnostics.items().to_vec());
                 return Report {
                     diagnostics: cargo_diagnostics,
                     outcome: Outcome::Rejected,
+                    truncated,
                 };
             }
         };
@@ -1053,6 +1098,7 @@ fn report(diags: diag::Diagnostics, outcome: Outcome) -> Report {
     Report {
         diagnostics: diags.items().to_vec(),
         outcome,
+        truncated: diags.cap_reached(),
     }
 }
 
@@ -1083,6 +1129,7 @@ mod tests {
                     .build(),
             ],
             outcome: Outcome::Rejected,
+            truncated: false,
         };
 
         let lines = report.cargo_directive_lines();

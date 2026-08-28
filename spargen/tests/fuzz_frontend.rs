@@ -130,8 +130,8 @@ fn exercise(dir: &TempDir, bytes: &[u8], ext: &str) {
     std::fs::write(&spec, bytes).unwrap();
     let report = check(&Spec::new(spec));
     // Touch the report so the optimizer cannot elide the call; also a cheap sanity walk.
-    std::hint::black_box(report.outcome);
-    std::hint::black_box(report.diagnostics.len());
+    std::hint::black_box(report.outcome());
+    std::hint::black_box(report.diagnostics().len());
 }
 
 /// Run one generated document through both the JSON and the YAML parser (JSON ⊂ YAML), so a single

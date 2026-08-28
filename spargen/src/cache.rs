@@ -20,11 +20,13 @@ pub(crate) struct InputSnapshot {
 }
 
 impl InputSnapshot {
-    pub fn load(spec: &Spec) -> Result<Self, Vec<Diagnostic>> {
+    /// The error carries the whole diagnostic batch, not just its items, so a caller can tell a
+    /// complete failure list from one the `batch_cap` truncated.
+    pub fn load(spec: &Spec) -> Result<Self, Diagnostics> {
         let mut diagnostics = Diagnostics::new(spec.batch_cap);
         let bundle = match InputBundle::load(&spec.path, &mut diagnostics) {
             Ok(bundle) => bundle,
-            Err(_) => return Err(diagnostics.items().to_vec()),
+            Err(_) => return Err(diagnostics),
         };
 
         let mut inputs = bundle
@@ -37,9 +39,10 @@ impl InputSnapshot {
             match std::fs::read(&lock) {
                 Ok(bytes) => inputs.push((lock, bytes)),
                 Err(error) => {
-                    return Err(vec![cache_diagnostic(format!(
+                    diagnostics.emit(cache_diagnostic(format!(
                         "failed to read build input `{lock}`: {error}"
-                    ))]);
+                    )));
+                    return Err(diagnostics);
                 }
             }
         }
@@ -441,14 +444,14 @@ components:
         let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
 
         let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
-        assert_eq!(first.outcome, Outcome::Generated, "{first:#?}");
+        assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
         let original = std::fs::read_to_string(&config.output).unwrap();
         let record = cache_path(&cache_dir, &config.output);
         assert!(record.is_file(), "generation must seed the target cache");
 
         std::fs::remove_file(&record).unwrap();
         let seeded = crate::generate_with_cache_dir(&config, Some(&cache_dir));
-        assert_eq!(seeded.outcome, Outcome::Generated, "{seeded:#?}");
+        assert_eq!(seeded.outcome(), Outcome::Generated, "{seeded:#?}");
         assert!(
             record.is_file(),
             "verified committed output must reseed cache"
@@ -457,12 +460,12 @@ components:
 
         std::fs::write(&config.output, format!("{original}// manual edit\n")).unwrap();
         let repaired = crate::generate_with_cache_dir(&config, Some(&cache_dir));
-        assert_eq!(repaired.outcome, Outcome::Generated, "{repaired:#?}");
+        assert_eq!(repaired.outcome(), Outcome::Generated, "{repaired:#?}");
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
 
         std::fs::remove_file(&config.output).unwrap();
         let restored = crate::generate_with_cache_dir(&config, Some(&cache_dir));
-        assert_eq!(restored.outcome, Outcome::Generated, "{restored:#?}");
+        assert_eq!(restored.outcome(), Outcome::Generated, "{restored:#?}");
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
     }
 }

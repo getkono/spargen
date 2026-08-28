@@ -202,7 +202,7 @@ let build = spargen::Spec::new("openapi.json")
     .carve(true)
     .build("src/api.rs");
 let report = spargen::generate(&build);
-assert_eq!(report.outcome, spargen::Outcome::Generated);
+assert_eq!(report.outcome(), spargen::Outcome::Generated);
 ```
 
 `spargen check --carve` audits the carved subset the same way. If you would rather remove specific

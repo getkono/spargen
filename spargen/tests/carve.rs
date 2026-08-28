@@ -58,7 +58,7 @@ fn write_spec(dir: &Path, name: &str, contents: &str) -> std::path::PathBuf {
 
 fn w009_count(report: &Report) -> usize {
     report
-        .diagnostics
+        .diagnostics()
         .iter()
         .filter(|diagnostic| diagnostic.code == Code::OmittedConstruct)
         .count()
@@ -92,7 +92,7 @@ fn glob_omit_path_removes_all_matching_operations() {
     let out = temp.path().join("client.rs");
     let config = omitting(&spec, &out, spargen::omit! { paths { "/admin/**"; } });
     let report = spargen::generate(&config);
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(&out).unwrap();
     assert!(
@@ -118,7 +118,7 @@ fn exact_omit_path_still_removes_exactly_one() {
     let out = temp.path().join("client.rs");
     let config = omitting(&spec, &out, spargen::omit! { paths { "/admin/users"; } });
     let report = spargen::generate(&config);
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     let generated = std::fs::read_to_string(&out).unwrap();
     assert!(!generated.contains("fn list_users"), "exact path removed");
     assert!(
@@ -165,9 +165,9 @@ fn without_carve_a_rejecting_spec_fails() {
     let spec = write_spec(temp.path(), "openapi.yaml", ONE_BAD_OP);
     let out = temp.path().join("client.rs");
     let report = spargen::generate(&config(&spec, &out));
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(report
-        .diagnostics
+        .diagnostics()
         .iter()
         .any(|d| d.code == Code::DynamicRefRejected));
 }
@@ -182,7 +182,7 @@ fn carve_generates_the_rest_and_reports_the_carved_operation() {
     let out = temp.path().join("client.rs");
     let config = carving(&spec, &out);
     let report = spargen::generate(&config);
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert_eq!(
         w009_count(&report),
         1,
@@ -190,7 +190,7 @@ fn carve_generates_the_rest_and_reports_the_carved_operation() {
     );
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.message.contains("get /bad")),
         "W009 names the carved operation: {report:#?}"
@@ -198,7 +198,7 @@ fn carve_generates_the_rest_and_reports_the_carved_operation() {
     // No un-carvable residual errors leaked as errors.
     assert!(
         !report
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.code == Code::DynamicRefRejected),
         "the rejection was carved, not left as an error: {report:#?}"
@@ -224,9 +224,12 @@ fn carve_output_is_deterministic() {
     let second = temp.path().join("second.rs");
     let first_config = carving(&spec, &first);
     let second_config = carving(&spec, &second);
-    assert_eq!(spargen::generate(&first_config).outcome, Outcome::Generated);
     assert_eq!(
-        spargen::generate(&second_config).outcome,
+        spargen::generate(&first_config).outcome(),
+        Outcome::Generated
+    );
+    assert_eq!(
+        spargen::generate(&second_config).outcome(),
         Outcome::Generated
     );
     assert_eq!(
@@ -294,32 +297,32 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
     let out = temp.path().join("client.rs");
     let config = carving(&spec, &out);
     let report = spargen::generate(&config);
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     // The component `Bad` and the `$dynamicRef` operation are both carved and reported.
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.message.contains("component schemas Bad")),
         "carved component reported: {report:#?}"
     );
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.message.contains("get /dynamic")),
         "carved operation reported: {report:#?}"
     );
     assert!(
         !report
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.code == Code::DynamicRefRejected),
         "the dynamic-ref rejection was carved: {report:#?}"
     );
     assert!(
         !report
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.code == Code::AllOfIrreconcilable),
         "the intersection rejection was carved: {report:#?}"
@@ -365,7 +368,7 @@ fn carve_is_a_noop_on_a_spec_with_no_rejections() {
 
     let carved_config = carving(&spec, &carved);
     let report = spargen::generate(&carved_config);
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert_eq!(
         w009_count(&report),
         0,
@@ -374,7 +377,7 @@ fn carve_is_a_noop_on_a_spec_with_no_rejections() {
 
     // The carved output is identical to a plain (non-carve) generate — carve added nothing.
     assert_eq!(
-        spargen::generate(&config(&spec, &plain)).outcome,
+        spargen::generate(&config(&spec, &plain)).outcome(),
         Outcome::Generated
     );
     let carved = std::fs::read_to_string(&carved).unwrap();
@@ -458,7 +461,7 @@ fn carve_targets_a_query_operation_without_taking_its_path() {
     );
     let out = temp.path().join("client.rs");
     let report = spargen::generate(&carving(&spec, &out));
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(&out).unwrap();
     assert!(
@@ -493,7 +496,7 @@ fn carve_targets_an_additional_operation_without_taking_its_path() {
     );
     let out = temp.path().join("client.rs");
     let report = spargen::generate(&carving(&spec, &out));
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
     let generated = std::fs::read_to_string(&out).unwrap();
     assert!(
@@ -550,7 +553,7 @@ components:
             }
         },
     ));
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert_eq!(w009_count(&report), 2, "one W009 per removal: {report:#?}");
 }
 
@@ -577,7 +580,7 @@ components:
 
     // The same document with no profile is already accepted, so the profile is the only difference.
     assert_eq!(
-        spargen::generate(&config(&spec, &out)).outcome,
+        spargen::generate(&config(&spec, &out)).outcome(),
         Outcome::Generated
     );
 
@@ -586,10 +589,10 @@ components:
         &out,
         spargen::omit! { components { schemas { "Legacy"; } } },
     ));
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(
         !report
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.code == Code::OmitCreatedInvalidDocument),
         "a components-only document is valid OpenAPI: {report:#?}"
@@ -620,10 +623,10 @@ paths:
         &out,
         spargen::omit! { pointers { "/paths"; } },
     ));
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .any(|d| d.code == Code::OmitCreatedInvalidDocument),
         "{report:#?}"
@@ -704,7 +707,7 @@ paths:
     );
     let out = dir.join("client.rs");
     let report = spargen::generate(&carving(&spec, &out));
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
 
     let code = std::fs::read_to_string(&out).unwrap();
     // The one unsupported operation is carved...
@@ -744,7 +747,7 @@ paths:
             rules: vec![spargen::OmitRule::path(r"/files/\*")],
         },
     ));
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(&exact).unwrap();
     assert!(!code.contains("get_glob_file"), "{code}");
     assert!(code.contains("get_kept_file"), "{code}");
@@ -757,7 +760,7 @@ paths:
             rules: vec![spargen::OmitRule::path("/files/*")],
         },
     ));
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(&bulk).unwrap();
     assert!(!code.contains("get_glob_file"), "{code}");
     assert!(!code.contains("get_kept_file"), "{code}");

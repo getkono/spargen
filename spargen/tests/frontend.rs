@@ -47,7 +47,7 @@ fn generate_with_code(spec: &str) -> (Report, String) {
 }
 
 fn has_code(report: &Report, code: Code) -> bool {
-    report.diagnostics.iter().any(|d| d.code == code)
+    report.diagnostics().iter().any(|d| d.code == code)
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn e011_official_structure_schema_rejects_missing_info() {
     let generated = generate(spec);
     let checked = check(spec);
     for report in [&generated, &checked] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(report, Code::InvalidInput), "{report:#?}");
     }
 }
@@ -72,11 +72,11 @@ paths:
         '200': { summary: ok }
 "#;
     let oas31 = generate(&format!("openapi: 3.1.0\n{body}"));
-    assert_eq!(oas31.outcome, Outcome::Rejected, "{oas31:#?}");
+    assert_eq!(oas31.outcome(), Outcome::Rejected, "{oas31:#?}");
     assert!(has_code(&oas31, Code::InvalidInput), "{oas31:#?}");
 
     let oas32 = generate(&format!("openapi: 3.2.0\n{body}"));
-    assert_ne!(oas32.outcome, Outcome::Rejected, "{oas32:#?}");
+    assert_ne!(oas32.outcome(), Outcome::Rejected, "{oas32:#?}");
 }
 
 #[test]
@@ -95,7 +95,7 @@ paths:
               schema: false
 "#;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("enum ResponseBody"), "{code}");
 }
 
@@ -115,7 +115,7 @@ paths:
               schema: { type: [string, integer] }
 "#;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("enum ResponseBody"), "{code}");
     assert!(!code.contains("serde_json :: Value"), "{code}");
 }
@@ -147,7 +147,7 @@ components:
       required: [extra]
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("pub id"), "{code}");
     assert!(code.contains("pub extra"), "{code}");
 }
@@ -175,7 +175,7 @@ components:
       required: [id]
 "##;
     let (report, code) = generate_with_code(valid);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("pub id"), "{code}");
 
     let cycle = valid.replace(
@@ -183,7 +183,7 @@ components:
         "B: { $ref: '#/components/schemas/A' }",
     );
     let report = generate(&cycle);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
 }
 
@@ -222,7 +222,7 @@ Pet:
     .unwrap();
     let out = dir.join("client.rs");
     let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
     assert!(!code.contains("serde_json :: Value"), "{code}");
@@ -251,7 +251,7 @@ components:
       properties: { id: { type: string } }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
@@ -299,7 +299,7 @@ Pet:
     .unwrap();
     let out = dir.join("client.rs");
     let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
 }
@@ -373,9 +373,9 @@ mod remote {
         // No lock present ⇒ the remote ref is unpinned. This must be rejected with the *narrowed*
         // E003 and an actionable remedy pointing at `spargen lock`.
         let (report, _temp, _out) = run(None, None, false);
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         let diag = report
-            .diagnostics
+            .diagnostics()
             .iter()
             .find(|d| d.code == Code::AbsoluteRefUnsupported)
             .expect("E003 fires");
@@ -392,7 +392,7 @@ mod remote {
         // Lock pins the correct sha256 and the vendored bytes match ⇒ the remote ref resolves with
         // no network and lowers to a typed struct (never `serde_json::Value`).
         let (report, _temp, out) = run(Some(lock(GIZMO_SHA256)), Some(GIZMO_YAML), false);
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             !has_code(&report, Code::AbsoluteRefUnsupported),
             "{report:#?}"
@@ -406,7 +406,7 @@ mod remote {
 
         // check/generate parity: `check` resolves the same remote ref, also without network.
         let (checked, _temp2, _out2) = run(Some(lock(GIZMO_SHA256)), Some(GIZMO_YAML), true);
-        assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+        assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
         assert!(
             !has_code(&checked, Code::AbsoluteRefUnsupported),
             "{checked:#?}"
@@ -419,7 +419,7 @@ mod remote {
         // of truth, so the drift is refused (E021) rather than silently used.
         let wrong_sha = "0".repeat(64);
         let (report, _temp, _out) = run(Some(lock(&wrong_sha)), Some(GIZMO_YAML), false);
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::VendoredRefDrift), "{report:#?}");
     }
 
@@ -427,7 +427,7 @@ mod remote {
     fn missing_vendored_file_is_e021() {
         // Lock pins the ref but the vendored copy is absent ⇒ drift (nothing to hash against).
         let (report, _temp, _out) = run(Some(lock(GIZMO_SHA256)), None, false);
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::VendoredRefDrift), "{report:#?}");
     }
 
@@ -493,7 +493,7 @@ mod remote {
 
         let (report, _temp, out) =
             run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         let generated = std::fs::read_to_string(&out).unwrap();
         assert!(
             generated.contains("Box"),
@@ -503,7 +503,7 @@ mod remote {
         // check/generate parity: a regression that reintroduces the crash must fail here too, and
         // both must return an outcome rather than aborting.
         let (checked, _t2, _o2) = run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
-        assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+        assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     }
 
     #[test]
@@ -524,7 +524,7 @@ mod remote {
             ("api.example.com/schemas/b.yaml", B_YAML),
         ];
         let (report, _temp, out) = run_layout(&responds_with(A_URL), Some(&lock), &vendor, false);
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         let generated = std::fs::read_to_string(&out).unwrap();
         assert!(
             generated.contains("Box"),
@@ -541,7 +541,11 @@ mod remote {
                 "version = 1\n\n[[remote]]\nurl = \"{GIZMO_URL}\"\nsha256 = \"{GIZMO_SHA256}\"\npath = \"{bad_path}\"\n"
             );
             let (report, _temp, _out) = run(Some(lock), Some(GIZMO_YAML), false);
-            assert_eq!(report.outcome, Outcome::Rejected, "{bad_path}: {report:#?}");
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{bad_path}: {report:#?}"
+            );
             assert!(
                 has_code(&report, Code::InvalidInput),
                 "{bad_path} rejected at parse: {report:#?}"
@@ -562,13 +566,13 @@ jsonSchemaDialect: https://example.com/not-the-base
 paths: {}
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedDialect));
     // The diagnostic must point at the offending value on line 4 (column 20, where the
     // `jsonSchemaDialect` value begins), not at line 1 / the whole file. This pins the
     // span-preserving parser: pre-fix, every node carried the root (whole-file) span.
     let dialect = report
-        .diagnostics
+        .diagnostics()
         .iter()
         .find(|d| d.code == Code::UnsupportedDialect)
         .expect("UnsupportedDialect diagnostic");
@@ -594,11 +598,11 @@ components:
       type: string
 "##;
     let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::DuplicateObjectKey), "{report:#?}");
     // The diagnostic points at the duplicate `type` on line 9, not line 1.
     let dup = report
-        .diagnostics
+        .diagnostics()
         .iter()
         .find(|d| d.code == Code::DuplicateObjectKey)
         .expect("duplicate-key diagnostic");
@@ -606,7 +610,7 @@ components:
 
     // check/generate parity: parsing runs before lowering, so `check` rejects identically.
     let checked = check(spec);
-    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(has_code(&checked, Code::DuplicateObjectKey), "{checked:#?}");
 }
 
@@ -625,14 +629,14 @@ paths:
         '200': { description: ok }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedOpenApiVersion),
         "{report:#?}"
     );
     // check/generate parity: the same acceptance is reached without emitting.
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         !has_code(&checked, Code::UnsupportedOpenApiVersion),
         "{checked:#?}"
@@ -650,7 +654,7 @@ info: { title: T, version: 1.0.0 }
 paths: {}
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         has_code(&report, Code::UnsupportedOpenApiVersion),
         "{report:#?}"
@@ -671,7 +675,7 @@ paths:
         '200': { description: ok }
 "##;
     let report = generate(accepted);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
 
     // The 3.2 prose names only the 3.1 URI, but 3.2's own published document schema gives this one
@@ -682,19 +686,19 @@ paths:
         "https://spec.openapis.org/oas/3.2/dialect/2025-09-17",
     );
     let report = generate(&published);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::UnsupportedDialect), "{report:#?}");
 
     // That leniency is scoped to 3.2: a 3.1 document claiming the 3.2 dialect is still wrong.
     let on_31 = published.replace("openapi: 3.2.0", "openapi: 3.1.0");
     let report = generate(&on_31);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedDialect), "{report:#?}");
 
     // A URI that no version of the specification defines stays `E002` either way.
     let nonexistent = accepted.replace("oas/3.1/dialect", "oas/3.2/dialect");
     let report = generate(&nonexistent);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedDialect), "{report:#?}");
 }
 
@@ -713,13 +717,13 @@ paths:
         '200': { description: ok }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
     );
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -736,14 +740,14 @@ paths:
         '200': { description: ok }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
     );
     // check/generate parity.
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         !has_code(&checked, Code::Oas32ConstructIgnored),
         "{checked:#?}"
@@ -768,7 +772,7 @@ paths:
           '200': { description: ok }
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
@@ -797,7 +801,7 @@ paths:
         '200': { description: ok }
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
@@ -829,7 +833,7 @@ paths:
         '200': { description: ok }
 "##;
     let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
@@ -853,7 +857,7 @@ paths:
         '200': { description: ok }
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedParameterStyle),
         "{report:#?}"
@@ -884,7 +888,7 @@ components:
         required: [id]
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("pub id"), "{code}");
     assert!(!code.contains("serde_json :: Value"), "{code}");
 }
@@ -918,14 +922,14 @@ components:
         seq: { type: integer }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
     );
     // check/generate parity.
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         !has_code(&checked, Code::Oas32ConstructIgnored),
         "{checked:#?}"
@@ -969,7 +973,7 @@ components:
         libraryId: { type: string }
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::ValidationKeywordIgnored),
         "consumed SSE content annotations must not warn: {report:#?}"
@@ -981,7 +985,7 @@ components:
         "contentSchema must become the stream payload type: {flat}"
     );
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         !has_code(&checked, Code::ValidationKeywordIgnored),
         "check/generate must agree that the SSE content annotations are consumed: {checked:#?}"
@@ -1010,13 +1014,13 @@ paths:
                     contentSchema: { type: object, properties: { id: { type: string } } }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         has_code(&report, Code::ValidationKeywordIgnored),
         "{report:#?}"
     );
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         has_code(&checked, Code::ValidationKeywordIgnored),
         "check/generate must report the same content annotation warning: {checked:#?}"
@@ -1041,7 +1045,7 @@ paths:
                 properties: { id: { type: integer } }
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("Framing::JsonSequence"), "{code}");
 }
 
@@ -1063,7 +1067,7 @@ paths:
                 items: { type: string }
 "##;
     let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
 }
 
@@ -1089,7 +1093,7 @@ paths:
         '204': { description: ok }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             !has_code(&report, Code::UnsupportedMediaType),
             "{report:#?}"
@@ -1121,7 +1125,7 @@ paths:
         '204': { description: ok }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             !has_code(&report, Code::UnsupportedMediaType),
             "{report:#?}"
@@ -1149,7 +1153,7 @@ paths:
         '204': { description: ok }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::DeclarationHasNoEffect),
             "{report:#?}"
@@ -1177,7 +1181,7 @@ paths:
         '204': { description: ok }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::DeclarationHasNoEffect),
             "{report:#?}"
@@ -1208,7 +1212,7 @@ paths:
         '204': { description: ok }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
@@ -1233,7 +1237,7 @@ paths:
         '204': { description: ok }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
@@ -1255,7 +1259,7 @@ paths:
         '204': { description: ok }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
@@ -1279,7 +1283,7 @@ components:
     Dog: { type: object, properties: { kind: { type: string } } }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     }
 }
@@ -1306,7 +1310,7 @@ components:
     Fish: { type: object, properties: { kind: { const: fish } } }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     }
 }
@@ -1330,7 +1334,7 @@ paths:
                   id: { type: string, xml: { nodeType: attribute } }
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
     assert!(code.contains("@id"), "{code}");
 }
@@ -1364,7 +1368,7 @@ paths:
         );
         for report in [generate(&spec), check(&spec)] {
             assert_eq!(
-                report.outcome,
+                report.outcome(),
                 Outcome::Rejected,
                 "{deprecated}: {report:#?}"
             );
@@ -1398,7 +1402,7 @@ paths:
                   id: { type: string, xml: { nodeType: fragment } }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
@@ -1424,7 +1428,7 @@ paths:
                   id: { type: string, xml: { nodeType: fragment } }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
 }
 
@@ -1442,7 +1446,7 @@ components:
       then: { properties: { value: { type: string } } }
 "##;
     let report = generate(warned);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         has_code(&report, Code::ValidationKeywordIgnored),
         "{report:#?}"
@@ -1453,7 +1457,7 @@ components:
         "then: { $dynamicRef: '#node' }",
     );
     let report = generate(&dynamic);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::DynamicRefRejected), "{report:#?}");
 }
 
@@ -1469,7 +1473,7 @@ paths:
     get: { operationId: same, responses: { '204': { description: ok } } }
 "##;
     let report = generate(duplicate_id);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 
     let missing_path_parameter = r##"
@@ -1480,7 +1484,7 @@ paths:
     get: { responses: { '204': { description: ok } } }
 "##;
     let report = generate(missing_path_parameter);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
@@ -1499,7 +1503,7 @@ paths:
       responses: { '204': { description: ok } }
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert_eq!(code.matches("pub limit:").count(), 1, "{code}");
 }
 
@@ -1523,7 +1527,7 @@ components:
         application/json: { schema: { type: string } }
 "##;
     let (report, code) = generate_with_code(base);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("shared result"), "{code}");
 
     let cycle = base.replace(
@@ -1531,7 +1535,7 @@ components:
         "B: { $ref: '#/components/responses/A' }",
     );
     let report = generate(&cycle);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
 }
 
@@ -1551,7 +1555,7 @@ paths:
         '200': { summary: Listed, description: all pets }
 "##;
     let (report, code) = generate_with_code(valid);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("Public API"), "{code}");
     assert!(code.contains("Response `200`: Listed"), "{code}");
 
@@ -1560,7 +1564,7 @@ paths:
         "{ name: api, parent: pets, summary: Public API, kind: nav }",
     );
     let report = generate(&cycle);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
 }
 
@@ -1584,7 +1588,7 @@ paths:
               itemSchema: { type: integer }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         has_code(&report, Code::Oas32ConstructIgnored),
         "{report:#?}"
@@ -1610,7 +1614,7 @@ components:
       itemSchema: { type: string, minLength: 1 }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         has_code(&report, Code::ValidationKeywordIgnored),
         "{report:#?}"
@@ -1636,7 +1640,7 @@ components:
         "^y-": { type: string }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::PatternPropertiesRejected),
         "{report:#?}"
@@ -1647,7 +1651,7 @@ components:
     );
     // check/generate parity: the same disposition is reached without emitting.
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         has_code(&checked, Code::ValidationKeywordIgnored),
         "{checked:#?}"
@@ -1676,13 +1680,13 @@ components:
         "^b-": { $ref: "#/components/schemas/B" }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::PatternPropertiesRejected),
         "{report:#?}"
     );
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -1703,11 +1707,11 @@ components:
         "^i-": { $ref: "#/components/schemas/B" }
 "##;
     let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::PatternPropertiesRejected));
     // check/generate parity: the rejection fires in `check` too.
     let checked = check(spec);
-    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(has_code(&checked, Code::PatternPropertiesRejected));
 }
 
@@ -1728,7 +1732,7 @@ components:
         "^x-": { type: string }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::PatternPropertiesRejected));
 }
 
@@ -1745,7 +1749,7 @@ components:
       $dynamicRef: "#meta"
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::DynamicRefRejected));
 }
 
@@ -1765,10 +1769,10 @@ components:
         - type: number
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -1791,7 +1795,7 @@ components:
           properties: { kind: { type: string }, b: { type: string } }
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 }
 
@@ -1811,10 +1815,10 @@ components:
         - type: integer
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -1832,11 +1836,11 @@ components:
         - type: integer
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -1868,10 +1872,10 @@ components:
           dog: "#/components/schemas/Dog"
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -1896,7 +1900,7 @@ components:
         propertyName: petType
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 }
 
@@ -1917,10 +1921,10 @@ components:
           items: { type: string }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -1950,10 +1954,10 @@ components:
         - $ref: "#/components/schemas/B"
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -1979,10 +1983,10 @@ components:
         - $ref: "#/components/schemas/B"
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2002,11 +2006,11 @@ components:
         - type: boolean
 "##;
     let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::NonDisjointUnion));
 
     let checked = check(spec);
-    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(has_code(&checked, Code::NonDisjointUnion));
 }
 
@@ -2028,10 +2032,10 @@ components:
           items: { type: string }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2050,10 +2054,10 @@ components:
         - type: "null"
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2070,7 +2074,7 @@ components:
       enum: ["a", 1]
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::NonScalarEnum));
 }
 
@@ -2088,7 +2092,7 @@ components:
       enum: [{ a: 1 }]
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::NonScalarEnum));
 }
 
@@ -2107,11 +2111,11 @@ components:
       enum: [low, medium, high, null]
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
 
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(!has_code(&checked, Code::NonScalarEnum), "{checked:#?}");
 }
 
@@ -2129,11 +2133,11 @@ components:
       enum: [null]
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::NonScalarEnum), "{report:#?}");
 
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2155,7 +2159,7 @@ paths:
         "204": { description: No Content }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedMediaType));
 }
 
@@ -2193,10 +2197,10 @@ paths:
                 properties: { detail: { type: string } }
 "##;
     let generated = generate(spec);
-    assert_ne!(generated.outcome, Outcome::Rejected, "{generated:#?}");
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     assert!(!has_code(&generated, Code::UnsupportedMediaType));
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(!has_code(&checked, Code::UnsupportedMediaType));
 }
 
@@ -2217,7 +2221,7 @@ paths:
               schema: { type: object, properties: { value: { type: string } } }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedMediaType));
 }
 
@@ -2238,7 +2242,7 @@ paths:
               schema: { type: object }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedMediaType));
 }
 
@@ -2264,13 +2268,13 @@ paths:
         "204": { description: No Content }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         !has_code(&checked, Code::UnsupportedMediaType),
         "{checked:#?}"
@@ -2299,13 +2303,13 @@ paths:
                   id: { type: string }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2328,7 +2332,7 @@ paths:
         "204": { description: No Content }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
@@ -2363,7 +2367,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
@@ -2396,7 +2400,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
     }
 }
@@ -2425,7 +2429,7 @@ paths:
         "204": { description: No Content }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
     let checked = check(spec);
     assert!(has_code(&checked, Code::XmlHintIgnored), "{checked:#?}");
@@ -2455,7 +2459,7 @@ paths:
         "204": { description: No Content }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
 }
 
@@ -2492,7 +2496,7 @@ components:
         id: { type: integer, xml: { attribute: true } }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
 }
 
@@ -2520,11 +2524,11 @@ paths:
               schema: { type: object, required: [b], properties: { b: { type: string } } }
 "##;
     let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     // check/generate parity: the same rejection is reached without emitting.
     let checked = check(spec);
-    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2545,14 +2549,14 @@ paths:
               schema: { type: object, required: [seq], properties: { seq: { type: integer } } }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
 
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         !has_code(&checked, Code::UnsupportedMediaType),
         "{checked:#?}"
@@ -2576,14 +2580,14 @@ paths:
               schema: { type: string }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
 
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         !has_code(&checked, Code::UnsupportedMediaType),
         "{checked:#?}"
@@ -2611,7 +2615,7 @@ paths:
               schema: { type: object, required: [id], properties: { id: { type: string } } }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
@@ -2637,7 +2641,7 @@ paths:
         "204": { description: No Content }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedMediaType));
 }
 
@@ -2668,14 +2672,14 @@ paths:
         "204": { description: No Content }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
 
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         !has_code(&checked, Code::UnsupportedMediaType),
         "{checked:#?}"
@@ -2701,7 +2705,7 @@ paths:
         "204": { description: No Content }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedMediaType));
 }
 
@@ -2738,14 +2742,14 @@ paths:
         "204": { description: No Content }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnsupportedMediaType),
         "{report:#?}"
     );
 
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 #[test]
@@ -2769,7 +2773,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             !has_code(&report, Code::UnsupportedParameterStyle),
             "{report:#?}"
@@ -2802,7 +2806,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             !has_code(&report, Code::UnsupportedParameterStyle),
             "{report:#?}"
@@ -2837,7 +2841,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     }
 }
 
@@ -2863,7 +2867,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedParameterStyle));
     }
 }
@@ -2887,7 +2891,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
     }
 }
@@ -2911,7 +2915,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             !has_code(&report, Code::UnsupportedParameterStyle),
             "{report:#?}"
@@ -2944,7 +2948,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::DeclarationHasNoEffect),
             "{report:#?}"
@@ -2970,7 +2974,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
     }
 }
@@ -2995,11 +2999,11 @@ paths:
         "204": { description: No Content }
 "##;
     let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnsupportedParameterStyle));
 
     let checked = check(spec);
-    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(has_code(&checked, Code::UnsupportedParameterStyle));
 }
 
@@ -3018,7 +3022,7 @@ paths:
         "204": { description: No Content }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnknownSecurityScheme));
 }
 
@@ -3039,7 +3043,7 @@ components:
             a: { type: string }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
 
@@ -3066,7 +3070,7 @@ components:
             extra: { type: integer }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
 
@@ -3091,7 +3095,7 @@ components:
             b: { type: string }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
 
@@ -3114,7 +3118,7 @@ components:
             base: { type: string }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
 
@@ -3153,11 +3157,11 @@ components:
                   name: { type: string }
 "##;
     let report = generate(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 
     let checked = check(spec);
-    assert_ne!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         !has_code(&checked, Code::AllOfIrreconcilable),
         "{checked:#?}"
@@ -3184,7 +3188,7 @@ components:
 #[test]
 fn e013_all_of_conflicting_property_types_rejected() {
     let report = generate(ALL_OF_CONFLICT_SPEC);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::AllOfIrreconcilable));
 }
 
@@ -3205,7 +3209,7 @@ components:
         - type: string
 "##;
     let report = generate(spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::AllOfIrreconcilable));
 }
 
@@ -3214,7 +3218,7 @@ components:
 #[test]
 fn e013_check_generate_parity() {
     let report = check(ALL_OF_CONFLICT_SPEC);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::AllOfIrreconcilable));
 }
 
@@ -3236,10 +3240,10 @@ components:
           $ref: "#/components/schemas/Node"
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .all(|d| d.severity != spargen::Severity::Error),
         "recursive schema must not raise an error: {report:#?}"
@@ -3271,10 +3275,10 @@ components:
             $ref: "#/components/schemas/A"
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .all(|d| d.severity != spargen::Severity::Error),
         "mutually-recursive schemas must not raise an error: {report:#?}"
@@ -3299,7 +3303,7 @@ components:
       minimum: 0
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(has_code(&report, Code::ValidationKeywordIgnored));
 }
 
@@ -3321,7 +3325,7 @@ webhooks:
         "200": { description: OK }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(has_code(&report, Code::ServerInitiatedFlowIgnored));
 }
 
@@ -3345,7 +3349,7 @@ components:
 #[test]
 fn w005_schema_default_not_applied_still_generates() {
     let report = generate(W005_SPEC);
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(has_code(&report, Code::SchemaDefaultNotApplied));
 }
 
@@ -3353,7 +3357,7 @@ fn w005_schema_default_not_applied_still_generates() {
 #[test]
 fn w005_check_generate_parity() {
     let report = check(W005_SPEC);
-    assert_eq!(report.outcome, Outcome::Clean, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Clean, "{report:#?}");
     assert!(has_code(&report, Code::SchemaDefaultNotApplied));
 }
 
@@ -3376,14 +3380,14 @@ components:
           default: "red"
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(
         !has_code(&report, Code::SchemaDefaultNotApplied),
         "{report:#?}"
     );
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .all(|d| d.severity != spargen::Severity::Error),
         "{report:#?}"
@@ -3413,14 +3417,14 @@ paths:
         "204": { description: No Content }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(
         !has_code(&report, Code::SchemaDefaultNotApplied),
         "{report:#?}"
     );
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .all(|d| d.severity != spargen::Severity::Error),
         "{report:#?}"
@@ -3444,14 +3448,14 @@ components:
       default: auto
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(
         !has_code(&report, Code::SchemaDefaultNotApplied),
         "{report:#?}"
     );
     assert!(
         report
-            .diagnostics
+            .diagnostics()
             .iter()
             .all(|d| d.severity != spargen::Severity::Error),
         "{report:#?}"
@@ -3477,7 +3481,7 @@ components:
       additionalProperties: { type: integer, default: 5 }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(
         has_code(&report, Code::SchemaDefaultNotApplied),
         "{report:#?}"
@@ -3504,7 +3508,7 @@ components:
           default: 5000000000
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(
         has_code(&report, Code::SchemaDefaultNotApplied),
         "{report:#?}"
@@ -3529,7 +3533,7 @@ components:
       default: aliased
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert!(
         has_code(&report, Code::SchemaDefaultNotApplied),
         "{report:#?}"
@@ -3571,9 +3575,9 @@ components:
         b: { type: string }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     // No diagnostics at all — the retired W003 must not fire under any code.
-    assert!(report.diagnostics.is_empty(), "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
 }
 
 #[test]
@@ -3614,8 +3618,8 @@ components:
         b: { type: string }
 "##,
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
-    assert!(report.diagnostics.is_empty(), "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
 }
 
 #[test]
@@ -3663,8 +3667,8 @@ components:
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
-    assert!(report.diagnostics.is_empty(), "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
 
     let code = std::fs::read_to_string(&out).unwrap();
     // Success dispatch: the exact 200 arm is emitted (and thus checked) before the 2XX range arm.
@@ -3715,7 +3719,7 @@ fn e014_deep_ref_chain_is_rejected_not_overflowed() {
     // `MAX_SCHEMA_DEPTH` (128); the pre-fix generator crashed on it.
     let spec = deep_component_chain(400);
     let report = generate(&spec);
-    assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         has_code(&report, Code::SchemaNestingTooDeep),
         "expected E014 SchemaNestingTooDeep; got {report:#?}"
@@ -3723,7 +3727,7 @@ fn e014_deep_ref_chain_is_rejected_not_overflowed() {
 
     // check/generate parity: the depth guard lives in lowering, which `check` runs identically.
     let checked = check(&spec);
-    assert_eq!(checked.outcome, Outcome::Rejected, "{checked:#?}");
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(
         has_code(&checked, Code::SchemaNestingTooDeep),
         "{checked:#?}"
@@ -3736,7 +3740,7 @@ fn moderate_ref_chain_below_the_cap_still_lowers() {
     // lowers cleanly. This pins the cap as a safety backstop, not a routine rejection.
     let spec = deep_component_chain(32);
     let report = generate(&spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::SchemaNestingTooDeep),
         "a 32-deep chain must lower without E014: {report:#?}"
@@ -3770,7 +3774,7 @@ components:
         legacy: { type: string, deprecated: true }
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("legacy"), "legacy field emitted: {code}");
     assert!(code.contains("current"), "current field emitted: {code}");
     // Exactly one item is deprecated — the property that says so — not every field of the
@@ -3834,10 +3838,10 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert_eq!(
             report
-                .diagnostics
+                .diagnostics()
                 .iter()
                 .filter(|d| d.code == Code::DeclarationHasNoEffect)
                 .count(),
@@ -3867,7 +3871,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
@@ -3902,7 +3906,7 @@ paths:
         "204": { description: No Content }
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         code.contains("body: Option<&"),
         "an optional body is passed as an Option: {code}"
@@ -3933,7 +3937,7 @@ components:
           "204": { description: No Content }
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         code.contains("list_pets"),
         "the referenced operation must be generated: {code}"
@@ -3963,7 +3967,7 @@ components:
           "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::SpecUndefinedBehavior),
             "{report:#?}"
@@ -3996,7 +4000,7 @@ components:
           "204": { description: No Content }
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         code.contains("Everything about pets"),
         "the reference site's `summary` never reached the generated docs:\n{code}"
@@ -4009,7 +4013,7 @@ components:
         code.contains("Component-owned description"),
         "an undeclared `description` must stay the referenced item's:\n{code}"
     );
-    assert_ne!(check(spec).outcome, Outcome::Rejected);
+    assert_ne!(check(spec).outcome(), Outcome::Rejected);
 }
 
 #[test]
@@ -4032,7 +4036,7 @@ paths:
                 items: { type: integer }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::TupleRestNotRepresentable),
             "{report:#?}"
@@ -4061,7 +4065,7 @@ paths:
                 items: false
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             !has_code(&report, Code::TupleRestNotRepresentable),
             "{report:#?}"
@@ -4088,7 +4092,7 @@ components:
       scheme: digest
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::UnknownSecurityScheme),
             "{report:#?}"
@@ -4114,7 +4118,7 @@ components:
       type: mutualTLS
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::DeclarationHasNoEffect),
             "{report:#?}"
@@ -4140,7 +4144,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::DeclarationHasNoEffect),
             "{report:#?}"
@@ -4172,7 +4176,7 @@ paths:
         "204": { description: No Content }
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("pub mod servers"), "{code}");
     assert!(code.contains("pub fn default_url()"), "{code}");
     // The `enum` variable becomes a closed type, so an illegal region cannot be constructed.
@@ -4200,7 +4204,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
     }
 }
@@ -4219,7 +4223,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
     }
 }
@@ -4256,7 +4260,7 @@ components:
       schema: { type: string }
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("ListPetsStatus200Headers"), "{code}");
     // A required header is a plain field; an optional one is an Option. Inline header schemas get
     // a synthesized named type, exactly as inline schemas elsewhere do.
@@ -4298,7 +4302,7 @@ paths:
         "204": { description: No Content }
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("API Team"), "{code}");
     assert!(code.contains("License: MIT (MIT)"), "{code}");
     assert!(code.contains("https://example.com/docs"), "{code}");
@@ -4327,7 +4331,7 @@ components:
       schema: { type: integer }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::DeclarationHasNoEffect),
             "{report:#?}"
@@ -4366,7 +4370,7 @@ paths:
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out).unwrap(),
     ));
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::UnknownSecurityScheme),
         "{report:#?}"
@@ -4410,7 +4414,7 @@ paths:
         "204": { description: No Content }
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     // No override: the client's base URL stands.
     assert!(
         code.contains("build_url_on(&self.core, None, &path, &query)"),
@@ -4447,7 +4451,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::DeclarationHasNoEffect),
             "{report:#?}"
@@ -4473,7 +4477,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
     }
 }
@@ -4506,7 +4510,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
@@ -4540,7 +4544,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
@@ -4573,7 +4577,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
 }
@@ -4611,7 +4615,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     }
 }
 
@@ -4639,7 +4643,7 @@ paths:
               schema: { type: string }
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         code.contains("support::HeaderShape::SetCookie"),
         "a documented Set-Cookie header must use the non-joining shape: {code}"
@@ -4672,7 +4676,7 @@ paths:
         "204": { description: No Content }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             has_code(&report, Code::AlternativeMediaIgnored),
             "{report:#?}"
@@ -4748,7 +4752,7 @@ components:
             read: Read your data
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     for expected in [
         "Bearer format: `JWT`",
         "A short-lived service token.",
@@ -4789,7 +4793,7 @@ paths:
         "204": { description: No Content }
 "##,
     );
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         code.contains("Everything about pets."),
         "path-item summary must reach rustdoc: {code}"
@@ -4848,7 +4852,7 @@ PetBody:
     .unwrap();
     let out = dir.join("client.rs");
     let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
     let code = std::fs::read_to_string(&out).unwrap();
     // The header became a typed accessor and the media type contributed the body type, so both
@@ -4889,7 +4893,7 @@ components:
       schema: { type: string, const: profile }
 "##;
     let (report, code) = generate_with_code(spec);
-    assert_ne!(report.outcome, Outcome::Rejected, "{report:#?}");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(
         !has_code(&report, Code::DeclarationHasNoEffect),
         "a resolved header that pins a const has an effect: {report:#?}"
@@ -4924,11 +4928,44 @@ paths:
         '204': { description: ok }
 "##;
     for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome, Outcome::Rejected, "{report:#?}");
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
         assert!(
             !has_code(&report, Code::DeclarationHasNoEffect),
             "{report:#?}"
         );
     }
+}
+
+/// A run that reaches `batch_cap` drops every diagnostic past it. Presenting that shortened list
+/// as if it were the whole one is the silent behavior the disposition invariant forbids, so the
+/// report says it is partial and `Display` carries the marker.
+#[test]
+fn a_report_that_hit_the_batch_cap_says_it_is_truncated() {
+    // Each of these paths carries its own unsupported media type, so the run has far more
+    // diagnostics to emit than the cap allows.
+    let mut spec = String::from("openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n");
+    for index in 0..12 {
+        spec.push_str(&format!(
+            "  /item{index}:\n    get:\n      responses:\n        '200':\n          description: ok\n          content:\n            application/vnd.unsupported: {{ schema: {{ type: string }} }}\n"
+        ));
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("openapi.yaml");
+    std::fs::write(&path, &spec).unwrap();
+    let spec_path = Utf8PathBuf::from_path_buf(path).unwrap();
+
+    let uncapped = spargen::check(&Spec::new(spec_path.clone()).batch_cap(100));
+    assert!(!uncapped.truncated(), "{uncapped:#?}");
+    let all = uncapped.diagnostics().len();
+    assert!(all > 3, "need more than the cap to prove truncation: {all}");
+
+    let capped = spargen::check(&Spec::new(spec_path).batch_cap(3));
+    assert!(capped.truncated(), "{capped:#?}");
+    assert_eq!(capped.diagnostics().len(), 3, "{capped:#?}");
+    assert!(
+        capped.to_string().contains("truncated at batch_cap"),
+        "{capped}"
+    );
 }

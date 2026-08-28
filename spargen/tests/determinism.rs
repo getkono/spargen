@@ -43,7 +43,7 @@ fn generate_module(spec_path: &Utf8PathBuf, path: &std::path::Path) {
             .build(Utf8PathBuf::from_path_buf(path.to_path_buf()).unwrap())
             .cargo(CargoIntegration::Off),
     );
-    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 }
 
 #[test]
