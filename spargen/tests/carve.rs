@@ -412,3 +412,144 @@ fn check_command_supports_carve() {
         "check reports the carved op: {stdout}"
     );
 }
+
+// --- (d) OpenAPI 3.2 constructs are omittable ----------------------------------------------------
+
+/// A 3.2 path whose supported `get` sits beside an operation spargen cannot generate (a response
+/// whose only content entry is an unregistered media type). The unsupported operation is reachable
+/// only through a 3.2 Path Item field, so it exercises the carve mapping for those fields.
+fn oas32_sibling_spec(unsupported: &str) -> String {
+    format!(
+        r#"
+openapi: 3.2.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json: {{ schema: {{ type: string }} }}
+{unsupported}
+"#
+    )
+}
+
+#[test]
+fn carve_targets_a_query_operation_without_taking_its_path() {
+    // `query` is a 3.2 Path Item fixed field. Before `OmitMethod::Query` existed, the carve mapping
+    // could not name it and fell back to omitting the whole path — taking the supported `get` with
+    // it. Carving must remove the one operation it cannot generate and nothing else.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        &oas32_sibling_spec(
+            r#"    query:
+      operationId: searchItems
+      responses:
+        "200":
+          description: OK
+          content:
+            application/sdp: { schema: { type: string } }"#,
+        ),
+    );
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        generated.contains("fn list_items"),
+        "the supported sibling must survive: {generated}"
+    );
+    assert!(
+        !generated.contains("fn search_items"),
+        "the unsupported `query` operation must be carved: {generated}"
+    );
+    assert_eq!(w009_count(&report), 1, "exactly one construct: {report:#?}");
+}
+
+#[test]
+fn carve_targets_an_additional_operation_without_taking_its_path() {
+    // A 3.2 `additionalOperations` method is not a Path Item fixed field, so no `OmitMethod` names
+    // it; it is carved as a JSON Pointer instead. Same requirement: the sibling `get` survives.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        &oas32_sibling_spec(
+            r#"    additionalOperations:
+      PURGE:
+        operationId: purgeItems
+        responses:
+          "200":
+            description: OK
+            content:
+              application/sdp: { schema: { type: string } }"#,
+        ),
+    );
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        generated.contains("fn list_items"),
+        "the supported sibling must survive: {generated}"
+    );
+    assert!(
+        !generated.contains("fn purge_items"),
+        "the unsupported `additionalOperations` method must be carved: {generated}"
+    );
+    assert_eq!(w009_count(&report), 1, "exactly one construct: {report:#?}");
+}
+
+#[test]
+fn omit_rules_reach_the_component_maps_the_frontend_models() {
+    // `components.pathItems` and 3.2's `components.mediaTypes` are both modeled by the frontend and
+    // both reachable by `$ref`, so an omit profile has to be able to name them. Neither spelling
+    // parsed as a `ComponentKind` before, so both were `E019` "invalid omit rule".
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r#"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /items:
+    get:
+      operationId: listItems
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json: { schema: { type: string } }
+components:
+  pathItems:
+    Unused:
+      get:
+        operationId: unusedOp
+        responses: { "204": { description: No Content } }
+  mediaTypes:
+    UnusedMedia:
+      schema: { type: string }
+"#,
+    );
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&omitting(
+        &spec,
+        &out,
+        spargen::omit! {
+            components {
+                path_items { "Unused"; }
+                media_types { "UnusedMedia"; }
+            }
+        },
+    ));
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+    assert_eq!(w009_count(&report), 2, "one W009 per removal: {report:#?}");
+}

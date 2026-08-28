@@ -490,6 +490,8 @@ impl std::str::FromStr for ComponentKind {
             "security_scheme" | "security_schemes" | "securityScheme" | "securitySchemes" => {
                 ComponentKind::SecuritySchemes
             }
+            "path_item" | "path_items" | "pathItem" | "pathItems" => ComponentKind::PathItems,
+            "media_type" | "media_types" | "mediaType" | "mediaTypes" => ComponentKind::MediaTypes,
             _ => {
                 return Err(UnknownOmitToken {
                     token: token.to_owned(),
@@ -519,6 +521,7 @@ impl std::str::FromStr for OmitMethod {
             "head" => OmitMethod::Head,
             "patch" => OmitMethod::Patch,
             "trace" => OmitMethod::Trace,
+            "query" => OmitMethod::Query,
             _ => {
                 return Err(UnknownOmitToken {
                     token: token.to_owned(),
@@ -576,6 +579,23 @@ fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
     match tokens.first()?.as_str() {
         "paths" => {
             let path = tokens.get(1)?.clone();
+            // An OpenAPI 3.2 `additionalOperations` method is not a Path Item fixed field, so no
+            // `OmitMethod` names it. Carving it as a pointer keeps the blast radius at the one
+            // operation; falling through to the path rule would take its supported siblings too.
+            if tokens
+                .get(2)
+                .is_some_and(|token| token == "additionalOperations")
+            {
+                let method = tokens.get(3)?;
+                return Some(OmitRule::pointer(
+                    None,
+                    format!(
+                        "/paths/{}/additionalOperations/{}",
+                        escape_pointer_token(&path),
+                        escape_pointer_token(method)
+                    ),
+                ));
+            }
             match tokens
                 .get(2)
                 .and_then(|token| token.parse::<OmitMethod>().ok())
@@ -590,6 +610,11 @@ fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
         }
         _ => None,
     }
+}
+
+/// Escape one RFC 6901 reference token, the inverse of the unescaping in [`pointer_tokens`].
+fn escape_pointer_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
 }
 
 /// Split a JSON Pointer into its unescaped reference tokens (`~1`→`/`, `~0`→`~`).
@@ -630,6 +655,9 @@ pub enum OmitMethod {
     Head,
     Patch,
     Trace,
+    /// OpenAPI 3.2's `query` Path Item field. A method declared under `additionalOperations` has
+    /// no fixed field to name, so it is targeted with an [`OmitRule::Pointer`] instead.
+    Query,
 }
 
 impl OmitMethod {
@@ -644,6 +672,7 @@ impl OmitMethod {
             OmitMethod::Head => "head",
             OmitMethod::Patch => "patch",
             OmitMethod::Trace => "trace",
+            OmitMethod::Query => "query",
         }
     }
 }
@@ -657,6 +686,10 @@ pub enum ComponentKind {
     RequestBodies,
     Headers,
     SecuritySchemes,
+    /// `components.pathItems`, reachable from a Path Item `$ref`.
+    PathItems,
+    /// OpenAPI 3.2's `components.mediaTypes`, reachable from a Media Type Object `$ref`.
+    MediaTypes,
 }
 
 impl ComponentKind {
@@ -669,6 +702,8 @@ impl ComponentKind {
             ComponentKind::RequestBodies => "requestBodies",
             ComponentKind::Headers => "headers",
             ComponentKind::SecuritySchemes => "securitySchemes",
+            ComponentKind::PathItems => "pathItems",
+            ComponentKind::MediaTypes => "mediaTypes",
         }
     }
 }
@@ -815,6 +850,14 @@ macro_rules! omit {
     }};
     (@components $omit:ident; security_schemes { $($names:tt)* } $($rest:tt)*) => {{
         $crate::omit!(@component_names $omit; $crate::ComponentKind::SecuritySchemes; $($names)*);
+        $crate::omit!(@components $omit; $($rest)*);
+    }};
+    (@components $omit:ident; path_items { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::ComponentKind::PathItems; $($names)*);
+        $crate::omit!(@components $omit; $($rest)*);
+    }};
+    (@components $omit:ident; media_types { $($names:tt)* } $($rest:tt)*) => {{
+        $crate::omit!(@component_names $omit; $crate::ComponentKind::MediaTypes; $($names)*);
         $crate::omit!(@components $omit; $($rest)*);
     }};
     (@component_names $omit:ident; $kind:expr;) => {};
