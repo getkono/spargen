@@ -59,6 +59,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
 
+  powerset:
+    name: Feature combinations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-hack
+      # Every other job runs `--all-features`, so a combination such as `xml` on and `time` off was
+      # never compiled — and those are exactly the subsets the generator embeds per spec.
+      - run: cargo hack check --workspace --each-feature --no-dev-deps
+      - run: cargo hack check -p support-runtime --feature-powerset
+
   runtime-dependencies:
     name: Runtime dependency floors
     runs-on: ubuntu-latest

@@ -33,10 +33,11 @@ changes.
 Validate changes:
 
 ```bash
-mise run check   # cargo check --workspace --all-features
-mise run fmt     # cargo fmt --all
-mise run lint    # cargo clippy --workspace --all-targets --all-features -- -D warnings
-mise run test    # cargo test --workspace --all-features
+mise run check     # cargo check --workspace --all-features
+mise run fmt       # cargo fmt --all
+mise run lint      # cargo clippy --workspace --all-targets --all-features -- -D warnings
+mise run test      # cargo test --workspace --all-features
+mise run powerset  # cargo hack: every feature combination, not just --all-features
 ```
 
 Standing invariants:
