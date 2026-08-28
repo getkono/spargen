@@ -3821,3 +3821,87 @@ paths:
         .join("\n");
     assert!(messages.contains("must not be optional"), "{messages}");
 }
+
+/// `W012` fires only where `under_build_script()` is true and no consumer manifest is discoverable
+/// — a combination no plain test process can reach, because Cargo always sets
+/// `CARGO_MANIFEST_DIR`. A real build script that clears it exercises the branch honestly rather
+/// than through a stubbed environment, and proves the run still generates: an un-audited build is
+/// degraded, not failed.
+#[test]
+fn w012_a_build_script_with_no_discoverable_manifest_warns_and_still_generates() {
+    let temp = tempfile::tempdir().unwrap();
+    let crate_dir = temp.path().join("consumer");
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+    let spargen_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        format!(
+            r#"[package]
+name = "unauditable-consumer"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+bytes = "1.12.1"
+reqwest = {{ version = "0.12.28", default-features = false }}
+secrecy = "0.10.3"
+serde = {{ version = "1.0.229", features = ["derive"] }}
+serde_json = "1.0.151"
+
+[build-dependencies]
+spargen = {{ path = {spargen_path:?}, default-features = false }}
+
+[workspace]
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("build.rs"),
+        r#"fn main() {
+    // Cargo always sets these for a build script, which is exactly why the "no manifest" branch
+    // is otherwise unreachable. Clearing them here is the honest way to reach it.
+    std::env::remove_var("CARGO_MANIFEST_PATH");
+    std::env::remove_var("CARGO_MANIFEST_DIR");
+
+    // Resolved at compile time, so clearing the runtime variable above cannot affect it.
+    let build = spargen::Spec::new(concat!(env!("CARGO_MANIFEST_DIR"), "/openapi.yaml"))
+        .build(concat!(env!("OUT_DIR"), "/generated.rs"));
+    let report = spargen::generate(&build);
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == spargen::Code::RuntimeAuditSkipped),
+        "expected W012: {report:#?}"
+    );
+    assert!(report.outcome().is_success(), "{report:#?}");
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(crate_dir.join("src/lib.rs"), "").unwrap();
+    std::fs::write(
+        crate_dir.join("openapi.yaml"),
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /ping:
+    get: { operationId: ping, responses: { "204": { description: OK } } }
+"#,
+    )
+    .unwrap();
+
+    let output = Command::new("cargo")
+        .arg("check")
+        .current_dir(&crate_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "build script must warn and still generate:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

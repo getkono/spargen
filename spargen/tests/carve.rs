@@ -765,3 +765,57 @@ paths:
     assert!(!code.contains("get_glob_file"), "{code}");
     assert!(!code.contains("get_kept_file"), "{code}");
 }
+
+/// `E019` is emitted from `compat`, and until now only its own module exercised it. An omit rule
+/// that names nothing is a mistake in the profile, not a property of the spec, so it fails the run
+/// rather than being ignored — for an exact rule and a glob alike.
+#[test]
+fn e019_an_omit_rule_that_matches_nothing_fails_the_run() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = temp.path();
+    let spec = write_spec(
+        dir,
+        "openapi.yaml",
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /pets:
+    get: { operationId: listPets, responses: { "204": { description: OK } } }
+"#,
+    );
+
+    for (label, rules) in [
+        (
+            "exact path",
+            vec![spargen::OmitRule::path("/does-not-exist")],
+        ),
+        (
+            "glob path",
+            vec![spargen::OmitRule::path("/nothing-here/*")],
+        ),
+        (
+            "component",
+            vec![spargen::OmitRule::component(
+                spargen::ComponentKind::Schemas,
+                "Absent",
+            )],
+        ),
+        (
+            "pointer",
+            vec![spargen::OmitRule::pointer(None, "/paths/~1absent")],
+        ),
+    ] {
+        let out = dir.join(format!("{}.rs", label.replace(' ', "_")));
+        let report = spargen::generate(&omitting(&spec, &out, spargen::Omit { rules }));
+        assert_eq!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::InvalidOmitRule),
+            "{label}: {report:#?}"
+        );
+    }
+}

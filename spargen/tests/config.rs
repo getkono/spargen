@@ -217,3 +217,79 @@ fn deps_reports_a_rejection_instead_of_a_block() {
         "{output:?}"
     );
 }
+
+// --- Cargo-integration dispositions -------------------------------------------------------------
+//
+// `W012`, `W013`, and `E024` are the facade's own diagnostics rather than the frontend's, so they
+// have no inline-spec fixture in `frontend.rs`. `W013` and `E024` are reachable from any plain
+// process; `W012` needs a real build script and lives in `e2e.rs` for that reason.
+
+/// Generating outside a build script emits no rebuild triggers and skips the dependency audit.
+/// Under `Auto` that is a degradation worth saying out loud, not a silent one.
+#[test]
+fn w013_generating_outside_a_build_script_reports_the_degradation() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(dir.join("openapi.yaml"), SPEC).unwrap();
+
+    let build = spargen::Spec::new(dir.join("openapi.yaml"))
+        .build(dir.join("client.rs"))
+        .cargo(spargen::CargoIntegration::Auto);
+    let report = spargen::generate(&build);
+
+    assert!(report.outcome().is_success(), "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == spargen::Code::CargoIntegrationDegraded),
+        "{report:#?}"
+    );
+}
+
+/// `Required` turns that same degradation into a hard failure, so a build that depends on the
+/// audit cannot quietly run without it.
+#[test]
+fn e024_required_cargo_integration_outside_a_build_script_is_fatal() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(dir.join("openapi.yaml"), SPEC).unwrap();
+
+    let build = spargen::Spec::new(dir.join("openapi.yaml"))
+        .build(dir.join("client.rs"))
+        .cargo(spargen::CargoIntegration::Required);
+    let report = spargen::generate(&build);
+
+    assert_eq!(report.outcome(), spargen::Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == spargen::Code::CargoIntegrationRequired),
+        "{report:#?}"
+    );
+    // The failure is announced before anything is written.
+    assert!(!dir.join("client.rs").exists(), "{report:#?}");
+}
+
+/// `Off` opts out of the whole policy, so neither diagnostic fires.
+#[test]
+fn cargo_integration_off_reports_neither_degradation_nor_failure() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = camino::Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(dir.join("openapi.yaml"), SPEC).unwrap();
+
+    let build = spargen::Spec::new(dir.join("openapi.yaml"))
+        .build(dir.join("client.rs"))
+        .cargo(spargen::CargoIntegration::Off);
+    let report = spargen::generate(&build);
+
+    assert!(report.outcome().is_success(), "{report:#?}");
+    assert!(
+        !report.diagnostics().iter().any(|d| matches!(
+            d.code,
+            spargen::Code::CargoIntegrationDegraded | spargen::Code::CargoIntegrationRequired
+        )),
+        "{report:#?}"
+    );
+}
