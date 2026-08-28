@@ -58,12 +58,12 @@ async fn main() {
     println!("created pet #{}", created.into_inner().id);
 
     // Fetch by path parameter.
-    let pet = client.get_pet("1".to_owned()).await.expect("get_pet");
+    let pet = client.get_pet("1").await.expect("get_pet");
     assert_eq!(pet.into_inner().status, types::Status::Available);
     println!("fetched pet #1");
 
     // A documented 404 arrives as the operation's typed error body — no silent degradation.
-    match client.get_pet("999".to_owned()).await {
+    match client.get_pet("999").await {
         Err(Error::Api(response)) => {
             assert_eq!(response.status(), 404);
             println!("typed 404: {}", response.into_inner().message);

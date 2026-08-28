@@ -202,7 +202,7 @@ pub(crate) fn emit_operation(
 
     // The typed argument list (required params, the optional-params struct, the body) is shared
     // verbatim with the blocking shim so the two signatures can never drift.
-    let (args, _arg_names) = operation_args(operation, names, options);
+    let (args, _arg_names) = operation_args(operation, api, names, options);
 
     let path_init = operation.path.raw.clone();
     let path_replacements = operation
@@ -804,6 +804,8 @@ pub(crate) fn emit_operation(
         }
     };
 
+    let arg_normalizations = operation_arg_normalizations(operation, api, names, options);
+
     quote! {
         #docs
         #(#param_default_docs)*
@@ -813,6 +815,7 @@ pub(crate) fn emit_operation(
             &self,
             #(#args),*
         ) -> Result<#return_ok_ty, support::Error<#error_ty>> {
+            #(#arg_normalizations)*
             let mut #path_binding = #path_init.to_owned();
             #(#path_replacements)*
             let mut #query_binding: Vec<String> = Vec::new();
@@ -848,6 +851,48 @@ pub(crate) fn emit_operation(
     }
 }
 
+/// Whether a required parameter is emitted as `impl Into<String>` rather than its concrete type.
+///
+/// Exactly a non-nullable, unboxed `String`. `Option<String>` and `Box<String>` positions stay
+/// concrete: `Into` would make `None` ambiguous at the call site for no gain.
+fn takes_into_string(api: &Api, ty: Ty) -> bool {
+    !ty.nullable
+        && !ty.boxed
+        && matches!(
+            api.types.get(ty.id).map(|definition| &definition.kind),
+            Some(TypeKind::Primitive(crate::ir::Prim::String))
+        )
+}
+
+/// Convert every `impl Into<..>` argument to its concrete type once, at the top of the method body,
+/// so the rest of the emitted body is written against concrete types exactly as before.
+fn operation_arg_normalizations(
+    operation: &Operation,
+    api: &Api,
+    names: &Names,
+    options: &CodegenOptions,
+) -> Vec<TokenStream> {
+    let bindings = operation_bindings(operation, names);
+    let params_ident = names
+        .params_structs
+        .get(&operation.id)
+        .expect("params name allocated");
+    let mut statements = Vec::new();
+    for param in operation.params.iter().filter(|param| param.required) {
+        if takes_into_string(api, param.ty) {
+            let ident = param_ident(param, crate::name::IdentRole::Param);
+            let ty = ty_tokens(param.ty, names, options, true);
+            statements.push(quote! { let #ident: #ty = #ident.into(); });
+        }
+    }
+    if let Some(params_binding) = &bindings.params {
+        statements.push(quote! {
+            let #params_binding: Option<#params_ident> = #params_binding.into();
+        });
+    }
+    statements
+}
+
 /// The typed method arguments and their bare forwarding names for an operation. Shared by
 /// [`emit_operation`] (the async method) and [`emit_blocking_operation`] (its synchronous shim) so
 /// the two signatures are constructed from one source and can never drift. The first vector holds
@@ -856,6 +901,7 @@ pub(crate) fn emit_operation(
 /// name (`body`) passes the reference straight through.
 fn operation_args(
     operation: &Operation,
+    api: &Api,
     names: &Names,
     options: &CodegenOptions,
 ) -> (Vec<TokenStream>, Vec<TokenStream>) {
@@ -868,12 +914,24 @@ fn operation_args(
     let mut forwards = Vec::new();
     for param in operation.params.iter().filter(|param| param.required) {
         let ident = param_ident(param, crate::name::IdentRole::Param);
+        // A plain `String` parameter accepts anything that converts, so a call site passes a
+        // literal without `.to_owned()`. Narrowed to exactly `String`: every other generated type
+        // keeps its concrete position, where `impl Into<T>` would buy nothing and cost inference.
         let ty = ty_tokens(param.ty, names, options, true);
-        args.push(quote! { #ident: #ty });
+        if takes_into_string(api, param.ty) {
+            // `Into<#ty>`, not `Into<String>`: a `$ref`'d string component lowers to a transparent
+            // `pub type WorkflowId = String`, so the bound is the same one either way — but naming
+            // the component keeps the generated signature as self-describing as it was.
+            args.push(quote! { #ident: impl Into<#ty> });
+        } else {
+            args.push(quote! { #ident: #ty });
+        }
         forwards.push(quote! { #ident });
     }
     if let Some(params_binding) = &bindings.params {
-        args.push(quote! { #params_binding: Option<#params_ident> });
+        // `impl Into<Option<..>>` accepts the bundle directly as well as `None`/`Some(..)`, so a
+        // caller who sets optional parameters no longer wraps them in `Some`.
+        args.push(quote! { #params_binding: impl Into<Option<#params_ident>> });
         forwards.push(quote! { #params_binding });
     }
     if let Some((ty, required)) = operation.request_body.as_ref().and_then(|body| {
@@ -951,7 +1009,7 @@ pub(crate) fn emit_blocking_client(
     let methods = api
         .operations
         .iter()
-        .map(|operation| emit_blocking_operation(operation, names, options));
+        .map(|operation| emit_blocking_operation(operation, api, names, options));
     let doc = "A synchronous client: owns the async `Client` plus a current-thread tokio runtime \
         and `block_on`s each operation. Enable the crate's `blocking` feature to use it.\n\n\
         Must NOT be constructed or called from inside another async runtime — tokio's `block_on` \
@@ -1045,6 +1103,7 @@ pub(crate) fn emit_blocking_client(
 /// return types as the async method (all built from the shared signature helpers).
 fn emit_blocking_operation(
     operation: &Operation,
+    api: &Api,
     names: &Names,
     options: &CodegenOptions,
 ) -> TokenStream {
@@ -1055,7 +1114,7 @@ fn emit_blocking_operation(
     let docs = doc_tokens(&operation.docs);
     let param_default_docs = param_default_docs_tokens(operation);
     let deprecated = operation.deprecated.then(|| quote! { #[deprecated] });
-    let (args, forwards) = operation_args(operation, names, options);
+    let (args, forwards) = operation_args(operation, api, names, options);
     let (return_ok_ty, error_ty) = operation_return_ty(operation, names, options);
     quote! {
         #docs

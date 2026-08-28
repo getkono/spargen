@@ -1258,6 +1258,26 @@ fn every_runtime_type_in_a_signature_is_nameable() {
     let _: &dyn basic_client::RetryPolicy = &NeverRetry;
 }
 
+// The call-site shapes `impl Into<..>` / `impl Into<Option<..>>` are meant to widen, never to
+// narrow: everything that compiled against the concrete signatures still compiles, and the shorter
+// spellings compile too.
+#[test]
+fn required_string_params_and_the_params_bundle_accept_conversions() {
+    fn call(client: &basic_client::Client) {
+        let owned = String::from("k");
+        // Widened: a literal and a `&String` now work where only `String` did.
+        let _ = client.read_file("k");
+        let _ = client.read_file(&owned);
+        // Still accepted, so no existing call site breaks.
+        let _ = client.read_file(owned.clone());
+        // The params bundle takes `None` and `Some(..)` as before, and now the bundle itself.
+        let _ = client.get_user("1", None);
+        let _ = client.get_user("1", basic_client::GetUserParams::default());
+        let _ = client.get_user("1", Some(basic_client::GetUserParams::default()));
+    }
+    let _ = call;
+}
+
 #[test]
 fn the_client_is_debug_and_clone() {
     fn assert_debug<T: std::fmt::Debug>() {}
