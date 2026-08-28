@@ -317,6 +317,10 @@ pub(super) fn parse_path_item(
         reference_siblings,
         operations,
         parameters,
+        servers: value
+            .get("servers")
+            .map(|value| parse_servers(value, &pointer.push("servers"), diags))
+            .unwrap_or_default(),
     })
 }
 
@@ -360,6 +364,10 @@ fn parse_operation(
         security: value
             .get("security")
             .map(|value| parse_security(value, &pointer.push("security"))),
+        servers: value
+            .get("servers")
+            .map(|value| parse_servers(value, &pointer.push("servers"), diags))
+            .unwrap_or_default(),
         deprecated: value
             .get("deprecated")
             .and_then(SpannedValue::as_bool)

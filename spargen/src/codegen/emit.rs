@@ -748,17 +748,27 @@ pub(crate) fn emit_operation(
     // The return type is shared with the blocking shim so both surfaces stay identical.
     let (return_ok_ty, _) = operation_return_ty(operation, names, options);
 
+    // An Operation or Path Item Object may override the document's `servers`. The runtime's
+    // `*_on` entry points take that override: absolute, it replaces the client's base URL;
+    // relative, it is joined onto it. `None` keeps the client's base.
+    let server_override = match &operation.server {
+        Some(server) => quote! { Some(#server) },
+        None => quote! { None },
+    };
     let build_url = if uses_querystring {
         quote! {
-            support::build_url_with_query_string(
+            support::build_url_with_query_string_on(
                 &self.core,
+                #server_override,
                 &#path_binding,
                 &#query_binding,
                 #raw_query_binding.as_deref(),
             )
         }
     } else {
-        quote! { support::build_url(&self.core, &#path_binding, &#query_binding) }
+        quote! {
+            support::build_url_on(&self.core, #server_override, &#path_binding, &#query_binding)
+        }
     };
 
     quote! {

@@ -228,6 +228,14 @@ pub fn lower(
                 append_response_docs(&mut operation_description, "default", &response);
             }
 
+            // Operation `servers` override the path item's, which override the document's. The
+            // document's is the client's base URL, so "no override" is the common case.
+            let server = if operation.servers.is_empty() {
+                lower_server_override(&item.servers, ctx.diags)
+            } else {
+                lower_server_override(&operation.servers, ctx.diags)
+            };
+
             operations.push(Operation {
                 id: OperationId(id),
                 method: method.clone(),
@@ -243,6 +251,7 @@ pub fn lower(
                     description: operation_description,
                     deprecated: operation.deprecated,
                 },
+                server,
                 provenance: operation.provenance.clone(),
             });
         }
@@ -3517,6 +3526,48 @@ fn lower_security_requirement(requirement: &SecurityRequirement) -> crate::ir::S
 /// A Server Variable `default` is unlike a Schema Object `default`: the specification says it is
 /// actually sent when the caller supplies no alternative, so it changes the wire and must be
 /// modeled rather than documented.
+/// Resolve the base-URL override an Operation or Path Item Object declares, rendered with every
+/// server variable at its declared default.
+///
+/// The specification defines no way for a client to *choose* among several `servers` entries in
+/// this position, so the first is used and the rest are acknowledged as having no effect (`W011`).
+/// Variables are substituted with their declared defaults — what the specification says is sent
+/// when nothing selects another value. Unlike the document's `servers`, a per-operation override
+/// gets no typed builder: there is no constructor to hand a selection to, since the choice is made
+/// per call rather than per client.
+fn lower_server_override(servers: &[super::Server], diags: &mut Diagnostics) -> Option<String> {
+    let (first, rest) = servers.split_first()?;
+    for extra in rest {
+        Diagnostic::warning(Code::DeclarationHasNoEffect, extra.provenance.clone())
+            .message(format!(
+                "`servers` entry `{}` past the first has no effect here: the specification \
+                 defines no rule for selecting among per-operation servers, so the first is used",
+                extra.url
+            ))
+            .emit(diags);
+    }
+    lower_server(first, diags).map(|server| render_server_url(&server))
+}
+
+/// Render a lowered server URL template with each variable at its declared default.
+///
+/// `lower_server` has already rejected a template naming an undeclared variable, so a missing
+/// entry here can only occur on a document that is already failing.
+fn render_server_url(server: &Server) -> String {
+    let mut url = String::with_capacity(server.url.len());
+    for segment in &server.segments {
+        match segment {
+            UrlSegment::Literal(text) => url.push_str(text),
+            UrlSegment::Variable(name) => {
+                if let Some(variable) = server.variables.get(name) {
+                    url.push_str(&variable.default);
+                }
+            }
+        }
+    }
+    url
+}
+
 fn lower_server(server: &super::Server, diags: &mut Diagnostics) -> Option<Server> {
     let segments = parse_url_template(&server.url);
     let mut seen: HashSet<&str> = HashSet::new();

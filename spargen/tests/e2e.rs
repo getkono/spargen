@@ -3138,3 +3138,125 @@ fn dates_are_rfc3339_on_the_wire_in_both_directions() {
     server.join().unwrap();
 }
 "##;
+
+/// A Path Item `servers` override must send that operation to a *different host*, while its
+/// siblings keep the client's base URL.
+///
+/// This is the wire half of the fix: the runtime already had `build_url_on` for exactly this, with
+/// its own unit test, but codegen never passed anything but `None` — so an override compiled fine
+/// and silently went to the wrong server. Only a second listener can tell the two apart.
+#[test]
+fn a_server_override_sends_the_operation_to_another_host() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    // Bound before generation: the override URL is baked into the generated code, so the port has
+    // to be known first. This listener is served from *this* process while the generated crate's
+    // test process drives the client against it.
+    let override_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let override_addr = override_listener.local_addr().unwrap();
+    let override_server = std::thread::spawn(move || {
+        let (mut stream, _) = override_listener.accept().unwrap();
+        let mut buf = [0u8; 2048];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]).to_string();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream.flush().unwrap();
+        request
+    });
+
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: Servers, version: 1.0.0 }}
+servers:
+  - url: https://api.example.com/v1
+paths:
+  /pets:
+    get:
+      operationId: listPets
+      responses:
+        "204": {{ description: No Content }}
+  /upload:
+    servers:
+      - url: http://{override_addr}
+    post:
+      operationId: uploadItem
+      responses:
+        "204": {{ description: No Content }}
+"##
+        ),
+    )
+    .unwrap();
+    let out = temp.path().join("client");
+    let report = generate_fixture_crate(&spec, &out, "servers_client");
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/servers.rs"),
+        r##"#![cfg(feature = "blocking")]
+
+use std::io::{Read, Write};
+use std::net::TcpListener;
+
+// The base-URL operation must reach the client's own base, proving the override is scoped to the
+// path item that declares it rather than applied to the whole client.
+#[test]
+fn the_unoverridden_operation_still_uses_the_client_base_url() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 2048];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]).to_string();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream.flush().unwrap();
+        request
+    });
+
+    let base = format!("http://{addr}");
+    let client = servers_client::BlockingClient::new(&base).unwrap();
+
+    // Goes to the client's base URL.
+    client.list_pets().expect("list_pets round-trips");
+    let seen = base_server.join().unwrap();
+    assert!(
+        seen.starts_with("GET /pets "),
+        "the base server should have served /pets: {seen}"
+    );
+
+    // Goes to the override host, which lives in the *parent* test process; reaching it at all is
+    // the proof, since this process never bound that port.
+    client.upload_item().expect("upload_item round-trips");
+}
+"##,
+    )
+    .unwrap();
+
+    let status = Command::new("cargo")
+        .args(["test", "--features", "blocking", "--test", "servers"])
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(status.success(), "the server-override round-trip must pass");
+
+    let seen = override_server.join().unwrap();
+    assert!(
+        seen.starts_with("POST /upload "),
+        "the override host should have served /upload: {seen}"
+    );
+    assert!(
+        seen.contains(&format!("host: {override_addr}")),
+        "the request must carry the override host, not the document server: {seen}"
+    );
+}

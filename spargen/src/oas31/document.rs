@@ -107,6 +107,9 @@ pub struct PathItem {
     pub operations: IndexMap<Method, OperationObject>,
     /// Parameters shared across all operations on this path.
     pub parameters: Vec<RefOr<ParameterObject>>,
+    /// `servers`: an alternative base URL for every operation on this path, overriding the
+    /// document's.
+    pub servers: Vec<Server>,
 }
 
 /// An OAS Operation Object.
@@ -121,6 +124,9 @@ pub struct OperationObject {
     pub security: Option<Vec<SecurityRequirement>>,
     pub deprecated: bool,
     pub tags: Vec<String>,
+    /// `servers`: an alternative base URL for this operation, overriding the path item's and the
+    /// document's.
+    pub servers: Vec<Server>,
     pub provenance: Provenance,
 }
 
