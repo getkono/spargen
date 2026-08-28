@@ -46,6 +46,67 @@ tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
     )
 }
 
+/// A spec whose only binary payload is one documented error body. `ErrorShape::Single` over a
+/// `TypeKind::Bytes` is the shape where generated code and the dependency contract can most easily
+/// disagree: the body never travels through serde (it is classified by `classify_error_bytes`), so
+/// the contract does not require `bytes/serde` — and codegen must not emit anything that does.
+const BYTES_ERROR_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /blob:
+    get:
+      operationId: getBlob
+      responses:
+        "200": { description: ok }
+        "404":
+          description: raw failure
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+"#;
+
+/// Generated output must compile against exactly the `[dependencies]` block `spargen deps` prints
+/// for the same spec — not against a superset. Building the manifest from `requirements()` rather
+/// than a fixed fat manifest is the point: a fat manifest hides a missing feature.
+#[test]
+fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(&spec_path, BYTES_ERROR_SPEC).unwrap();
+    let spec = Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap());
+
+    let requirements = spargen::requirements(&spec).expect("spec lowers");
+    let out = temp.path().join("client");
+    std::fs::create_dir_all(out.join("src")).unwrap();
+    std::fs::write(
+        out.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"deps_exact\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n{}",
+            requirements.manifest_block()
+        ),
+    )
+    .unwrap();
+
+    let report = spargen::generate(
+        &spec
+            .clone()
+            .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
+            .cargo(CargoIntegration::Off),
+    );
+    assert_eq!(report.outcome, Outcome::Generated, "{report:#?}");
+
+    let status = Command::new("cargo")
+        .arg("check")
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "generated output must compile against the block `spargen deps` prints"
+    );
+}
+
 #[test]
 fn cargo_build_rejects_a_runtime_requirement_below_the_supported_floor() {
     let temp = tempfile::tempdir().unwrap();

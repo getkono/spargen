@@ -74,7 +74,7 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
     let errors = api
         .operations
         .iter()
-        .map(|operation| emit_error_enum(operation, names, options));
+        .map(|operation| emit_error_enum(operation, api, names, options));
     let response_enums = api
         .operations
         .iter()
@@ -2178,6 +2178,7 @@ fn status_label(spec: crate::ir::StatusSpec) -> String {
 /// bodies, a transparent newtype for one, and the uninhabited alias for none.
 pub(crate) fn emit_error_enum(
     operation: &Operation,
+    api: &Api,
     names: &Names,
     options: &CodegenOptions,
 ) -> TokenStream {
@@ -2231,8 +2232,16 @@ pub(crate) fn emit_error_enum(
         // local model type is shared with success bodies that are not errors. `serde(transparent)`
         // keeps the wire representation identical, and `Deref` plus `From` in both directions keep
         // the inner value one step away.
-        ErrorShape::Single(ty) => {
-            let ty = ty_tokens(ty, names, options, true);
+        ErrorShape::Single(body_ty) => {
+            let ty = ty_tokens(body_ty, names, options, true);
+            // The derive is emitted exactly when the decode path actually uses serde. A binary body
+            // is classified by `classify_error_bytes`, which builds the newtype through
+            // `From<Bytes>` — so deriving `Deserialize` there would demand `bytes/serde` of the
+            // consumer for an impl nothing calls, and the runtime dependency contract deliberately
+            // does not require that feature for a top-level bytes body. This predicate is the same
+            // one the error branch in `emit_operation` dispatches on, so the two cannot drift.
+            let deserialize = (!is_bytes_ty(api, body_ty))
+                .then(|| quote! { #[derive(serde::Deserialize)] #[serde(transparent)] });
             let doc = format!(
                 "The documented error body of this operation, wrapped so `Error<{error_ident}>` \
                  is a `std::error::Error`. Derefs and converts to the inner type."
@@ -2240,8 +2249,8 @@ pub(crate) fn emit_error_enum(
             quote! {
                 #[doc = #doc]
                 #[allow(dead_code)]
-                #[derive(Debug, Clone, serde::Deserialize)]
-                #[serde(transparent)]
+                #[derive(Debug, Clone)]
+                #deserialize
                 pub struct #error_ident(pub #ty);
 
                 #[allow(dead_code)]
