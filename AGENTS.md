@@ -59,7 +59,16 @@ mise run deny       # supply-chain audit
 mise run docs       # build the mdBook site (fails on broken links/includes)
 ```
 
-`hk.pkl` wires these into git hooks, so pre-commit/pre-push run the same task bodies CI does.
+`hk.pkl` wires four of these into git hooks through the same mise tasks CI runs: `fmt` and `lint`
+on pre-commit, `test` and the `convco` commit-message check on pre-push. The rest — `check`,
+`powerset`, `corpus-smoke`, `example`, `github-api`, `deny`, `docs` — run only in CI; they are too
+slow for a hook, so a green pre-push is not a green CI. Run `mise run hooks` once to install them.
+
+CI additionally gates five things the list above does not name: `msrv` (the declared
+`rust-version` floor still compiles), `package` (`cargo publish --dry-run`, which is what keeps the
+runtime symlinks shipping inside the `.crate`), `runtime-dependencies` (the `#[ignore]`d
+minimal-versions proof in `e2e.rs`), `commits` (Conventional Commits over the outgoing range), and
+`cargo bench --no-run` inside the `test` job — so `mise run test` alone is weaker than CI's.
 
 Standing invariants:
 
@@ -73,7 +82,9 @@ Standing invariants:
 - Generated output must stay consumable via `include!` — no crate-level inner attributes;
   attributes ride on emitted items.
 - Prefer `pub(crate)` over `pub` for anything not part of the `build.rs` facade or an emitted
-  API; module privacy plus the layering DAG is how coupling stays controlled.
+  API; module privacy plus the layering DAG is how coupling stays controlled. The DAG is enforced
+  by `spargen/tests/layering.rs`, which diffs each `//! layer-deps:` header against the module's
+  real `crate::` edges — the `xtask lint-layers` job `lib.rs` describes does not exist yet.
 
 ## Testing strategy (by subsystem)
 
@@ -87,18 +98,20 @@ Tests live closest to what they pin; when you touch a subsystem, extend its suit
 | build cache | `spargen/src/cache.rs` | Complete input fingerprints plus missing, stale, and manually edited output invalidation. |
 | `diag` | `spargen/src/diag/code.rs` tests | Code string round-trips; every code has title + explain text. |
 | `name` | in-module proptests | Determinism, injectivity in scope, valid identifiers, keyword escaping. |
-| `compat` | in-module + `e2e.rs` | Omit rules match/apply, fingerprint stability, `W009`/`E019`/`E020`. |
+| `compat` | in-module + `carve.rs` + `e2e.rs` | Omit rules match/apply, fingerprint stability (same profile repeats, different profiles differ, order-sensitive), `W009`/`E019` in-module, `E020` in `carve.rs`. |
 | `support-runtime` | in-file `#[cfg(test)]` mods | URL building, auth attachment (all schemes + alternatives + failure modes), status classification, error taxonomy semantics. No async runtime: poll-once with `Waker::noop`. |
 | whole tool | `examples/petstore` + `examples/petstore-macro` (`mise run example`) | The generated client driven over real HTTP against a local mock server (params, bodies, auth, typed errors, undocumented statuses), via both the `build.rs` and macro paths; the macro run also asserts spargen stays out of the runtime graph (`cargo tree -e no-proc-macro`). |
-| corpus | `mise run corpus-smoke` / `corpus/manifest.toml` | Pinned real-world specs with expected outcomes (`expect = "generate"` / `"reject:E###"`); update expectations only with a reviewed reason. |
+| corpus | `spargen/tests/corpus_manifest.rs` / `mise run corpus-smoke` | `corpus/manifest.toml` is the single source of expectations (`expect = "generate"` / `"reject:E###"`); update them only with a reviewed reason. The suite drives every case, verifies each file against its pinned `sha256`, and holds the smoke task, the CI job, `snapshot.rs`, and `corpus/README.md` to the manifest — adding a case means adding it everywhere. |
 | `compat` (carve) | `spargen/tests/carve.rs` | Omit-profile globbing and auto-carve: rules match what they say, carve reaches a fixpoint, and it stays deterministic. |
-| `surface` | `spargen/tests/diff.rs` | `spargen diff` semver classification per change kind, and stability of the same pair twice. |
+| `surface` | `spargen/tests/diff.rs` + in-module | `spargen diff` semver classification per change kind, and stability of the same pair twice. Every `ChangeKind` needs a fixture in `diff.rs`; the in-module tests enforce that, and pin the impact policy and the kebab-case codes (`ChangeKind` is `#[non_exhaustive]`, so only an in-crate test can notice a new variant). |
 | `config` / CLI | `spargen/tests/config.rs`, `spargen/tests/cli.rs` | Config discovery and precedence, `spargen deps` output, the Cargo-integration policy, and the subcommand set (`generate` is deliberately absent). |
 | lowering invariants | `spargen/tests/lowering_props.rs` | Proptests over union/`allOf` lowering: category disjointness, closed-object disjointness, exact `allOf` merge. |
 | robustness | `spargen/tests/fuzz_frontend.rs` | Fixed-seed proptest no-panic harness over `check` (arbitrary bytes, UTF-8, keyword-biased and valid-skeleton documents, deep `$ref` chains), through both parsers. `fuzz/` is the nightly libFuzzer counterpart, run by hand. |
-| snapshots | `spargen/tests/snapshot.rs` | Per-corpus outcome plus a sorted diagnostic histogram, and an API surface for the small generating cases. Deliberately **not** the full emitted source — a change to signatures, derives, serde attributes, or the embedded runtime produces no diff here. |
+| snapshots | `spargen/tests/snapshot.rs` | One per corpus case (enforced by `corpus_manifest.rs`): the outcome plus a sorted diagnostic histogram, and an API surface for the small generating cases. Deliberately **not** the full emitted source — a change to signatures, derives, serde attributes, or the embedded runtime produces no diff here. |
 | framework round-trip | `spargen/tests/recipes.rs` | The OpenAPI documents utoipa / aide / poem-openapi actually emit. |
-| docs ↔ code | `spargen/src/diag/code.rs` tests | `docs/errors.md` lists exactly `Code::all()` with matching titles; every code a support document cites is real, every declared code appears in `docs/support-matrix.md`, and it sits in the column matching its severity. |
+| `emit` | in-module | The provenance header's format and version stamp, that it precedes the module verbatim and is comments-only (generated output is `include!`d, so an inner attribute here breaks every consumer), the one-file rule, and `EmitError`'s display/source chain. |
+| `support` + layering | `spargen/tests/layering.rs` | Each subsystem's `//! layer-deps:` header matches the `crate::` edges it actually takes and the DAG table in `lib.rs`; each runtime source carries `#[cfg(test)]` at most once with nothing after it (the embed splits on that literal); generated output carries no test module; `runtime_files()` and the `src/support/runtime/` symlinks equal the `support-runtime/src` file set. |
+| docs ↔ code | `spargen/src/diag/code.rs` tests | `docs/errors.md` lists exactly `Code::all()` with matching titles; every code a support document cites is real, every declared code appears in `docs/support-matrix.md`, and it sits in the column matching its severity. `Code::all()` is checked against the enum, and every code must be asserted by `frontend.rs` or by the suite named in that test's `OWNED_ELSEWHERE` table. |
 
 Bug-fix discipline: every bug becomes a fixture (usually in `frontend.rs` or the runtime test
 mods) *before* its fix, so regressions cannot reappear silently.
