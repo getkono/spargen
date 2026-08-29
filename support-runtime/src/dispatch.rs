@@ -486,10 +486,11 @@ pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
 /// The body is pulled incrementally and abandoned one byte past the cap, so peak memory is a
 /// function of the cap rather than of whatever the server chose to send — `reqwest` imposes no
 /// response size limit of its own, so without this a hostile or malfunctioning peer could force an
-/// arbitrarily large allocation on an error path whose contents are mostly discarded. The bound is
-/// a small multiple of the cap, not `cap` exactly: `BytesMut` grows by doubling and `freeze` does
-/// not shrink, and `cap_body` then allocates the retained copy while the read buffer is still
-/// live.
+/// arbitrarily large allocation on an error path whose contents are mostly discarded. What matters
+/// is that peak stops depending on the body's size; it is not `cap` exactly. The loop extends
+/// before it re-tests, so one transport chunk rides on top — hyper buffers up to a few hundred KiB
+/// — and `BytesMut` grows by doubling while `cap_body` allocates the retained copy alongside it. A
+/// small cap is therefore dominated by the chunk, not by the cap.
 ///
 /// Abandoning the body early forgoes reuse of that connection, which is the right trade for a
 /// response already too large to retain. The threshold is the cap itself, with no drain allowance
@@ -1231,9 +1232,9 @@ mod tests {
         );
     }
 
-    /// A body of exactly `cap` bytes is not truncated. This pins `cap_body`'s `<= cap` boundary:
-    /// narrowing it to `<` reports an exact-fit body as truncated and copies it needlessly, which
-    /// nothing else in the suite notices (verified by regressing it).
+    /// A body of exactly `cap` bytes is not truncated. This pins `cap_body`'s truncation test:
+    /// widening `body.len() > cap` to `>=` reports an exact-fit body as truncated, which nothing
+    /// else in the suite notices (verified by regressing it).
     #[test]
     fn a_body_of_exactly_the_cap_is_not_truncated() {
         let mut core = core();

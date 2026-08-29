@@ -42,12 +42,16 @@ pub enum Error<E> {
         path: String,
         /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
         ///
-        /// Two paths do not yet reach the cap and construct this variant with the whole body: the
-        /// generated shim for an operation with more than one documented success status, which
-        /// reads through `read_success_body`, and `EventStream`'s per-frame decode, which is
-        /// bounded only by the frame. Neither is a deliberate exemption — `read_success_body`
-        /// simply does not take the cap, and threading it through changes emitted output, so it is
-        /// deferred rather than accepted. The same shim reaches `UnexpectedStatus` uncapped too.
+        /// Two paths do not reach the cap and construct this variant with the whole body, for
+        /// different reasons:
+        ///
+        /// - The generated shim for an operation with more than one documented success status
+        ///   reads through `read_success_body`, which does not take the cap. Threading it through
+        ///   changes emitted output, so this is deferred rather than accepted. The same shim
+        ///   reaches `UnexpectedStatus` uncapped too.
+        /// - `EventStream`'s per-frame decode retains one frame, already detached by the framer.
+        ///   The cap does not apply because the bound there is the frame, not the response — but
+        ///   the frame buffer itself is unbounded, so this is a real gap, not a safe exemption.
         body: Bytes,
         /// Whether bytes were dropped from `body` to meet the cap.
         ///
