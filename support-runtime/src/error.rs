@@ -35,17 +35,19 @@ pub enum Error<E> {
         /// The raw response body.
         body: Bytes,
     },
-    /// #8 — the response body failed to deserialize; retains the serde error path and (capped) raw
-    /// body.
+    /// #8 — the response body failed to deserialize; retains the serde error path and the raw
+    /// body, capped on every path but the two named on `body` below.
     Decode {
         /// The serde deserialization error path.
         path: String,
         /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
         ///
         /// Two paths do not yet reach the cap and construct this variant with the whole body: the
-        /// generated multi-success-status shim, which reads through `read_success_body` and has no
-        /// `ClientCore` to consult, and `EventStream`'s per-frame decode, which is bounded only by
-        /// the frame. Both are stated here rather than left to be discovered from the field.
+        /// generated shim for an operation with more than one documented success status, which
+        /// reads through `read_success_body`, and `EventStream`'s per-frame decode, which is
+        /// bounded only by the frame. Neither is a deliberate exemption — `read_success_body`
+        /// simply does not take the cap, and threading it through changes emitted output, so it is
+        /// deferred rather than accepted. The same shim reaches `UnexpectedStatus` uncapped too.
         body: Bytes,
         /// Whether bytes were dropped from `body` to meet the cap.
         ///

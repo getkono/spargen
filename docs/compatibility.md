@@ -133,12 +133,17 @@ pointer = "/components/schemas/X"       # pointer → OmitRule::Pointer
 file = "extra.yaml"                     #   file optional (file-local pointer)
 ```
 
-On native targets `error_body_cap` bounds reading as well as retention: a response body that
-exceeds it is abandoned partway rather than buffered whole, so an oversized error body cannot force
-an arbitrarily large allocation. Abandoning it forgoes reuse of that connection, so a cap set far
-below the error bodies an API actually returns trades connection reuse for a smaller retained
-prefix. On `wasm32` the `fetch` backend offers no incremental read, so there the cap bounds only
-what is retained — see the **Targets** row of [the support matrix](support-matrix.md).
+`error_body_cap` bounds what a generated client retains on an error. For bodies read as errors on
+native targets it bounds *reading* too: one that exceeds the cap is abandoned partway rather than
+buffered whole, so an oversized error body cannot force an arbitrarily large allocation. Abandoning
+it forgoes reuse of that connection, so a cap set far below the error bodies an API actually returns
+trades connection reuse for a smaller retained prefix. On `wasm32` the `fetch` backend offers no
+incremental read, so there the cap bounds only what is retained — see the **Targets** row of
+[the support matrix](support-matrix.md).
+
+A *success* body that fails to decode is capped on retention only, on every target: deserialization
+needs the whole body, so it is always read whole. The emitted `ClientConfig::max_error_body` doc
+carries the full disposition, including the two paths that are not capped at all.
 
 Equivalent repeatable CLI flags (unioned with any config-file omit rules):
 

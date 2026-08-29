@@ -468,19 +468,17 @@ pub async fn unexpected_status<E>(core: &ClientCore, response: Response) -> Erro
 }
 
 /// Truncate a body to the retention cap, **copying** the retained prefix rather than slicing it.
+/// Returns the retained bytes and whether any were dropped.
 ///
-/// Only the truncating branch copies: an under-cap body is returned untouched, which is correct
-/// wherever the caller's `Bytes` is already sized to its contents. A caller holding a buffer with
-/// spare capacity must detach before calling — see `read_capped`.
-/// `Bytes::slice` returns a refcounted view that keeps the whole original allocation alive, so an
-/// oversized body would stay resident for the lifetime of the `Error` — the cap is documented as a
-/// bound on retention, so it has to detach. Returns the retained bytes and whether any were dropped.
+/// The copy is unconditional, including when nothing is truncated, because a `Bytes` does not
+/// reveal how much memory stands behind it and every source here can hand over more than it holds:
+/// `Bytes::slice` is a refcounted view onto the whole original; `BytesMut::freeze` hands over the
+/// buffer at its doubled capacity; and `response.bytes()` can return a view sharing the transport's
+/// read buffer. Retention is documented as bounded by the cap, so the only way to mean it is to
+/// detach every time. The cost is one copy of at most `cap` bytes, on error paths only.
 pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
-    if body.len() <= cap {
-        (body, false)
-    } else {
-        (Bytes::copy_from_slice(&body[..cap]), true)
-    }
+    let retained = body.len().min(cap);
+    (Bytes::copy_from_slice(&body[..retained]), body.len() > cap)
 }
 
 /// Read a response body, retaining at most `max_error_body` bytes.
@@ -518,15 +516,8 @@ async fn read_capped<E>(
             None => break,
         }
     }
-    // `BytesMut::freeze` hands the buffer over at its full capacity, and growth doubles, so an
-    // UNDER-cap body would otherwise pin an allocation up to twice its length — the same retention
-    // defect this function exists to close, in miniature. `cap_body` cannot see that: a `Bytes`
-    // does not expose the capacity behind it. So detach here whenever the buffer holds slack, and
-    // keep `freeze` for the exact-fit case, where it is free.
-    let read = buffered.len();
-    if read <= cap && read < buffered.capacity() {
-        return Ok((Bytes::copy_from_slice(&buffered), false));
-    }
+    // `freeze` hands the buffer over at its doubled capacity, so an under-cap body would pin up to
+    // twice its length. `cap_body` copies unconditionally, which is what settles that here.
     Ok(cap_body(buffered.freeze(), cap))
 }
 
