@@ -845,3 +845,186 @@ fn prim_label(prim: Prim) -> &'static str {
 fn method_label(method: &crate::ir::Method) -> String {
     method.as_str().to_uppercase()
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{ChangeKind, Impact};
+
+    /// Every change kind, produced by an exhaustive match so a new variant does not compile until
+    /// it is listed — which is what makes the coverage assertions below closed over the enum.
+    /// `ChangeKind` is `#[non_exhaustive]`, so this list can only live inside the crate; the
+    /// fixtures that drive each kind live in `tests/diff.rs`, which cannot match exhaustively.
+    fn all_kinds() -> Vec<ChangeKind> {
+        let every = [
+            ChangeKind::OperationAdded,
+            ChangeKind::OperationRemoved,
+            ChangeKind::MethodRenamed,
+            ChangeKind::RequestBodyAdded,
+            ChangeKind::RequestBodyRemoved,
+            ChangeKind::RequestBodyTypeChanged,
+            ChangeKind::SuccessTypeChanged,
+            ChangeKind::ErrorTypeChanged,
+            ChangeKind::RequiredParamAdded,
+            ChangeKind::OptionalParamAdded,
+            ChangeKind::ParamRemoved,
+            ChangeKind::ParamTypeChanged,
+            ChangeKind::ParamRequirednessChanged,
+            ChangeKind::TypeAdded,
+            ChangeKind::TypeRemoved,
+            ChangeKind::TypeKindChanged,
+            ChangeKind::FieldAdded,
+            ChangeKind::RequiredFieldAdded,
+            ChangeKind::FieldRemoved,
+            ChangeKind::FieldTypeChanged,
+            ChangeKind::FieldRequirednessChanged,
+            ChangeKind::VariantAdded,
+            ChangeKind::VariantRemoved,
+            ChangeKind::VariantTypeChanged,
+        ];
+        for kind in every {
+            // Exhaustive by construction: adding a variant to `ChangeKind` fails to compile here
+            // until it is named, and the length assertion then fails until it joins `every`.
+            match kind {
+                ChangeKind::OperationAdded
+                | ChangeKind::OperationRemoved
+                | ChangeKind::MethodRenamed
+                | ChangeKind::RequestBodyAdded
+                | ChangeKind::RequestBodyRemoved
+                | ChangeKind::RequestBodyTypeChanged
+                | ChangeKind::SuccessTypeChanged
+                | ChangeKind::ErrorTypeChanged
+                | ChangeKind::RequiredParamAdded
+                | ChangeKind::OptionalParamAdded
+                | ChangeKind::ParamRemoved
+                | ChangeKind::ParamTypeChanged
+                | ChangeKind::ParamRequirednessChanged
+                | ChangeKind::TypeAdded
+                | ChangeKind::TypeRemoved
+                | ChangeKind::TypeKindChanged
+                | ChangeKind::FieldAdded
+                | ChangeKind::RequiredFieldAdded
+                | ChangeKind::FieldRemoved
+                | ChangeKind::FieldTypeChanged
+                | ChangeKind::FieldRequirednessChanged
+                | ChangeKind::VariantAdded
+                | ChangeKind::VariantRemoved
+                | ChangeKind::VariantTypeChanged => {}
+            }
+        }
+        every.to_vec()
+    }
+
+    /// The `variant -> Rust identifier` mapping, for the source scan below.
+    fn variant_name(kind: ChangeKind) -> &'static str {
+        match kind {
+            ChangeKind::OperationAdded => "OperationAdded",
+            ChangeKind::OperationRemoved => "OperationRemoved",
+            ChangeKind::MethodRenamed => "MethodRenamed",
+            ChangeKind::RequestBodyAdded => "RequestBodyAdded",
+            ChangeKind::RequestBodyRemoved => "RequestBodyRemoved",
+            ChangeKind::RequestBodyTypeChanged => "RequestBodyTypeChanged",
+            ChangeKind::SuccessTypeChanged => "SuccessTypeChanged",
+            ChangeKind::ErrorTypeChanged => "ErrorTypeChanged",
+            ChangeKind::RequiredParamAdded => "RequiredParamAdded",
+            ChangeKind::OptionalParamAdded => "OptionalParamAdded",
+            ChangeKind::ParamRemoved => "ParamRemoved",
+            ChangeKind::ParamTypeChanged => "ParamTypeChanged",
+            ChangeKind::ParamRequirednessChanged => "ParamRequirednessChanged",
+            ChangeKind::TypeAdded => "TypeAdded",
+            ChangeKind::TypeRemoved => "TypeRemoved",
+            ChangeKind::TypeKindChanged => "TypeKindChanged",
+            ChangeKind::FieldAdded => "FieldAdded",
+            ChangeKind::RequiredFieldAdded => "RequiredFieldAdded",
+            ChangeKind::FieldRemoved => "FieldRemoved",
+            ChangeKind::FieldTypeChanged => "FieldTypeChanged",
+            ChangeKind::FieldRequirednessChanged => "FieldRequirednessChanged",
+            ChangeKind::VariantAdded => "VariantAdded",
+            ChangeKind::VariantRemoved => "VariantRemoved",
+            ChangeKind::VariantTypeChanged => "VariantTypeChanged",
+        }
+    }
+
+    #[test]
+    fn the_kind_list_covers_the_whole_enum() {
+        assert_eq!(
+            all_kinds().len(),
+            24,
+            "a `ChangeKind` variant reached the exhaustive match without joining the list"
+        );
+    }
+
+    /// The codes are the JSON surface of `spargen diff`, so they are consumed by scripts: two
+    /// kinds sharing one, or a code that is not kebab-case, would break a caller silently.
+    #[test]
+    fn every_kind_has_a_distinct_kebab_case_code() {
+        let codes: BTreeSet<&str> = all_kinds().iter().map(|kind| kind.code()).collect();
+        assert_eq!(codes.len(), all_kinds().len(), "two kinds share a code");
+        for code in codes {
+            assert!(!code.is_empty());
+            assert!(
+                code.chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'),
+                "`{code}` is not kebab-case"
+            );
+            assert!(!code.starts_with('-') && !code.ends_with('-'), "`{code}`");
+        }
+    }
+
+    /// Additive changes are minor and everything else is major. Stated as a closed list so that
+    /// reclassifying a kind — which changes the version bump spargen recommends — is a deliberate
+    /// edit here rather than a silent consequence of moving a match arm.
+    #[test]
+    fn only_the_five_additive_kinds_are_minor() {
+        const MINOR: &[ChangeKind] = &[
+            ChangeKind::OperationAdded,
+            ChangeKind::OptionalParamAdded,
+            ChangeKind::TypeAdded,
+            ChangeKind::FieldAdded,
+            ChangeKind::VariantAdded,
+        ];
+        for kind in all_kinds() {
+            let expected = if MINOR.contains(&kind) {
+                Impact::Minor
+            } else {
+                Impact::Major
+            };
+            assert_eq!(
+                kind.impact(),
+                expected,
+                "{} is classified {:?}",
+                kind.code(),
+                kind.impact()
+            );
+        }
+    }
+
+    /// CLAUDE.md asks `tests/diff.rs` for "semver classification per change kind". Nine of the 24
+    /// had a fixture; the rest were classified by policy alone, with nothing proving the
+    /// classifier ever produces them. This makes "per change kind" mean what it says.
+    #[test]
+    fn every_kind_has_a_fixture_in_the_diff_suite() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/diff.rs");
+        let Ok(suite) = std::fs::read_to_string(path) else {
+            // Absent when this crate is tested from a packaged `.crate`, which ships no tests.
+            eprintln!("skipping: {path} is not present");
+            return;
+        };
+        for kind in all_kinds() {
+            let variant = variant_name(kind);
+            let needle = format!("ChangeKind::{variant}");
+            let mentioned = suite.match_indices(&needle).any(|(at, _)| {
+                suite[at + needle.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| !next.is_alphanumeric() && next != '_')
+            });
+            assert!(
+                mentioned,
+                "{} has no fixture: `{needle}` appears nowhere in spargen/tests/diff.rs",
+                kind.code()
+            );
+        }
+    }
+}

@@ -241,3 +241,365 @@ fn rejecting_spec_reports_cleanly_without_a_diff() {
     assert!(rejection.old_spec().is_none());
     assert!(rejection.new_spec().is_some());
 }
+
+// --- The remaining change kinds -----------------------------------------------------------------
+//
+// The nine kinds above were the ones with fixtures. The rest were classified by policy alone, with
+// nothing proving the classifier ever produces them; each of the tests below drives one out of a
+// real pair of specs. `spargen/src/surface/mod.rs` holds the guard that keeps this list complete.
+
+/// A spec assembled from a whole `paths:` body and a whole `components.schemas:` body, for the
+/// shapes the narrower `spec` helper above cannot express (request bodies, error responses, enums).
+fn full(paths: &str, schemas: &str) -> String {
+    format!(
+        "openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+{paths}components:
+  schemas:
+{schemas}"
+    )
+}
+
+/// One `get /pets` operation whose 200 body is `success`, with `extra` operation lines spliced in
+/// at 6-space indent (a `requestBody:`, and so on).
+fn pets_get(operation_id: &str, extra: &str, success: &str) -> String {
+    format!(
+        "  /pets:
+    get:
+      operationId: {operation_id}
+{extra}      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {success}
+"
+    )
+}
+
+const PET_REF: &str = "{ $ref: '#/components/schemas/Pet' }";
+
+const PET_SCHEMA: &str = "    Pet:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+";
+
+#[test]
+fn renaming_an_operation_id_renames_the_method_and_is_major() {
+    // Same path and method, different `operationId`: the generated callable renames, so every call
+    // site breaks even though the endpoint is unchanged.
+    let old = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
+    let new = full(&pets_get("fetchPets", "", PET_REF), PET_SCHEMA);
+    let report = diff(&old, &new);
+    assert!(
+        kinds(&report).contains(&ChangeKind::MethodRenamed),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+const REQUEST_BODY_PET: &str = "      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Pet' }
+";
+
+const REQUEST_BODY_STRING: &str = "      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: string }
+";
+
+#[test]
+fn adding_a_request_body_is_major() {
+    // A new required `&T` argument on an existing method.
+    let old = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
+    let new = full(&pets_get("listPets", REQUEST_BODY_PET, PET_REF), PET_SCHEMA);
+    let report = diff(&old, &new);
+    assert!(
+        kinds(&report).contains(&ChangeKind::RequestBodyAdded),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn removing_a_request_body_is_major() {
+    let old = full(&pets_get("listPets", REQUEST_BODY_PET, PET_REF), PET_SCHEMA);
+    let new = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
+    let report = diff(&old, &new);
+    assert!(
+        kinds(&report).contains(&ChangeKind::RequestBodyRemoved),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn changing_a_request_body_type_is_major() {
+    let old = full(&pets_get("listPets", REQUEST_BODY_PET, PET_REF), PET_SCHEMA);
+    let new = full(
+        &pets_get("listPets", REQUEST_BODY_STRING, PET_REF),
+        PET_SCHEMA,
+    );
+    let report = diff(&old, &new);
+    assert!(
+        kinds(&report).contains(&ChangeKind::RequestBodyTypeChanged),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn changing_the_success_type_is_major() {
+    let old = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
+    let new = full(&pets_get("listPets", "", "{ type: string }"), PET_SCHEMA);
+    let report = diff(&old, &new);
+    assert!(
+        kinds(&report).contains(&ChangeKind::SuccessTypeChanged),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+/// `get /pets` with a documented `404` whose body is `error_schema`.
+fn with_error(error_schema: &str) -> String {
+    format!(
+        "  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {{ $ref: '#/components/schemas/Pet' }}
+        '404':
+          description: missing
+          content:
+            application/json:
+              schema: {error_schema}
+"
+    )
+}
+
+#[test]
+fn changing_a_documented_error_type_is_major() {
+    // The typed error body is part of the operation's `Result`, so changing it breaks every
+    // `match` a consumer wrote against it.
+    let old = full(&with_error("{ type: string }"), PET_SCHEMA);
+    let new = full(&with_error("{ type: integer }"), PET_SCHEMA);
+    let report = diff(&old, &new);
+    assert!(
+        kinds(&report).contains(&ChangeKind::ErrorTypeChanged),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn removing_a_parameter_is_major() {
+    let report = diff(&spec(PARAM_OPTIONAL_INT, "id", PET_PROPS, ""), &base());
+    assert_eq!(kinds(&report), vec![ChangeKind::ParamRemoved]);
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn flipping_a_parameter_between_required_and_optional_is_major_both_ways() {
+    // Either direction changes the method signature: a required parameter is positional, an
+    // optional one is a `…Params` field.
+    let optional = spec(PARAM_OPTIONAL_INT, "id", PET_PROPS, "");
+    let required = spec(PARAM_REQUIRED_INT, "id", PET_PROPS, "");
+
+    for (old, new) in [(&optional, &required), (&required, &optional)] {
+        let report = diff(old, new);
+        assert_eq!(kinds(&report), vec![ChangeKind::ParamRequirednessChanged]);
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
+const PET_AND_OWNER: &str = "    Pet:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+        owner: { $ref: '#/components/schemas/Owner' }
+    Owner:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+";
+
+const PET_WITH_INLINE_OWNER: &str = "    Pet:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+        owner: { type: string }
+";
+
+#[test]
+fn adding_a_public_type_is_minor_and_removing_one_is_major() {
+    let without = full(&pets_get("listPets", "", PET_REF), PET_WITH_INLINE_OWNER);
+    let with = full(&pets_get("listPets", "", PET_REF), PET_AND_OWNER);
+
+    let added = diff(&without, &with);
+    assert!(
+        kinds(&added).contains(&ChangeKind::TypeAdded),
+        "{:?}",
+        added.changes
+    );
+
+    let removed = diff(&with, &without);
+    assert!(
+        kinds(&removed).contains(&ChangeKind::TypeRemoved),
+        "{:?}",
+        removed.changes
+    );
+    assert_eq!(removed.bump, Impact::Major);
+}
+
+/// Two operations, so both `Pet` and `Status` are reachable from the generated surface.
+const TWO_OPS: &str = "  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+  /status:
+    get:
+      operationId: getStatus
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Status' }
+";
+
+const PET_MINIMAL: &str = "    Pet:
+      type: object
+      required: [id]
+      properties:
+        id: { type: integer }
+";
+
+fn with_status(status: &str) -> String {
+    format!("{PET_MINIMAL}{status}")
+}
+
+const STATUS_STRUCT: &str = "    Status:
+      type: object
+      required: [state]
+      properties:
+        state: { type: string }
+";
+
+const STATUS_ENUM_TWO: &str = "    Status:
+      type: string
+      enum: [active, retired]
+";
+
+const STATUS_ENUM_THREE: &str = "    Status:
+      type: string
+      enum: [active, retired, pending]
+";
+
+#[test]
+fn changing_a_types_generation_kind_is_major() {
+    // The same named type going from `struct` to `enum` breaks every construction and every field
+    // access, even though the name is unchanged.
+    let report = diff(
+        &full(TWO_OPS, &with_status(STATUS_STRUCT)),
+        &full(TWO_OPS, &with_status(STATUS_ENUM_TWO)),
+    );
+    assert!(
+        kinds(&report).contains(&ChangeKind::TypeKindChanged),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn adding_an_enum_variant_is_minor_and_removing_one_is_major() {
+    // The documented additive rule: a new value a consumer may now receive is minor.
+    let added = diff(
+        &full(TWO_OPS, &with_status(STATUS_ENUM_TWO)),
+        &full(TWO_OPS, &with_status(STATUS_ENUM_THREE)),
+    );
+    assert_eq!(kinds(&added), vec![ChangeKind::VariantAdded]);
+    assert_eq!(added.bump, Impact::Minor);
+
+    let removed = diff(
+        &full(TWO_OPS, &with_status(STATUS_ENUM_THREE)),
+        &full(TWO_OPS, &with_status(STATUS_ENUM_TWO)),
+    );
+    assert_eq!(kinds(&removed), vec![ChangeKind::VariantRemoved]);
+    assert_eq!(removed.bump, Impact::Major);
+}
+
+const UNION_STRING_OR_INT: &str = "    Status:
+      oneOf:
+        - { type: string }
+        - { type: integer }
+";
+
+const UNION_STRING_OR_BOOL: &str = "    Status:
+      oneOf:
+        - { type: string }
+        - { type: boolean }
+";
+
+#[test]
+fn changing_a_union_variant_payload_type_is_major() {
+    let report = diff(
+        &full(TWO_OPS, &with_status(UNION_STRING_OR_INT)),
+        &full(TWO_OPS, &with_status(UNION_STRING_OR_BOOL)),
+    );
+    let kinds = kinds(&report);
+    assert!(
+        kinds.contains(&ChangeKind::VariantTypeChanged)
+            || (kinds.contains(&ChangeKind::VariantAdded)
+                && kinds.contains(&ChangeKind::VariantRemoved)),
+        "a union payload change must be reported, not silently dropped: {:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
+#[test]
+fn flipping_a_field_between_required_and_optional_is_major_both_ways() {
+    // `T` ↔ `Option<T>` on a public struct field.
+    let required_name = spec("", "id, name", PET_PROPS, "");
+    let optional_name = base();
+
+    for (old, new) in [
+        (&optional_name, &required_name),
+        (&required_name, &optional_name),
+    ] {
+        let report = diff(old, new);
+        assert!(
+            kinds(&report).contains(&ChangeKind::FieldRequirednessChanged),
+            "{:?}",
+            report.changes
+        );
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
