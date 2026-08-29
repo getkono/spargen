@@ -1337,4 +1337,69 @@ components:
         );
         assert!(omit.fingerprint().len() == 16);
     }
+
+    fn omit_of(rules: Vec<OmitRule>) -> Omit {
+        Omit { rules }
+    }
+
+    /// The fingerprint is stamped into every generated file's provenance header, so it is how a
+    /// reader tells which omit profile produced a module. The only assertion on it was that it is
+    /// 16 characters long — which a constant would also satisfy.
+    #[test]
+    fn the_fingerprint_distinguishes_profiles_and_repeats_for_the_same_one() {
+        let empty = omit_of(Vec::new());
+        let by_path = omit_of(vec![OmitRule::path("/a")]);
+        let by_other_path = omit_of(vec![OmitRule::path("/b")]);
+        let by_operation = omit_of(vec![OmitRule::operation(OmitMethod::Get, "/a")]);
+        let by_component = omit_of(vec![OmitRule::component(ComponentKind::Schemas, "/a")]);
+        let two_rules = omit_of(vec![OmitRule::path("/a"), OmitRule::path("/b")]);
+
+        // Same rules, computed twice: a fingerprint that moved between calls would make generated
+        // output non-deterministic, since it is stamped into the header.
+        assert_eq!(
+            by_path.fingerprint(),
+            omit_of(vec![OmitRule::path("/a")]).fingerprint()
+        );
+
+        let distinct = [
+            ("empty", empty.fingerprint()),
+            ("path /a", by_path.fingerprint()),
+            ("path /b", by_other_path.fingerprint()),
+            ("get /a", by_operation.fingerprint()),
+            ("schema /a", by_component.fingerprint()),
+            ("two paths", two_rules.fingerprint()),
+        ];
+        for (index, (left_name, left)) in distinct.iter().enumerate() {
+            assert_eq!(left.len(), 16, "{left_name} is not 16 hex characters");
+            for (right_name, right) in &distinct[index + 1..] {
+                assert_ne!(
+                    left, right,
+                    "`{left_name}` and `{right_name}` share a fingerprint"
+                );
+            }
+        }
+    }
+
+    /// The rules are hashed in declaration order, so the fingerprint is order-*sensitive*. That is
+    /// the behavior, and it is worth stating: two profiles that omit the same things in a
+    /// different order stamp different headers even though they generate the same module.
+    #[test]
+    fn the_fingerprint_follows_rule_order() {
+        let forward = omit_of(vec![OmitRule::path("/a"), OmitRule::path("/b")]);
+        let reversed = omit_of(vec![OmitRule::path("/b"), OmitRule::path("/a")]);
+        assert_ne!(forward.fingerprint(), reversed.fingerprint());
+    }
+
+    #[test]
+    fn the_fingerprint_is_hexadecimal() {
+        // It lands in a `// source:` comment, so anything outside `[0-9a-f]` would be a surprise
+        // to whatever reads the header back.
+        let fingerprint = omit_of(vec![OmitRule::path("/a")]).fingerprint();
+        assert!(
+            fingerprint
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()),
+            "{fingerprint}"
+        );
+    }
 }
