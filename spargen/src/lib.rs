@@ -18,7 +18,7 @@
 //! | `diag`    | —             |
 //! | `source`  | `diag`        |
 //! | `ir`      | `diag`        |
-//! | `oas31`   | `source`, `ir`, `diag` |
+//! | `oas31`   | `source`, `ir`, `name`, `diag` |
 //! | `name`    | `ir`, `diag`  |
 //! | `support` | — (compiles standalone against reqwest/serde) |
 //! | `codegen` | `ir`, `name`, `support`, `diag` |

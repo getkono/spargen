@@ -1,5 +1,5 @@
 //! # Subsystem: oas31
-//! layer-deps: source, ir, diag
+//! layer-deps: source, ir, name, diag
 //!
 //! The OAS 3.1.x / 3.2.x typed document model, structural/meta-schema validation, `$ref`
 //! resolution, per-keyword disposition audit, and lowering `SpannedValue` → IR. The only subsystem
