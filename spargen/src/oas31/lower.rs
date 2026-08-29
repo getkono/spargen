@@ -1301,14 +1301,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if hints.wrapped {
             unsupported.push("wrapped".to_owned());
         }
-        // `element` and `attribute` are the two node types spargen's XML representation can
-        // express. Every other value — the specification's `text`/`cdata`/`none`, and anything
-        // outside the enumeration, which the document schema does not validate because it does not
-        // validate Schema Objects — changes the XML on the wire, so it takes a disposition rather
-        // than being ignored.
-        if matches!(hints.node_type.as_deref(), Some(node_type)
-            if !matches!(node_type, "element" | "attribute"))
-        {
+        // OpenAPI 3.2 replaced the `attribute`/`wrapped` flags with `nodeType`, and gave it a
+        // *defaulting table*: a `$ref` node and a `type: array` schema default to `none`, and
+        // everything else to `element`. Reading the field as a plain string match misses that,
+        // which is how the two spellings of one construct came to disagree — `wrapped: true` was
+        // rejected while its exact 3.2 equivalent, `nodeType: element` on an array, was waved
+        // through and put unwrapped XML on the wire.
+        //
+        // `none` on a node that defaults to `none` is the default restated: it is a genuine no-op
+        // and takes no disposition. Anywhere else it deletes a node from the wire, so it joins
+        // `text`/`cdata` and any token outside the enumeration (the document schema does not
+        // validate Schema Objects, so unknown tokens do reach here).
+        let is_array = schema.types.types.contains(&JsonType::Array);
+        let defaults_to_none = schema.reference.is_some() || is_array;
+        let effective =
+            hints
+                .node_type
+                .as_deref()
+                .unwrap_or(if defaults_to_none { "none" } else { "element" });
+        let node_type_unsupported = match effective {
+            "attribute" => false,
+            // On an array this is precisely `wrapped: true` — it asks for an element wrapping the
+            // list, which is the representation quick-xml does not give us. On a `$ref` it names
+            // the element the referenced component already produces.
+            "element" => is_array,
+            "none" => !defaults_to_none,
+            _ => true,
+        };
+        if node_type_unsupported {
             unsupported.push("nodeType".to_owned());
         }
         XmlField {
@@ -2264,7 +2284,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .emit(self.diags);
                 return None;
             };
-            let object = self.resolve_media_object(object)?;
+            let object = self.resolve_media_object(object, media_name)?;
             let media = lower_media_type(media_name, &parameter.provenance, self.diags)?;
             if !matches!(media, MediaType::Json | MediaType::FormUrlEncoded) {
                 Diagnostic::error(
@@ -2388,7 +2408,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let ty = self.lower_schema_ref(schema, &parameter.name)?;
             self.remap_binary_param(ty, &parameter.name)
         } else if let Some((media, object)) = parameter.content.iter().next() {
-            let object = self.resolve_media_object(object)?;
+            let object = self.resolve_media_object(object, media)?;
             let media_name = media.clone();
             let media = lower_media_type(media, &parameter.provenance, self.diags)?;
             // A `content` parameter is rendered by its media codec. Only JSON and raw text have a
@@ -2459,7 +2479,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
         let (media_name, object) = choose_media(&body.content, &body.provenance, self.diags)?;
-        let object = self.resolve_media_object(object)?;
+        let object = self.resolve_media_object(object, media_name)?;
         let media = lower_media_type(media_name, &body.provenance, self.diags)?;
         // Streaming media is a response-only construct: a `text/event-stream` / `application/x-ndjson`
         // *request* body has no representation here, so it stays rejected (narrowed `E009`) rather
@@ -2585,24 +2605,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Encoding diagnostics point at the Media Type Object that declares them, not at the whole
         // request body.
         let at = &object.provenance;
-        let declares_encoding = !object.encoding.is_empty()
-            || !object.prefix_encoding.is_empty()
-            || object.item_encoding.is_some();
-        // Encoding applies only to form and multipart content. The specification says it SHALL be
-        // ignored elsewhere, so this is a warning rather than a rejection.
+        // Media that is neither form nor multipart is dispositioned once, in
+        // `resolve_media_object`, which every Media Type Object passes through.
         if !matches!(media, MediaType::FormUrlEncoded | MediaType::Multipart) {
-            if declares_encoding {
-                Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
-                    .message(format!(
-                        "`encoding` has no effect on `{media_name}`: it applies only to \
-                         `multipart` and `application/x-www-form-urlencoded` content"
-                    ))
-                    .emit(self.diags);
-            }
             return Some(BodyEncoding::default());
         }
-        // Positional encoding describes an array-shaped multipart body. Spargen generates
-        // multipart only from an object schema, so there are no positions to encode.
+        // `prefixEncoding`/`itemEncoding` describe positional parts of an array-shaped body, and
+        // the specification scopes both to `multipart`. On multipart spargen generates from an
+        // object schema, so there are no positions to encode and the declaration is rejected; on
+        // form-urlencoded the specification itself says they do not apply, so they are inert.
         let positional = object
             .prefix_encoding
             .first()
@@ -2614,18 +2625,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|(_, at)| ("itemEncoding", at.clone()))
             });
         if let Some((field, at)) = positional {
-            Diagnostic::error(Code::UnsupportedMediaType, at)
-                .message(format!(
-                    "`{field}` describes positional parts of an array-shaped multipart body; \
-                     spargen generates `multipart/form-data` from an object schema, which has no \
-                     positions"
-                ))
-                .remedy(
-                    "use `encoding` keyed by property name, or omit this API segment with \
-                     spargen::omit!",
-                )
-                .emit(self.diags);
-            return None;
+            if media == MediaType::FormUrlEncoded {
+                Diagnostic::warning(Code::DeclarationHasNoEffect, at)
+                    .message(format!(
+                        "`{field}` has no effect on `{media_name}`: the specification scopes it to \
+                         `multipart` content"
+                    ))
+                    .emit(self.diags);
+            } else {
+                Diagnostic::error(Code::UnsupportedMediaType, at)
+                    .message(format!(
+                        "`{field}` describes positional parts of an array-shaped multipart body; \
+                         spargen generates `multipart/form-data` from an object schema, which has \
+                         no positions"
+                    ))
+                    .remedy(
+                        "use `encoding` keyed by property name, or omit this API segment with \
+                         spargen::omit!",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
         }
         let Some(TypeKind::Struct(structure)) =
             ty.and_then(|ty| self.graph.get(ty.id)).map(|def| &def.kind)
@@ -2972,7 +2992,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn lower_response(&mut self, response: &ResponseObject) -> Option<Response> {
         let body = choose_media(&response.content, &response.provenance, self.diags).and_then(
             |(media_name, object)| {
-                let object = self.resolve_media_object(object)?;
+                let object = self.resolve_media_object(object, media_name)?;
                 let media = lower_media_type(media_name, &response.provenance, self.diags)?;
                 // For a sequential/streaming media (`text/event-stream` / `application/x-ndjson`),
                 // OpenAPI 3.2 gives the PER-ITEM type in `itemSchema`; a whole-body `schema` does not
@@ -3131,6 +3151,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 };
                 (ty, shape)
             } else if let Some((media, object)) = header.content.iter().next() {
+                // Resolve first: a header's content may itself be a Reference Object, and reading
+                // `schema` off the unresolved shell would find `None` and drop the typed accessor
+                // with nothing said.
+                let Some(object) = self.resolve_media_object(object, media) else {
+                    continue;
+                };
                 let Some(media) = lower_media_type(media, &header.provenance, self.diags) else {
                     continue;
                 };
@@ -3143,11 +3169,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .emit(self.diags);
                     continue;
                 }
-                let Some(ty) = object
-                    .schema
-                    .as_ref()
-                    .and_then(|schema| self.lower_schema_ref(schema, &format!("Header{name}")))
-                else {
+                if object.item_schema.is_some() {
+                    Diagnostic::warning(Code::Oas32ConstructIgnored, header.provenance.clone())
+                        .message(format!(
+                            "`itemSchema` has no effect on response header `{name}`: a header \
+                             field value is not a sequential media"
+                        ))
+                        .emit(self.diags);
+                }
+                let Some(schema) = object.schema.as_ref() else {
+                    Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
+                        .message(format!(
+                            "response header `{name}` declares `content` without a schema, so no \
+                             typed accessor is generated"
+                        ))
+                        .remedy("give the content entry a `schema`")
+                        .emit(self.diags);
+                    continue;
+                };
+                let Some(ty) = self.lower_schema_ref(schema, &format!("Header{name}")) else {
                     continue;
                 };
                 (ty, crate::ir::HeaderShape::Json)
@@ -3457,13 +3497,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
+    /// Resolve a Media Type Object through any `$ref` hops and give every position-independent
+    /// field it can carry a disposition.
+    ///
+    /// This is the single seam every Media Type Object passes through — request bodies, responses,
+    /// parameter content, whole-query-string content, and response header content alike — so a
+    /// field that only *sometimes* has an effect is reported once, wherever it appears, instead of
+    /// being dispositioned on the request-body path and silently dropped everywhere else.
     fn resolve_media_object(
         &mut self,
         object: &super::MediaTypeObject,
+        media_name: &str,
     ) -> Option<super::MediaTypeObject> {
         let mut current = object.clone();
         let mut seen = HashSet::new();
         while let Some(reference) = current.reference.clone() {
+            // A Reference Object's own `summary`/`description` documents this use site, which one
+            // generated item shared across every use cannot express — the same disposition the
+            // Parameter, Response, and Request Body paths already give it.
+            self.note_reference_docs(&reference);
             if !seen.insert(reference.reference.clone()) {
                 Diagnostic::error(Code::UnresolvedRef, reference.provenance)
                     .message("media type reference cycle cannot be resolved")
@@ -3511,10 +3563,45 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
             current = target.clone();
         }
-        // Encoding fields are validated where the body's media type and schema are known
-        // (`lower_body_encoding`); the specification says they are simply ignored on any other
-        // media, so rejecting them here would refuse valid documents.
+        // Encoding is scoped to form and multipart content. The specification says it is simply
+        // ignored elsewhere, so rejecting would refuse valid documents — but ignoring it silently
+        // would be the fourth behavior this generator does not have. Acknowledge it instead. The
+        // form/multipart case carries on to `lower_body_encoding`, which knows the schema.
+        if !matches!(
+            media_essence(media_name),
+            "multipart/form-data" | "application/x-www-form-urlencoded"
+        ) {
+            self.note_inert_encoding(&current, media_name);
+        }
         Some(current)
+    }
+
+    /// Report the encoding fields of a Media Type Object that cannot take effect in this position.
+    fn note_inert_encoding(&mut self, object: &super::MediaTypeObject, media_name: &str) {
+        let declared = object
+            .encoding
+            .first()
+            .map(|(_, encoding)| ("encoding", encoding.provenance.clone()))
+            .or_else(|| {
+                object
+                    .prefix_encoding
+                    .first()
+                    .map(|(_, at)| ("prefixEncoding", at.clone()))
+            })
+            .or_else(|| {
+                object
+                    .item_encoding
+                    .as_ref()
+                    .map(|(_, at)| ("itemEncoding", at.clone()))
+            });
+        if let Some((field, at)) = declared {
+            Diagnostic::warning(Code::DeclarationHasNoEffect, at)
+                .message(format!(
+                    "`{field}` has no effect on `{media_name}`: it applies only to `multipart` \
+                     and `application/x-www-form-urlencoded` content"
+                ))
+                .emit(self.diags);
+        }
     }
 
     /// Lower a possibly-`$ref` schema. Component refs go through [`Self::ensure_component`] so

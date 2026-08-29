@@ -2258,7 +2258,7 @@ paths:
 
 #[test]
 fn xml_request_body_generates() {
-    // Issue #13: an `application/xml` request body lowers to a typed struct and generates (no E009);
+    // an `application/xml` request body lowers to a typed struct and generates (no E009);
     // it is serialized through the runtime's quick-xml codec. check/generate stay in parity.
     let spec = r##"
 openapi: 3.1.0
@@ -2293,7 +2293,7 @@ paths:
 
 #[test]
 fn xml_response_body_generates() {
-    // Issue #13: a `text/xml` response body lowers to a typed struct and generates (no E009); it is
+    // a `text/xml` response body lowers to a typed struct and generates (no E009); it is
     // decoded through the runtime's quick-xml codec rather than serde_json.
     let spec = r##"
 openapi: 3.1.0
@@ -2417,7 +2417,7 @@ paths:
 
 #[test]
 fn json_only_schema_with_xml_hints_suppresses_rename_and_warns_w006() {
-    // Issue #13 regression guard: a schema carrying `xml.name`/`xml.attribute` but reachable only
+    // regression guard: a schema carrying `xml.name`/`xml.attribute` but reachable only
     // from a JSON body must NOT have the format-agnostic serde rename applied (it would corrupt
     // JSON). The suppression is acknowledged with W006 (never silent), and generation still succeeds.
     let spec = r##"
@@ -2512,7 +2512,7 @@ components:
 
 #[test]
 fn xml_body_in_multi_status_enum_is_rejected() {
-    // Issue #13: XML decode is scoped to single-body success/error. An XML body that would land in a
+    // XML decode is scoped to single-body success/error. An XML body that would land in a
     // multi-status success enum (two bodied success statuses) is rejected cleanly with narrowed E009
     // rather than silently decoded as JSON.
     let spec = r##"
@@ -2543,7 +2543,7 @@ paths:
 
 #[test]
 fn sse_response_body_generates() {
-    // Issue #14: a `text/event-stream` (SSE) success response is now a typed stream, not `E009`. It
+    // a `text/event-stream` (SSE) success response is now a typed stream, not `E009`. It
     // generates without the code firing, and check/generate stay in parity.
     let spec = r##"
 openapi: 3.1.0
@@ -2575,7 +2575,7 @@ paths:
 
 #[test]
 fn ndjson_response_body_generates() {
-    // Issue #14: an `application/x-ndjson` success response is a typed stream, not `E009`.
+    // an `application/x-ndjson` success response is a typed stream, not `E009`.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -5011,5 +5011,497 @@ components:
         );
         let report = generate(&ok);
         assert_ne!(report.outcome(), Outcome::Rejected, "{kind}: {report:#?}");
+    }
+}
+
+// --- Media Type Object dispositions outside the request body -------------------------------
+//
+// `resolve_media_object` is the seam every Media Type Object passes through. Before these
+// fixtures, only the request-body path dispositioned `encoding`; the same declaration on a
+// response, a parameter, a header, or a `components.mediaTypes` entry was dropped in silence.
+
+#[test]
+fn w011_encoding_on_a_response_media_type_has_no_effect() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { type: object, properties: { a: { type: string } } }
+              encoding:
+                a: { contentType: text/plain }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_encoding_on_a_parameter_content_media_type_has_no_effect() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          content:
+            application/json:
+              schema: { type: object, properties: { a: { type: string } } }
+              encoding:
+                a: { contentType: text/plain }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_encoding_reached_through_a_component_media_type_reference_has_no_effect() {
+    // The declaration is one `$ref` hop away from its use site. Resolving it is what makes the
+    // disposition reachable at all.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              $ref: '#/components/mediaTypes/Payload'
+components:
+  mediaTypes:
+    Payload:
+      schema: { type: object, properties: { a: { type: string } } }
+      encoding:
+        a: { contentType: text/plain }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_media_type_reference_summary_documents_the_use_site() {
+    // A Reference Object's own `summary`/`description` documents this use site, which one shared
+    // generated item cannot express — the same disposition parameters and responses already get.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              $ref: '#/components/mediaTypes/Payload'
+              summary: the payload as returned by this operation
+components:
+  mediaTypes:
+    Payload:
+      schema: { type: object, properties: { a: { type: string } } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w011_prefix_encoding_on_form_urlencoded_has_no_effect() {
+    // The specification scopes `prefixEncoding`/`itemEncoding` to `multipart`, so on a form body
+    // they are inert rather than an error — this was previously over-rejected as E009.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /form:
+    post:
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema: { type: object, properties: { a: { type: string } } }
+            prefixEncoding:
+              - { contentType: text/plain }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_prefix_encoding_on_multipart_is_rejected() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: { type: object, properties: { a: { type: string } } }
+            prefixEncoding:
+              - { contentType: text/plain }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_item_encoding_on_multipart_is_rejected() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: { type: object, properties: { a: { type: string } } }
+            itemEncoding: { contentType: text/plain }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn response_header_content_media_type_reference_resolves() {
+    // Reading `schema` off an unresolved Reference Object found `None` and dropped the typed
+    // accessor with nothing said. Resolving first is what makes the header typed.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Meta:
+              content:
+                application/json:
+                  $ref: '#/components/mediaTypes/Meta'
+          content:
+            application/json:
+              schema: { type: string }
+components:
+  mediaTypes:
+    Meta:
+      schema: { type: object, properties: { a: { type: string } } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("x_meta"),
+        "the typed header accessor should be generated: {code}"
+    );
+}
+
+#[test]
+fn w011_response_header_content_without_a_schema_is_reported() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Meta:
+              content:
+                application/json: {}
+          content:
+            application/json:
+              schema: { type: string }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::DeclarationHasNoEffect),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w010_item_schema_on_a_response_header_is_ignored() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Meta:
+              content:
+                application/json:
+                  schema: { type: object, properties: { a: { type: string } } }
+                  itemSchema: { type: string }
+          content:
+            application/json:
+              schema: { type: string }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::Oas32ConstructIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+// --- OpenAPI 3.2 XML nodeType defaulting ----------------------------------------------------
+//
+// 3.2 replaced `attribute`/`wrapped` with `nodeType` and gave it a defaulting table: `$ref` and
+// `type: array` schemas default to `none`, everything else to `element`. Before these fixtures
+// `nodeType` was a plain string match, so `nodeType: element` on an array — which is exactly
+// `wrapped: true` — was accepted and emitted unwrapped XML, while `wrapped: true` was rejected.
+
+#[test]
+fn e009_element_node_type_on_an_array_is_rejected_like_wrapped() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/xml:
+            schema:
+              type: object
+              properties:
+                tags:
+                  type: array
+                  items: { type: string }
+                  xml: { nodeType: element }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn w006_element_node_type_on_an_array_never_serialized_as_xml_warns() {
+    // Same declaration on a type that never reaches the wire as XML genuinely has no effect.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                tags:
+                  type: array
+                  items: { type: string }
+                  xml: { nodeType: element }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    }
+}
+
+#[test]
+fn none_node_type_on_an_array_is_the_default_and_generates() {
+    // `none` is the 3.2 default for an array, so restating it is a no-op and takes no
+    // disposition. This was previously rejected outright.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/xml:
+            schema:
+              type: object
+              properties:
+                tags:
+                  type: array
+                  items: { type: string }
+                  xml: { nodeType: none }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+        assert!(!has_code(&report, Code::XmlHintIgnored), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_none_node_type_on_a_scalar_property_is_rejected() {
+    // On a scalar the default is `element`, so `none` deletes a node from the wire.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          application/xml:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  xml: { nodeType: none }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+// --- additionalOperations method tokens -----------------------------------------------------
+//
+// The official document schema pins these keys to an RFC 9110 token and forbids restating a fixed
+// field, but it validates the *root* document only. A Path Item reached by `$ref` into another
+// file never meets it, so both fixtures below route through a sub-file — the path that was
+// previously unguarded, and on which a non-token key reached codegen and was emitted as
+// `Method::from_bytes(..).expect(..)`, panicking inside the consumer's client at request time.
+
+#[test]
+fn e011_additional_operations_method_must_be_an_http_token() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    $ref: './sub.yaml#/item'
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("sub.yaml"),
+        r##"
+item:
+  additionalOperations:
+    "pu rge":
+      operationId: purgeIt
+      responses:
+        '204': { description: ok }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out));
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+#[test]
+fn e011_additional_operations_method_must_not_restate_a_fixed_field_method() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    $ref: './sub.yaml#/item'
+"##,
+    )
+    .unwrap();
+    // Compared case-insensitively: `Get` is strictly a distinct RFC 9110 token, but no server
+    // implements it and generating a second method shadowing `get` is worse than refusing.
+    std::fs::write(
+        dir.join("sub.yaml"),
+        r##"
+item:
+  additionalOperations:
+    Get:
+      operationId: getIt
+      responses:
+        '204': { description: ok }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out));
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
     }
 }

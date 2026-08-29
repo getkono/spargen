@@ -1,4 +1,4 @@
-//! Framework round-trip recipes (Issue #30): proves spargen turns the OpenAPI document EMITTED BY a
+//! Framework round-trip recipes: proves spargen turns the OpenAPI document EMITTED BY a
 //! Rust server framework (utoipa, aide, poem-openapi) into a client, i.e. the round-trip
 //! `Rust server → OpenAPI → spargen client`.
 //!

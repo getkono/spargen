@@ -40,10 +40,10 @@ pub type ExecuteFuture<'a> = Pin<Box<dyn Future<Output = Result<Response, Transp
 /// The swappable HTTP transport: it executes a prepared [`reqwest::Request`] into a
 /// [`reqwest::Response`].
 ///
-/// This is the seam #17 (retry), #20 (middleware), and #21 (WASM) build on: implement it to wrap,
-/// replace, or retry the execute step without touching URL building, auth, decode, streaming, or
-/// pagination. The default [`ReqwestBackend`] simply runs the request on a wrapped
-/// [`reqwest::Client`].
+/// This is the seam the retry adapter, the middleware interceptor, and the WASM build all rest on:
+/// implement it to wrap, replace, or retry the execute step without touching URL building, auth,
+/// decode, streaming, or pagination. The default [`ReqwestBackend`] simply runs the request on a
+/// wrapped [`reqwest::Client`].
 ///
 /// Implementations must be [`MaybeSend`] + [`MaybeSync`] — `Send + Sync` on native (the `Client` is
 /// shared across tasks), vacuous on `wasm32` — and `Debug` (so [`crate::ClientCore`] stays `Debug`).
@@ -57,7 +57,7 @@ pub trait HttpBackend: MaybeSend + MaybeSync + std::fmt::Debug {
 }
 
 /// The default backend: executes requests on a wrapped [`reqwest::Client`]. This is what
-/// `Client::new` and `Client::with_client` install, so the out-of-the-box behavior is unchanged.
+/// `Client::new` and `Client::with_client` install.
 #[derive(Debug, Clone)]
 pub struct ReqwestBackend {
     client: reqwest::Client,

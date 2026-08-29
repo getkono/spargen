@@ -25,20 +25,41 @@ changes.
   date newtypes). No spargen crate may ever appear in a consumer's runtime graph. Each source file
   keeps its `#[cfg(test)]` module last — everything above that marker is embedded into generated
   code and must compile there.
-- `examples/petstore/` — the end-to-end example (own workspace); `mise run example` must stay
-  green.
+- `examples/` — each its own workspace, so a consumer's crate layout is what is actually tested.
+  `petstore/` (build.rs path) and `petstore-macro/` (macro path) are driven over real HTTP by
+  `mise run example`; `github-api/` generates the pinned 12.9 MB GitHub 3.1 description and is
+  compile-checked natively and for wasm by `mise run github-api`. All three must stay green.
+- `corpus/` — pinned real-world descriptions with expected outcomes in `corpus/manifest.toml`
+  (`expect = "generate"` / `"reject:E###"`), mirrored in `corpus/README.md`. Files are Git-LFS.
+  `corpus/recipes/` holds the hand-written framework-output specs `tests/recipes.rs` drives.
+- `fuzz/` — a cargo-fuzz crate (libFuzzer, nightly, **excluded from the workspace**), manual-only:
+  `cargo +nightly fuzz run frontend`. Its always-on counterpart is `tests/fuzz_frontend.rs`, a
+  fixed-seed proptest no-panic harness.
+- `spargen/benches/` — criterion benchmarks over the generation pipeline (`mise run bench`). CI
+  records them on tags as an artifact; they are **not** a gate.
+- `docs/book/` — the mdBook site (`mise run docs`), which includes the standalone `docs/*.md`
+  rather than duplicating them. `references/` carries the vendored OpenAPI specification texts —
+  `3.2.0.md` is the ground truth for any 3.2 conformance question.
+- `deny.toml` — the supply-chain policy (`mise run deny`).
 
 ## Quality
 
 Validate changes:
 
 ```bash
-mise run check     # cargo check --workspace --all-features
-mise run fmt       # cargo fmt --all
-mise run lint      # cargo clippy --workspace --all-targets --all-features -- -D warnings
-mise run test      # cargo test --workspace --all-features
-mise run powerset  # cargo hack: every feature combination, not just --all-features
+mise run check      # cargo check --workspace --all-features
+mise run fmt        # cargo fmt --all
+mise run lint       # cargo clippy --workspace --all-targets --all-features -- -D warnings
+mise run test       # cargo test --workspace --all-features
+mise run powerset   # cargo hack: every feature combination, not just --all-features
+mise run corpus-smoke  # pinned real-world specs
+mise run example    # both petstore examples over a local mock server
+mise run github-api # the full GitHub client: native strict clippy + wasm32
+mise run deny       # supply-chain audit
+mise run docs       # build the mdBook site (fails on broken links/includes)
 ```
+
+`hk.pkl` wires these into git hooks, so pre-commit/pre-push run the same task bodies CI does.
 
 Standing invariants:
 
@@ -46,8 +67,9 @@ Standing invariants:
   (pinned by `spargen/tests/determinism.rs`).
 - Generated code never silently degrades a typed schema to `serde_json::Value`, and every
   spec construct is supported, warned, or rejected — no fourth, silent behavior. New warnings
-  and rejections get a stable code in `diag`, an entry in `docs/errors.md`, and a fixture in
-  `spargen/tests/frontend.rs`, in the same commit.
+  and rejections get a stable code in `diag`, an entry in `docs/errors.md`, a cell in
+  `docs/support-matrix.md`, and a fixture in `spargen/tests/frontend.rs`, in the same commit.
+  The last three are enforced by tests, not convention.
 - Generated output must stay consumable via `include!` — no crate-level inner attributes;
   attributes ride on emitted items.
 - Prefer `pub(crate)` over `pub` for anything not part of the `build.rs` facade or an emitted
@@ -69,6 +91,14 @@ Tests live closest to what they pin; when you touch a subsystem, extend its suit
 | `support-runtime` | in-file `#[cfg(test)]` mods | URL building, auth attachment (all schemes + alternatives + failure modes), status classification, error taxonomy semantics. No async runtime: poll-once with `Waker::noop`. |
 | whole tool | `examples/petstore` + `examples/petstore-macro` (`mise run example`) | The generated client driven over real HTTP against a local mock server (params, bodies, auth, typed errors, undocumented statuses), via both the `build.rs` and macro paths; the macro run also asserts spargen stays out of the runtime graph (`cargo tree -e no-proc-macro`). |
 | corpus | `mise run corpus-smoke` / `corpus/manifest.toml` | Pinned real-world specs with expected outcomes (`expect = "generate"` / `"reject:E###"`); update expectations only with a reviewed reason. |
+| `compat` (carve) | `spargen/tests/carve.rs` | Omit-profile globbing and auto-carve: rules match what they say, carve reaches a fixpoint, and it stays deterministic. |
+| `surface` | `spargen/tests/diff.rs` | `spargen diff` semver classification per change kind, and stability of the same pair twice. |
+| `config` / CLI | `spargen/tests/config.rs`, `spargen/tests/cli.rs` | Config discovery and precedence, `spargen deps` output, the Cargo-integration policy, and the subcommand set (`generate` is deliberately absent). |
+| lowering invariants | `spargen/tests/lowering_props.rs` | Proptests over union/`allOf` lowering: category disjointness, closed-object disjointness, exact `allOf` merge. |
+| robustness | `spargen/tests/fuzz_frontend.rs` | Fixed-seed proptest no-panic harness over `check` (arbitrary bytes, UTF-8, keyword-biased and valid-skeleton documents, deep `$ref` chains), through both parsers. `fuzz/` is the nightly libFuzzer counterpart, run by hand. |
+| snapshots | `spargen/tests/snapshot.rs` | Per-corpus outcome plus a sorted diagnostic histogram, and an API surface for the small generating cases. Deliberately **not** the full emitted source — a change to signatures, derives, serde attributes, or the embedded runtime produces no diff here. |
+| framework round-trip | `spargen/tests/recipes.rs` | The OpenAPI documents utoipa / aide / poem-openapi actually emit. |
+| docs ↔ code | `spargen/src/diag/code.rs` tests | `docs/errors.md` lists exactly `Code::all()` with matching titles; every code a support document cites is real, every declared code appears in `docs/support-matrix.md`, and it sits in the column matching its severity. |
 
 Bug-fix discipline: every bug becomes a fixture (usually in `frontend.rs` or the runtime test
 mods) *before* its fix, so regressions cannot reappear silently.

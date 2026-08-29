@@ -6,9 +6,8 @@
 //! thin shim that reuses every line of the async dispatch, adding no logic of its own.
 //!
 //! This module is compiled only under the `blocking` feature, which pulls in `tokio` with just the
-//! `rt` feature. The API-derived runtime dependency set is unchanged — a client built without the
-//! feature carries no tokio direct dependency and no
-//! blocking client at all.
+//! `rt` feature. A client built without the feature carries no tokio dependency and no blocking
+//! client at all.
 //!
 //! # Nested-runtime caveat
 //!

@@ -52,6 +52,6 @@ fn generate_is_rejected_as_an_unknown_command() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
         stderr.contains("unrecognized subcommand 'generate'"),
-        "stderr must identify the removed command: {stderr}"
+        "stderr must name the unrecognized command: {stderr}"
     );
 }

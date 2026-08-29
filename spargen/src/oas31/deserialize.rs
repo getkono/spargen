@@ -306,11 +306,48 @@ pub(super) fn parse_path_item(
     if let Some(additional) = value.get("additionalOperations") {
         if let Some(additional) = object(additional, &pointer.push("additionalOperations"), diags) {
             for (method, value) in additional.iter() {
-                if let Some(operation) = parse_operation(
-                    value,
-                    &pointer.push("additionalOperations").push(&method.name),
-                    diags,
-                ) {
+                let at = pointer.push("additionalOperations").push(&method.name);
+                // The official document schema pins these keys to an RFC 9110 method token and
+                // forbids restating a fixed field — but it validates the *root* document only, so
+                // a Path Item reached by `$ref` into another file never meets it. Without this the
+                // token reaches codegen and is emitted as `Method::from_bytes(..).expect(..)`,
+                // which panics inside the consumer's client when the call is made.
+                if !is_method_token(&method.name) {
+                    Diagnostic::error(
+                        Code::InvalidInput,
+                        Provenance::new(at.clone(), Some(method.span)),
+                    )
+                    .message(format!(
+                        "`additionalOperations` key `{}` is not an HTTP method token",
+                        method.name
+                    ))
+                    .remedy("use an RFC 9110 token: no spaces, quotes, or separators")
+                    .emit(diags);
+                    continue;
+                }
+                // Compared case-insensitively on purpose. RFC 9110 method tokens *are* case
+                // sensitive, so `Get` is strictly a distinct extension method — but no server
+                // implements it, the author overwhelmingly meant the `get` fixed field, and
+                // generating a second client method that shadows the first is worse than saying
+                // so. The specification's own MUST NOT is the rule being enforced.
+                if FIXED_FIELD_METHODS
+                    .iter()
+                    .any(|fixed| method.name.eq_ignore_ascii_case(fixed))
+                {
+                    Diagnostic::error(
+                        Code::InvalidInput,
+                        Provenance::new(at.clone(), Some(method.span)),
+                    )
+                    .message(format!(
+                        "`additionalOperations` key `{}` restates a method the specification \
+                             defines as a fixed field",
+                        method.name
+                    ))
+                    .remedy("declare the operation under its fixed field instead")
+                    .emit(diags);
+                    continue;
+                }
+                if let Some(operation) = parse_operation(value, &at, diags) {
                     operations.insert(Method::Custom(method.name.clone()), operation);
                 }
             }
@@ -1445,6 +1482,12 @@ fn parse_security(value: &SpannedValue, _pointer: &JsonPointer) -> Vec<SecurityR
         .collect()
 }
 
+/// The nine methods OpenAPI defines as Path Item fixed fields, which `additionalOperations` MUST
+/// NOT restate.
+const FIXED_FIELD_METHODS: &[&str] = &[
+    "get", "put", "post", "delete", "options", "head", "patch", "trace", "query",
+];
+
 fn parse_method(value: &str) -> Option<Method> {
     Some(match value {
         "get" => Method::Get,
@@ -1513,6 +1556,35 @@ fn number_u64(value: &SpannedValue) -> Option<u64> {
         Node::Number(Number::Int(value)) => (*value >= 0).then_some(*value as u64),
         _ => None,
     }
+}
+
+/// Whether a string is an RFC 9110 method token (`tchar+`).
+///
+/// The official document schema pins `additionalOperations` keys to this, but validates only the
+/// root document — a Path Item reached by `$ref` into another file never meets it, so the check
+/// lives here, where every Path Item passes regardless of how it was reached.
+fn is_method_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                        | b'-'
+                )
+        })
 }
 
 fn provenance(pointer: &JsonPointer, value: &SpannedValue) -> Provenance {

@@ -59,6 +59,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
 
+  msrv:
+    name: MSRV
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      # `rust-version` in the workspace manifest is a published contract: it is what tells a
+      # consumer which toolchains can compile spargen and the code it emits. Every other job runs
+      # `stable`, so nothing proved the floor was real.
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-features --locked
+      # Generated output has its own floor, and it is the one consumers actually hit. The petstore
+      # example runs build.rs -> generate -> compile, so this covers the emitter and the emitted
+      # code together, bounded by what that spec exercises. No `--locked`: the example's committed
+      # lockfile is already stale on `master`, which is worth fixing on its own rather than here.
+      - run: cargo check --manifest-path examples/petstore/Cargo.toml
+
   powerset:
     name: Feature combinations
     runs-on: ubuntu-latest

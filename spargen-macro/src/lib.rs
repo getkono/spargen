@@ -323,8 +323,7 @@ fn parse_operations(input: ParseStream, omit: &mut spargen::Omit) -> syn::Result
     while !body.is_empty() {
         let method: Ident = body.parse()?;
         // Delegated to `OmitMethod`'s own `FromStr` rather than matched here, so the macro cannot
-        // fall behind the method set the generator supports — as it did when OpenAPI 3.2's `query`
-        // was added.
+        // fall behind the method set the generator supports.
         let method = method
             .to_string()
             .parse::<spargen::OmitMethod>()

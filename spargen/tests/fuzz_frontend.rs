@@ -141,9 +141,7 @@ fn exercise_both(dir: &TempDir, text: &str) {
     exercise(dir, text.as_bytes(), "yaml");
 }
 
-// ---------------------------------------------------------------------------------------------
 // Strategies
-// ---------------------------------------------------------------------------------------------
 
 /// A short string, biased toward frontend-meaningful scalars but including arbitrary noise.
 fn arb_scalar_string() -> impl Strategy<Value = String> {
@@ -253,9 +251,7 @@ fn arb_ref_chain() -> impl Strategy<Value = String> {
     })
 }
 
-// ---------------------------------------------------------------------------------------------
 // The no-panic properties
-// ---------------------------------------------------------------------------------------------
 
 #[test]
 fn check_never_panics_on_arbitrary_bytes() {

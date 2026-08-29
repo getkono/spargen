@@ -1,4 +1,4 @@
-//! Issue #34 (layer B) — LOWERING-INVARIANT property tests over the union/allOf lowering, driven
+//! LOWERING-INVARIANT property tests over the union/allOf lowering, driven
 //! end-to-end through `check`/`generate` on synthesized inline specs (the strategy and merge
 //! decisions are methods on the private lowering state, so they are exercised via the public
 //! frontend rather than called in isolation):
@@ -43,9 +43,7 @@ fn has_code(report: &Report, code: Code) -> bool {
     report.diagnostics().iter().any(|d| d.code == code)
 }
 
-// ---------------------------------------------------------------------------
-// Property 1: JSON-type-category disjointness is sound.
-// ---------------------------------------------------------------------------
+// JSON-type-category disjointness is sound.
 
 /// A JSON primitive category to place in a union variant. `Integer` and `Number` deliberately share
 /// the numeric wire category — the lowering must never treat them as disjoint.
@@ -92,9 +90,7 @@ fn category_union_spec(variants: &[Category]) -> String {
     spec
 }
 
-// ---------------------------------------------------------------------------
-// Property 2: required-key disjointness (closed objects) is sound.
-// ---------------------------------------------------------------------------
+// Required-key disjointness (closed objects) is sound.
 
 /// The candidate property names for the closed-object variants. Each is a single lowercase letter so
 /// its wire name equals its Rust field ident.
@@ -121,9 +117,7 @@ fn closed_object_union_spec(variants: &[BTreeSet<usize>]) -> String {
     spec
 }
 
-// ---------------------------------------------------------------------------
-// Property 3: allOf merge reconciliation.
-// ---------------------------------------------------------------------------
+// The allOf merge reconciles member constraints exactly.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PropType {

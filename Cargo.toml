@@ -8,7 +8,6 @@
 [workspace]
 resolver = "2"
 members = ["spargen", "spargen-macro", "support-runtime"]
-# members = ["spargen", "support-runtime", "xtask"]  # reserved
 # The `fuzz/` cargo-fuzz crate is a deliberately-excluded, opt-in workspace member: it depends on
 # libfuzzer-sys and needs a nightly libFuzzer sysroot, neither of which should touch the normal
 # `cargo build --workspace` / `check` / `lint` / `test` / `deny` paths. Building it is manual —
@@ -18,7 +17,7 @@ exclude = ["fuzz"]
 [workspace.package]
 version = "0.3.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["Justin Chung"]
 repository = "https://github.com/getkono/spargen"

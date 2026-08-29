@@ -29,22 +29,17 @@ pub trait MaybeSend: Send {}
 #[cfg(not(target_arch = "wasm32"))]
 impl<T: Send + ?Sized> MaybeSend for T {}
 
-/// `Send` on native targets; a vacuous marker on `wasm32` (the single-threaded browser target).
 #[cfg(target_arch = "wasm32")]
 pub trait MaybeSend {}
 #[cfg(target_arch = "wasm32")]
 impl<T: ?Sized> MaybeSend for T {}
 
-/// `Sync` on native targets; a vacuous marker on `wasm32`.
-///
-/// The `Sync` counterpart to [`MaybeSend`]: on native, `Sync` with a blanket impl for every `Sync`
-/// type; on wasm, implemented for all types and imposing nothing.
+/// The [`MaybeSend`] counterpart for `Sync`.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait MaybeSync: Sync {}
 #[cfg(not(target_arch = "wasm32"))]
 impl<T: Sync + ?Sized> MaybeSync for T {}
 
-/// `Sync` on native targets; a vacuous marker on `wasm32` (the single-threaded browser target).
 #[cfg(target_arch = "wasm32")]
 pub trait MaybeSync {}
 #[cfg(target_arch = "wasm32")]
