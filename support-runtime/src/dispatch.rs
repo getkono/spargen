@@ -483,7 +483,8 @@ pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
 
 /// Read a response body, retaining at most `max_error_body` bytes.
 ///
-/// The body is pulled incrementally and abandoned one byte past the cap, so peak memory is a
+/// The body is pulled incrementally and abandoned at the first chunk that carries it past the cap
+/// (the loop extends before it re-tests), so peak memory is a
 /// function of the cap rather than of whatever the server chose to send — `reqwest` imposes no
 /// response size limit of its own, so without this a hostile or malfunctioning peer could force an
 /// arbitrarily large allocation on an error path whose contents are mostly discarded. What matters
@@ -1233,8 +1234,9 @@ mod tests {
     }
 
     /// A body of exactly `cap` bytes is not truncated. This pins `cap_body`'s truncation test:
-    /// widening `body.len() > cap` to `>=` reports an exact-fit body as truncated, which nothing
-    /// else in the suite notices (verified by regressing it).
+    /// widening `body.len() > cap` to `>=` reports an exact-fit body as truncated. Verified by
+    /// regressing it — that mutation fails this fixture and `a_zero_cap_retains_nothing`, whose
+    /// empty body under a zero cap is the same `len == cap` case, and nothing else.
     #[test]
     fn a_body_of_exactly_the_cap_is_not_truncated() {
         let mut core = core();
@@ -1246,9 +1248,11 @@ mod tests {
         assert_eq!(body.len(), 32);
     }
 
-    /// A cap of zero retains nothing and still terminates. This is the fixture that pins the read
-    /// loop's own `<= cap` bound: narrowing it to `<` never enters the loop at all, so an
-    /// over-cap body is silently reported as complete (verified by regressing it).
+    /// A cap of zero retains nothing and still terminates. This is the only fixture that pins the
+    /// read loop's own `<= cap` bound: narrowing it to `<` never enters the loop at all, so an
+    /// over-cap body is silently reported as complete. It also covers `cap_body`'s truncation test
+    /// from the other side, since an empty body under a zero cap is `len == cap`. Both verified by
+    /// regressing each comparison.
     #[test]
     fn a_zero_cap_retains_nothing() {
         let mut core = core();

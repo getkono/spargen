@@ -54,7 +54,8 @@ uses them. Spargen audits the consumer manifest against its tested
   undiscriminated unions are rejected instead.
 - **Safe by construction.** Unsafe-forbidding attributes ride on every generated item,
   `Debug`-redacted secrets (via [`secrecy`](https://docs.rs/secrecy)), and a configurable 64 KiB
-  cap on error-body retention.
+  cap on error-body retention — bounding reading too, for bodies read as errors on native targets.
+  Two paths are not yet capped; the emitted `ClientConfig::max_error_body` doc names them.
 - **`include!`-friendly output.** Generated code carries no crate-level inner attributes, so it
   drops into a module or an `OUT_DIR` file consumed with `include!`.
 

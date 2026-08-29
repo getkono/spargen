@@ -26,7 +26,8 @@ pub struct ClientConfig {
     /// - Two paths are **not** capped at all: the generated shim for an operation with more than
     ///   one documented success status, which reads through
     ///   [`read_success_body`](crate::read_success_body) and reaches both `Decode` and
-    ///   `UnexpectedStatus`; and `EventStream`'s per-frame decode, bounded only by the frame.
+    ///   `UnexpectedStatus`; and `EventStream`'s per-frame decode, which retains one frame drawn
+    ///   from a frame buffer that is itself unbounded.
     pub max_error_body: usize,
 }
 

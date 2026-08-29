@@ -42,8 +42,7 @@ pub enum Error<E> {
         path: String,
         /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
         ///
-        /// Two paths do not reach the cap and construct this variant with the whole body, for
-        /// different reasons:
+        /// Two paths do not reach the cap, for different reasons, and retain more than it:
         ///
         /// - The generated shim for an operation with more than one documented success status
         ///   reads through `read_success_body`, which does not take the cap. Threading it through
