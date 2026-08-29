@@ -481,10 +481,13 @@ pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
 
 /// Read a response body, retaining at most `max_error_body` bytes.
 ///
-/// The body is pulled incrementally and abandoned one byte past the cap, so peak memory is bounded
-/// by `cap + one chunk` instead of by whatever the server chose to send — `reqwest` imposes no
+/// The body is pulled incrementally and abandoned one byte past the cap, so peak memory is a
+/// function of the cap rather than of whatever the server chose to send — `reqwest` imposes no
 /// response size limit of its own, so without this a hostile or malfunctioning peer could force an
-/// arbitrarily large allocation on an error path whose contents are mostly discarded.
+/// arbitrarily large allocation on an error path whose contents are mostly discarded. The bound is
+/// a small multiple of the cap, not `cap` exactly: `BytesMut` grows by doubling and `freeze` does
+/// not shrink, and `cap_body` then allocates the retained copy while the read buffer is still
+/// live.
 ///
 /// Abandoning the body early forgoes reuse of that connection, which is the right trade for a
 /// response already too large to retain.
@@ -1119,6 +1122,10 @@ mod tests {
     fn oversized_error_body_stops_being_read_at_the_cap() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
+        /// 1 KiB chunks against the 4 KiB cap below: four pulls reach the cap exactly, and the
+        /// fifth is the one that proves the remainder is being dropped.
+        const PULLS_FOR_4K_CAP: usize = 5;
+
         // A stream of 1 KiB chunks that counts how many were actually pulled. Always immediately
         // ready, so the poll-once waker is enough.
         struct Counting {
@@ -1159,10 +1166,56 @@ mod tests {
         assert!(truncated);
         assert_eq!(retained.len(), 4096);
         let pulled = pulled.load(Ordering::SeqCst);
-        assert!(
-            pulled <= 6,
+        // Derived, not fitted: the loop exits at the first pull that puts the buffer past the cap,
+        // so 1 KiB chunks against a 4 KiB cap is exactly five. Asserting the tight value is what
+        // pins "stops at the first over-cap chunk" rather than merely "stops somewhere early".
+        assert_eq!(
+            pulled, PULLS_FOR_4K_CAP,
             "read {pulled} KiB chunks for a 4 KiB cap - the whole body was buffered"
         );
+    }
+
+    /// A body of exactly `cap` bytes is not truncated. This pins `cap_body`'s `<= cap` boundary:
+    /// narrowing it to `<` reports an exact-fit body as truncated and copies it needlessly, which
+    /// nothing else in the suite notices (verified by regressing it).
+    #[test]
+    fn a_body_of_exactly_the_cap_is_not_truncated() {
+        let mut core = core();
+        core.config_mut().max_error_body = 32;
+        let response = json_response(500, &"x".repeat(32));
+        let (_status, _headers, body, truncated) =
+            poll_ready(read_error_body::<std::convert::Infallible>(&core, response)).unwrap();
+        assert!(!truncated, "an exact-fit body must not report truncation");
+        assert_eq!(body.len(), 32);
+    }
+
+    /// A cap of zero retains nothing and still terminates. This is the fixture that pins the read
+    /// loop's own `<= cap` bound: narrowing it to `<` never enters the loop at all, so an
+    /// over-cap body is silently reported as complete (verified by regressing it).
+    #[test]
+    fn a_zero_cap_retains_nothing() {
+        let mut core = core();
+        core.config_mut().max_error_body = 0;
+
+        let (_status, _headers, body, truncated) = poll_ready(read_error_body::<
+            std::convert::Infallible,
+        >(
+            &core, json_response(500, "body")
+        ))
+        .unwrap();
+        assert!(truncated);
+        assert!(body.is_empty());
+
+        // An empty body under a zero cap is the one case that must NOT report truncation: nothing
+        // was dropped.
+        let (_status, _headers, body, truncated) = poll_ready(read_error_body::<
+            std::convert::Infallible,
+        >(
+            &core, json_response(500, "")
+        ))
+        .unwrap();
+        assert!(!truncated, "nothing was dropped, so nothing was truncated");
+        assert!(body.is_empty());
     }
 
     /// A SUCCESS response that fails to deserialize must also honour the cap: `Error::Decode`
