@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/getkono/spargen/compare/spargen-v0.3.0...spargen-v0.4.0) - 2026-08-29
+
+### Fixed
+
+- use as_chunks in the SHA-256 block loop
+- [**breaking**] reject an additionalOperations key that is not a method token
+- [**breaking**] give every Media Type Object and XML node type a disposition
+
+### Other
+
+- remove backlog references and changelog narration from comments
+- pin the support documents to the codes that exist
+
 ## [0.3.0](https://github.com/getkono/spargen/compare/spargen-v0.2.2...spargen-v0.3.0) - 2026-08-28
 
 ### Added
