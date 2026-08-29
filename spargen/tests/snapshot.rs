@@ -213,6 +213,42 @@ fn github_api_3_1_generates() {
 }
 
 #[test]
+fn stripe_rejects() {
+    // Manifest expectation: `reject:E001` — Stripe emits 3.0.0, refused at the version gate.
+    let (report, _) = generate_corpus("stripe/spec3.json", false);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    insta::assert_snapshot!("stripe", summary(&report));
+}
+
+#[test]
+fn twilio_api_2010_rejects() {
+    // Manifest expectation: `reject:E001` — Twilio emits 3.0.1.
+    let (report, _) = generate_corpus("twilio-api-2010/twilio_api_v2010.json", false);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    insta::assert_snapshot!("twilio_api_2010", summary(&report));
+}
+
+#[test]
+fn kubernetes_authentication_v1_rejects() {
+    // Manifest expectation: `reject:E001` — the Kubernetes OpenAPI v3 tree emits 3.0.0.
+    let (report, _) = generate_corpus(
+        "kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json",
+        false,
+    );
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    insta::assert_snapshot!("kubernetes_authentication_v1", summary(&report));
+}
+
+#[test]
+fn meilisearch_rejects() {
+    // Manifest expectation: `reject:E011` — 3.1.0, so it clears the version gate and is refused by
+    // strict official-schema validation instead (`description: null` on a Tag's externalDocs).
+    let (report, _) = generate_corpus("meilisearch/open-api.json", false);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    insta::assert_snapshot!("meilisearch", summary(&report));
+}
+
+#[test]
 fn openai_openapi_rejects() {
     // Manifest expectation: `reject`.
     let (report, _) = generate_corpus("openai-openapi/openapi.yaml", false);

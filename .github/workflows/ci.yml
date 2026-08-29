@@ -141,6 +141,12 @@ jobs:
       # ollama now generates (union lowering, #9): check must succeed with no rejection.
       - run: cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json
       - run: cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
+      # openai is 3.1 and past the version gate, but `POST /realtime/calls` documents
+      # `application/sdp` as its only 201 content entry, and there is no codec for it. The cap is
+      # raised for the same reason as GitHub 3.1: the warning volume would otherwise truncate the
+      # batch before the terminal E009.
+      - run: cargo run -q -p spargen --features cli -- check corpus/openai-openapi/openapi.yaml --format json --batch-cap 100000 > /tmp/spargen-openai.json || test $? -eq 1
+      - run: grep -q E009 /tmp/spargen-openai.json
       # Stripe (3.0.0), Twilio (3.0.1), Kubernetes API-group (3.0.0): rejected at the version gate.
       - run: cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json > /tmp/spargen-stripe.json || test $? -eq 1
       - run: grep -q E001 /tmp/spargen-stripe.json

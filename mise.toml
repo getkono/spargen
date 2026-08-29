@@ -61,6 +61,11 @@ run = [
   "cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml >/tmp/spargen-github-31.json",
   "cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json",
   "cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
+  # 3.1 and past the version gate, but `POST /realtime/calls` documents `application/sdp` as its
+  # only 201 content entry and spargen has no codec for an unregistered media type. The cap is
+  # raised for the same reason as GitHub 3.1: at the default of 100 the warning volume truncates
+  # the batch before the terminal E009 is reached.
+  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/openai-openapi/openapi.yaml --format json --batch-cap 100000 >/tmp/spargen-openai.json || test $? -eq 1; grep -q E009 /tmp/spargen-openai.json'",
   # 3.0.x/3.0.1/3.0.0 real-world APIs: rejected at the version gate (E001).
   "sh -c 'cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json >/tmp/spargen-stripe.json || test $? -eq 1; grep -q E001 /tmp/spargen-stripe.json'",
   "sh -c 'cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json >/tmp/spargen-twilio.json || test $? -eq 1; grep -q E001 /tmp/spargen-twilio.json'",
