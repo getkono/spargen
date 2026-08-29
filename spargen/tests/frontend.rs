@@ -5505,3 +5505,110 @@ item:
         assert!(has_code(report, Code::InvalidInput), "{report:#?}");
     }
 }
+
+// --- check/generate parity ----------------------------------------------------------------------
+//
+// The module header calls parity a contract, and `spargen check` is sold as telling you what
+// `generate` would do. It was asserted by seven fixtures in the whole file, each written by hand;
+// the other 175 go through `generate` alone. A `check` that quietly stopped running one frontend
+// stage would keep passing.
+
+/// The sorted diagnostic codes a report carries, duplicates kept: a stage that fires the same
+/// warning twice differs from one that fires it once.
+fn codes(report: &Report) -> Vec<&'static str> {
+    let mut codes: Vec<&'static str> = report
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect();
+    codes.sort_unstable();
+    codes
+}
+
+/// `check` must reach the same verdict as `generate`: it accepts exactly what `generate` accepts,
+/// and reports exactly the same diagnostics. The two outcomes are deliberately *not* compared for
+/// equality — a successful `check` is `Clean` and a successful `generate` is `Generated`, because
+/// only one of them wrote a module. What must agree is the accept/reject decision.
+///
+/// `check` skips codegen and emit, so any diagnostic the two disagree on is one that only a
+/// generating run reports — which is exactly what would stop `check` standing in for it.
+fn assert_parity(name: &str, spec: &str) {
+    let generated = generate(spec);
+    let checked = check(spec);
+
+    assert_eq!(
+        checked.outcome() == Outcome::Rejected,
+        generated.outcome() == Outcome::Rejected,
+        "`{name}`: check says {:?} but generate says {:?}",
+        checked.outcome(),
+        generated.outcome()
+    );
+    assert_eq!(
+        codes(&checked),
+        codes(&generated),
+        "`{name}`: check and generate report different diagnostics"
+    );
+}
+
+/// One spec per diagnostic family the frontend can reach, plus a clean one. Rejections and warnings
+/// both matter: a rejection proves `check` runs the stage that refuses, a warning proves it runs
+/// the stage that merely notices.
+const PARITY_FIXTURES: &[(&str, &str)] = &[
+    (
+        "clean",
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths:\n  /a:\n    get:\n      operationId: getA\n      responses: { '204': { description: ok } }\n",
+    ),
+    (
+        "E001 unsupported version",
+        "openapi: 3.0.3\ninfo: { title: T, version: 1.0.0 }\npaths: {}\n",
+    ),
+    ("E011 structurally invalid", "openapi: 3.1.0\npaths: {}\n"),
+    (
+        "E004 unresolvable ref",
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n  /a:\n    get:\n      operationId: getA\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema: { $ref: '#/components/schemas/Missing' }\n",
+    ),
+    (
+        "E012 unknown security scheme",
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n  /a:\n    get:\n      operationId: getA\n      security: [{ nope: [] }]\n      responses: { '204': { description: ok } }\n",
+    ),
+    ("E013 irreconcilable allOf", ALL_OF_CONFLICT_SPEC),
+    ("W005 schema default", W005_SPEC),
+    (
+        "W001 validation-only keyword",
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    S: { type: string, minLength: 3 }\n",
+    ),
+    (
+        "W002 server-initiated flow",
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\nwebhooks:\n  ping:\n    post:\n      operationId: ping\n      responses: { '204': { description: ok } }\n",
+    ),
+];
+
+#[test]
+fn check_and_generate_agree_on_every_parity_fixture() {
+    for (name, spec) in PARITY_FIXTURES {
+        assert_parity(name, spec);
+    }
+}
+
+#[test]
+fn the_parity_fixtures_span_both_verdicts() {
+    // A parity suite made only of clean specs would pass trivially. This keeps it honest: it has to
+    // contain rejections, warnings, and specs that succeed.
+    let mut rejected = 0;
+    let mut warned = 0;
+    let mut succeeded = 0;
+    for (_, spec) in PARITY_FIXTURES {
+        let report = check(spec);
+        if report.outcome() == Outcome::Rejected {
+            rejected += 1;
+        } else {
+            succeeded += 1;
+        }
+        if codes(&report).iter().any(|code| code.starts_with('W')) {
+            warned += 1;
+        }
+    }
+    assert!(rejected >= 4, "only {rejected} fixtures reject");
+    assert!(warned >= 3, "only {warned} fixtures warn");
+    assert!(succeeded >= 2, "only {succeeded} fixtures succeed");
+}
