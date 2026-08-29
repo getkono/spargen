@@ -34,3 +34,47 @@ impl ToTokens for Ident {
         ident.to_tokens(tokens);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use quote::ToTokens;
+
+    use super::Ident;
+    use crate::name::{escape, IdentRole};
+
+    #[test]
+    fn an_identifier_renders_as_itself_in_text_and_in_tokens() {
+        let ident = escape("petId", IdentRole::Field);
+        assert_eq!(ident.as_str(), "pet_id");
+        assert_eq!(ident.to_string(), "pet_id");
+        assert_eq!(ident.to_token_stream().to_string(), "pet_id");
+    }
+
+    /// The `r#` prefix is part of the identifier's text but must reach the token stream as a raw
+    /// identifier rather than as the two tokens `r` and `#`. This is the reason `to_tokens` splits
+    /// on the prefix at all.
+    #[test]
+    fn a_raw_identifier_tokenizes_as_one_raw_ident() {
+        let ident = escape("type", IdentRole::Field);
+        assert_eq!(ident.as_str(), "r#type");
+
+        let stream = ident.to_token_stream();
+        let mut tokens = stream.into_iter();
+        let Some(proc_macro2::TokenTree::Ident(single)) = tokens.next() else {
+            panic!("a raw identifier must be one Ident token");
+        };
+        assert!(tokens.next().is_none(), "expected exactly one token");
+        assert_eq!(single.to_string(), "r#type");
+    }
+
+    #[test]
+    fn identifiers_compare_and_hash_by_their_text() {
+        // `Scope` keys its occupancy set on the rendered text, so equality must be textual.
+        assert_eq!(Ident::new("pet_id"), Ident::new("pet_id"));
+        assert_ne!(Ident::new("pet_id"), Ident::new("petId"));
+
+        let mut set = std::collections::HashSet::new();
+        assert!(set.insert(Ident::new("pet_id")));
+        assert!(!set.insert(Ident::new("pet_id")));
+    }
+}
