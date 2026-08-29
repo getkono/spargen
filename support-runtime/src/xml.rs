@@ -26,9 +26,9 @@ where
 
 /// Decode an XML success response body into `T`, wrapping it with status and headers. The XML
 /// analogue of [`crate::decode_success`]; a parse failure (invalid UTF-8 or malformed XML) becomes
-/// [`Error::Decode`] with the quick-xml error path and the (whole) body retained.
+/// [`Error::Decode`] with the quick-xml error path and a body capped at `max_error_body`.
 pub async fn decode_success_xml<T>(
-    _core: &ClientCore,
+    core: &ClientCore,
     response: Response,
 ) -> Result<ResponseValue<T>, Error<Infallible>>
 where
@@ -39,11 +39,14 @@ where
     let body = response.bytes().await.map_err(Error::from_reqwest)?;
     match from_xml_bytes::<T>(&body) {
         Ok(value) => Ok(ResponseValue::new(status, headers, value)),
-        Err(path) => Err(Error::Decode {
-            path,
-            body,
-            truncated: false,
-        }),
+        Err(path) => {
+            let (body, truncated) = crate::dispatch::cap_body(body, core.config().max_error_body);
+            Err(Error::Decode {
+                path,
+                body,
+                truncated,
+            })
+        }
     }
 }
 
@@ -141,5 +144,46 @@ mod tests {
     fn invalid_utf8_yields_a_decode_error_path() {
         let error = from_xml_bytes::<Point>(&Bytes::from_static(&[0xff, 0xfe])).unwrap_err();
         assert!(!error.is_empty());
+    }
+
+    /// `Error::Decode` documents its body as retained "up to the configured cap"; the XML codec
+    /// must honour that too, not retain the whole response.
+    #[test]
+    fn xml_decode_failure_honours_the_error_body_cap() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        fn poll_ready<F: Future>(future: F) -> F::Output {
+            let mut future = std::pin::pin!(future);
+            match future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            {
+                Poll::Ready(value) => value,
+                Poll::Pending => panic!("future was not immediately ready"),
+            }
+        }
+
+        let mut core = crate::ClientCore::new("https://example.com").unwrap();
+        core.config_mut().max_error_body = 16;
+        // Well-formed UTF-8 that is not valid XML, far larger than the cap.
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(200)
+                .body("n".repeat(32 * 1024))
+                .expect("valid synthetic response"),
+        );
+        match poll_ready(super::decode_success_xml::<Point>(&core, response)) {
+            Err(crate::Error::Decode {
+                body, truncated, ..
+            }) => {
+                assert!(
+                    truncated,
+                    "oversized XML decode body reported as untruncated"
+                );
+                assert_eq!(body.len(), 16);
+            }
+            other => panic!("expected a capped Decode error, got {other:?}"),
+        }
     }
 }

@@ -231,9 +231,10 @@ pub async fn send(core: &ClientCore, request: Request) -> Result<Response, Error
 }
 
 /// Decode a success response body into `T`, wrapping it with status and headers. Monomorphized once
-/// per body type. Decode failures become [`Error::Decode`] with the serde path and a capped body.
+/// per body type. Decode failures become [`Error::Decode`] with the serde path and a body capped
+/// at `max_error_body`.
 pub async fn decode_success<T>(
-    _core: &ClientCore,
+    core: &ClientCore,
     response: Response,
 ) -> Result<ResponseValue<T>, Error<Infallible>>
 where
@@ -242,19 +243,26 @@ where
     let status = response.status();
     let headers = response.headers().clone();
     let body = response.bytes().await.map_err(Error::from_reqwest)?;
-    let value = serde_json::from_slice::<T>(&body).map_err(|error| Error::Decode {
-        path: error.to_string(),
-        body,
-        truncated: false,
-    })?;
-    Ok(ResponseValue::new(status, headers, value))
+    // Deserialization needs the whole body, so peak here is inherent to typed decoding; only what
+    // the error *retains* is capped.
+    match serde_json::from_slice::<T>(&body) {
+        Ok(value) => Ok(ResponseValue::new(status, headers, value)),
+        Err(error) => {
+            let (body, truncated) = cap_body(body, core.config().max_error_body);
+            Err(Error::Decode {
+                path: error.to_string(),
+                body,
+                truncated,
+            })
+        }
+    }
 }
 
 /// Decode a raw UTF-8 success body as the JSON string value described by a textual OpenAPI media
 /// type. Converting through `Value::String` keeps generated string enums and string formats typed
 /// while avoiding JSON's quote requirement on the wire.
 pub async fn decode_success_text<T>(
-    _core: &ClientCore,
+    core: &ClientCore,
     response: Response,
 ) -> Result<ResponseValue<T>, Error<Infallible>>
 where
@@ -263,12 +271,17 @@ where
     let status = response.status();
     let headers = response.headers().clone();
     let body = response.bytes().await.map_err(Error::from_reqwest)?;
-    let value = decode_text_body::<T>(&body).map_err(|path| Error::Decode {
-        path,
-        body,
-        truncated: false,
-    })?;
-    Ok(ResponseValue::new(status, headers, value))
+    match decode_text_body::<T>(&body) {
+        Ok(value) => Ok(ResponseValue::new(status, headers, value)),
+        Err(path) => {
+            let (body, truncated) = cap_body(body, core.config().max_error_body);
+            Err(Error::Decode {
+                path,
+                body,
+                truncated,
+            })
+        }
+    }
 }
 
 /// Decode a raw binary success body without attempting JSON deserialization.
@@ -454,14 +467,57 @@ pub async fn unexpected_status<E>(core: &ClientCore, response: Response) -> Erro
     }
 }
 
+/// Truncate a body to the retention cap, **copying** the retained prefix rather than slicing it.
+/// `Bytes::slice` returns a refcounted view that keeps the whole original allocation alive, so an
+/// oversized body would stay resident for the lifetime of the `Error` — the cap is documented as a
+/// bound on retention, so it has to detach. Returns the retained bytes and whether any were dropped.
+pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
+    if body.len() <= cap {
+        (body, false)
+    } else {
+        (Bytes::copy_from_slice(&body[..cap]), true)
+    }
+}
+
+/// Read a response body, retaining at most `max_error_body` bytes.
+///
+/// The body is pulled incrementally and abandoned one byte past the cap, so peak memory is bounded
+/// by `cap + one chunk` instead of by whatever the server chose to send — `reqwest` imposes no
+/// response size limit of its own, so without this a hostile or malfunctioning peer could force an
+/// arbitrarily large allocation on an error path whose contents are mostly discarded.
+///
+/// Abandoning the body early forgoes reuse of that connection, which is the right trade for a
+/// response already too large to retain.
+///
+/// Uses `Response::chunk`, which — unlike `bytes_stream` — is not behind reqwest's `stream`
+/// feature. Generated clients enable `stream` only for APIs with sequential responses, so reading
+/// incrementally here must not depend on it.
+#[cfg(not(target_arch = "wasm32"))]
+async fn read_capped<E>(
+    core: &ClientCore,
+    mut response: Response,
+) -> Result<(Bytes, bool), Error<E>> {
+    let cap = core.config().max_error_body;
+    // Pre-size to the cap, but do not honour an enormous configured cap up front — the point is to
+    // avoid large speculative allocations.
+    let mut buffered = bytes::BytesMut::with_capacity(cap.min(16 * 1024));
+    while buffered.len() <= cap {
+        // One byte past the cap is enough to know the remainder is being dropped.
+        match response.chunk().await.map_err(Error::from_reqwest)? {
+            Some(chunk) => buffered.extend_from_slice(&chunk),
+            None => break,
+        }
+    }
+    Ok(cap_body(buffered.freeze(), cap))
+}
+
+/// The `wasm32` counterpart. reqwest's `fetch` backend exposes no `chunk`, so the body arrives
+/// whole and only *retention* can be bounded here, not peak memory.
+#[cfg(target_arch = "wasm32")]
 async fn read_capped<E>(core: &ClientCore, response: Response) -> Result<(Bytes, bool), Error<E>> {
     let cap = core.config().max_error_body;
     let bytes = response.bytes().await.map_err(Error::from_reqwest)?;
-    if bytes.len() <= cap {
-        Ok((bytes, false))
-    } else {
-        Ok((bytes.slice(..cap), true))
-    }
+    Ok(cap_body(bytes, cap))
 }
 
 #[cfg(test)]
@@ -475,6 +531,7 @@ mod tests {
     use crate::{AuthKind, AuthScheme, ClientCore, Credential, TokenFuture};
 
     use super::attach_auth;
+    use bytes::Bytes;
 
     /// The static-credential paths never actually suspend, so a single poll with a noop waker is
     /// enough — no async runtime needed in the runtime's own test suite.
@@ -1024,5 +1081,123 @@ mod tests {
     fn error_dispatch_parse_failure_is_decode() {
         let error = dispatch_error(json_response(409, "not json"));
         assert!(matches!(error, Error::Decode { .. }));
+    }
+
+    // --- error-body cap fixtures -------------------------------------------------------------
+    //
+    // `max_error_body` is documented as a cap on RETENTION (README, `config.rs`, and
+    // `Error::Decode`'s own field docs). These pin all three ways that contract can be broken:
+    // retaining a view into an oversized buffer, reading an unbounded body before capping, and
+    // the success-decode paths ignoring the cap outright.
+
+    /// A body far larger than the cap must not leave the original allocation reachable through the
+    /// retained `Bytes`. `Bytes::slice` returns a refcounted view whose parent stays alive; a real
+    /// copy is detached, which `try_into_mut` (unique ownership) reports through its capacity.
+    #[test]
+    fn capped_error_body_does_not_retain_the_oversized_allocation() {
+        let mut core = core();
+        core.config_mut().max_error_body = 8;
+        let response = json_response(500, &"x".repeat(64 * 1024));
+        let (_status, _headers, body, truncated) =
+            poll_ready(read_error_body::<std::convert::Infallible>(&core, response)).unwrap();
+        assert!(truncated);
+        assert_eq!(body.len(), 8);
+        let owned = body
+            .try_into_mut()
+            .expect("retained body should be uniquely owned");
+        assert_eq!(
+            owned.capacity(),
+            8,
+            "retained body still points into the full response allocation"
+        );
+    }
+
+    /// The cap must bound PEAK memory too: an oversized body has to stop being pulled once enough
+    /// bytes are in hand, rather than being buffered whole and trimmed afterwards.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn oversized_error_body_stops_being_read_at_the_cap() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // A stream of 1 KiB chunks that counts how many were actually pulled. Always immediately
+        // ready, so the poll-once waker is enough.
+        struct Counting {
+            remaining: usize,
+            pulled: Arc<AtomicUsize>,
+        }
+        impl futures_core::Stream for Counting {
+            type Item = Result<Bytes, std::io::Error>;
+            fn poll_next(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if self.remaining == 0 {
+                    return Poll::Ready(None);
+                }
+                self.remaining -= 1;
+                self.pulled.fetch_add(1, Ordering::SeqCst);
+                Poll::Ready(Some(Ok(Bytes::from_static(&[b'x'; 1024]))))
+            }
+        }
+
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let body = reqwest::Body::wrap_stream(Counting {
+            remaining: 1024, // 1 MiB available
+            pulled: Arc::clone(&pulled),
+        });
+
+        let mut core = core();
+        core.config_mut().max_error_body = 4096; // 4 KiB cap
+
+        let (_status, _headers, retained, truncated) = poll_ready(read_error_body::<
+            std::convert::Infallible,
+        >(
+            &core, raw_response(500, body)
+        ))
+        .unwrap();
+
+        assert!(truncated);
+        assert_eq!(retained.len(), 4096);
+        let pulled = pulled.load(Ordering::SeqCst);
+        assert!(
+            pulled <= 6,
+            "read {pulled} KiB chunks for a 4 KiB cap - the whole body was buffered"
+        );
+    }
+
+    /// A SUCCESS response that fails to deserialize must also honour the cap: `Error::Decode`
+    /// documents its body as retained "up to the configured cap", with `truncated` saying so.
+    #[test]
+    fn decode_failure_on_success_body_honours_the_cap() {
+        let mut core = core();
+        core.config_mut().max_error_body = 16;
+        // Valid UTF-8, not valid JSON for `Created`, and far larger than the cap.
+        let response = json_response(200, &"n".repeat(32 * 1024));
+        match poll_ready(super::decode_success::<Created>(&core, response)) {
+            Err(Error::Decode {
+                body, truncated, ..
+            }) => {
+                assert!(truncated, "oversized decode body reported as untruncated");
+                assert_eq!(body.len(), 16);
+            }
+            other => panic!("expected a capped Decode error, got {other:?}"),
+        }
+    }
+
+    /// The textual codec shares the cap.
+    #[test]
+    fn textual_decode_failure_honours_the_cap() {
+        let mut core = core();
+        core.config_mut().max_error_body = 16;
+        let response = json_response(200, &"n".repeat(32 * 1024));
+        match poll_ready(super::decode_success_text::<TextChoice>(&core, response)) {
+            Err(Error::Decode {
+                body, truncated, ..
+            }) => {
+                assert!(truncated);
+                assert_eq!(body.len(), 16);
+            }
+            other => panic!("expected a capped Decode error, got {other:?}"),
+        }
     }
 }
