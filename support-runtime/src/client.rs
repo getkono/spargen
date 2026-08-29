@@ -15,8 +15,9 @@ pub struct ClientConfig {
     /// [`Error::UnexpectedStatus`](crate::Error::UnexpectedStatus) carry no such field, so on
     /// those the body is capped without being flagged.
     ///
-    /// The cap bounds reading as well as retention: an over-cap body is abandoned partway, which
-    /// forgoes reuse of that connection.
+    /// On native targets the cap bounds reading as well as retention: an over-cap body is
+    /// abandoned partway, which forgoes reuse of that connection. On `wasm32` the `fetch` backend
+    /// has no incremental read, so there the cap bounds only what is retained.
     pub max_error_body: usize,
 }
 

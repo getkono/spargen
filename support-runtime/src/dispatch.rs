@@ -468,6 +468,10 @@ pub async fn unexpected_status<E>(core: &ClientCore, response: Response) -> Erro
 }
 
 /// Truncate a body to the retention cap, **copying** the retained prefix rather than slicing it.
+///
+/// Only the truncating branch copies: an under-cap body is returned untouched, which is correct
+/// wherever the caller's `Bytes` is already sized to its contents. A caller holding a buffer with
+/// spare capacity must detach before calling — see `read_capped`.
 /// `Bytes::slice` returns a refcounted view that keeps the whole original allocation alive, so an
 /// oversized body would stay resident for the lifetime of the `Error` — the cap is documented as a
 /// bound on retention, so it has to detach. Returns the retained bytes and whether any were dropped.
@@ -510,6 +514,15 @@ async fn read_capped<E>(
             Some(chunk) => buffered.extend_from_slice(&chunk),
             None => break,
         }
+    }
+    // `BytesMut::freeze` hands the buffer over at its full capacity, and growth doubles, so an
+    // UNDER-cap body would otherwise pin an allocation up to twice its length — the same retention
+    // defect this function exists to close, in miniature. `cap_body` cannot see that: a `Bytes`
+    // does not expose the capacity behind it. So detach here whenever the buffer holds slack, and
+    // keep `freeze` for the exact-fit case, where it is free.
+    let read = buffered.len();
+    if read <= cap && read < buffered.capacity() {
+        return Ok((Bytes::copy_from_slice(&buffered), false));
     }
     Ok(cap_body(buffered.freeze(), cap))
 }
@@ -1172,6 +1185,55 @@ mod tests {
         assert_eq!(
             pulled, PULLS_FOR_4K_CAP,
             "read {pulled} KiB chunks for a 4 KiB cap - the whole body was buffered"
+        );
+    }
+
+    /// An UNDER-cap body must not pin the read buffer either. The incremental read grows a
+    /// `BytesMut` by doubling and `freeze` hands it over at full capacity, so 40 KiB arriving in
+    /// chunks under the 64 KiB default retains 64 KiB — measured, not hypothetical. Same contract
+    /// violation as the oversized case, just bounded by the cap instead of by the server.
+    ///
+    /// The body has to arrive in MULTIPLE chunks to reproduce: a single-chunk body reserves
+    /// exactly once and lands on an exact-size allocation, so it hides the defect.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn an_under_cap_body_does_not_retain_the_read_buffer() {
+        let mut core = core();
+        core.config_mut().max_error_body = 64 * 1024;
+        // 40 x 1 KiB, all under the cap, so the read runs to EOF and nothing is truncated.
+        // `futures-core` is the only stream dependency here and carries no combinators, so the
+        // stream is hand-rolled; it is always immediately ready, which the poll-once waker needs.
+        struct Chunks(usize);
+        impl futures_core::Stream for Chunks {
+            type Item = Result<Bytes, std::io::Error>;
+            fn poll_next(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if self.0 == 0 {
+                    return Poll::Ready(None);
+                }
+                self.0 -= 1;
+                Poll::Ready(Some(Ok(Bytes::from_static(&[b'x'; 1024]))))
+            }
+        }
+
+        let body = reqwest::Body::wrap_stream(Chunks(40));
+        let (_status, _headers, body, truncated) = poll_ready(read_error_body::<
+            std::convert::Infallible,
+        >(
+            &core, raw_response(500, body)
+        ))
+        .unwrap();
+        assert!(!truncated);
+        assert_eq!(body.len(), 40 * 1024);
+        let owned = body
+            .try_into_mut()
+            .expect("retained body should be uniquely owned");
+        assert_eq!(
+            owned.capacity(),
+            40 * 1024,
+            "under-cap body still pins the doubled read buffer"
         );
     }
 
