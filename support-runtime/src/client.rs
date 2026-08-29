@@ -9,8 +9,25 @@ use crate::{Credential, Error, HttpBackend, ReqwestBackend};
 /// Client-wide configuration.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// Maximum bytes of a response body retained on error variants; the rest is dropped and the
-    /// error flags truncation (default 64 KiB).
+    /// Maximum bytes of a response body retained on error variants; the rest is dropped
+    /// (default 64 KiB).
+    ///
+    /// Where it applies, and what says so:
+    ///
+    /// - Bodies read as errors are capped, and on native targets the cap bounds *reading* too —
+    ///   an over-cap body is abandoned partway, which forgoes reuse of that connection. On
+    ///   `wasm32` the `fetch` backend has no incremental read, so there only retention is bounded.
+    /// - A success body that fails to decode is capped on retention only. Deserialization needs
+    ///   the whole body, so it is always read whole.
+    /// - [`Error::Decode`](crate::Error::Decode) reports truncation through its `truncated` field.
+    ///   [`Error::Api`](crate::Error::Api) and
+    ///   [`Error::UnexpectedStatus`](crate::Error::UnexpectedStatus) have no such field, so where
+    ///   they are capped they are capped silently.
+    /// - Two paths are **not** capped at all: the generated shim for an operation with more than
+    ///   one documented success status, which reads through
+    ///   [`read_success_body`](crate::read_success_body) and reaches both `Decode` and
+    ///   `UnexpectedStatus`; and `EventStream`'s per-frame decode, which retains one frame drawn
+    ///   from a frame buffer that is itself unbounded.
     pub max_error_body: usize,
 }
 
