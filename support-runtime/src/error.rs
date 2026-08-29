@@ -40,9 +40,17 @@ pub enum Error<E> {
     Decode {
         /// The serde deserialization error path.
         path: String,
-        /// The retained raw body (up to the configured cap).
+        /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
+        ///
+        /// Two paths do not yet reach the cap and construct this variant with the whole body: the
+        /// generated multi-success-status shim, which reads through `read_success_body` and has no
+        /// `ClientCore` to consult, and `EventStream`'s per-frame decode, which is bounded only by
+        /// the frame. Both are stated here rather than left to be discovered from the field.
         body: Bytes,
-        /// Whether the retained body was truncated at the cap.
+        /// Whether bytes were dropped from `body` to meet the cap.
+        ///
+        /// `false` therefore means "nothing was dropped", not "the cap was applied" — on the two
+        /// paths above nothing is dropped because nothing is capped.
         truncated: bool,
     },
     /// #9 — the connection dropped mid-stream on a streamed response.

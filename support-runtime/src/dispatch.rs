@@ -494,7 +494,10 @@ pub(crate) fn cap_body(body: Bytes, cap: usize) -> (Bytes, bool) {
 /// live.
 ///
 /// Abandoning the body early forgoes reuse of that connection, which is the right trade for a
-/// response already too large to retain.
+/// response already too large to retain. The threshold is the cap itself, with no drain allowance
+/// on top: an allowance would be a second bound that nothing declares and no caller can set, and
+/// the cap is already the one number a consumer chose. A deployment that would rather keep the
+/// connection can raise the cap, which says so directly.
 ///
 /// Uses `Response::chunk`, which — unlike `bytes_stream` — is not behind reqwest's `stream`
 /// feature. Generated clients enable `stream` only for APIs with sequential responses, so reading
