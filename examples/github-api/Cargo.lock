@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "spargen"
-version = "0.2.2"
+version = "0.4.0"
 dependencies = [
  "camino",
  "indexmap",
