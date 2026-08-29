@@ -133,6 +133,11 @@ pointer = "/components/schemas/X"       # pointer → OmitRule::Pointer
 file = "extra.yaml"                     #   file optional (file-local pointer)
 ```
 
+`error_body_cap` bounds reading as well as retention: a response body that exceeds it is abandoned
+partway rather than buffered whole, so an oversized error body cannot force an arbitrarily large
+allocation. Abandoning it forgoes reuse of that connection, so a cap set far below the error bodies
+an API actually returns trades connection reuse for a smaller retained prefix.
+
 Equivalent repeatable CLI flags (unioned with any config-file omit rules):
 
 ```

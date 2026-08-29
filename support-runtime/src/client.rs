@@ -9,8 +9,14 @@ use crate::{Credential, Error, HttpBackend, ReqwestBackend};
 /// Client-wide configuration.
 #[derive(Debug, Clone)]
 pub struct ClientConfig {
-    /// Maximum bytes of a response body retained on error variants; the rest is dropped and the
-    /// error flags truncation (default 64 KiB).
+    /// Maximum bytes of a response body retained on error variants; the rest is dropped
+    /// (default 64 KiB). [`Error::Decode`](crate::Error::Decode) reports whether that happened
+    /// through its `truncated` field; [`Error::Api`](crate::Error::Api) and
+    /// [`Error::UnexpectedStatus`](crate::Error::UnexpectedStatus) carry no such field, so on
+    /// those the body is capped without being flagged.
+    ///
+    /// The cap bounds reading as well as retention: an over-cap body is abandoned partway, which
+    /// forgoes reuse of that connection.
     pub max_error_body: usize,
 }
 

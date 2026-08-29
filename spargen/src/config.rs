@@ -118,6 +118,10 @@ impl Spec {
     }
 
     /// Cap the bytes of a response body retained on generated error variants (default 64 KiB).
+    ///
+    /// The cap bounds reading as well as retention: a body that exceeds it is abandoned partway,
+    /// which forgoes reuse of that connection. Setting it far below the error bodies an API
+    /// actually returns therefore trades connection reuse for a smaller retained prefix.
     pub fn error_body_cap(mut self, bytes: usize) -> Self {
         self.error_body_cap = bytes;
         self
