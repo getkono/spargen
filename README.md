@@ -180,11 +180,14 @@ mise run hooks        # install git hooks
 | `mise run fmt-check` | Verify the workspace is formatted |
 | `mise run lint` | Clippy with warnings denied |
 | `mise run test` | Full suite: unit, property, frontend-fixture, cache, determinism, and generated-code E2E tests |
+| `mise run powerset` | Every feature combination via cargo-hack, not just `--all-features` |
 | `mise run corpus-smoke` | Fast checks against pinned real-world specs |
 | `mise run bench` | Criterion benchmarks over the generation pipeline |
 | `mise run github-api` | Generate and compile the full pinned GitHub API client (native strict Clippy + wasm) |
 | `mise run example` | Run the end-to-end petstore example |
 | `mise run deny` | Supply-chain audit (licenses, advisories, bans) |
+| `mise run docs` | Build the mdBook site (fails on broken links or includes) |
+| `mise run doc-links` | Rustdoc over the workspace, warnings denied, private items included |
 
 The validation strategy is documented per subsystem in
 [`AGENTS.md`](AGENTS.md#testing-strategy-by-subsystem).
@@ -194,8 +197,8 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 ## Architecture
 
 The primary published crate is internally partitioned into subsystems with a declared dependency DAG —
-`diag`, `source`, `ir`, `oas31`, `name`, `support`, `codegen`, `emit`, `compat`, `cli`, and the
-`lib.rs` facade. Everything that knows OpenAPI 3.1/3.2 syntax lives in the `oas31` frontend, which
+`diag`, `source`, `ir`, `oas31`, `name`, `support`, `codegen`, `emit`, `compat`, `surface`, `cli`,
+and the `lib.rs` facade. Everything that knows OpenAPI 3.1/3.2 syntax lives in the `oas31` frontend, which
 lowers into a version-agnostic IR; codegen never sees a spec document. A future incompatible spec
 version can become a sibling frontend that lowers into the same IR and touches nothing downstream. The
 emitted runtime is real, standalone-compilable source in the `support-runtime` workspace member
