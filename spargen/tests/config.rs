@@ -132,6 +132,124 @@ fn config_file_knobs_reach_the_library() {
     assert!(output.status.success(), "{output:?}");
 }
 
+// --- Precedence ---------------------------------------------------------------------------------
+//
+// `spargen/src/cli/config.rs` states the contract: "defaults < `spargen.toml` < CLI flags", an
+// explicit `--config` replaces auto-discovery, and omit flags are *unioned* with the file's rules
+// rather than replacing them. Every test above uses a single config source, so none of that was
+// exercised — including `explicit_config_path_is_used`, which writes its config into a separate
+// directory with no competing `spargen.toml` for it to beat.
+
+/// A JSON-pointer needle that matches the whole pointer value, so `/paths/~1pets` cannot be
+/// satisfied by an occurrence of `/paths/~1pets~1{id}`.
+fn omits_pointer(stdout: &str, pointer: &str) -> bool {
+    stdout.contains(&format!("\"pointer\":\"{pointer}\""))
+}
+
+#[test]
+fn an_explicit_config_replaces_the_discovered_one_rather_than_merging_with_it() {
+    let (temp, spec) = workspace();
+    // Discoverable beside the spec, and it omits a *different* path than the explicit file.
+    std::fs::write(
+        temp.path().join("spargen.toml"),
+        "[[omit]]\npath = \"/pets\"\n",
+    )
+    .unwrap();
+    let configs = tempfile::tempdir().unwrap();
+    let explicit = configs.path().join("analysis.toml");
+    std::fs::write(&explicit, "[[omit]]\npath = \"/pets/{id}\"\n").unwrap();
+
+    let output = check(
+        temp.path(),
+        &spec,
+        &["--config", explicit.to_str().unwrap(), "--format", "json"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        omits_pointer(&stdout, "/paths/~1pets~1{id}"),
+        "the explicit config's rule must apply: {stdout}"
+    );
+    assert!(
+        !omits_pointer(&stdout, "/paths/~1pets"),
+        "the discovered config must not also apply when --config is given: {stdout}"
+    );
+}
+
+#[test]
+fn a_cli_omit_flag_is_unioned_with_the_config_file_rules() {
+    // Flags are applied last so they win on scalar knobs, but omit rules accumulate — a flag adds
+    // to the profile rather than discarding what the file declared.
+    let (temp, spec) = workspace();
+    std::fs::write(
+        temp.path().join("spargen.toml"),
+        "[[omit]]\npath = \"/pets/{id}\"\n",
+    )
+    .unwrap();
+
+    let output = check(
+        temp.path(),
+        &spec,
+        &["--omit-path", "/pets", "--format", "json"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    assert!(
+        omits_pointer(&stdout, "/paths/~1pets~1{id}"),
+        "the config file's rule must survive the flag: {stdout}"
+    );
+    assert!(
+        omits_pointer(&stdout, "/paths/~1pets"),
+        "the flag's rule must apply too: {stdout}"
+    );
+}
+
+const TWO_WARNINGS: &str = r##"
+openapi: 3.1.0
+info: { title: Batch, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    First: { type: string, minLength: 3 }
+    Second: { type: string, maxLength: 9 }
+"##;
+
+#[test]
+fn batch_cap_from_the_config_file_truncates_the_reported_batch() {
+    // `config_file_knobs_reach_the_library` sets four knobs and asserts only that the process
+    // exits zero, which a config file that was never read would also satisfy. `batch_cap` has an
+    // observable effect: the report says it truncated.
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, TWO_WARNINGS).unwrap();
+
+    let uncapped = check(temp.path(), &spec, &["--format", "json"]);
+    assert!(uncapped.status.success(), "{uncapped:?}");
+    let uncapped = String::from_utf8_lossy(&uncapped.stdout);
+    assert_eq!(
+        uncapped.matches("\"code\":\"W001\"").count(),
+        2,
+        "the fixture must produce two diagnostics to cap: {uncapped}"
+    );
+    assert!(uncapped.contains("\"truncated\":false"), "{uncapped}");
+
+    std::fs::write(temp.path().join("spargen.toml"), "batch_cap = 1\n").unwrap();
+    let capped = check(temp.path(), &spec, &["--format", "json"]);
+    assert!(capped.status.success(), "{capped:?}");
+    let capped = String::from_utf8_lossy(&capped.stdout);
+    assert_eq!(
+        capped.matches("\"code\":\"W001\"").count(),
+        1,
+        "batch_cap from the file must limit the batch: {capped}"
+    );
+    assert!(
+        capped.contains("\"truncated\":true"),
+        "a capped batch must say it was truncated: {capped}"
+    );
+}
+
 fn deps(dir: &Path, spec: &Path, extra: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_spargen"))
         .current_dir(dir)

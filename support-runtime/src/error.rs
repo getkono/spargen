@@ -286,7 +286,7 @@ mod tests {
     use reqwest::header::HeaderMap;
     use reqwest::StatusCode;
 
-    use crate::ResponseValue;
+    use crate::{ResponseValue, TransportError};
 
     use super::{Error, TimeoutKind};
 
@@ -326,5 +326,234 @@ mod tests {
         assert!(matches!(error, Error::RequestConstruction(_)));
         let source = std::error::Error::source(&error).expect("request errors carry a source");
         assert_eq!(source.to_string(), "no credential for `token`");
+    }
+
+    /// A typed API error body that is itself an `Error`, so `Error::source` can reach it.
+    #[derive(Debug)]
+    struct ApiBody(&'static str);
+
+    impl std::fmt::Display for ApiBody {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for ApiBody {}
+
+    /// A genuine `reqwest::Error`, obtained the only way that needs neither a network nor an async
+    /// runtime: an unparseable URL, whose failure `RequestBuilder::build` surfaces.
+    fn reqwest_error() -> reqwest::Error {
+        reqwest::Client::new()
+            .request(reqwest::Method::GET, "not a url")
+            .build()
+            .expect_err("an unparseable URL fails to build")
+    }
+
+    /// One value of every variant. The match in each test below is exhaustive over this list by
+    /// construction, so a variant added to `Error` has to be added here — and then classified.
+    fn every_variant() -> Vec<Error<ApiBody>> {
+        vec![
+            Error::request_message("bad path segment"),
+            Error::Transport(TransportError::new(reqwest_error())),
+            Error::Timeout(TimeoutKind::Total),
+            // The field is private, but these tests live in the defining module.
+            Error::Protocol(super::ProtocolError {
+                source: reqwest_error(),
+            }),
+            Error::Redirect(super::RedirectError {
+                source: reqwest_error(),
+            }),
+            Error::Api(ResponseValue::new(
+                StatusCode::BAD_REQUEST,
+                HeaderMap::new(),
+                ApiBody("bad request"),
+            )),
+            Error::UnexpectedStatus {
+                status: StatusCode::IM_A_TEAPOT,
+                headers: HeaderMap::new(),
+                body: Bytes::new(),
+            },
+            Error::Decode {
+                path: "items[0].id".to_owned(),
+                body: Bytes::from_static(b"{}"),
+                truncated: false,
+            },
+            Error::InterruptedBody(TransportError::new(reqwest_error())),
+        ]
+    }
+
+    /// `from_reqwest` is the taxonomy: every failure a [`crate::HttpBackend`] reports is mapped
+    /// through it, which is what keeps a custom transport classifying identically to executing on
+    /// a `reqwest::Client` directly. Its timeout, redirect, decode, and request branches all need a
+    /// live connection attempt to reach (reqwest exposes no constructor for its own error), so what
+    /// is pinned here is the *fallback*: an error reqwest does not classify becomes `Transport`,
+    /// and a `Transport` failure is retryable. A backend that reported a permanent failure reqwest
+    /// leaves unclassified would therefore be retried, so the fallback is worth stating explicitly.
+    #[test]
+    fn from_reqwest_falls_back_to_transport_for_an_unclassified_error() {
+        let error = Error::<ApiBody>::from_reqwest(reqwest_error());
+        assert!(matches!(error, Error::Transport(_)), "{error}");
+        assert!(error.is_transient());
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn is_transient_classifies_every_variant() {
+        for error in every_variant() {
+            let expected = match &error {
+                // Worth retrying: the failure is about the connection, not the request.
+                Error::Transport(_) | Error::Timeout(_) | Error::InterruptedBody(_) => true,
+                // A documented or undocumented status is retryable only when the server said so.
+                Error::Api(value) => {
+                    value.status() == StatusCode::TOO_MANY_REQUESTS
+                        || value.status().is_server_error()
+                }
+                Error::UnexpectedStatus { status, .. } => {
+                    *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+                }
+                // Deterministic failures: retrying reproduces them.
+                Error::RequestConstruction(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::Decode { .. } => false,
+            };
+            assert_eq!(
+                error.is_transient(),
+                expected,
+                "is_transient disagrees for {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_retryable_status_is_retryable_through_both_status_variants() {
+        for status in [StatusCode::TOO_MANY_REQUESTS, StatusCode::BAD_GATEWAY] {
+            assert!(
+                Error::<ApiBody>::UnexpectedStatus {
+                    status,
+                    headers: HeaderMap::new(),
+                    body: Bytes::new(),
+                }
+                .is_transient(),
+                "{status} should be transient as an undocumented status"
+            );
+            assert!(
+                Error::Api(ResponseValue::new(status, HeaderMap::new(), ApiBody("x")))
+                    .is_transient(),
+                "{status} should be transient as a documented status"
+            );
+        }
+        // The boundary: 499 is a client error, 500 is not.
+        assert!(!Error::<ApiBody>::UnexpectedStatus {
+            status: StatusCode::from_u16(499).unwrap(),
+            headers: HeaderMap::new(),
+            body: Bytes::new(),
+        }
+        .is_transient());
+    }
+
+    #[test]
+    fn every_variant_displays_something_that_names_its_class() {
+        for error in every_variant() {
+            let rendered = error.to_string();
+            assert!(!rendered.is_empty(), "a variant renders as an empty string");
+            let expected = match &error {
+                Error::RequestConstruction(_) => "request construction failed",
+                Error::Transport(_) => "transport failed",
+                Error::Timeout(_) => "timeout elapsed",
+                Error::Protocol(_) => "protocol error",
+                Error::Redirect(_) => "redirect policy exhausted",
+                Error::Api(_) => "documented API error",
+                Error::UnexpectedStatus { .. } => "unexpected response status",
+                Error::Decode { .. } => "response decode failed",
+                Error::InterruptedBody(_) => "response body was interrupted",
+            };
+            assert!(
+                rendered.contains(expected),
+                "{rendered:?} does not name its class ({expected:?})"
+            );
+        }
+    }
+
+    /// The variants that wrap a cause expose it; the three that carry only data do not. A caller
+    /// walking the chain must not find a phantom source, nor lose a real one.
+    #[test]
+    fn source_is_present_exactly_where_the_taxonomy_carries_a_cause() {
+        for error in every_variant() {
+            let expected = match &error {
+                Error::RequestConstruction(_)
+                | Error::Transport(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::Api(_)
+                | Error::InterruptedBody(_) => true,
+                Error::Timeout(_) | Error::UnexpectedStatus { .. } | Error::Decode { .. } => false,
+            };
+            assert_eq!(
+                std::error::Error::source(&error).is_some(),
+                expected,
+                "source() disagrees for {error}"
+            );
+        }
+    }
+
+    /// `widen` is applied by every generated shim, so dropping or reclassifying a variant there
+    /// would silently change the error a consumer matches on. `Api` is statically unreachable in an
+    /// `Error<Infallible>` and so is not in this list.
+    #[test]
+    fn widen_preserves_every_reachable_variant() {
+        let narrow: Vec<Error<std::convert::Infallible>> = vec![
+            Error::request_message("bad path segment"),
+            Error::Transport(TransportError::new(reqwest_error())),
+            Error::Timeout(TimeoutKind::Connect),
+            Error::Protocol(super::ProtocolError {
+                source: reqwest_error(),
+            }),
+            Error::Redirect(super::RedirectError {
+                source: reqwest_error(),
+            }),
+            Error::UnexpectedStatus {
+                status: StatusCode::IM_A_TEAPOT,
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(b"teapot"),
+            },
+            Error::Decode {
+                path: "items[0].id".to_owned(),
+                body: Bytes::from_static(b"{}"),
+                truncated: true,
+            },
+            Error::InterruptedBody(TransportError::new(reqwest_error())),
+        ];
+
+        for error in narrow {
+            let before = error.to_string();
+            let transient = error.is_transient();
+            let widened: Error<ApiBody> = error.widen();
+            assert_eq!(widened.to_string(), before, "widen changed the variant");
+            assert_eq!(
+                widened.is_transient(),
+                transient,
+                "widen changed retryability of {before}"
+            );
+        }
+
+        // The payload fields survive, not just the discriminant.
+        let widened: Error<ApiBody> = Error::<std::convert::Infallible>::Decode {
+            path: "a.b".to_owned(),
+            body: Bytes::from_static(b"raw"),
+            truncated: true,
+        }
+        .widen();
+        let Error::Decode {
+            path,
+            body,
+            truncated,
+        } = widened
+        else {
+            panic!("widen changed the variant");
+        };
+        assert_eq!(path, "a.b");
+        assert_eq!(body, Bytes::from_static(b"raw"));
+        assert!(truncated);
     }
 }

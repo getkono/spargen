@@ -1,13 +1,13 @@
 //! Remote (`http`/`https`) `$ref` primitives: URL math, `$ref` classification, and the ref
 //! rewriting that keeps hermetic resolution correct. The networked vendor step lives in
-//! [`super::vendor`] (feature `remote-fetch`); these helpers are shared by both the hermetic bundle
+//! [`vendor`](fn@super::vendor) (feature `remote-fetch`); these helpers are shared by both the hermetic bundle
 //! loader and the vendor walk.
 //!
 //! ## Hermetic by construction
 //!
 //! `generate` and `check` never reach the network. A remote `$ref` is resolved only from a locally
 //! vendored copy that is hash-pinned in [`spargen.lock`](super::lock). The single place bytes are
-//! fetched is [`super::vendor`] — driven exclusively by `spargen lock`. This is also the anti-SSRF
+//! fetched is [`vendor`](fn@super::vendor) — driven exclusively by `spargen lock`. This is also the anti-SSRF
 //! boundary: no spec content can trigger a network request during a build.
 
 use super::{Node, SpannedValue};

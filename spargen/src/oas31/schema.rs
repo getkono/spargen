@@ -6,7 +6,7 @@ use crate::source::SpannedValue;
 /// A JSON Schema 2020-12 node under the default OAS 3.1 dialect.
 ///
 /// Validation-only keywords are retained in [`validation`](Schema::validation) so the disposition
-/// [`audit`](super::audit) can W-warn them by pointer; shape keywords drive lowering to the IR.
+/// [`audit`](fn@super::audit) can W-warn them by pointer; shape keywords drive lowering to the IR.
 #[derive(Debug, Clone)]
 pub struct Schema {
     /// A boolean schema when this value appears in an OpenAPI position whose outer model stores a

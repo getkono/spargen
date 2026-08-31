@@ -3,9 +3,10 @@
 
 [tools]
 hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
-"cargo:convco" = "0.6.4"                    # Conventional Commit checker
+"cargo:convco" = "0.7.1"                    # Conventional Commit checker
 "aqua:EmbarkStudios/cargo-deny" = "0.19.9"  # supply-chain audit
 "cargo:cargo-hack" = "0.6.39"               # feature-combination builds
+"cargo:mdbook" = "0.5.4"                    # documentation site builder
 
 [tasks.fmt]
 description = "Format the whole workspace"
@@ -61,6 +62,11 @@ run = [
   "cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml >/tmp/spargen-github-31.json",
   "cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json",
   "cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
+  # 3.1 and past the version gate, but `POST /realtime/calls` documents `application/sdp` as its
+  # only 201 content entry and spargen has no codec for an unregistered media type. The cap is
+  # raised for the same reason as GitHub 3.1: at the default of 100 the warning volume truncates
+  # the batch before the terminal E009 is reached.
+  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/openai-openapi/openapi.yaml --format json --batch-cap 100000 >/tmp/spargen-openai.json || test $? -eq 1; grep -q E009 /tmp/spargen-openai.json'",
   # 3.0.x/3.0.1/3.0.0 real-world APIs: rejected at the version gate (E001).
   "sh -c 'cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json >/tmp/spargen-stripe.json || test $? -eq 1; grep -q E001 /tmp/spargen-stripe.json'",
   "sh -c 'cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json >/tmp/spargen-twilio.json || test $? -eq 1; grep -q E001 /tmp/spargen-twilio.json'",
@@ -90,9 +96,19 @@ run = [
   "sh -c 'leak=$(cargo tree -e no-proc-macro -i spargen --manifest-path examples/petstore-macro/Cargo.toml 2>/dev/null); if [ -n \"$leak\" ]; then echo \"spargen leaked into the runtime graph:\"; echo \"$leak\"; exit 1; fi; echo \"macro runtime graph is spargen-free\"'",
 ]
 
+[tasks.doc-links]
+description = "Rustdoc across the workspace with warnings denied, private items included"
+# `--document-private-items` is the point: every subsystem module is private, so a plain
+# `cargo doc` documents none of them and link-checks none of them. Without this flag the whole
+# internal doc surface — which is most of the crate — is unchecked, and stale links accumulate
+# invisibly. `--no-deps` keeps it to this workspace.
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = "cargo doc --no-deps --workspace --all-features --document-private-items"
+
 [tasks.docs]
 description = "Build the mdBook documentation site into docs/book/book (git-ignored)"
-# Requires mdBook (`cargo install mdbook`). Fails on broken includes/links.
+# mdBook is pinned in `[tools]` above, so this uses the same version CI does. Fails on broken
+# includes/links.
 run = "mdbook build docs/book"
 
 [tasks.commit-msg]

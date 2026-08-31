@@ -8,6 +8,19 @@ fn generate_fixture_crate(
     out: &std::path::Path,
     name: &str,
 ) -> spargen::Report {
+    generate_fixture_crate_in_edition(spec, out, name, "2021")
+}
+
+/// Generated output is a freestanding module `include!`d into the consumer's crate, so it compiles
+/// under the *consumer's* edition, not spargen's. Every fixture above pins edition 2021; this seam
+/// exists so a fixture can pin a different one, because an identifier legal in 2021 is not
+/// necessarily legal in 2024.
+fn generate_fixture_crate_in_edition(
+    spec: &std::path::Path,
+    out: &std::path::Path,
+    name: &str,
+    edition: &str,
+) -> spargen::Report {
     std::fs::create_dir_all(out.join("src")).unwrap();
     std::fs::write(
         out.join("Cargo.toml"),
@@ -15,7 +28,7 @@ fn generate_fixture_crate(
             r#"[package]
 name = "{name}"
 version = "0.0.0"
-edition = "2021"
+edition = "{edition}"
 
 [features]
 blocking = ["dep:tokio"]
@@ -3902,6 +3915,134 @@ paths:
     assert!(
         output.status.success(),
         "build script must warn and still generate:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// A response header and a server variable may be spelled with a Rust keyword. Both are allocated
+/// with `IdentRole::Field`, so both escape to `r#type` — and both were then rebound through
+/// `proc_macro2::Ident::new`, which *panics* on a raw identifier ("`r#type` is not a valid Ident").
+/// A perfectly legal description crashed the generator rather than emitting anything. The
+/// `cargo check` below is what pins the second half: the emitted `r#type` must also compile.
+const KEYWORD_HEADER_AND_SERVER_VARIABLE_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: "https://{type}.{match}.example.com/{enum}"
+    variables:
+      type: { default: api }
+      match: { default: eu, enum: [eu, us] }
+      enum: { default: v1 }
+paths:
+  /h:
+    get:
+      operationId: h
+      responses:
+        "200":
+          description: ok
+          headers:
+            type: { schema: { type: string } }
+            ref: { schema: { type: string } }
+            x-normal: { schema: { type: string } }
+"#;
+
+#[test]
+fn a_keyword_header_or_server_variable_generates_compiling_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("api.yaml");
+    std::fs::write(&spec, KEYWORD_HEADER_AND_SERVER_VARIABLE_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "keyword_ident_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    for raw in ["r#type", "r#match", "r#enum", "r#ref"] {
+        assert!(
+            generated.contains(raw),
+            "a keyword header/server-variable name must survive as a raw identifier, missing \
+             `{raw}`:\n{generated}"
+        );
+    }
+
+    let status = Command::new("cargo")
+        .arg("check")
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "a keyword-named header or server variable must generate compiling code"
+    );
+}
+
+/// `gen` is reserved in edition 2024 but an ordinary identifier in 2021. Generated output is a
+/// freestanding module compiled under the *consumer's* edition, so a spec that names anything `gen`
+/// must still emit code an edition-2024 crate accepts. This fixture puts `gen` in every position a
+/// spec can put it — operation, path and query parameter, schema property (including one with a
+/// default, which also names a generated provider fn), response header, and server variable — and
+/// compiles the result under edition 2024, which is the only oracle that can catch this: the
+/// `name` proptests lex with `proc_macro2` under edition 2021, where `gen` is perfectly legal.
+const GEN_KEYWORD_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: "https://{gen}.example.com"
+    variables:
+      gen: { default: api }
+paths:
+  /gen/{gen}:
+    get:
+      operationId: gen
+      parameters:
+        - { name: gen, in: path, required: true, schema: { type: string } }
+        - { name: gen2, in: query, required: false, schema: { type: string } }
+      responses:
+        "200":
+          description: ok
+          headers:
+            gen: { schema: { type: string } }
+          content:
+            application/json: { schema: { $ref: "#/components/schemas/gen" } }
+components:
+  schemas:
+    gen:
+      type: object
+      required: [gen]
+      properties:
+        gen: { type: string }
+        gen_defaulted: { type: string, default: "d" }
+"##;
+
+#[test]
+fn a_gen_named_spec_compiles_under_edition_2024() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("api.yaml");
+    std::fs::write(&spec, GEN_KEYWORD_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate_in_edition(&spec, &out, "gen_client", "2024");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("r#gen"),
+        "`gen` must be raw-escaped for an edition-2024 consumer:\n{generated}"
+    );
+    // The wire name is carried by an explicit `rename`, so escaping the Rust ident cannot move it.
+    assert!(
+        generated.contains(r#"rename = "gen""#),
+        "escaping must not change the wire name:\n{generated}"
+    );
+
+    let output = Command::new("cargo")
+        .arg("check")
+        .current_dir(&out)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a spec naming things `gen` must compile for an edition-2024 consumer:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

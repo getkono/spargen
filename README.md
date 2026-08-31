@@ -106,6 +106,11 @@ the version it emits, and the idioms spargen handles.
   [runtime dependency contract](docs/book/src/getting-started.md#runtime-dependency-contract).
 - **Deterministic.** Same spargen version + spec + config ⇒ byte-identical output, enforced by
   test. Item ordering never depends on input map ordering.
+- **Edition-independent output.** The generated module is `include!`d into the consumer's crate and
+  compiles under *that* crate's edition, so identifiers are escaped against the union of Rust's
+  reserved words across editions 2015-2024: a spec that names a field `type` or `gen` emits
+  `r#type` / `r#gen` rather than code only some editions accept. Wire names are unaffected — they
+  ride on an explicit `serde(rename)`.
 - **Every construct has a disposition.** Supported, warned, or rejected — never a fourth, silent
   behavior; a typed schema is never silently degraded to `serde_json::Value`. The
   [support matrix](docs/support-matrix.md) and [diagnostic index](docs/errors.md) are the

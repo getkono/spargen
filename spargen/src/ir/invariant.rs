@@ -5,7 +5,7 @@ use super::{AdditionalProps, Api, Ty, TypeKind};
 /// Check the IR's well-formedness invariants, reporting any violation through `diags`.
 ///
 /// Run unconditionally after every lowering, on every entry point. The invariant is referential
-/// integrity of the type graph: every [`Ty`](super::Ty) reachable from the API — operation
+/// integrity of the type graph: every [`super::Ty`] reachable from the API — operation
 /// parameters, request bodies, response bodies, response headers, and, transitively, struct
 /// fields, typed additional properties, array items, tuple elements, and union variants — names a
 /// `TypeId` that resolves in the [`TypeGraph`](super::TypeGraph). A failure here is a frontend

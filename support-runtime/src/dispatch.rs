@@ -680,6 +680,119 @@ mod tests {
         assert!(value.is_sensitive());
     }
 
+    #[test]
+    fn attaches_http_basic_credential() {
+        // `Basic` was previously present only as the *wrong* credential for a bearer scheme, so
+        // nothing asserted the header it is supposed to produce. RFC 7617: base64("u:p").
+        let mut core = core();
+        core.set_credential(
+            "login",
+            Credential::Basic {
+                username: "aladdin".to_owned(),
+                password: SecretString::from("open sesame"),
+            },
+        );
+        let request = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "login",
+                kind: AuthKind::Basic,
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Basic YWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+        );
+    }
+
+    #[test]
+    fn a_bearer_credential_does_not_satisfy_a_basic_scheme() {
+        let mut core = core();
+        core.set_credential("login", Credential::Bearer(SecretString::from("t0k")));
+        let error = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "login",
+                kind: AuthKind::Basic,
+            }]],
+        ))
+        .unwrap_err();
+        let source = std::error::Error::source(&error).unwrap();
+        assert!(source.to_string().contains("http basic"), "{source}");
+    }
+
+    #[test]
+    fn attaches_api_key_cookie_and_marks_it_sensitive() {
+        let mut core = core();
+        core.set_credential("session", Credential::ApiKey(SecretString::from("s3ss")));
+        let request = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "session",
+                kind: AuthKind::ApiKeyCookie("SESSION"),
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        let value = &request.headers()[reqwest::header::COOKIE];
+        assert_eq!(value, "SESSION=s3ss");
+        assert!(value.is_sensitive());
+    }
+
+    #[test]
+    fn mutual_tls_is_satisfied_by_the_transport_without_a_registered_credential() {
+        // The client certificate lives on the `reqwest::Client`, so a `mutualTLS` scheme must
+        // neither demand a credential nor block its alternative from being selected — and it must
+        // add no header of its own.
+        let core = core();
+        let request = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "mtls",
+                kind: AuthKind::MutualTls,
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert!(request.headers().is_empty(), "{:?}", request.headers());
+    }
+
+    #[test]
+    fn mutual_tls_does_not_block_a_paired_scheme_in_the_same_alternative() {
+        let mut core = core();
+        core.set_credential("token", Credential::Bearer(SecretString::from("t0k")));
+        let request = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[
+                AuthScheme {
+                    name: "mtls",
+                    kind: AuthKind::MutualTls,
+                },
+                AuthScheme {
+                    name: "token",
+                    kind: AuthKind::Bearer,
+                },
+            ]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(
+            request.headers()[reqwest::header::AUTHORIZATION],
+            "Bearer t0k"
+        );
+    }
+
     use super::{build_url, build_url_on, build_url_with_query_string, StatusSpec};
 
     fn core_at(base: &str) -> ClientCore {

@@ -3,7 +3,7 @@
 //!
 //! IR + allocated names → Rust tokens: models, client, and the embedded `support` module, with
 //! deterministic item ordering and `prettyplease` formatting. Codegen never
-//! sees a spec document — it consumes only the IR and the [`Names`](crate::name::Names) table.
+//! sees a spec document — it consumes only the IR and the [`crate::name::Names`] table.
 
 mod emit;
 mod format;

@@ -536,4 +536,185 @@ mod tests {
             }
         }
     }
+
+    /// The Rust identifier of each variant. The match is exhaustive, so a variant added to `Code`
+    /// does not compile until it is named here — which is what makes the two tests below closed
+    /// over the whole enum rather than over whatever `all()` happens to list.
+    fn variant_name(code: Code) -> &'static str {
+        match code {
+            Code::UnsupportedOpenApiVersion => "UnsupportedOpenApiVersion",
+            Code::UnsupportedDialect => "UnsupportedDialect",
+            Code::AbsoluteRefUnsupported => "AbsoluteRefUnsupported",
+            Code::UnresolvedRef => "UnresolvedRef",
+            Code::VendoredRefDrift => "VendoredRefDrift",
+            Code::DuplicateObjectKey => "DuplicateObjectKey",
+            Code::PatternPropertiesRejected => "PatternPropertiesRejected",
+            Code::DynamicRefRejected => "DynamicRefRejected",
+            Code::NonDisjointUnion => "NonDisjointUnion",
+            Code::NonScalarEnum => "NonScalarEnum",
+            Code::UnsupportedMediaType => "UnsupportedMediaType",
+            Code::UnsupportedParameterStyle => "UnsupportedParameterStyle",
+            Code::InvalidInput => "InvalidInput",
+            Code::UnknownSecurityScheme => "UnknownSecurityScheme",
+            Code::AllOfIrreconcilable => "AllOfIrreconcilable",
+            Code::InvalidOmitRule => "InvalidOmitRule",
+            Code::OmitCreatedInvalidDocument => "OmitCreatedInvalidDocument",
+            Code::ValidationKeywordIgnored => "ValidationKeywordIgnored",
+            Code::ServerInitiatedFlowIgnored => "ServerInitiatedFlowIgnored",
+            Code::OmittedConstruct => "OmittedConstruct",
+            Code::SchemaDefaultNotApplied => "SchemaDefaultNotApplied",
+            Code::XmlHintIgnored => "XmlHintIgnored",
+            Code::Oas32ConstructIgnored => "Oas32ConstructIgnored",
+            Code::AlternativeMediaIgnored => "AlternativeMediaIgnored",
+            Code::SchemaNestingTooDeep => "SchemaNestingTooDeep",
+            Code::RuntimeDependencyContract => "RuntimeDependencyContract",
+            Code::SpecUndefinedBehavior => "SpecUndefinedBehavior",
+            Code::TupleRestNotRepresentable => "TupleRestNotRepresentable",
+            Code::DeclarationHasNoEffect => "DeclarationHasNoEffect",
+            Code::RuntimeAuditSkipped => "RuntimeAuditSkipped",
+            Code::CargoIntegrationDegraded => "CargoIntegrationDegraded",
+            Code::CargoIntegrationRequired => "CargoIntegrationRequired",
+        }
+    }
+
+    /// Does `haystack` name the path `Code::<variant>` as a whole path segment? A plain
+    /// `contains` would accept `Code::UnresolvedRefTypo` as evidence for `Code::UnresolvedRef`,
+    /// so every occurrence must be followed by a non-identifier character.
+    fn mentions_variant(haystack: &str, variant: &str) -> bool {
+        let needle = format!("Code::{variant}");
+        haystack.match_indices(&needle).any(|(at, _)| {
+            haystack[at + needle.len()..]
+                .chars()
+                .next()
+                .is_none_or(|next| !next.is_alphanumeric() && next != '_')
+        })
+    }
+
+    /// The workspace root, or `None` when this crate is tested from a packaged `.crate`, which
+    /// carries neither the workspace manifest nor the test suites. Gating on the *workspace
+    /// marker* rather than on the file under inspection is deliberate: inside the repository a
+    /// missing `tests/` file must fail the test, not silently skip it.
+    fn repo_root() -> Option<std::path::PathBuf> {
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).to_path_buf();
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+        manifest.contains("[workspace]").then_some(root)
+    }
+
+    /// `all()` is a hand-written `const ALL`, and every docs/behavior test iterates it — so a
+    /// variant added to the enum but forgotten there would be invisible to all of them. Adding a
+    /// variant first fails to compile in `variant_name`; once named, `DECLARED` no longer matches
+    /// and this fails until `all()` lists it too.
+    #[test]
+    fn all_lists_every_declared_variant() {
+        const DECLARED: usize = 32;
+
+        assert_eq!(
+            Code::all().len(),
+            DECLARED,
+            "Code::all() lists {} codes but {DECLARED} variants are declared — a variant reached \
+             `Code` and `variant_name` without reaching `ALL`",
+            Code::all().len()
+        );
+
+        let variants: std::collections::BTreeSet<&str> =
+            Code::all().iter().map(|code| variant_name(*code)).collect();
+        assert_eq!(
+            variants.len(),
+            DECLARED,
+            "Code::all() lists the same variant twice"
+        );
+
+        let strings: std::collections::BTreeSet<&str> =
+            Code::all().iter().map(|code| code.as_str()).collect();
+        assert_eq!(
+            strings.len(),
+            DECLARED,
+            "two variants share a code string, so `from_str` cannot round-trip both"
+        );
+    }
+
+    /// Titles and explain text are product surface reached by `spargen explain`, independently of
+    /// whether the docs tree is present. The assertions on them inside
+    /// `the_published_index_lists_exactly_the_declared_codes` sit *after* its early return, so a
+    /// packaged build skips them; these always run. The title check there is a `contains` against
+    /// the docs row, which an empty title would satisfy trivially — this is what rules that out.
+    #[test]
+    fn every_code_has_title_and_explain_text() {
+        for code in Code::all() {
+            assert!(!code.title().is_empty(), "{} has no title", code.as_str());
+            assert!(
+                !code.explain().is_empty(),
+                "{} has no explain text",
+                code.as_str()
+            );
+        }
+    }
+
+    /// CLAUDE.md: every code gets "a fixture in `spargen/tests/frontend.rs`", enforced by tests
+    /// rather than convention. Frontend codes are asserted there; the seven the frontend cannot
+    /// produce — the `compat` omit rules and the facade's own Cargo-integration and
+    /// runtime-audit diagnostics — are asserted in the suite that *can* produce them, and each
+    /// must say so here. A new code that lands in neither place fails, which is the point.
+    #[test]
+    fn every_code_is_asserted_by_the_suite_that_owns_it() {
+        const OWNED_ELSEWHERE: &[(&str, &str)] = &[
+            // `compat` rules: the frontend never sees an omit rule.
+            ("InvalidOmitRule", "carve.rs"),
+            ("OmitCreatedInvalidDocument", "carve.rs"),
+            ("OmittedConstruct", "carve.rs"),
+            // The runtime-dependency contract needs a real consumer manifest to audit.
+            ("RuntimeDependencyContract", "e2e.rs"),
+            ("RuntimeAuditSkipped", "e2e.rs"),
+            // The Cargo-integration policy is a property of the build environment, not of the
+            // spec; `frontend.rs` deliberately runs every fixture with the integration off.
+            ("CargoIntegrationDegraded", "config.rs"),
+            ("CargoIntegrationRequired", "config.rs"),
+        ];
+
+        let Some(root) = repo_root() else {
+            return;
+        };
+        let tests = root.join("spargen/tests");
+        let read = |name: &str| {
+            std::fs::read_to_string(tests.join(name))
+                .unwrap_or_else(|error| panic!("spargen/tests/{name} must be readable: {error}"))
+        };
+
+        let frontend = read("frontend.rs");
+        for code in Code::all() {
+            let variant = variant_name(*code);
+            match OWNED_ELSEWHERE.iter().find(|(owned, _)| *owned == variant) {
+                Some((_, suite)) => {
+                    assert!(
+                        mentions_variant(&read(suite), variant),
+                        "{} is declared to be asserted in {suite}, but `Code::{variant}` appears \
+                         nowhere in it",
+                        code.as_str()
+                    );
+                    assert!(
+                        !mentions_variant(&frontend, variant),
+                        "{} is listed in OWNED_ELSEWHERE but frontend.rs now asserts it too — \
+                         drop the entry so one suite owns it",
+                        code.as_str()
+                    );
+                }
+                None => assert!(
+                    mentions_variant(&frontend, variant),
+                    "{} has no fixture: `Code::{variant}` appears nowhere in \
+                     spargen/tests/frontend.rs. Add one, or add the code to OWNED_ELSEWHERE \
+                     naming the suite that asserts it.",
+                    code.as_str()
+                ),
+            }
+        }
+
+        for (variant, _) in OWNED_ELSEWHERE {
+            assert!(
+                Code::all()
+                    .iter()
+                    .any(|code| variant_name(*code) == *variant),
+                "OWNED_ELSEWHERE names `{variant}`, which is not a declared Code variant"
+            );
+        }
+    }
 }

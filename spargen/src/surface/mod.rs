@@ -2,8 +2,8 @@
 //! layer-deps: ir, name
 //!
 //! The **consumer-visible API surface** of generated output, and semver-impact diffing between two
-//! surfaces. This is a pure analysis subsystem: it reads a lowered [`Api`](crate::ir::Api) plus its
-//! allocated [`Names`](crate::name::Names) and models exactly what a *consumer* of the generated
+//! surfaces. This is a pure analysis subsystem: it reads a lowered [`crate::ir::Api`] plus its
+//! allocated [`crate::name::Names`] and models exactly what a *consumer* of the generated
 //! client sees — the client methods (operations) and the public model types — then classifies every
 //! difference between an old and a new surface as a semver bump. It never emits code and has no
 //! effect on generation or the runtime; it backs `spargen diff`.
@@ -104,7 +104,11 @@ struct FieldSurface {
 
 /// The semver impact of one change (and of a whole diff, taken as the max over its changes). The
 /// ordering `Patch < Minor < Major` is load-bearing: the overall bump is the maximum impact.
+///
+/// Serializes as the lowercase bump label (`major` / `minor` / `patch`) rather than the Rust
+/// variant name, so the JSON form agrees with [`Impact::as_str`] and with the human rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Impact {
     /// No consumer-visible surface change (docs-only / internal).
     Patch,
@@ -127,7 +131,7 @@ impl Impact {
 
 /// The kind of a single surface change. Each kind maps to a fixed [`Impact`] and a stable
 /// machine-readable code; the mapping is the documented classification policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChangeKind {
     /// A new operation (client method) appeared. **Minor** — additive.
@@ -240,6 +244,16 @@ impl ChangeKind {
             ChangeKind::VariantRemoved => "variant-removed",
             ChangeKind::VariantTypeChanged => "variant-type-changed",
         }
+    }
+}
+
+impl serde::Serialize for ChangeKind {
+    /// Serializes as the stable kebab-case [`code`](ChangeKind::code), not the Rust variant name:
+    /// the code is the documented machine surface of `spargen diff`, and the variant name is an
+    /// implementation detail. Hand-written rather than `rename_all = "kebab-case"` so `code` stays
+    /// the single spelling table for both renderings.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.code())
     }
 }
 
@@ -844,4 +858,212 @@ fn prim_label(prim: Prim) -> &'static str {
 
 fn method_label(method: &crate::ir::Method) -> String {
     method.as_str().to_uppercase()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{ChangeKind, Impact};
+
+    /// Every change kind, produced by an exhaustive match so a new variant does not compile until
+    /// it is listed — which is what makes the coverage assertions below closed over the enum.
+    /// `ChangeKind` is `#[non_exhaustive]`, so this list can only live inside the crate; the
+    /// fixtures that drive each kind live in `tests/diff.rs`, which cannot match exhaustively.
+    fn all_kinds() -> Vec<ChangeKind> {
+        let every = [
+            ChangeKind::OperationAdded,
+            ChangeKind::OperationRemoved,
+            ChangeKind::MethodRenamed,
+            ChangeKind::RequestBodyAdded,
+            ChangeKind::RequestBodyRemoved,
+            ChangeKind::RequestBodyTypeChanged,
+            ChangeKind::SuccessTypeChanged,
+            ChangeKind::ErrorTypeChanged,
+            ChangeKind::RequiredParamAdded,
+            ChangeKind::OptionalParamAdded,
+            ChangeKind::ParamRemoved,
+            ChangeKind::ParamTypeChanged,
+            ChangeKind::ParamRequirednessChanged,
+            ChangeKind::TypeAdded,
+            ChangeKind::TypeRemoved,
+            ChangeKind::TypeKindChanged,
+            ChangeKind::FieldAdded,
+            ChangeKind::RequiredFieldAdded,
+            ChangeKind::FieldRemoved,
+            ChangeKind::FieldTypeChanged,
+            ChangeKind::FieldRequirednessChanged,
+            ChangeKind::VariantAdded,
+            ChangeKind::VariantRemoved,
+            ChangeKind::VariantTypeChanged,
+        ];
+        for kind in every {
+            // Exhaustive by construction: adding a variant to `ChangeKind` fails to compile here
+            // until it is named, and the length assertion then fails until it joins `every`.
+            match kind {
+                ChangeKind::OperationAdded
+                | ChangeKind::OperationRemoved
+                | ChangeKind::MethodRenamed
+                | ChangeKind::RequestBodyAdded
+                | ChangeKind::RequestBodyRemoved
+                | ChangeKind::RequestBodyTypeChanged
+                | ChangeKind::SuccessTypeChanged
+                | ChangeKind::ErrorTypeChanged
+                | ChangeKind::RequiredParamAdded
+                | ChangeKind::OptionalParamAdded
+                | ChangeKind::ParamRemoved
+                | ChangeKind::ParamTypeChanged
+                | ChangeKind::ParamRequirednessChanged
+                | ChangeKind::TypeAdded
+                | ChangeKind::TypeRemoved
+                | ChangeKind::TypeKindChanged
+                | ChangeKind::FieldAdded
+                | ChangeKind::RequiredFieldAdded
+                | ChangeKind::FieldRemoved
+                | ChangeKind::FieldTypeChanged
+                | ChangeKind::FieldRequirednessChanged
+                | ChangeKind::VariantAdded
+                | ChangeKind::VariantRemoved
+                | ChangeKind::VariantTypeChanged => {}
+            }
+        }
+        every.to_vec()
+    }
+
+    /// The `variant -> Rust identifier` mapping, for the source scan below.
+    fn variant_name(kind: ChangeKind) -> &'static str {
+        match kind {
+            ChangeKind::OperationAdded => "OperationAdded",
+            ChangeKind::OperationRemoved => "OperationRemoved",
+            ChangeKind::MethodRenamed => "MethodRenamed",
+            ChangeKind::RequestBodyAdded => "RequestBodyAdded",
+            ChangeKind::RequestBodyRemoved => "RequestBodyRemoved",
+            ChangeKind::RequestBodyTypeChanged => "RequestBodyTypeChanged",
+            ChangeKind::SuccessTypeChanged => "SuccessTypeChanged",
+            ChangeKind::ErrorTypeChanged => "ErrorTypeChanged",
+            ChangeKind::RequiredParamAdded => "RequiredParamAdded",
+            ChangeKind::OptionalParamAdded => "OptionalParamAdded",
+            ChangeKind::ParamRemoved => "ParamRemoved",
+            ChangeKind::ParamTypeChanged => "ParamTypeChanged",
+            ChangeKind::ParamRequirednessChanged => "ParamRequirednessChanged",
+            ChangeKind::TypeAdded => "TypeAdded",
+            ChangeKind::TypeRemoved => "TypeRemoved",
+            ChangeKind::TypeKindChanged => "TypeKindChanged",
+            ChangeKind::FieldAdded => "FieldAdded",
+            ChangeKind::RequiredFieldAdded => "RequiredFieldAdded",
+            ChangeKind::FieldRemoved => "FieldRemoved",
+            ChangeKind::FieldTypeChanged => "FieldTypeChanged",
+            ChangeKind::FieldRequirednessChanged => "FieldRequirednessChanged",
+            ChangeKind::VariantAdded => "VariantAdded",
+            ChangeKind::VariantRemoved => "VariantRemoved",
+            ChangeKind::VariantTypeChanged => "VariantTypeChanged",
+        }
+    }
+
+    #[test]
+    fn the_kind_list_covers_the_whole_enum() {
+        assert_eq!(
+            all_kinds().len(),
+            24,
+            "a `ChangeKind` variant reached the exhaustive match without joining the list"
+        );
+    }
+
+    /// The codes are the JSON surface of `spargen diff`, so they are consumed by scripts: two
+    /// kinds sharing one, or a code that is not kebab-case, would break a caller silently.
+    #[test]
+    fn every_kind_has_a_distinct_kebab_case_code() {
+        let codes: BTreeSet<&str> = all_kinds().iter().map(|kind| kind.code()).collect();
+        assert_eq!(codes.len(), all_kinds().len(), "two kinds share a code");
+        for code in codes {
+            assert!(!code.is_empty());
+            assert!(
+                code.chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-'),
+                "`{code}` is not kebab-case"
+            );
+            assert!(!code.starts_with('-') && !code.ends_with('-'), "`{code}`");
+        }
+    }
+
+    /// The codes are only *actually* the JSON surface if they are what `Serialize` emits. The
+    /// derive would emit the Rust variant name instead, silently disagreeing with both `code` and
+    /// the human rendering — so pin the two together over the whole enum.
+    #[test]
+    fn every_kind_serializes_as_its_code() {
+        for kind in all_kinds() {
+            let json = serde_json::to_string(&kind).expect("a kind serializes");
+            assert_eq!(
+                json,
+                format!("\"{}\"", kind.code()),
+                "{kind:?} does not serialize as its code"
+            );
+        }
+    }
+
+    /// Same contract one level up: `impact` and `bump` are read by scripts that branch on the
+    /// semver bump, and `--format human` spells it lowercase. The derive would emit `"Major"`.
+    #[test]
+    fn every_impact_serializes_as_its_lowercase_label() {
+        for impact in [Impact::Patch, Impact::Minor, Impact::Major] {
+            let json = serde_json::to_string(&impact).expect("an impact serializes");
+            assert_eq!(json, format!("\"{}\"", impact.as_str()), "{impact:?}");
+        }
+    }
+
+    /// Additive changes are minor and everything else is major. Stated as a closed list so that
+    /// reclassifying a kind — which changes the version bump spargen recommends — is a deliberate
+    /// edit here rather than a silent consequence of moving a match arm.
+    #[test]
+    fn only_the_five_additive_kinds_are_minor() {
+        const MINOR: &[ChangeKind] = &[
+            ChangeKind::OperationAdded,
+            ChangeKind::OptionalParamAdded,
+            ChangeKind::TypeAdded,
+            ChangeKind::FieldAdded,
+            ChangeKind::VariantAdded,
+        ];
+        for kind in all_kinds() {
+            let expected = if MINOR.contains(&kind) {
+                Impact::Minor
+            } else {
+                Impact::Major
+            };
+            assert_eq!(
+                kind.impact(),
+                expected,
+                "{} is classified {:?}",
+                kind.code(),
+                kind.impact()
+            );
+        }
+    }
+
+    /// CLAUDE.md asks `tests/diff.rs` for "semver classification per change kind". Nine of the 24
+    /// had a fixture; the rest were classified by policy alone, with nothing proving the
+    /// classifier ever produces them. This makes "per change kind" mean what it says.
+    #[test]
+    fn every_kind_has_a_fixture_in_the_diff_suite() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/diff.rs");
+        let Ok(suite) = std::fs::read_to_string(path) else {
+            // Absent when this crate is tested from a packaged `.crate`, which ships no tests.
+            eprintln!("skipping: {path} is not present");
+            return;
+        };
+        for kind in all_kinds() {
+            let variant = variant_name(kind);
+            let needle = format!("ChangeKind::{variant}");
+            let mentioned = suite.match_indices(&needle).any(|(at, _)| {
+                suite[at + needle.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|next| !next.is_alphanumeric() && next != '_')
+            });
+            assert!(
+                mentioned,
+                "{} has no fixture: `{needle}` appears nowhere in spargen/tests/diff.rs",
+                kind.code()
+            );
+        }
+    }
 }

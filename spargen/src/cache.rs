@@ -367,7 +367,7 @@ impl CachedLoc {
 #[cfg(test)]
 mod tests {
     use super::{cache_path, finalized, verified_output, InputSnapshot};
-    use crate::{Build, CargoIntegration, Outcome, Spec};
+    use crate::{Build, CargoIntegration, OmitRule, Outcome, Spec};
     use camino::Utf8PathBuf;
 
     fn fixture() -> (tempfile::TempDir, Build) {
@@ -467,5 +467,154 @@ components:
         let restored = crate::generate_with_cache_dir(&config, Some(&cache_dir));
         assert_eq!(restored.outcome(), Outcome::Generated, "{restored:#?}");
         assert_eq!(std::fs::read_to_string(&config.output).unwrap(), original);
+    }
+
+    /// The whole point of the cache, and the one path the tests above never take: each of them
+    /// destroys the record or the output first, so `Outcome::Cached` was returned by nothing and
+    /// `read_cache` — whose only caller is this branch — ran in no test at all.
+    #[test]
+    fn an_unchanged_rebuild_is_a_cache_hit_that_rewrites_nothing() {
+        let (temp, config) = fixture();
+        let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
+
+        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
+        let generated = std::fs::read_to_string(&config.output).unwrap();
+        let written_at = std::fs::metadata(&config.output)
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(
+            second.outcome(),
+            Outcome::Cached,
+            "an unchanged rebuild must hit the cache: {second:#?}"
+        );
+        assert_eq!(std::fs::read_to_string(&config.output).unwrap(), generated);
+        assert_eq!(
+            std::fs::metadata(&config.output)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            written_at,
+            "a cache hit must not rewrite the output"
+        );
+    }
+
+    #[test]
+    fn a_cache_hit_replays_the_diagnostics_of_the_run_that_seeded_it() {
+        // A cached run reports what the original run reported. Without this a warning would be
+        // announced once and then vanish on every later build, which is worse than never
+        // reporting it — the spec still contains the construct.
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("openapi.yaml");
+        std::fs::write(
+            &root,
+            r#"openapi: 3.1.0
+info: { title: Cache, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Capped: { type: string, minLength: 3 }
+"#,
+        )
+        .unwrap();
+        let config = Spec::new(Utf8PathBuf::from_path_buf(root).unwrap())
+            .build(Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap())
+            .cargo(CargoIntegration::Off);
+        let cache_dir = Utf8PathBuf::from_path_buf(temp.path().join("cache")).unwrap();
+
+        let first = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(first.outcome(), Outcome::Generated, "{first:#?}");
+        let mut seeded: Vec<&str> = first
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+        seeded.sort_unstable();
+        assert!(
+            seeded.contains(&"W001"),
+            "the fixture must warn so there is something to replay: {seeded:?}"
+        );
+
+        let second = crate::generate_with_cache_dir(&config, Some(&cache_dir));
+        assert_eq!(second.outcome(), Outcome::Cached, "{second:#?}");
+        let mut replayed: Vec<&str> = second
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.code.as_str())
+            .collect();
+        replayed.sort_unstable();
+        assert_eq!(
+            replayed, seeded,
+            "a cache hit lost the original diagnostics"
+        );
+    }
+
+    /// CLAUDE.md calls the fingerprint "complete". `Spec` has seven fields and every one of them
+    /// changes what is generated, so every one must move the digest — otherwise a config change
+    /// leaves a stale module in place with nothing to tell the consumer. Three were covered.
+    #[test]
+    fn every_spec_field_moves_the_input_fingerprint() {
+        let (temp, config) = fixture();
+        let base = config.spec.clone();
+        let baseline = InputSnapshot::load(&base).unwrap().digest;
+
+        let variants: Vec<(&str, Spec)> = vec![
+            ("uuid", base.clone().uuid(!base.uuid)),
+            ("time", base.clone().time(!base.time)),
+            ("error_body_cap", base.clone().error_body_cap(1)),
+            ("batch_cap", base.clone().batch_cap(7)),
+            ("carve", base.clone().carve(!base.carve)),
+            (
+                "omit",
+                base.clone().omit_rule(OmitRule::Path {
+                    path: "/things".into(),
+                }),
+            ),
+        ];
+
+        for (field, spec) in variants {
+            assert_ne!(
+                InputSnapshot::load(&spec).unwrap().digest,
+                baseline,
+                "changing `{field}` left the input fingerprint unchanged, so a rebuild would \
+                 serve the module built for the previous value"
+            );
+        }
+
+        // `path` is the seventh. Byte-identical content at a different path is still a different
+        // build input, because the provenance header records the path.
+        let moved = temp.path().join("elsewhere.yaml");
+        std::fs::copy(base.path(), &moved).unwrap();
+        let relocated = Spec::new(Utf8PathBuf::from_path_buf(moved).unwrap());
+        assert_ne!(
+            InputSnapshot::load(&relocated).unwrap().digest,
+            baseline,
+            "changing `path` left the input fingerprint unchanged"
+        );
+    }
+
+    #[test]
+    fn two_omit_rule_sets_that_differ_are_not_one_fingerprint() {
+        let (_temp, config) = fixture();
+        let base = config.spec.clone();
+
+        let by_path = base.clone().omit_rule(OmitRule::Path {
+            path: "/things".into(),
+        });
+        let by_other_path = base.clone().omit_rule(OmitRule::Path {
+            path: "/others".into(),
+        });
+        let by_component = base.clone().omit_rule(OmitRule::Component {
+            kind: crate::ComponentKind::Schemas,
+            name: "things".into(),
+        });
+
+        let digest = |spec: &Spec| InputSnapshot::load(spec).unwrap().digest;
+        assert_ne!(digest(&by_path), digest(&by_other_path));
+        // The rule *kind* is part of the fingerprint, not just its payload.
+        assert_ne!(digest(&by_path), digest(&by_component));
     }
 }

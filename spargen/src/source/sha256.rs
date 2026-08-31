@@ -114,4 +114,50 @@ mod tests {
             "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3"
         );
     }
+
+    /// Every corpus case in `corpus/manifest.toml` records the `sha256` of its pinned file, and
+    /// nothing verified it — so a corpus file could be edited, or an LFS fetch could return the
+    /// wrong revision, and every corpus expectation would silently be about a different document.
+    /// This lives here because `sha256_hex` is crate-private; it doubles as a check of the
+    /// hand-rolled hasher against multi-megabyte real-world inputs.
+    #[test]
+    fn the_pinned_corpus_files_still_hash_to_their_manifest_sha256() {
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/.."));
+        let Ok(manifest) = std::fs::read_to_string(root.join("corpus/manifest.toml")) else {
+            // Absent when this crate is tested from a packaged `.crate`, which ships no corpus.
+            eprintln!("skipping: corpus/manifest.toml is not present");
+            return;
+        };
+
+        // The manifest is a list of `[[case]]` tables; `path` and `sha256` are the two keys here.
+        fn value(line: &str) -> &str {
+            line.split_once('=')
+                .map(|(_, value)| value.trim().trim_matches('"'))
+                .expect("a key line carries a value")
+        }
+
+        let mut checked = 0usize;
+        let mut path: Option<&str> = None;
+        for line in manifest.lines() {
+            if line.starts_with("path = ") {
+                path = Some(value(line));
+            } else if line.starts_with("sha256 = ") {
+                let expected = value(line);
+                let relative = path.take().expect("`path` precedes `sha256` in each case");
+                let file = root.join("corpus").join(relative);
+                let bytes = std::fs::read(&file)
+                    .unwrap_or_else(|error| panic!("{} is missing: {error}", file.display()));
+                assert_eq!(
+                    sha256_hex(&bytes),
+                    expected,
+                    "`{relative}` no longer matches the sha256 pinned in corpus/manifest.toml"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 9,
+            "expected every manifest case to carry a sha256; checked {checked}"
+        );
+    }
 }
