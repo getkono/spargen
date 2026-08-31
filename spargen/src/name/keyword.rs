@@ -12,7 +12,6 @@ pub enum IdentRole {
     Variant,
     /// A method name (`snake_case`).
     Method,
-    /// A module name (`snake_case`).
     /// A function parameter (`snake_case`).
     Param,
 }
@@ -52,60 +51,37 @@ pub fn escape(raw: &str, role: IdentRole) -> Ident {
     Ident::new(ident)
 }
 
+/// Every word that may not be spelled as a bare Rust identifier, in any edition spargen's output
+/// has to compile in. Generated code is `include!`d into a consumer crate and inherits *that*
+/// crate's edition, not spargen's, so this is the union across editions 2015-2024 rather than the
+/// set for any single one.
+///
+/// Deliberately absent: the weak keywords `macro_rules`, `union`, `safe`, `raw`, and `dyn` before
+/// 2018 are legal identifiers everywhere spargen emits one, and escaping them would rename fields
+/// for no reason.
+///
+/// The tests read this same const, so it cannot disagree with `is_keyword` — but that also means it
+/// cannot check its own contents. What a table is *missing* is only caught by compiling generated
+/// output under the edition in question; `spargen/tests/e2e.rs` does that for 2024.
+const KEYWORDS: &[&str] = &[
+    // Strict, edition 2015.
+    "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
+    "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref", "return",
+    "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe", "use", "where",
+    "while", //
+    // Strict, added in edition 2018.
+    "async", "await", "dyn", //
+    // Reserved for future use, edition 2015.
+    "abstract", "become", "box", "do", "final", "macro", "override", "priv", "typeof", "unsized",
+    "virtual", "yield", //
+    // Reserved for future use, added in edition 2018.
+    "try", //
+    // Reserved for future use, added in edition 2024 (`gen` blocks).
+    "gen",
+];
+
 fn is_keyword(ident: &str) -> bool {
-    matches!(
-        ident,
-        "as" | "break"
-            | "const"
-            | "continue"
-            | "crate"
-            | "else"
-            | "enum"
-            | "extern"
-            | "false"
-            | "fn"
-            | "for"
-            | "if"
-            | "impl"
-            | "in"
-            | "let"
-            | "loop"
-            | "match"
-            | "mod"
-            | "move"
-            | "mut"
-            | "pub"
-            | "ref"
-            | "return"
-            | "self"
-            | "Self"
-            | "static"
-            | "struct"
-            | "super"
-            | "trait"
-            | "true"
-            | "type"
-            | "unsafe"
-            | "use"
-            | "where"
-            | "while"
-            | "async"
-            | "await"
-            | "dyn"
-            | "abstract"
-            | "become"
-            | "box"
-            | "do"
-            | "final"
-            | "macro"
-            | "override"
-            | "priv"
-            | "try"
-            | "typeof"
-            | "unsized"
-            | "virtual"
-            | "yield"
-    )
+    KEYWORDS.contains(&ident)
 }
 
 fn can_raw_escape(ident: &str) -> bool {
@@ -119,7 +95,7 @@ fn can_raw_escape(ident: &str) -> bool {
 mod tests {
     use proptest::prelude::*;
 
-    use super::{escape, IdentRole};
+    use super::{escape, is_keyword, IdentRole, KEYWORDS};
 
     /// Every role `escape` accepts. Written out rather than derived so a new role has to be
     /// classified here before the property tests silently stop covering it.
@@ -129,15 +105,6 @@ mod tests {
         IdentRole::Field,
         IdentRole::Method,
         IdentRole::Param,
-    ];
-
-    /// The strict and reserved keywords of the 2015/2018 editions — the set `is_keyword` mirrors.
-    const KEYWORDS: &[&str] = &[
-        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
-        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
-        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
-        "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
-        "final", "macro", "override", "priv", "try", "typeof", "unsized", "virtual", "yield",
     ];
 
     /// Does `text` lex as exactly one Rust identifier token? This is the real question — `Ident`'s
@@ -178,12 +145,41 @@ mod tests {
                     lexes_as_one_identifier(text),
                     "escape({keyword:?}, {role:?}) produced {text:?}, which is not an identifier"
                 );
+                // Stronger than "did not return its own input": escaping one keyword into a
+                // *different* keyword would also be a bug.
                 assert!(
-                    text != *keyword || !KEYWORDS.contains(&text),
-                    "escape({keyword:?}, {role:?}) returned the bare keyword {text:?}"
+                    !is_keyword(text),
+                    "escape({keyword:?}, {role:?}) returned the keyword {text:?}"
                 );
             }
         }
+    }
+
+    /// `gen` is an ordinary identifier in edition 2021 and reserved in 2024. Generated output
+    /// adopts the consumer's edition, so it has to be escaped even though every test oracle in this
+    /// crate — `proc_macro2`, compiled at edition 2021 — considers the bare word perfectly valid.
+    /// The end-to-end proof is `a_gen_named_spec_compiles_under_edition_2024` in `e2e.rs`.
+    #[test]
+    fn gen_is_escaped_although_edition_2021_would_accept_it() {
+        for role in [IdentRole::Field, IdentRole::Method, IdentRole::Param] {
+            assert_eq!(escape("gen", role).as_str(), "r#gen", "{role:?}");
+        }
+        // A type or variant cases to `Gen`, which is not a keyword at all.
+        for role in [IdentRole::Type, IdentRole::Variant] {
+            assert_eq!(escape("gen", role).as_str(), "Gen", "{role:?}");
+        }
+    }
+
+    /// A `matches!` chain warns on a repeated arm; a flat slice does not, so the duplicate check
+    /// that the old table got from the compiler has to be written down.
+    #[test]
+    fn the_keyword_table_has_no_duplicates() {
+        let unique: std::collections::BTreeSet<&str> = KEYWORDS.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            KEYWORDS.len(),
+            "duplicate keyword in the table"
+        );
     }
 
     #[test]
