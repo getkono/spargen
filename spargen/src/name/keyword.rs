@@ -60,9 +60,12 @@ pub fn escape(raw: &str, role: IdentRole) -> Ident {
 /// 2018 are legal identifiers everywhere spargen emits one, and escaping them would rename fields
 /// for no reason.
 ///
-/// The tests read this same const, so it cannot disagree with `is_keyword` — but that also means it
-/// cannot check its own contents. What a table is *missing* is only caught by compiling generated
-/// output under the edition in question; `spargen/tests/e2e.rs` does that for 2024.
+/// The tests read this same const, so it cannot disagree with `is_keyword` — but that also means
+/// they cannot check its contents against an independent source, and the two failure modes need
+/// different guards. A *missing* word is only caught by compiling generated output under the
+/// edition that reserves it, which `spargen/tests/e2e.rs` does for 2024. A *deleted* word is caught
+/// here: `the_table_holds_every_keyword_it_started_with` pins the count, and `KNOWN_KEYWORDS`
+/// spot-checks a sample spelled out independently below.
 const KEYWORDS: &[&str] = &[
     // Strict, edition 2015.
     "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn", "for",
@@ -168,6 +171,46 @@ mod tests {
         for role in [IdentRole::Type, IdentRole::Variant] {
             assert_eq!(escape("gen", role).as_str(), "Gen", "{role:?}");
         }
+    }
+
+    /// A sample of the table, written out here rather than read from `KEYWORDS`, so these words
+    /// cannot be dropped from it unnoticed. Deliberately small: a full second copy is what this
+    /// module used to carry, and it bought deletion-detection at the price of an omission blind
+    /// spot in both lists at once. The count assertion below covers deletion in general; this
+    /// covers the words whose loss would hurt most.
+    const KNOWN_KEYWORDS: &[&str] = &[
+        "as", "fn", "type", "match", "self", "Self", "async", "dyn", "try", "yield", "become",
+        "gen",
+    ];
+
+    #[test]
+    fn a_known_keyword_is_never_left_bare() {
+        for word in KNOWN_KEYWORDS {
+            assert!(
+                is_keyword(word),
+                "`{word}` is a Rust keyword and left the table"
+            );
+            for role in ROLES {
+                let escaped = escape(word, *role);
+                assert_ne!(
+                    escaped.as_str(),
+                    *word,
+                    "escape({word:?}, {role:?}) left the keyword bare"
+                );
+            }
+        }
+    }
+
+    /// `is_keyword` and the test that iterates it now read one list, so a word deleted from that
+    /// list is simply never tested. The count is the guard: adding or removing an entry is a
+    /// deliberate act that has to update this number, and a reviewer sees it in the diff.
+    #[test]
+    fn the_table_holds_every_keyword_it_started_with() {
+        assert_eq!(
+            KEYWORDS.len(),
+            52,
+            "the keyword table changed size; update this count only alongside a deliberate edit"
+        );
     }
 
     /// A `matches!` chain warns on a repeated arm; a flat slice does not, so the duplicate check
