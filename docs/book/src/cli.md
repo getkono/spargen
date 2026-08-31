@@ -78,3 +78,10 @@ spargen diff <OLD> <NEW> [--exit-code] [--format <human|json>]
 
 `--exit-code` exits non-zero for a breaking (`major`) change. A spec that cannot lower is always a
 hard error.
+
+`--format json` prints one object: `changes`, an array of `{ kind, impact, location, detail }`
+sorted most-severe first, plus the top-level `bump`. `kind` is the stable kebab-case change code
+(`operation-added`, `method-renamed`, …) and `impact`/`bump` are the lowercase semver labels
+`major` / `minor` / `patch` — the same spellings the human rendering prints, so a script and a
+reader never disagree. The set of `kind` codes grows with new change classes, so match on the
+codes a caller knows and treat an unrecognized one as its stated `impact`.

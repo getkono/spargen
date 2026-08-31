@@ -104,7 +104,11 @@ struct FieldSurface {
 
 /// The semver impact of one change (and of a whole diff, taken as the max over its changes). The
 /// ordering `Patch < Minor < Major` is load-bearing: the overall bump is the maximum impact.
+///
+/// Serializes as the lowercase bump label (`major` / `minor` / `patch`) rather than the Rust
+/// variant name, so the JSON form agrees with [`Impact::as_str`] and with the human rendering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Impact {
     /// No consumer-visible surface change (docs-only / internal).
     Patch,
@@ -127,7 +131,7 @@ impl Impact {
 
 /// The kind of a single surface change. Each kind maps to a fixed [`Impact`] and a stable
 /// machine-readable code; the mapping is the documented classification policy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ChangeKind {
     /// A new operation (client method) appeared. **Minor** — additive.
@@ -240,6 +244,16 @@ impl ChangeKind {
             ChangeKind::VariantRemoved => "variant-removed",
             ChangeKind::VariantTypeChanged => "variant-type-changed",
         }
+    }
+}
+
+impl serde::Serialize for ChangeKind {
+    /// Serializes as the stable kebab-case [`code`](ChangeKind::code), not the Rust variant name:
+    /// the code is the documented machine surface of `spargen diff`, and the variant name is an
+    /// implementation detail. Hand-written rather than `rename_all = "kebab-case"` so `code` stays
+    /// the single spelling table for both renderings.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.code())
     }
 }
 
@@ -969,6 +983,31 @@ mod tests {
                 "`{code}` is not kebab-case"
             );
             assert!(!code.starts_with('-') && !code.ends_with('-'), "`{code}`");
+        }
+    }
+
+    /// The codes are only *actually* the JSON surface if they are what `Serialize` emits. The
+    /// derive would emit the Rust variant name instead, silently disagreeing with both `code` and
+    /// the human rendering — so pin the two together over the whole enum.
+    #[test]
+    fn every_kind_serializes_as_its_code() {
+        for kind in all_kinds() {
+            let json = serde_json::to_string(&kind).expect("a kind serializes");
+            assert_eq!(
+                json,
+                format!("\"{}\"", kind.code()),
+                "{kind:?} does not serialize as its code"
+            );
+        }
+    }
+
+    /// Same contract one level up: `impact` and `bump` are read by scripts that branch on the
+    /// semver bump, and `--format human` spells it lowercase. The derive would emit `"Major"`.
+    #[test]
+    fn every_impact_serializes_as_its_lowercase_label() {
+        for impact in [Impact::Patch, Impact::Minor, Impact::Major] {
+            let json = serde_json::to_string(&impact).expect("an impact serializes");
+            assert_eq!(json, format!("\"{}\"", impact.as_str()), "{impact:?}");
         }
     }
 
