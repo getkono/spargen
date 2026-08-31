@@ -7,9 +7,9 @@ use super::{JsonType, RefOr, Resolver, Schema, SchemaOr};
 /// The typed JSON carried in the `data` field of an OpenAPI 3.2 SSE envelope.
 #[derive(Debug, Clone)]
 pub(super) struct JsonDataSchema {
-    pub schema: SchemaOr,
+    pub(crate) schema: SchemaOr,
     /// The `data` property whose content annotations are consumed by the SSE codec.
-    pub annotation_site: Provenance,
+    pub(crate) annotation_site: Provenance,
 }
 
 /// Find one unambiguous `data: string` carrying JSON described by `contentSchema` in an SSE

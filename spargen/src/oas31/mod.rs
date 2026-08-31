@@ -19,17 +19,17 @@ mod resolve;
 mod schema;
 mod sse;
 
-pub use audit::audit;
-pub use deserialize::parse_document;
-pub use document::{
+pub(crate) use audit::audit;
+pub(crate) use deserialize::parse_document;
+pub(crate) use document::{
     Components, Document, EncodingObject, HeaderObject, Info, MediaTypeObject, OAuthFlow,
     OperationObject, ParameterObject, PathItem, Paths, RefOr, Reference, RequestBodyObject,
     ResponseObject, ResponsesObject, SecurityRequirement, SecuritySchemeObject, Server,
     ServerVariable, Tag,
 };
-pub use lower::lower;
-pub use metaschema::MetaSchemaValidator;
-pub use resolve::Resolver;
-pub use schema::{
+pub(crate) use lower::lower;
+pub(crate) use metaschema::MetaSchemaValidator;
+pub(crate) use resolve::Resolver;
+pub(crate) use schema::{
     Discriminator, JsonType, Schema, SchemaOr, TypeSet, ValidationKeywords, XmlHints,
 };

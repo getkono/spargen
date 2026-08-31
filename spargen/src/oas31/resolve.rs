@@ -7,7 +7,7 @@ use super::{deserialize::parse_schema, Document, Schema};
 
 /// Resolves `$ref`s within a [`Document`] and its input bundle.
 #[derive(Debug)]
-pub struct Resolver<'doc> {
+pub(crate) struct Resolver<'doc> {
     document: &'doc Document,
     bundle: &'doc InputBundle,
 }
@@ -17,19 +17,19 @@ pub struct Resolver<'doc> {
 #[derive(Debug)]
 pub(crate) struct Resolved<'doc> {
     /// The target schema.
-    pub schema: Cow<'doc, Schema>,
+    pub(crate) schema: Cow<'doc, Schema>,
 }
 
 impl<'doc> Resolver<'doc> {
     /// Build a resolver over a document and its bundle.
-    pub fn new(document: &'doc Document, bundle: &'doc InputBundle) -> Self {
+    pub(crate) fn new(document: &'doc Document, bundle: &'doc InputBundle) -> Self {
         Self { document, bundle }
     }
 
     /// Resolve a `$ref` string that appears at `at`, reporting an unresolved/unpinned ref through
     /// `diags`. Remote (`http`/`https`) refs are resolved hermetically from the vendored, hash-
     /// pinned copy already loaded into the bundle — no network access.
-    pub fn resolve(
+    pub(crate) fn resolve(
         &self,
         reference: &str,
         at: &Provenance,
@@ -67,7 +67,7 @@ impl<'doc> Resolver<'doc> {
     /// Path Item references are ordinary bundle references: they may address a
     /// `#/components/pathItems/` entry, a pointer inside any loaded file, or a whole relative
     /// file — the shape the multi-file layouts in the wild actually use.
-    pub fn resolve_path_item(
+    pub(crate) fn resolve_path_item(
         &self,
         reference: &str,
         from: crate::diag::FileId,
@@ -98,7 +98,7 @@ impl<'doc> Resolver<'doc> {
     /// Multi-file API descriptions commonly reference a whole file — `../responses/Error.yaml` —
     /// rather than a `#/components/...` entry, so component aliases fall back to the bundle the
     /// same way schema references already do.
-    pub fn resolve_component<T>(
+    pub(crate) fn resolve_component<T>(
         &self,
         reference: &str,
         from: crate::diag::FileId,
