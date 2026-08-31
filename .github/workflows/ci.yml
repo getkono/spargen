@@ -244,6 +244,6 @@ jobs:
       # Same version as `[tools]` in mise.toml, so a message that passes the pre-push hook
       # cannot fail here on a newer convco.
       - name: Install convco
-        run: cargo install convco --version 0.6.4 --locked
+        run: cargo install convco --version 0.7.1 --locked
       - name: Check commits
         run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}

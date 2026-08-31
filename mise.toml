@@ -3,7 +3,7 @@
 
 [tools]
 hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
-"cargo:convco" = "0.6.4"                    # Conventional Commit checker
+"cargo:convco" = "0.7.1"                    # Conventional Commit checker
 "aqua:EmbarkStudios/cargo-deny" = "0.19.9"  # supply-chain audit
 "cargo:cargo-hack" = "0.6.39"               # feature-combination builds
 "cargo:mdbook" = "0.5.4"                    # documentation site builder
