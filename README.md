@@ -81,7 +81,8 @@ the version it emits, and the idioms spargen handles.
   A missing required credential is a request-construction error, never a silent 401.
 - A closed error taxonomy, identical across all spargen output: request-construction, transport,
   timeout, protocol, redirect, documented API error (typed `E`), undocumented status (raw body
-  preserved), decode failure (serde path + capped body), interrupted body. Every generated error
+  preserved), decode failure (serde path + body, capped except on the two paths the emitted
+  `ClientConfig::max_error_body` doc names), interrupted body. Every generated error
   type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
   `thiserror`. `Error::is_transient()` classifies retry-worthy failures.
 - Beyond the request/response path, the embedded runtime carries a swappable transport seam
@@ -117,7 +118,9 @@ the version it emits, and the idioms spargen handles.
 - **No `serde(untagged)`.** First-match-wins deserialization can silently misparse; undiscriminated
   unions are rejected instead.
 - **`#![forbid(unsafe_code)]`-equivalent attributes on all generated items**, `Debug`-redacted
-  secrets, and a 64 KiB (configurable) cap on error-body retention.
+  secrets, and a 64 KiB (configurable) cap on error-body retention — bounding reading too, for
+  bodies read as errors on native targets. Two paths are not yet capped; the emitted
+  `ClientConfig::max_error_body` doc names them.
 
 ## Status
 

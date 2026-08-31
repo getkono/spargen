@@ -118,6 +118,17 @@ impl Spec {
     }
 
     /// Cap the bytes of a response body retained on generated error variants (default 64 KiB).
+    ///
+    /// For bodies read as errors on native targets, the cap bounds reading as well as retention:
+    /// one that exceeds it is abandoned partway, which forgoes reuse of that connection. Setting
+    /// it far below the error bodies an API actually returns therefore trades connection reuse for
+    /// a smaller retained prefix. On `wasm32` the `fetch` backend has no incremental read, so the
+    /// cap bounds only what is retained — see the Targets row of `docs/support-matrix.md`.
+    ///
+    /// A *success* body that fails to decode is capped on retention only, on every target:
+    /// deserialization needs the whole body, so it is always read whole. See
+    /// `ClientConfig::max_error_body` in the emitted runtime for the full disposition, including
+    /// the two paths that are not capped at all.
     pub fn error_body_cap(mut self, bytes: usize) -> Self {
         self.error_body_cap = bytes;
         self
