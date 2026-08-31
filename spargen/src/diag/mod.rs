@@ -19,10 +19,10 @@ mod severity;
 mod span;
 
 pub use code::{Code, UnknownCode};
-pub use collect::{Aborted, Diagnostics};
+pub(crate) use collect::{Aborted, Diagnostics};
 pub use interp::InterpId;
 pub use pointer::JsonPointer;
-pub use provenance::Provenance;
+pub(crate) use provenance::Provenance;
 pub use severity::Severity;
 pub use span::{FileId, Loc, Span};
 

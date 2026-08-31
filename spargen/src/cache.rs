@@ -15,14 +15,14 @@ const INPUT_PREFIX: &str = "// input-sha256: ";
 const CONTENT_PREFIX: &str = "// content-sha256: ";
 
 pub(crate) struct InputSnapshot {
-    pub digest: String,
-    pub paths: Vec<Utf8PathBuf>,
+    pub(crate) digest: String,
+    pub(crate) paths: Vec<Utf8PathBuf>,
 }
 
 impl InputSnapshot {
     /// The error carries the whole diagnostic batch, not just its items, so a caller can tell a
     /// complete failure list from one the `batch_cap` truncated.
-    pub fn load(spec: &Spec) -> Result<Self, Diagnostics> {
+    pub(crate) fn load(spec: &Spec) -> Result<Self, Diagnostics> {
         let mut diagnostics = Diagnostics::new(spec.batch_cap);
         let bundle = match InputBundle::load(&spec.path, &mut diagnostics) {
             Ok(bundle) => bundle,
@@ -148,8 +148,8 @@ pub(crate) fn verified_output(path: &Utf8Path, input_digest: &str) -> Option<Str
 }
 
 pub(crate) struct CachedRun {
-    pub diagnostics: Vec<Diagnostic>,
-    pub requirements: RuntimeRequirements,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) requirements: RuntimeRequirements,
 }
 
 pub(crate) fn read_cache(
