@@ -3905,3 +3905,60 @@ paths:
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// A response header and a server variable may be spelled with a Rust keyword. Both are allocated
+/// with `IdentRole::Field`, so both escape to `r#type` — and both were then rebound through
+/// `proc_macro2::Ident::new`, which *panics* on a raw identifier ("`r#type` is not a valid Ident").
+/// A perfectly legal description crashed the generator rather than emitting anything. The
+/// `cargo check` below is what pins the second half: the emitted `r#type` must also compile.
+const KEYWORD_HEADER_AND_SERVER_VARIABLE_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: "https://{type}.{match}.example.com/{enum}"
+    variables:
+      type: { default: api }
+      match: { default: eu, enum: [eu, us] }
+      enum: { default: v1 }
+paths:
+  /h:
+    get:
+      operationId: h
+      responses:
+        "200":
+          description: ok
+          headers:
+            type: { schema: { type: string } }
+            ref: { schema: { type: string } }
+            x-normal: { schema: { type: string } }
+"#;
+
+#[test]
+fn a_keyword_header_or_server_variable_generates_compiling_code() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("api.yaml");
+    std::fs::write(&spec, KEYWORD_HEADER_AND_SERVER_VARIABLE_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "keyword_ident_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    for raw in ["r#type", "r#match", "r#enum", "r#ref"] {
+        assert!(
+            generated.contains(raw),
+            "a keyword header/server-variable name must survive as a raw identifier, missing \
+             `{raw}`:\n{generated}"
+        );
+    }
+
+    let status = Command::new("cargo")
+        .arg("check")
+        .current_dir(&out)
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "a keyword-named header or server variable must generate compiling code"
+    );
+}

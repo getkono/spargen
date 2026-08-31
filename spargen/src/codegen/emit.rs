@@ -1220,13 +1220,11 @@ fn emit_response_headers(
         let ident = names
             .response_header_structs
             .get(&(operation.id.clone(), label.clone()))?;
-        let ident = proc_macro2::Ident::new(ident.as_str(), proc_macro2::Span::call_site());
         let fields = response.headers.iter().map(|header| {
             let field = names
                 .response_header_fields
                 .get(&(operation.id.clone(), label.clone(), header.name.clone()))
                 .expect("response header field allocated");
-            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
             // Header structs live beside `Client`, not inside `types`, so the type path must be
             // qualified — a header whose schema lowered to a named type would not resolve here.
             let ty = ty_tokens(header.ty, names, options, true);
@@ -1245,7 +1243,6 @@ fn emit_response_headers(
                 .response_header_fields
                 .get(&(operation.id.clone(), label.clone(), header.name.clone()))
                 .expect("response header field allocated");
-            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
             let name = header.name.clone();
             let shape = match header.shape {
                 crate::ir::HeaderShape::Scalar => quote! { support::HeaderShape::Scalar },
@@ -1310,7 +1307,6 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
             .get(index)
             .expect("server name allocated")
             .clone();
-        let ident = proc_macro2::Ident::new(ident.as_str(), proc_macro2::Span::call_site());
         let mut docs = vec![format!("Server `{}`.", server.url)];
         if let Some(description) = &server.description {
             docs.push(description.clone());
@@ -1319,15 +1315,11 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
 
         let variable_enums = server.variables.iter().filter_map(|(name, variable)| {
             let enum_ident = names.server_variable_enums.get(&(index, name.clone()))?;
-            let enum_ident =
-                proc_macro2::Ident::new(enum_ident.as_str(), proc_macro2::Span::call_site());
             let variants = variable.enum_values.iter().map(|value| {
                 let variant = names
                     .server_variable_variants
                     .get(&(index, name.clone(), value.clone()))
                     .expect("server variable variant allocated");
-                let variant =
-                    proc_macro2::Ident::new(variant.as_str(), proc_macro2::Span::call_site());
                 let default = (value == &variable.default).then(|| quote! { #[default] });
                 quote! { #default #variant }
             });
@@ -1336,8 +1328,6 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
                     .server_variable_variants
                     .get(&(index, name.clone(), value.clone()))
                     .expect("server variable variant allocated");
-                let variant =
-                    proc_macro2::Ident::new(variant.as_str(), proc_macro2::Span::call_site());
                 quote! { Self::#variant => #value }
             });
             let doc = format!("Permitted values of the `{name}` server variable.");
@@ -1364,13 +1354,8 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
                 .server_variable_fields
                 .get(&(index, name.clone()))
                 .expect("server variable field allocated");
-            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
             match names.server_variable_enums.get(&(index, name.clone())) {
                 Some(enum_ident) => {
-                    let enum_ident = proc_macro2::Ident::new(
-                        enum_ident.as_str(),
-                        proc_macro2::Span::call_site(),
-                    );
                     quote! { #field: #enum_ident }
                 }
                 None => quote! { #field: String },
@@ -1382,14 +1367,9 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
                 .server_variable_fields
                 .get(&(index, name.clone()))
                 .expect("server variable field allocated");
-            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
             match names.server_variable_enums.get(&(index, name.clone())) {
                 // The `#[default]` variant is the declared default, so `Default` is exact.
                 Some(enum_ident) => {
-                    let enum_ident = proc_macro2::Ident::new(
-                        enum_ident.as_str(),
-                        proc_macro2::Span::call_site(),
-                    );
                     quote! { #field: <#enum_ident as Default>::default() }
                 }
                 None => {
@@ -1404,7 +1384,6 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
                 .server_variable_fields
                 .get(&(index, name.clone()))
                 .expect("server variable field allocated");
-            let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
             let mut doc = format!("Set the `{name}` server variable.");
             if let Some(description) = &variable.description {
                 doc.push(' ');
@@ -1412,10 +1391,6 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
             }
             match names.server_variable_enums.get(&(index, name.clone())) {
                 Some(enum_ident) => {
-                    let enum_ident = proc_macro2::Ident::new(
-                        enum_ident.as_str(),
-                        proc_macro2::Span::call_site(),
-                    );
                     quote! {
                         #[doc = #doc]
                         #[must_use]
@@ -1452,7 +1427,6 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
                     .server_variable_fields
                     .get(&(index, name.clone()))
                     .expect("server variable field allocated");
-                let field = proc_macro2::Ident::new(field.as_str(), proc_macro2::Span::call_site());
                 match names.server_variable_enums.get(&(index, name.clone())) {
                     Some(_) => quote! { url.push_str(self.#field.as_str()); },
                     None => quote! { url.push_str(&self.#field); },
@@ -1512,7 +1486,6 @@ fn emit_servers(api: &Api, names: &Names) -> TokenStream {
         }
     });
     let first = names.servers.first().expect("at least one server").clone();
-    let first = proc_macro2::Ident::new(first.as_str(), proc_macro2::Span::call_site());
     quote! {
         /// Base URLs declared by the API description.
         #[allow(dead_code)]
