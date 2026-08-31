@@ -14,19 +14,19 @@ mod types;
 
 use indexmap::IndexMap;
 
-pub use auth::{
+pub(crate) use auth::{
     ApiKeyLoc, HttpScheme, SchemeId, SecurityRequirement, SecurityScheme, SecuritySchemeDef,
 };
-pub use invariant::check_invariants;
-pub use media::{
+pub(crate) use invariant::check_invariants;
+pub(crate) use media::{
     BodyEncoding, EncodingMode, ErrorShape, Framing, HeaderShape, MediaType, PropertyEncoding,
     RequestBody, Response, ResponseHeader, Responses, StatusSpec, SuccessShape,
 };
-pub use operation::{
+pub(crate) use operation::{
     Delimiter, Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment,
     PathTemplate,
 };
-pub use types::{
+pub(crate) use types::{
     AdditionalProps, DefaultValue, DisjointFeature, Field, FieldDefault, JsonCategory, Prim,
     PropertyName, ScalarEnum, ScalarRepr, ScalarValue, Struct, Ty, TypeDef, TypeGraph, TypeId,
     TypeKind, Union, UnionMode, UnionStrategy, UnionVariant, XmlField,
@@ -36,22 +36,22 @@ pub use types::{
 #[derive(Debug, Clone)]
 pub(crate) struct Api {
     /// API identity (`info`).
-    pub info: Info,
+    pub(crate) info: Info,
     /// Servers, with variable-substitution metadata retained.
-    pub servers: Vec<Server>,
+    pub(crate) servers: Vec<Server>,
     /// Every operation, in deterministic order.
-    pub operations: Vec<Operation>,
+    pub(crate) operations: Vec<Operation>,
     /// The type graph referenced by operations and each other.
-    pub types: TypeGraph,
+    pub(crate) types: TypeGraph,
     /// Named security schemes (`components.securitySchemes`).
-    pub security_schemes: IndexMap<SchemeId, SecuritySchemeDef>,
+    pub(crate) security_schemes: IndexMap<SchemeId, SecuritySchemeDef>,
 }
 
 impl Api {
     /// Whether any operation uses an `application/xml` / `text/xml` request or response body. Drives
     /// the feature-gated `quick-xml` dependency in the synthesized manifest and the conditional
     /// embedding of the XML runtime helpers — both deterministic functions of the API.
-    pub fn uses_xml(&self) -> bool {
+    pub(crate) fn uses_xml(&self) -> bool {
         self.operations.iter().any(|operation| {
             let request_xml = operation
                 .request_body
@@ -74,7 +74,7 @@ impl Api {
     ///
     /// This is a property of the API alone; whether those primitives actually *become* the newtypes
     /// additionally depends on the `time` config knob, which callers apply themselves.
-    pub fn uses_time(&self) -> bool {
+    pub(crate) fn uses_time(&self) -> bool {
         self.types.iter().any(|(_, definition)| {
             matches!(
                 definition.kind,
@@ -85,7 +85,7 @@ impl Api {
 
     /// Whether any operation returns a sequential response as a typed stream. Drives conditional
     /// stream-runtime embedding and the `futures-core` / reqwest `stream` requirements.
-    pub fn uses_streams(&self) -> bool {
+    pub(crate) fn uses_streams(&self) -> bool {
         self.operations
             .iter()
             .any(|operation| operation.responses.stream_success().is_some())
@@ -94,29 +94,29 @@ impl Api {
 
 /// API identity, lowered from `info`.
 #[derive(Debug, Clone)]
-pub struct Info {
+pub(crate) struct Info {
     /// `info.title`.
-    pub title: String,
+    pub(crate) title: String,
     /// `info.version`.
-    pub version: String,
+    pub(crate) version: String,
     /// `info.description`, if present.
-    pub description: Option<String>,
+    pub(crate) description: Option<String>,
 }
 
 /// A server entry (matrix: Document).
 #[derive(Debug, Clone)]
-pub struct Server {
+pub(crate) struct Server {
     /// OpenAPI 3.2 `name`: a stable identity for this host, used to name the generated builder.
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
     /// The raw, possibly templated server URL.
-    pub url: String,
+    pub(crate) url: String,
     /// The URL template split into literals and variable references, parsed once here so codegen
     /// and rendering never re-scan the string.
-    pub segments: Vec<UrlSegment>,
+    pub(crate) segments: Vec<UrlSegment>,
     /// Declared variables, in source order.
-    pub variables: IndexMap<String, ServerVariable>,
+    pub(crate) variables: IndexMap<String, ServerVariable>,
     /// `server.description`.
-    pub description: Option<String>,
+    pub(crate) description: Option<String>,
 }
 
 /// One piece of a parsed server URL template.
@@ -130,13 +130,13 @@ pub(crate) enum UrlSegment {
 
 /// A server variable: a closed or open set of substitutions with a default that is actually sent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServerVariable {
+pub(crate) struct ServerVariable {
     /// The value used when the caller supplies none.
-    pub default: String,
+    pub(crate) default: String,
     /// The permitted values, when the document declares a closed set. Empty means free-form.
-    pub enum_values: Vec<String>,
+    pub(crate) enum_values: Vec<String>,
     /// `description`, surfaced as rustdoc on the generated setter.
-    pub description: Option<String>,
+    pub(crate) description: Option<String>,
 }
 
 /// Documentation carried from a construct's `title`/`summary`/`description`/`deprecated`, lowered
@@ -144,11 +144,11 @@ pub struct ServerVariable {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Docs {
     /// `title`.
-    pub title: Option<String>,
+    pub(crate) title: Option<String>,
     /// `summary`.
-    pub summary: Option<String>,
+    pub(crate) summary: Option<String>,
     /// `description`.
-    pub description: Option<String>,
+    pub(crate) description: Option<String>,
     /// Whether the construct is `deprecated` (also drives `#[deprecated]`).
-    pub deprecated: bool,
+    pub(crate) deprecated: bool,
 }
