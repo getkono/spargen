@@ -28,7 +28,7 @@ spargen_macro::generate_api!(
 
 ```toml
 [dependencies]
-spargen-macro = "0.2"
+spargen-macro = "0.4"
 # ...plus the audited crates this generated client uses at runtime. No spargen crate appears at
 # runtime. See spargen's runtime dependency contract for the exact floors and conditional features.
 ```
