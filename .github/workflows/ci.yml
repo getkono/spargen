@@ -214,6 +214,13 @@ jobs:
       # Fails the job on broken includes/links so doc-site breakage is caught. The built HTML
       # (docs/book/book/) is git-ignored; only the book source is committed.
       - run: mdbook build docs/book
+      # Rustdoc's own link check. `--document-private-items` is load-bearing: every subsystem
+      # module is private, so without it rustdoc never looks at most of the crate and broken
+      # links accumulate unseen.
+      - name: Rustdoc link check
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --workspace --all-features --document-private-items
 
   deny:
     name: cargo-deny

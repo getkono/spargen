@@ -57,12 +57,14 @@ mise run example    # both petstore examples over a local mock server
 mise run github-api # the full GitHub client: native strict clippy + wasm32
 mise run deny       # supply-chain audit
 mise run docs       # build the mdBook site (fails on broken links/includes)
+mise run doc-links  # rustdoc over the workspace, warnings denied, private items included
 ```
 
 `hk.pkl` wires four of these into git hooks through the same mise tasks CI runs: `fmt` and `lint`
 on pre-commit, `test` and the `convco` commit-message check on pre-push. The rest — `check`,
-`powerset`, `corpus-smoke`, `example`, `github-api`, `deny`, `docs` — run only in CI; they are too
-slow for a hook, so a green pre-push is not a green CI. Run `mise run hooks` once to install them.
+`powerset`, `corpus-smoke`, `example`, `github-api`, `deny`, `docs`, `doc-links` — run only in
+CI; they are too slow for a hook, so a green pre-push is not a green CI. Run `mise run hooks`
+once to install them.
 
 CI additionally gates five things the list above does not name: `msrv` (the declared
 `rust-version` floor still compiles), `package` (`cargo publish --dry-run`, which is what keeps the

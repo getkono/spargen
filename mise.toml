@@ -95,6 +95,15 @@ run = [
   "sh -c 'leak=$(cargo tree -e no-proc-macro -i spargen --manifest-path examples/petstore-macro/Cargo.toml 2>/dev/null); if [ -n \"$leak\" ]; then echo \"spargen leaked into the runtime graph:\"; echo \"$leak\"; exit 1; fi; echo \"macro runtime graph is spargen-free\"'",
 ]
 
+[tasks.doc-links]
+description = "Rustdoc across the workspace with warnings denied, private items included"
+# `--document-private-items` is the point: every subsystem module is private, so a plain
+# `cargo doc` documents none of them and link-checks none of them. Without this flag the whole
+# internal doc surface — which is most of the crate — is unchecked, and stale links accumulate
+# invisibly. `--no-deps` keeps it to this workspace.
+env = { RUSTDOCFLAGS = "-D warnings" }
+run = "cargo doc --no-deps --workspace --all-features --document-private-items"
+
 [tasks.docs]
 description = "Build the mdBook documentation site into docs/book/book (git-ignored)"
 # Requires mdBook (`cargo install mdbook`). Fails on broken includes/links.
