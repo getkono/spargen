@@ -1,7 +1,8 @@
 # Spargen Validation Corpus
 
-This corpus is vendored for repeatable OpenAPI 3.1 implementation and regression checks. Large
-JSON/YAML artifacts are stored through Git LFS.
+This corpus is vendored for repeatable OpenAPI 3.1.x/3.2.x implementation and regression checks.
+Large JSON/YAML artifacts are stored through Git LFS, and every file's `SHA-256` below is
+verified by `spargen/tests/corpus_manifest.rs` against `manifest.toml`.
 
 Included public APIs:
 
@@ -22,4 +23,4 @@ representative Kubernetes API-group document are still OpenAPI 3.0.x/3.0.1, so t
 gate (`E001`) on major APIs; `meilisearch` is genuine OpenAPI 3.1.0 and exercises strict official
 document validation past the gate, rejecting its null Tag `externalDocs.description` fields (`E011`).
 
-Explicitly not included per planning constraints: HoneyHive, IOTA gas-station, and Redocly.
+Deliberately not included: HoneyHive, IOTA gas-station, and Redocly.

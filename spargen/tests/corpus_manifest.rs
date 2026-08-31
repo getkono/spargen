@@ -7,10 +7,16 @@
 //! snapshot suite but in neither smoke copy.
 //!
 //! This suite drives the manifest itself, and holds the other copies to it.
+//!
+//! One manifest field stays unchecked: `tree_sha256`, carried by `openapi-boilerplate` alone. How
+//! it was constructed is recorded nowhere, and no natural definition over that directory
+//! reproduces it, so verifying it would mean inventing a rule and calling the result a guarantee.
+//! Every case's `sha256` — the per-file pin the support documents cite — is verified below.
 
 use std::collections::BTreeSet;
 
 use camino::Utf8PathBuf;
+use sha2::{Digest, Sha256};
 use spargen::{Outcome, Spec};
 
 #[derive(serde::Deserialize)]
@@ -23,6 +29,9 @@ struct Manifest {
 struct Case {
     id: String,
     path: String,
+    /// The pinned content hash of `path`. Not optional: a case that omits it would vendor a spec
+    /// nothing pins, which is the drift this field exists to prevent.
+    sha256: String,
     /// `generate` or `reject:E###`.
     expect: String,
 }
@@ -75,6 +84,26 @@ fn every_pinned_spec_is_present_and_is_not_an_unfetched_lfs_pointer() {
         assert!(
             !bytes.starts_with(b"version https://git-lfs.github.com/spec/"),
             "`{}` is an unfetched Git-LFS pointer — run `git lfs pull`",
+            case.id
+        );
+    }
+}
+
+#[test]
+fn every_pinned_spec_matches_the_hash_the_manifest_declares() {
+    // The manifest records where each spec came from and what it hashed to. Nothing read the hash,
+    // so a re-fetched, hand-edited, or silently-updated corpus file would have changed the meaning
+    // of every expectation below it while still reporting a pass.
+    for case in manifest().cases {
+        let path = workspace_root().join("corpus").join(&case.path);
+        let bytes = std::fs::read(&path)
+            .unwrap_or_else(|error| panic!("`{}` is missing at {path}: {error}", case.id));
+
+        let actual = format!("{:x}", Sha256::digest(&bytes));
+        assert_eq!(
+            actual, case.sha256,
+            "`{}` no longer matches its pinned hash. The vendored file at {path} changed; \
+             re-pin it in corpus/manifest.toml only with a reviewed reason.",
             case.id
         );
     }
