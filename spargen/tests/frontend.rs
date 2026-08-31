@@ -1,6 +1,9 @@
 //! Per-diagnostic frontend coverage: one minimal inline spec per rejection/warning code, asserting
 //! the code fires and the pipeline outcome is what the taxonomy promises. Rejections travel through
-//! `generate`; the E013 case also proves `check` runs the same lowering (check/generate parity).
+//! `generate`. Check/generate parity is a property over `PARITY_FIXTURES` rather than a remark
+//! about one case: every fixture there must reach the same accept/reject verdict and report the
+//! same codes through both entry points, and a companion test keeps that set spanning rejections,
+//! warnings and clean runs so it cannot pass vacuously.
 
 use camino::Utf8PathBuf;
 use spargen::{Build, CargoIntegration, Code, Outcome, Report, Spec};
