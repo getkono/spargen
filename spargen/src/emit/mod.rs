@@ -2,7 +2,7 @@
 //! layer-deps: codegen, diag
 //!
 //! Module assembly and provenance stamping. Emit turns
-//! [`GeneratedCode`](crate::codegen::GeneratedCode) into one deterministic module plan.
+//! [`crate::codegen::GeneratedCode`] into one deterministic module plan.
 
 mod header;
 

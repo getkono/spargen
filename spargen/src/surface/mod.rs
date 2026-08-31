@@ -2,8 +2,8 @@
 //! layer-deps: ir, name
 //!
 //! The **consumer-visible API surface** of generated output, and semver-impact diffing between two
-//! surfaces. This is a pure analysis subsystem: it reads a lowered [`Api`](crate::ir::Api) plus its
-//! allocated [`Names`](crate::name::Names) and models exactly what a *consumer* of the generated
+//! surfaces. This is a pure analysis subsystem: it reads a lowered [`crate::ir::Api`] plus its
+//! allocated [`crate::name::Names`] and models exactly what a *consumer* of the generated
 //! client sees — the client methods (operations) and the public model types — then classifies every
 //! difference between an old and a new surface as a semver bump. It never emits code and has no
 //! effect on generation or the runtime; it backs `spargen diff`.

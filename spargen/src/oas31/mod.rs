@@ -7,7 +7,7 @@
 //! same JSON Schema 2020-12 dialect, so both versions deliberately share this frontend and lower
 //! into the same IR.
 //!
-//! Frontend flow: [`parse_document`] → [`MetaSchemaValidator::validate`] + [`audit`] → [`lower`],
+//! Frontend flow: [`parse_document`] → [`MetaSchemaValidator::validate`] + [`audit`](fn@audit) → [`lower`](fn@lower),
 //! with [`Resolver`] resolving `$ref`s throughout.
 
 mod audit;

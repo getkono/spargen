@@ -8,7 +8,8 @@
 //! A middleware receives the request plus a [`Next`] handle. Calling [`Next::run`] advances to the
 //! rest of the chain — the next middleware, or, when the chain is exhausted, the inner
 //! [`HttpBackend`]. A middleware may inspect/modify the request before calling `run`, inspect the
-//! [`Response`] after, or return a response *without* calling `run` at all to short-circuit. This is
+//! [`reqwest::Response`] after, or return a response *without* calling `run` at all to
+//! short-circuit. This is
 //! the classic "onion" middleware shape, expressed with std's `Future`/`Pin`/`Box` — no
 //! `async-trait` and no `tower`, so middleware adds no dependency to the generated runtime.
 //!

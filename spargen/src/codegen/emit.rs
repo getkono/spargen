@@ -994,7 +994,7 @@ fn param_default_docs_tokens(operation: &Operation) -> Vec<TokenStream> {
 }
 
 /// Emit the `BlockingClient`: a synchronous facade, gated on the generated crate's `blocking`
-/// feature, that owns the async [`Client`] plus a current-thread tokio runtime and drives each async
+/// feature, that owns the async `Client` plus a current-thread tokio runtime and drives each async
 /// operation to completion with `block_on`. It reuses the whole async dispatch — every method is a
 /// thin shim — so there is zero logic duplication. Constructors mirror the async client's.
 ///
@@ -1139,7 +1139,8 @@ fn emit_blocking_operation(
 /// `Display`; an object/array/union becomes a JSON-encoded text part. Optional fields (`Option<T>`)
 /// only add their part when `Some`. Lowering guarantees a multipart body is an object schema, so a
 /// non-struct body cannot reach here (it is rejected as `E009`); the fallback stays a no-op.
-/// Render one resolved [`BodyEncoding`] as `support::FormProperty` const entries.
+/// Render one resolved [`BodyEncoding`](crate::ir::BodyEncoding) as `support::FormProperty`
+/// const entries.
 fn form_properties_tokens(encoding: &crate::ir::BodyEncoding) -> Vec<TokenStream> {
     encoding
         .properties
@@ -3085,7 +3086,8 @@ fn success_enum_ident(method_ident: &crate::name::Ident) -> proc_macro2::Ident {
 
 /// The `PascalCase` variant identifier for a documented status selector: `Status200` for an exact
 /// code, `Status2xx` for a range, and `Default` for the `default` response (carried as the
-/// `Range(0)` sentinel by [`Responses::error`]). Deterministic and, within one enum, unique by
+/// `Range(0)` sentinel by [`Responses::error`](crate::ir::Responses::error)). Deterministic and,
+/// within one enum, unique by
 /// construction (each selector appears once). Routed through the `name` escaper for validity.
 fn status_variant_ident(spec: crate::ir::StatusSpec) -> proc_macro2::Ident {
     let raw = match spec {
@@ -3099,7 +3101,7 @@ fn status_variant_ident(spec: crate::ir::StatusSpec) -> proc_macro2::Ident {
     )
 }
 
-/// The runtime [`support::StatusSpec`] tokens for a documented status selector. The `default`
+/// The runtime `support::StatusSpec` tokens for a documented status selector. The `default`
 /// sentinel (`Range(0)`) maps to `Any`, matching how the single-error-body path builds its table.
 fn runtime_status_spec(spec: crate::ir::StatusSpec) -> TokenStream {
     match spec {
