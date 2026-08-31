@@ -209,8 +209,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # Keep this version in step with `[tools]` in mise.toml. `--locked` alone pins only
+      # mdBook's own dependencies, so without `--version` every run picks up the newest release.
       - name: Install mdBook
-        run: cargo install mdbook --locked
+        run: cargo install mdbook --version 0.5.4 --locked
       # Fails the job on broken includes/links so doc-site breakage is caught. The built HTML
       # (docs/book/book/) is git-ignored; only the book source is committed.
       - run: mdbook build docs/book
@@ -237,7 +239,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Same version as `[tools]` in mise.toml, so a message that passes the pre-push hook
+      # cannot fail here on a newer convco.
       - name: Install convco
-        run: cargo install convco --locked
+        run: cargo install convco --version 0.6.4 --locked
       - name: Check commits
         run: convco check ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
