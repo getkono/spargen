@@ -5,7 +5,7 @@
 //! used: its boundary rules differ, and identifier allocation needs a segmentation this crate pins.
 
 /// Convert `raw` to `PascalCase` (for types and variants).
-pub fn to_pascal_case(raw: &str) -> String {
+pub(crate) fn to_pascal_case(raw: &str) -> String {
     let words = words(raw);
     if words.is_empty() {
         return "Generated".to_owned();
@@ -23,7 +23,7 @@ pub fn to_pascal_case(raw: &str) -> String {
 }
 
 /// Convert `raw` to `snake_case` (for fields, methods, modules).
-pub fn to_snake_case(raw: &str) -> String {
+pub(crate) fn to_snake_case(raw: &str) -> String {
     let words = words(raw);
     if words.is_empty() {
         "generated".to_owned()

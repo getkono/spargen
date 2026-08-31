@@ -14,7 +14,7 @@ use super::{Node, Number, SpannedKey, SpannedMap, SpannedValue};
 /// and every object key carries its precise `[start, end)` source range rather than the whole
 /// file. Malformed input is reported through `diags` (with a span at the error location) rather
 /// than by panic; a fatal parse error returns [`Aborted`].
-pub fn parse_json(
+pub(crate) fn parse_json(
     file: FileId,
     text: &str,
     diags: &mut Diagnostics,
@@ -53,7 +53,7 @@ pub fn parse_json(
 /// (`yaml_rust2::parser::Parser` + a [`MarkedEventReceiver`]) is used instead of `YamlLoader` so
 /// that each event's source [`Marker`] can be turned into a per-node span. Errors are reported
 /// through `diags`.
-pub fn parse_yaml(
+pub(crate) fn parse_yaml(
     file: FileId,
     text: &str,
     diags: &mut Diagnostics,

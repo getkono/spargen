@@ -17,11 +17,11 @@ use std::collections::HashMap;
 use crate::diag::Diagnostics;
 use crate::ir::{AdditionalProps, Api, OperationId, ScalarValue, TypeId, TypeKind};
 
-pub use casing::{to_pascal_case, to_snake_case};
-pub use ident::Ident;
-pub use keyword::{escape, IdentRole};
-pub use scope::Scope;
-pub use synth::synth_operation_id;
+pub(crate) use casing::{to_pascal_case, to_snake_case};
+pub(crate) use ident::Ident;
+pub(crate) use keyword::{escape, IdentRole};
+pub(crate) use scope::Scope;
+pub(crate) use synth::synth_operation_id;
 
 /// The identifiers allocated for a whole [`Api`]: one per operation, params struct, type, field,
 /// and variant. Codegen looks names up here rather than deriving them, so naming stays in one
@@ -29,59 +29,59 @@ pub use synth::synth_operation_id;
 #[derive(Debug, Default)]
 pub(crate) struct Names {
     /// Method name per operation.
-    pub operations: HashMap<OperationId, Ident>,
+    pub(crate) operations: HashMap<OperationId, Ident>,
     /// Optional-parameters `…Params` struct name per operation.
-    pub params_structs: HashMap<OperationId, Ident>,
+    pub(crate) params_structs: HashMap<OperationId, Ident>,
     /// Generator-owned signature and request-building bindings per operation. Required OpenAPI
     /// parameters reserve their natural Rust spellings first, so these identifiers can never
     /// shadow caller-provided values.
-    pub operation_bindings: HashMap<OperationId, OperationBindings>,
+    pub(crate) operation_bindings: HashMap<OperationId, OperationBindings>,
     /// Type name per type.
-    pub types: HashMap<TypeId, Ident>,
+    pub(crate) types: HashMap<TypeId, Ident>,
     /// Field name per `(type, wire property name)`.
-    pub fields: HashMap<(TypeId, String), Ident>,
+    pub(crate) fields: HashMap<(TypeId, String), Ident>,
     /// The synthetic `#[serde(flatten)]` overflow-map field ident per struct that has a typed
     /// `additionalProperties`/`patternProperties` map. Allocated in the struct's field scope
     /// (reserved after the declared fields) so it can never collide with a declared property named
     /// `additional`.
-    pub struct_overflow: HashMap<TypeId, Ident>,
+    pub(crate) struct_overflow: HashMap<TypeId, Ident>,
     /// Variant name per `(type, wire variant value)`.
-    pub variants: HashMap<(TypeId, String), Ident>,
+    pub(crate) variants: HashMap<(TypeId, String), Ident>,
     /// Builder type name per declared server, by index.
-    pub servers: Vec<Ident>,
+    pub(crate) servers: Vec<Ident>,
     /// Enum type name per `(server index, variable name)`, for a variable with a closed `enum`.
-    pub server_variable_enums: HashMap<(usize, String), Ident>,
+    pub(crate) server_variable_enums: HashMap<(usize, String), Ident>,
     /// Enum variant name per `(server index, variable name, value)`.
-    pub server_variable_variants: HashMap<(usize, String, String), Ident>,
+    pub(crate) server_variable_variants: HashMap<(usize, String, String), Ident>,
     /// Setter/field name per `(server index, variable name)`.
-    pub server_variable_fields: HashMap<(usize, String), Ident>,
+    pub(crate) server_variable_fields: HashMap<(usize, String), Ident>,
     /// Header-struct type name per `(operation, status label)`.
-    pub response_header_structs: HashMap<(OperationId, String), Ident>,
+    pub(crate) response_header_structs: HashMap<(OperationId, String), Ident>,
     /// Field name per `(operation, status label, header name)`.
-    pub response_header_fields: HashMap<(OperationId, String, String), Ident>,
+    pub(crate) response_header_fields: HashMap<(OperationId, String, String), Ident>,
 }
 
 /// Generator-owned bindings emitted inside one operation method.
 #[derive(Debug)]
 pub(crate) struct OperationBindings {
     /// The optional-parameters struct argument, when one is emitted.
-    pub params: Option<Ident>,
+    pub(crate) params: Option<Ident>,
     /// The request-body argument, when one is emitted.
-    pub body: Option<Ident>,
+    pub(crate) body: Option<Ident>,
     /// Mutable path assembled before URL construction.
-    pub path: Ident,
+    pub(crate) path: Ident,
     /// Mutable query-pair collection.
-    pub query: Ident,
+    pub(crate) query: Ident,
     /// Serialized whole-query value for an `in: querystring` parameter.
-    pub raw_query: Ident,
+    pub(crate) raw_query: Ident,
     /// Fully constructed request URL.
-    pub url: Ident,
+    pub(crate) url: Ident,
     /// Mutable request builder, then the built request.
-    pub request: Ident,
+    pub(crate) request: Ident,
     /// Clone of a streaming request retained for opt-in SSE reconnects.
-    pub reconnect_request: Ident,
+    pub(crate) reconnect_request: Ident,
     /// Mutable cookie-fragment collection.
-    pub cookies: Ident,
+    pub(crate) cookies: Ident,
 }
 
 /// Allocate every identifier the API needs, in one deterministic pass. Naming conflicts

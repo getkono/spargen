@@ -20,9 +20,9 @@ mod value;
 #[cfg(feature = "remote-fetch")]
 mod vendor;
 
-pub use bundle::InputBundle;
-pub use parse::{parse_json, parse_yaml};
-pub use value::{Node, Number, SpannedKey, SpannedMap, SpannedValue};
+pub(crate) use bundle::InputBundle;
+pub(crate) use parse::{parse_json, parse_yaml};
+pub(crate) use value::{Node, Number, SpannedKey, SpannedMap, SpannedValue};
 
 // Remote-ref helpers shared with `oas31::resolve` for hermetic fragment resolution.
 pub(crate) use remote::is_absolute_ref as is_remote_ref;
@@ -30,4 +30,6 @@ pub(crate) use remote::rewrite_refs_to_absolute as rewrite_refs_absolute;
 pub(crate) use sha256::sha256_hex;
 
 #[cfg(feature = "remote-fetch")]
-pub use vendor::{vendor, ReqwestFetcher, VendorReport, VendoredRef};
+pub(crate) use vendor::{vendor, ReqwestFetcher};
+#[cfg(feature = "remote-fetch")]
+pub use vendor::{VendorReport, VendoredRef};

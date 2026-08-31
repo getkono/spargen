@@ -36,11 +36,11 @@ const LOCK_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteEntry {
     /// The absolute `http`/`https` URL the document was fetched from (fragment stripped).
-    pub url: String,
+    pub(crate) url: String,
     /// Lowercase hex SHA-256 of the fetched bytes.
-    pub sha256: String,
+    pub(crate) sha256: String,
     /// Path of the vendored copy, relative to [`VENDOR_DIR`].
-    pub path: String,
+    pub(crate) path: String,
 }
 
 /// The parsed `spargen.lock`: a set of pinned remote documents, kept sorted by URL.
@@ -51,7 +51,7 @@ pub(crate) struct Lock {
 
 /// A lock-file parse failure (malformed TOML or an unknown schema version).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LockError(pub String);
+pub(crate) struct LockError(pub(crate) String);
 
 impl std::fmt::Display for LockError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
