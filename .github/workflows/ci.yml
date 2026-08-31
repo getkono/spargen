@@ -73,8 +73,10 @@ jobs:
       - run: cargo check --workspace --all-features --locked
       # Generated output has its own floor, and it is the one consumers actually hit. The petstore
       # example runs build.rs -> generate -> compile, so this covers the emitter and the emitted
-      # code together, bounded by what that spec exercises. No `--locked`: the example's committed
-      # lockfile is already stale on `master`, which is worth fixing on its own rather than here.
+      # code together, bounded by what that spec exercises. Still no `--locked`: the examples are
+      # separate workspaces, so a release bumps the workspace version without refreshing their
+      # lockfiles, and the `spargen` path-dependency stamp goes stale again on every release.
+      # `--locked` here would turn that into a red MSRV job rather than a lockfile refresh.
       - run: cargo check --manifest-path examples/petstore/Cargo.toml
 
   powerset:
