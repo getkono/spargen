@@ -5,6 +5,27 @@ provides analysis and schema-vendoring tools only. Client generation belongs in 
 `generate_api!`; the CLI intentionally has no `generate`, stdout, watch, drift, or crate-scaffold
 path.
 
+## Cargo features
+
+Two features gate the generator crate itself. Neither affects generated output — that stays
+freestanding either way.
+
+| Feature | Default | What it adds |
+| --- | --- | --- |
+| `cli` | off | The `spargen` binary and its argument parser. Implies `remote-fetch`, so an installed binary can run `spargen lock`. |
+| `remote-fetch` | off | The `reqwest`-backed fetcher behind [`spargen lock`](#spargen-lock) — the only code path in the crate that opens a network connection. |
+
+`remote-fetch` is separate from `cli` so a library-only consumer — a `build.rs`, or a tool calling
+`spargen::vendor` directly — can vendor remote `$ref`s without pulling in the whole CLI stack:
+
+```toml
+[build-dependencies]
+spargen = { version = "0.4", features = ["remote-fetch"] }
+```
+
+With neither feature on (the default), the crate links no HTTP client at all, and `generate` and
+`check` cannot reach the network even in principle.
+
 ```text
 Usage: spargen <COMMAND>
 
