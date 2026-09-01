@@ -97,16 +97,21 @@ pub(crate) struct XmlHints {
 }
 
 impl Schema {
-    /// Whether this schema constrains the *storage shape* of a value at all.
+    /// Whether this schema constrains a value at all — neither its storage shape nor its
+    /// validation.
     ///
-    /// `{}` and `true` constrain nothing, and neither do the annotation- and validation-only
-    /// keywords, which are documented or reported (`W001`) rather than typed. This is what lets a
-    /// caller tell "an alternative that decodes to exactly the same thing" from one that does not,
-    /// before any of it has been lowered.
+    /// `{}` and `true` constrain nothing. Annotations (`default`, `title`, `description`,
+    /// `deprecated`, `readOnly`/`writeOnly`) do not either: they are documented rather than
+    /// enforced, and two entries differing only in prose decode identically. A *validation*
+    /// keyword does count, even though it never changes the storage type — see
+    /// [`ValidationKeywords::constrains_nothing`].
+    ///
+    /// This is what lets a caller tell "an alternative that decodes to exactly the same thing"
+    /// from one that does not, before any of it has been lowered.
     ///
     /// The destructure is exhaustive on purpose: a field added to [`Schema`] fails to compile here
     /// rather than silently letting a constrained schema pass as unconstrained.
-    pub(crate) fn constrains_no_shape(&self) -> bool {
+    pub(crate) fn constrains_nothing(&self) -> bool {
         let Schema {
             boolean,
             types,
@@ -130,9 +135,9 @@ impl Schema {
             content_media_type,
             content_schema,
             xml,
-            // Annotation- and validation-only: documented or reported, never typed.
+            validation,
+            // Annotation-only: documented or reported, never typed.
             default: _,
-            validation: _,
             deprecated: _,
             read_only: _,
             write_only: _,
@@ -163,6 +168,10 @@ impl Schema {
             && content_media_type.is_none()
             && content_schema.is_none()
             && xml.is_none()
+            // A validation keyword does not change the storage type, but it is a constraint the
+            // document stated, so an entry carrying one is not interchangeable with one that
+            // says nothing.
+            && validation.constrains_nothing()
     }
 }
 
@@ -232,4 +241,48 @@ pub(crate) struct ValidationKeywords {
     /// Another JSON Schema validation/applicator keyword is present (`not`, `if`/`then`/`else`,
     /// `contains`, `dependent*`, `unevaluated*`, `propertyNames`, or content validation).
     pub(crate) other: bool,
+}
+
+impl ValidationKeywords {
+    /// Whether no validation keyword is present at all.
+    ///
+    /// These keywords never change a body's storage type, so they are invisible to
+    /// [`Schema::constrains_nothing`]'s question. They are still something the document
+    /// *said*: a media alternative carrying `maxLength: 10` is not interchangeable with one that
+    /// says nothing, even though both decode to the same Rust type. Proving two entries decode
+    /// identically therefore requires this on top of the shape check.
+    ///
+    /// Destructured exhaustively so a new keyword fails to compile rather than silently passing.
+    pub(crate) fn constrains_nothing(&self) -> bool {
+        let ValidationKeywords {
+            pattern,
+            minimum,
+            maximum,
+            exclusive_minimum,
+            exclusive_maximum,
+            multiple_of,
+            min_length,
+            max_length,
+            min_items,
+            max_items,
+            unique_items,
+            min_properties,
+            max_properties,
+            other,
+        } = self;
+        pattern.is_none()
+            && minimum.is_none()
+            && maximum.is_none()
+            && exclusive_minimum.is_none()
+            && exclusive_maximum.is_none()
+            && multiple_of.is_none()
+            && min_length.is_none()
+            && max_length.is_none()
+            && min_items.is_none()
+            && max_items.is_none()
+            && !*unique_items
+            && min_properties.is_none()
+            && max_properties.is_none()
+            && !*other
+    }
 }

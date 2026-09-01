@@ -4528,7 +4528,7 @@ fn lower_media_type(
     }
 }
 
-/// `opaque` answers, without lowering anything, whether an entry's body constrains no shape — the
+/// `opaque` answers, without lowering anything, whether an entry's body constrains nothing — the
 /// proof that an ignored alternative would decode exactly like the selection.
 fn choose_media<'a, T>(
     content: &'a IndexMap<String, T>,
@@ -4557,22 +4557,40 @@ fn choose_media<'a, T>(
         // generated. That narrows the documented surface — a server that also accepts XML will only
         // ever be sent JSON — so it is reported rather than dropped in silence.
         //
-        // An alternative that decodes to the very same thing narrows nothing, though. An
-        // opaque-octets body that constrains no shape is `bytes::Bytes`, so a ranged media response
-        // offering `video/*`, `audio/*` and `application/octet-stream` gives up nothing by
-        // generating one of them, and saying otherwise is noise on a common shape.
+        // An alternative that decodes to the very same thing narrows nothing, though. Two entries
+        // decode identically when they share a codec and both constrain nothing: a ranged media
+        // response offering `video/*`, `audio/*` and `application/octet-stream` is `bytes::Bytes`
+        // three times over, and `text/plain` beside `text/csv` is `String` twice. Saying a
+        // narrowing happened there is noise.
         //
-        // "Opaque" has to be proved, not assumed from the media type: an octet-classified
-        // alternative carrying an object schema would be *rejected* by the octet gate, not turned
-        // into bytes, so suppressing it would be the silent fourth behavior nothing is allowed.
+        // This is decided before anything is lowered, so type identity is proved structurally
+        // rather than by comparing lowered ids: within one codec, a body that constrains nothing
+        // has exactly one representation, so codec identity plus proven emptiness is that proof.
+        // Distinct codecs are never merged even when they happen to agree — `application/xml` and
+        // `application/json` both lower to the same struct, and a client that sends only JSON to a
+        // server offering both has still narrowed what the document promised.
+        //
+        // "Constrains nothing" has to be proved, not assumed from the media type: an
+        // octet-classified alternative carrying an object schema would be *rejected* by the octet
+        // gate, not turned into bytes, so suppressing it would be the silent fourth behavior
+        // nothing is allowed.
+        //
+        // The selection's own body has to reach that shared representation too. For every codec
+        // but octet-stream it must therefore constrain nothing itself — a `text/plain` body
+        // carrying a string enum lowers to a typed value rather than to `String`, so an opaque
+        // `text/csv` beside it really is a narrowing. Octet-stream is the exception, and it is one
+        // because of the gate rather than for convenience: the gate admits only bodies that
+        // collapse to `bytes::Bytes`, so every entry that survives it already shares the one
+        // representation.
+        let selection_is_canonical = classified == MediaType::OctetStream || opaque(value);
         let ignored: Vec<&str> = content
             .iter()
             .filter(|(candidate, _)| candidate.as_str() != media)
-            .filter(|(candidate, value)| {
-                classified != MediaType::OctetStream
-                    || !opaque(value)
+            .filter(|(candidate, candidate_value)| {
+                !selection_is_canonical
+                    || !opaque(candidate_value)
                     || classify_media(media_essence(candidate)).map(|(media, _)| media)
-                        != Some(MediaType::OctetStream)
+                        != Some(classified)
             })
             .map(|(candidate, _)| candidate.as_str())
             .collect();
@@ -4597,15 +4615,21 @@ fn choose_media<'a, T>(
     None
 }
 
-/// Whether a Media Type Object's body constrains no shape: no `schema` at all, or one that says
-/// nothing about the value's storage. On a binary media that is exactly `bytes::Bytes`.
+/// Whether a Media Type Object constrains nothing: no `schema` at all, or one that says nothing
+/// about the value. On a binary media that is exactly `bytes::Bytes`.
 ///
 /// A `$ref` is never taken as opaque — proving it would mean resolving it here, and answering
-/// "unknown" as "not opaque" only costs a warning that was already being reported.
+/// "unknown" as "not opaque" only costs a warning that was already being reported. That holds for
+/// both places a reference can appear: a `schema: {$ref: …}`, and a 3.2 Media Type Object that is
+/// *itself* a Reference Object, which parses with `schema: None` and would otherwise take the
+/// no-schema arm and be called opaque on the strength of a field the `$ref` spelling never sets.
 fn media_object_is_opaque(object: &MediaTypeObject) -> bool {
+    if object.reference.is_some() {
+        return false;
+    }
     match &object.schema {
         None => true,
-        Some(RefOr::Item(schema)) => schema.constrains_no_shape(),
+        Some(RefOr::Item(schema)) => schema.constrains_nothing(),
         Some(RefOr::Ref(_)) => false,
     }
 }
