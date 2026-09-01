@@ -9,11 +9,11 @@
 
 /// One runtime source file to embed into generated output.
 #[derive(Debug, Clone, Copy)]
-pub struct SupportFile {
+pub(crate) struct SupportFile {
     /// The emitted file/module name (e.g. `error.rs`).
-    pub name: &'static str,
+    pub(crate) name: &'static str,
     /// The verbatim source contents.
-    pub contents: &'static str,
+    pub(crate) contents: &'static str,
 }
 
 /// The runtime source files, embedded from the `support-runtime` crate via `include_str!`. Emitted
@@ -23,7 +23,7 @@ pub struct SupportFile {
 /// the canonical `support-runtime/src/*.rs` sources. That indirection keeps a single source of
 /// truth while ensuring `cargo publish` follows the links and ships the bytes *inside* the
 /// `spargen` crate — so the published crate is self-contained.
-pub fn runtime_files() -> &'static [SupportFile] {
+pub(crate) fn runtime_files() -> &'static [SupportFile] {
     const FILES: &[SupportFile] = &[
         SupportFile {
             name: "auth.rs",
@@ -79,7 +79,7 @@ pub fn runtime_files() -> &'static [SupportFile] {
 
 /// The streaming runtime, embedded only when an operation has a sequential response. It carries
 /// the only references to `futures-core` and reqwest's `stream` capability.
-pub fn stream_runtime_file() -> SupportFile {
+pub(crate) fn stream_runtime_file() -> SupportFile {
     SupportFile {
         name: "stream.rs",
         contents: include_str!("runtime/stream.rs"),
@@ -90,7 +90,7 @@ pub fn stream_runtime_file() -> SupportFile {
 /// body (see [`crate::ir::Api::uses_xml`]). Kept out of [`runtime_files`] so a non-XML output never
 /// carries the `quick-xml`-dependent module; its bytes still ship inside the published crate through
 /// the `runtime/xml.rs` symlink so any XML-using consumer gets self-contained output.
-pub fn xml_runtime_file() -> SupportFile {
+pub(crate) fn xml_runtime_file() -> SupportFile {
     SupportFile {
         name: "xml.rs",
         contents: include_str!("runtime/xml.rs"),
@@ -101,7 +101,7 @@ pub fn xml_runtime_file() -> SupportFile {
 /// `format: date` to a typed value (see [`crate::ir::Api::uses_time`] and the `time` config knob).
 /// Kept out of [`runtime_files`] so an output with no dates never carries a `time` reference; its
 /// bytes still ship inside the published crate through the `runtime/datetime.rs` symlink.
-pub fn datetime_runtime_file() -> SupportFile {
+pub(crate) fn datetime_runtime_file() -> SupportFile {
     SupportFile {
         name: "datetime.rs",
         contents: include_str!("runtime/datetime.rs"),
@@ -113,7 +113,7 @@ pub fn datetime_runtime_file() -> SupportFile {
 /// only when a consumer opts in. Kept out of [`runtime_files`] (which is embedded unconditionally
 /// with no cfg) because it must carry the `#[cfg(feature = "blocking")]` gate; its bytes ship inside
 /// the published crate through the `runtime/blocking.rs` symlink.
-pub fn blocking_runtime_file() -> SupportFile {
+pub(crate) fn blocking_runtime_file() -> SupportFile {
     SupportFile {
         name: "blocking.rs",
         contents: include_str!("runtime/blocking.rs"),

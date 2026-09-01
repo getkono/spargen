@@ -68,13 +68,13 @@ impl Dependency {
 /// The dependency capabilities referenced by one generated module.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RuntimeRequirements {
-    pub reqwest_json: bool,
-    pub reqwest_multipart: bool,
-    pub bytes_serde: bool,
-    pub streams: bool,
-    pub xml: bool,
-    pub uuid: bool,
-    pub time: bool,
+    pub(crate) reqwest_json: bool,
+    pub(crate) reqwest_multipart: bool,
+    pub(crate) bytes_serde: bool,
+    pub(crate) streams: bool,
+    pub(crate) xml: bool,
+    pub(crate) uuid: bool,
+    pub(crate) time: bool,
 }
 
 impl RuntimeRequirements {
@@ -225,8 +225,8 @@ pub(crate) fn manifest_from_env() -> Option<Utf8PathBuf> {
 }
 
 pub(crate) struct Audit {
-    pub diagnostics: Vec<Diagnostic>,
-    pub manifests: Vec<Utf8PathBuf>,
+    pub(crate) diagnostics: Vec<Diagnostic>,
+    pub(crate) manifests: Vec<Utf8PathBuf>,
 }
 
 pub(crate) fn cargo_directives(manifests: &[Utf8PathBuf]) {
@@ -450,7 +450,7 @@ impl std::fmt::Display for Requirements {
     }
 }
 
-pub fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
+pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
     let mut diagnostics = Vec::new();
     let mut manifests = vec![manifest_path.to_path_buf()];
     let manifest = match read_toml(manifest_path) {

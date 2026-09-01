@@ -9,7 +9,7 @@ use super::Diagnostic;
 /// `cap_reached` is what `Report::truncated` reports, so a run that hits `batch_cap` says so
 /// instead of presenting a partial list as a complete one.
 #[derive(Debug)]
-pub struct Diagnostics {
+pub(crate) struct Diagnostics {
     items: Vec<Diagnostic>,
     cap: usize,
     error_count: usize,
@@ -19,11 +19,11 @@ pub struct Diagnostics {
 /// A fatal-outcome marker returned when a pipeline stage recorded an error and cannot continue.
 /// The diagnostics themselves live in the [`Diagnostics`] batch; this only signals control flow.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Aborted;
+pub(crate) struct Aborted;
 
 impl Diagnostics {
     /// Create a collector retaining at most `cap` diagnostics.
-    pub fn new(cap: usize) -> Self {
+    pub(crate) fn new(cap: usize) -> Self {
         Self {
             items: Vec::new(),
             cap,
@@ -33,7 +33,7 @@ impl Diagnostics {
     }
 
     /// Record a diagnostic. Ignored once the cap is reached, but sets the cap-reached flag.
-    pub fn emit(&mut self, diagnostic: Diagnostic) {
+    pub(crate) fn emit(&mut self, diagnostic: Diagnostic) {
         if self
             .items
             .iter()
@@ -53,22 +53,22 @@ impl Diagnostics {
     }
 
     /// Whether the cap was reached and diagnostics past it were dropped.
-    pub fn cap_reached(&self) -> bool {
+    pub(crate) fn cap_reached(&self) -> bool {
         self.cap_reached
     }
 
     /// Whether any error-severity diagnostic has been recorded.
-    pub fn has_errors(&self) -> bool {
+    pub(crate) fn has_errors(&self) -> bool {
         self.error_count > 0
     }
 
     /// The collected diagnostics, in emission order.
-    pub fn items(&self) -> &[Diagnostic] {
+    pub(crate) fn items(&self) -> &[Diagnostic] {
         &self.items
     }
 
     /// Collapse to `Ok(value)` when no errors were recorded, else `Err(`[`Aborted`]`)`.
-    pub fn result<T>(&self, value: T) -> Result<T, Aborted> {
+    pub(crate) fn result<T>(&self, value: T) -> Result<T, Aborted> {
         if self.has_errors() {
             Err(Aborted)
         } else {

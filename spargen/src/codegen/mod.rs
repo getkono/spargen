@@ -13,19 +13,19 @@ use crate::ir::Api;
 use crate::name::Names;
 use quote::quote;
 
-pub use format::format_tokens;
+pub(crate) use format::format_tokens;
 
 /// Options controlling code generation. The `uuid`/`time` flags mirror the emitted crate's
 /// features: when off, the corresponding `format` mappings fall back to `String`.
 #[derive(Debug, Clone)]
 pub(crate) struct CodegenOptions {
     /// Map `format: uuid` to `uuid::Uuid` (else `String`).
-    pub feature_uuid: bool,
+    pub(crate) feature_uuid: bool,
     /// Map `format: date-time`/`date` to the `time` crate (else `String`).
-    pub feature_time: bool,
+    pub(crate) feature_time: bool,
     /// Max bytes of a response body retained on error variants; stamped into the
     /// generated client's default configuration.
-    pub error_body_cap: usize,
+    pub(crate) error_body_cap: usize,
 }
 
 impl Default for CodegenOptions {
@@ -42,14 +42,14 @@ impl Default for CodegenOptions {
 #[derive(Debug, Clone)]
 pub(crate) struct GeneratedFile {
     /// The formatted source.
-    pub contents: String,
+    pub(crate) contents: String,
 }
 
 /// The complete generated code for one client (models, client, embedded support).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct GeneratedCode {
     /// The generated files, in deterministic order.
-    pub files: Vec<GeneratedFile>,
+    pub(crate) files: Vec<GeneratedFile>,
 }
 
 /// Generate the Rust source for a client from the IR and allocated names.

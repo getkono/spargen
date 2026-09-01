@@ -8,29 +8,29 @@ mod header;
 
 use crate::codegen::{GeneratedCode, GeneratedFile};
 
-pub use header::provenance_header;
+pub(crate) use header::provenance_header;
 
 /// Identity of the source spec, stamped into the provenance header.
 #[derive(Debug, Clone)]
 pub(crate) struct SpecMeta {
     /// A description of the source spec (path or URL as vendored).
-    pub source: String,
+    pub(crate) source: String,
     /// The spargen version that produced the output.
-    pub spargen_version: String,
+    pub(crate) spargen_version: String,
 }
 
 /// Options for one emission.
 #[derive(Debug, Clone)]
 pub(crate) struct EmitOptions {
     /// Spec provenance to stamp.
-    pub spec: SpecMeta,
+    pub(crate) spec: SpecMeta,
 }
 
 /// A fully-rendered emission plan with its final on-disk contents and provenance header.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EmitPlan {
     /// The files to write, in deterministic order.
-    pub files: Vec<GeneratedFile>,
+    pub(crate) files: Vec<GeneratedFile>,
 }
 
 /// An emission failure.
