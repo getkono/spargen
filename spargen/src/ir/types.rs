@@ -7,18 +7,18 @@ use super::Docs;
 /// A stable, dense identifier for a type in the [`TypeGraph`]. Ordered so codegen can emit items
 /// deterministically regardless of input map ordering.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct TypeId(pub u32);
+pub(crate) struct TypeId(pub(crate) u32);
 
 /// The graph of named/derived types the API references. Owns every [`TypeDef`]; a [`Ty`] is a
 /// lightweight reference into it.
 #[derive(Debug, Clone, Default)]
-pub struct TypeGraph {
+pub(crate) struct TypeGraph {
     defs: IndexMap<TypeId, TypeDef>,
 }
 
 impl TypeGraph {
     /// Insert a definition and return its stable id.
-    pub fn insert(&mut self, def: TypeDef) -> TypeId {
+    pub(crate) fn insert(&mut self, def: TypeDef) -> TypeId {
         let id = TypeId(self.defs.len() as u32);
         self.defs.insert(id, def);
         id
@@ -32,7 +32,7 @@ impl TypeGraph {
     /// recursive schema generates a finite Rust type instead of being rejected. Every reserved id
     /// must be filled before it can be emitted; the placeholder is a valid (if meaningless) def so
     /// a leak on an already-failing (rejected) lowering is harmless rather than a sentinel.
-    pub fn reserve(&mut self) -> TypeId {
+    pub(crate) fn reserve(&mut self) -> TypeId {
         self.insert(TypeDef {
             name_hint: String::new(),
             kind: TypeKind::Any,
@@ -43,7 +43,7 @@ impl TypeGraph {
 
     /// Replace the def at an already-present id (typically a [`reserve`](Self::reserve)d
     /// placeholder). The id's position — and therefore [`iter`](Self::iter) order — is preserved.
-    pub fn fill(&mut self, id: TypeId, def: TypeDef) {
+    pub(crate) fn fill(&mut self, id: TypeId, def: TypeDef) {
         debug_assert!(self.defs.contains_key(&id), "fill of an unreserved id");
         self.defs.insert(id, def);
     }
@@ -51,51 +51,51 @@ impl TypeGraph {
     /// Remove and return the most recently inserted `(id, def)` pair. Used to lift a component
     /// root — always the last def inserted while lowering its body — into its reserved id, which
     /// keeps ids dense (the freed id is immediately reused by the next insert).
-    pub fn pop_last(&mut self) -> Option<(TypeId, TypeDef)> {
+    pub(crate) fn pop_last(&mut self) -> Option<(TypeId, TypeDef)> {
         self.defs.pop()
     }
 
     /// The definition for `id`, if present.
-    pub fn get(&self, id: TypeId) -> Option<&TypeDef> {
+    pub(crate) fn get(&self, id: TypeId) -> Option<&TypeDef> {
         self.defs.get(&id)
     }
 
     /// A mutable borrow of the definition for `id`, for in-place post-lowering adjustments that do
     /// not change ids or insertion order (e.g. suppressing an XML field rename on a shared type).
-    pub fn get_mut(&mut self, id: TypeId) -> Option<&mut TypeDef> {
+    pub(crate) fn get_mut(&mut self, id: TypeId) -> Option<&mut TypeDef> {
         self.defs.get_mut(&id)
     }
 
     /// Iterate `(id, def)` pairs in insertion order.
-    pub fn iter(&self) -> impl Iterator<Item = (TypeId, &TypeDef)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (TypeId, &TypeDef)> {
         self.defs.iter().map(|(id, def)| (*id, def))
     }
 }
 
 /// A named or structurally-derived type definition.
 #[derive(Debug, Clone)]
-pub struct TypeDef {
+pub(crate) struct TypeDef {
     /// The preferred wire/spec name; the Rust identifier is allocated later by `name`.
-    pub name_hint: String,
+    pub(crate) name_hint: String,
     /// The type's structure.
-    pub kind: TypeKind,
+    pub(crate) kind: TypeKind,
     /// Documentation lowered to rustdoc.
-    pub docs: Docs,
+    pub(crate) docs: Docs,
     /// Where the type came from.
-    pub provenance: Provenance,
+    pub(crate) provenance: Provenance,
 }
 
 /// A reference to a type, plus the two shape modifiers that ride on a use site rather than the
 /// definition: nullability (from `"null"` in a type array) and boxing (to break `$ref` cycles →
 /// `Box`, matrix: Schema shape).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Ty {
+pub(crate) struct Ty {
     /// The referenced definition.
-    pub id: TypeId,
+    pub(crate) id: TypeId,
     /// Whether `null` is an accepted value (`Option<T>`).
-    pub nullable: bool,
+    pub(crate) nullable: bool,
     /// Whether the reference must be boxed to break a type cycle.
-    pub boxed: bool,
+    pub(crate) boxed: bool,
 }
 
 /// The structure of a [`TypeDef`].
@@ -105,7 +105,7 @@ pub struct Ty {
 ///
 /// [`Any`]: TypeKind::Any
 #[derive(Debug, Clone)]
-pub enum TypeKind {
+pub(crate) enum TypeKind {
     /// A scalar primitive.
     Primitive(Prim),
     /// An object with named fields.
@@ -134,26 +134,26 @@ pub enum TypeKind {
 /// Dispatch uses discriminator tags / unique JSON categories, statically disjoint features, or
 /// typed trial matching with the source applicator's exact semantics.
 #[derive(Debug, Clone)]
-pub struct Union {
+pub(crate) struct Union {
     /// The variants, in spec (source) order.
-    pub variants: Vec<UnionVariant>,
+    pub(crate) variants: Vec<UnionVariant>,
     /// How the union is (de)serialized.
-    pub strategy: UnionStrategy,
+    pub(crate) strategy: UnionStrategy,
 }
 
 /// One variant of a [`Union`]: a name hint (allocated to a Rust variant identifier by `name`) and
 /// the variant's payload type.
 #[derive(Debug, Clone)]
-pub struct UnionVariant {
+pub(crate) struct UnionVariant {
     /// The preferred variant name; the Rust identifier is allocated by `name` (keyed by this hint).
-    pub name_hint: String,
+    pub(crate) name_hint: String,
     /// The variant's payload type.
-    pub ty: Ty,
+    pub(crate) ty: Ty,
 }
 
 /// The (de)serialization strategy of a [`Union`].
 #[derive(Debug, Clone)]
-pub enum UnionStrategy {
+pub(crate) enum UnionStrategy {
     /// A `discriminator` → a custom `Deserialize`/`Serialize` that reads/writes the tag field on a
     /// buffered `serde_json::Value` (NOT serde's `#[serde(tag = ...)]`, which would consume the tag
     /// out of the buffer and break variants that declare the discriminator as a required property).
@@ -190,7 +190,7 @@ pub enum UnionStrategy {
 
 /// Runtime matching semantics for an overlapping typed union.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum UnionMode {
+pub(crate) enum UnionMode {
     /// Exactly one variant must deserialize successfully.
     OneOf,
     /// One or more variants may match; the most specific typed match is selected.
@@ -200,7 +200,7 @@ pub enum UnionMode {
 /// The statically-proven feature that selects a [`UnionStrategy::Disjoint`] variant when inspecting
 /// a buffered `serde_json::Value`.
 #[derive(Debug, Clone)]
-pub enum DisjointFeature {
+pub(crate) enum DisjointFeature {
     /// The variant occupies a distinct JSON primitive category (dispatch on `Value::is_*`).
     JsonType(JsonCategory),
     /// The variant is an object carrying a required property whose name appears in no other variant
@@ -211,7 +211,7 @@ pub enum DisjointFeature {
 /// A JSON primitive category for disjointness by JSON type. `number` and `integer` share
 /// [`Number`](JsonCategory::Number) — they overlap on the wire, so they are never disjoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JsonCategory {
+pub(crate) enum JsonCategory {
     /// A JSON string.
     String,
     /// A JSON number (integer or floating-point).
@@ -227,7 +227,7 @@ pub enum JsonCategory {
 /// A scalar primitive. Numeric wire types map to fixed Rust scalars; `format`-based type mappings
 /// are feature-gated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Prim {
+pub(crate) enum Prim {
     /// `boolean`.
     Bool,
     /// `string`.
@@ -250,34 +250,34 @@ pub enum Prim {
 
 /// An object type: named fields plus an `additionalProperties` policy.
 #[derive(Debug, Clone)]
-pub struct Struct {
+pub(crate) struct Struct {
     /// The declared properties, in deterministic order.
-    pub fields: Vec<Field>,
+    pub(crate) fields: Vec<Field>,
     /// How unknown properties are handled.
-    pub additional: AdditionalProps,
+    pub(crate) additional: AdditionalProps,
 }
 
 /// A single object field.
 #[derive(Debug, Clone)]
-pub struct Field {
+pub(crate) struct Field {
     /// The wire property name.
-    pub name: PropertyName,
+    pub(crate) name: PropertyName,
     /// The field's type.
-    pub ty: Ty,
+    pub(crate) ty: Ty,
     /// Whether the property is `required`.
-    pub required: bool,
+    pub(crate) required: bool,
     /// `deprecated` → `#[deprecated]`.
-    pub deprecated: bool,
+    pub(crate) deprecated: bool,
     /// `readOnly` annotation (W-class, surfaced in rustdoc).
-    pub read_only: bool,
+    pub(crate) read_only: bool,
     /// `writeOnly` annotation (W-class, surfaced in rustdoc).
-    pub write_only: bool,
+    pub(crate) write_only: bool,
     /// The JSON Schema `default` disposition, if the field declared one. `None` when the field has
     /// no `default`.
-    pub default: Option<FieldDefault>,
+    pub(crate) default: Option<FieldDefault>,
     /// XML representation hints (`xml.name` / `xml.attribute`) applied when the field's owning type
     /// is serialized as XML. Default (no hint) leaves the field's normal wire name and element form.
-    pub xml: XmlField,
+    pub(crate) xml: XmlField,
 }
 
 /// The supported XML representation hints for a struct field, lowered from the OpenAPI `xml` object.
@@ -286,24 +286,24 @@ pub struct Field {
 /// lowering and otherwise ignored. Applied via serde `rename` at emit time — attributes use
 /// quick-xml's `@name` convention.
 #[derive(Debug, Clone, Default)]
-pub struct XmlField {
+pub(crate) struct XmlField {
     /// `xml.name`: the wire element (or attribute) name, overriding the property name.
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
     /// `xml.attribute: true`: serialize this field as an XML attribute (`@name`) rather than a child
     /// element.
-    pub attribute: bool,
+    pub(crate) attribute: bool,
     /// XML hints that change the wire but have no faithful mapping — `namespace`, `prefix`,
     /// `wrapped`, and the 3.2 node types other than `element`/`attribute`. Their disposition
     /// depends on whether the owning type is ever serialized as XML, which is only known once the
     /// whole type graph exists, so it is decided after lowering.
-    pub unsupported: Vec<String>,
+    pub(crate) unsupported: Vec<String>,
 }
 
 impl XmlField {
     /// The effective serde wire name for this field under XML: the `xml.name` override (or the given
     /// property wire name), prefixed with `@` when the field is an attribute. Returns `None` when no
     /// XML hint applies, so codegen keeps the plain property wire name.
-    pub fn wire_override(&self, property_wire: &str) -> Option<String> {
+    pub(crate) fn wire_override(&self, property_wire: &str) -> Option<String> {
         if self.name.is_none() && !self.attribute {
             return None;
         }
@@ -326,18 +326,18 @@ impl XmlField {
 /// * a non-representable default (object/array/null/heterogeneous or scalar-type mismatch),
 ///   documented in rustdoc and reported once as `W005` during lowering (`applied` is `None`).
 #[derive(Debug, Clone)]
-pub struct FieldDefault {
+pub(crate) struct FieldDefault {
     /// The rustdoc note line describing the default (e.g. ``Default: `active`.``).
-    pub doc_note: String,
+    pub(crate) doc_note: String,
     /// The scalar to wire through a generated serde default provider, when the default is
     /// representable *and* the field is a plain optional (non-required, non-nullable) scalar.
-    pub applied: Option<DefaultValue>,
+    pub(crate) applied: Option<DefaultValue>,
 }
 
 /// A representable scalar `default`, carried so codegen can render it as a correct Rust literal for
 /// the field's Rust type.
 #[derive(Debug, Clone, PartialEq)]
-pub enum DefaultValue {
+pub(crate) enum DefaultValue {
     /// A boolean literal.
     Bool(bool),
     /// An integer literal (rendered unsuffixed so it infers to the field's `i32`/`i64`).
@@ -353,7 +353,7 @@ pub enum DefaultValue {
 
 /// The `additionalProperties` policy of a [`Struct`] (matrix: Schema shape).
 #[derive(Debug, Clone)]
-pub enum AdditionalProps {
+pub(crate) enum AdditionalProps {
     /// `additionalProperties: false` → `#[serde(deny_unknown_fields)]`.
     Deny,
     /// `additionalProperties: true` / absent → unknown fields ignored.
@@ -365,24 +365,24 @@ pub enum AdditionalProps {
 /// A wire property name. The Rust identifier is allocated separately by `name`; keeping
 /// the wire name here means the IR stays language-agnostic.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct PropertyName {
+pub(crate) struct PropertyName {
     /// The exact property name as it appears on the wire.
-    pub wire: String,
+    pub(crate) wire: String,
 }
 
 /// A homogeneous scalar enumeration generated from `enum`/`const` over a single scalar kind.
 /// Heterogeneous or structured value sets are R-rejected.
 #[derive(Debug, Clone)]
-pub struct ScalarEnum {
+pub(crate) struct ScalarEnum {
     /// The shared scalar kind of every variant.
-    pub repr: ScalarRepr,
+    pub(crate) repr: ScalarRepr,
     /// The variant wire values, in declared order.
-    pub variants: Vec<ScalarValue>,
+    pub(crate) variants: Vec<ScalarValue>,
 }
 
 /// The scalar kind backing a [`ScalarEnum`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScalarRepr {
+pub(crate) enum ScalarRepr {
     /// All-string value set.
     String,
     /// All-integer value set.
@@ -393,7 +393,7 @@ pub enum ScalarRepr {
 
 /// A concrete scalar value (an `enum` member or `const`).
 #[derive(Debug, Clone, PartialEq)]
-pub enum ScalarValue {
+pub(crate) enum ScalarValue {
     /// A boolean value.
     Bool(bool),
     /// An integer value.

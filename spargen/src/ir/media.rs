@@ -2,7 +2,7 @@ use super::{ParamStyle, Ty};
 
 /// The wire codec selected for a supported request/response media type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MediaType {
+pub(crate) enum MediaType {
     /// `application/json` (canonical).
     Json,
     /// `application/x-www-form-urlencoded`.
@@ -32,7 +32,7 @@ pub enum MediaType {
 
 impl MediaType {
     /// The stream framing for a streaming response media type, or `None` for a non-streaming media.
-    pub fn stream_framing(self) -> Option<Framing> {
+    pub(crate) fn stream_framing(self) -> Option<Framing> {
         match self {
             MediaType::EventStream => Some(Framing::Sse),
             MediaType::Ndjson => Some(Framing::Ndjson),
@@ -45,7 +45,7 @@ impl MediaType {
 /// How a streaming response body is framed into typed items. Mirrors the runtime `Framing` enum;
 /// codegen maps each variant to its `support::Framing` counterpart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Framing {
+pub(crate) enum Framing {
     /// Server-Sent Events (`text/event-stream`).
     Sse,
     /// Standards-compliant SSE events converted to JSON objects before schema deserialization.
@@ -61,38 +61,38 @@ pub enum Framing {
 
 /// A request body (matrix: Bodies).
 #[derive(Debug, Clone)]
-pub struct RequestBody {
+pub(crate) struct RequestBody {
     /// The body media type.
-    pub media: MediaType,
+    pub(crate) media: MediaType,
     /// The selected content type essence, preserved for the emitted `Content-Type` header.
-    pub content_type: String,
+    pub(crate) content_type: String,
     /// The body's type, or `None` for an untyped/byte body.
-    pub ty: Option<Ty>,
+    pub(crate) ty: Option<Ty>,
     /// Whether the body is `required`. A required body is a plain argument; an optional one is
     /// passed as `Option<&T>` and omitted from the request when absent.
-    pub required: bool,
+    pub(crate) required: bool,
     /// Per-property wire encoding for a form or multipart body. Always fully resolved — one entry
     /// per body property, in field order — so the runtime never has to infer a default.
-    pub encoding: BodyEncoding,
+    pub(crate) encoding: BodyEncoding,
 }
 
 /// Per-property wire encoding for an `application/x-www-form-urlencoded` or
 /// `multipart/form-data` request body (matrix: Media → Encoding Object).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct BodyEncoding {
+pub(crate) struct BodyEncoding {
     /// One entry per body-schema property, in the body struct's field order.
-    pub properties: Vec<PropertyEncoding>,
+    pub(crate) properties: Vec<PropertyEncoding>,
 }
 
 /// How one property of a form or multipart body is rendered.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PropertyEncoding {
+pub(crate) struct PropertyEncoding {
     /// The wire property name — the form field name, or the multipart part name.
-    pub name: String,
-    pub mode: EncodingMode,
+    pub(crate) name: String,
+    pub(crate) mode: EncodingMode,
     /// Literal extra part headers (multipart only), with `Content-Type` already removed because
     /// the specification describes it separately.
-    pub headers: Vec<(String, String)>,
+    pub(crate) headers: Vec<(String, String)>,
 }
 
 /// The Encoding Object's mode switch.
@@ -101,7 +101,7 @@ pub struct PropertyEncoding {
 /// selects RFC 6570 query-style serialization and makes `contentType` inert, while all three
 /// absent selects media-type serialization under `contentType` (explicit or defaulted).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EncodingMode {
+pub(crate) enum EncodingMode {
     /// Media-type mode: the value is rendered in `content_type` by `codec`.
     Media {
         /// The single concrete media type this property is sent as.
@@ -120,7 +120,7 @@ pub enum EncodingMode {
 
 /// A response status selector (matrix: Responses).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatusSpec {
+pub(crate) enum StatusSpec {
     /// An exact status code, e.g. `200`.
     Exact(u16),
     /// A status range by leading digit, e.g. `Range(2)` for `2XX`.
@@ -129,7 +129,7 @@ pub enum StatusSpec {
 
 impl StatusSpec {
     /// Whether the selector covers only success (2xx) statuses.
-    pub fn is_success(self) -> bool {
+    pub(crate) fn is_success(self) -> bool {
         match self {
             StatusSpec::Exact(code) => (200..300).contains(&code),
             StatusSpec::Range(prefix) => prefix == 2,
@@ -140,44 +140,44 @@ impl StatusSpec {
 /// A typed response for one status selector. Documented headers get typed accessors; every header
 /// stays reachable raw through `ResponseValue::headers`.
 #[derive(Debug, Clone)]
-pub struct Response {
+pub(crate) struct Response {
     /// The response body type, if any.
-    pub body: Option<Ty>,
+    pub(crate) body: Option<Ty>,
     /// The chosen body media type, or `None` for a bodyless response. Codegen routes the decode by
     /// this (e.g. XML/text/binary bodies use their own codecs rather than serde_json).
-    pub media: Option<MediaType>,
+    pub(crate) media: Option<MediaType>,
     /// For a streaming response (chosen media `text/event-stream` or `application/x-ndjson`), the
     /// framing of the streamed items; `None` for a whole-body response. The `body` is the item
     /// type `T` when this is `Some`.
-    pub stream: Option<Framing>,
+    pub(crate) stream: Option<Framing>,
     /// Documented response headers, in source order. A `Content-Type` entry is dropped during
     /// lowering, because the specification says it is ignored.
-    pub headers: Vec<ResponseHeader>,
+    pub(crate) headers: Vec<ResponseHeader>,
 }
 
 /// One documented response header.
 #[derive(Debug, Clone)]
-pub struct ResponseHeader {
+pub(crate) struct ResponseHeader {
     /// The header name, as declared.
-    pub name: String,
+    pub(crate) name: String,
     /// The value type.
-    pub ty: Ty,
+    pub(crate) ty: Ty,
     /// Whether the header is documented as always present.
-    pub required: bool,
+    pub(crate) required: bool,
     /// `explode` for the `simple` style; the default is `false`.
-    pub explode: bool,
+    pub(crate) explode: bool,
     /// The wire shape, derived from `ty` — `simple` is lossy, so the shape cannot be recovered
     /// from the text and must travel with it.
-    pub shape: HeaderShape,
+    pub(crate) shape: HeaderShape,
     /// `deprecated` → `#[deprecated]` on the accessor field.
-    pub deprecated: bool,
+    pub(crate) deprecated: bool,
     /// Documentation carried onto the generated field.
-    pub docs: super::Docs,
+    pub(crate) docs: super::Docs,
 }
 
 /// The wire shape of a documented header value. Mirrors the runtime enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeaderShape {
+pub(crate) enum HeaderShape {
     /// A single scalar.
     Scalar,
     /// A comma-separated list.
@@ -193,11 +193,11 @@ pub enum HeaderShape {
 
 /// The full set of responses for an operation: per-status entries plus an optional `default`.
 #[derive(Debug, Clone)]
-pub struct Responses {
+pub(crate) struct Responses {
     /// Per-status responses, most-specific first (exact before range).
-    pub by_status: Vec<(StatusSpec, Response)>,
+    pub(crate) by_status: Vec<(StatusSpec, Response)>,
     /// The `default` response, if declared.
-    pub default: Option<Response>,
+    pub(crate) default: Option<Response>,
 }
 
 impl Responses {
@@ -207,7 +207,7 @@ impl Responses {
     /// enum whose entries are sorted into decode precedence (exact code ascending, then range
     /// ascending, then `default` last) and which also carries any documented bodyless success
     /// status as a payload-free unit variant, so no documented status is silently dropped.
-    pub fn success(&self) -> SuccessShape {
+    pub(crate) fn success(&self) -> SuccessShape {
         // A default with no explicit status entries is the operation's single success body.
         if self.by_status.is_empty() {
             return match self.default.as_ref().and_then(|default| default.body) {
@@ -240,7 +240,7 @@ impl Responses {
     /// returns `EventStream<T>` in place of `ResponseValue<T>`. A JSON alternative on the same
     /// response wins during media selection (see `choose_media`), so it never reaches here as a
     /// stream. Multiple bodied success statuses fall back to the normal (non-streaming) shape.
-    pub fn stream_success(&self) -> Option<(Framing, Ty)> {
+    pub(crate) fn stream_success(&self) -> Option<(Framing, Ty)> {
         let responses = self.success_responses();
         let mut bodied = responses
             .into_iter()
@@ -258,7 +258,7 @@ impl Responses {
     /// The media type of the operation's single bodied success response, when exactly one success
     /// response carries a body (i.e. [`Self::success`] is [`SuccessShape::Plain`]). Codegen uses this
     /// to route the success decode. `None` when there is no single bodied success.
-    pub fn single_success_media(&self) -> Option<MediaType> {
+    pub(crate) fn single_success_media(&self) -> Option<MediaType> {
         let mut bodied = self
             .success_responses()
             .into_iter()
@@ -272,7 +272,7 @@ impl Responses {
     /// The media type of the operation's single bodied error response, when exactly one error
     /// response carries a body (i.e. [`Self::error`] is [`ErrorShape::Single`]). Codegen uses this to
     /// route the error-body classification. `None` when there is no single bodied error.
-    pub fn single_error_media(&self) -> Option<MediaType> {
+    pub(crate) fn single_error_media(&self) -> Option<MediaType> {
         let mut bodied = self
             .error_responses()
             .into_iter()
@@ -287,7 +287,7 @@ impl Responses {
     /// (two or more bodied success or error statuses). XML decode is scoped to the single-body
     /// success/error paths, so this exotic combination is rejected cleanly during lowering (narrowed
     /// `E009`) rather than silently mis-decoding an XML body as JSON.
-    pub fn xml_in_multi_status(&self) -> bool {
+    pub(crate) fn xml_in_multi_status(&self) -> bool {
         let is_xml = |response: &&Response| response.media == Some(MediaType::Xml);
         let success_multi = matches!(self.success(), SuccessShape::Enum(_))
             && self.success_responses().iter().any(is_xml);
@@ -330,7 +330,7 @@ impl Responses {
     /// precedence (exact code ascending, then range ascending, then `default` — the `Range(0)`
     /// sentinel — last) and carrying any documented bodyless error status as a unit variant.
     /// `default` contributes here (as `Range(0)`) whenever it is not the sole success source.
-    pub fn error(&self) -> ErrorShape {
+    pub(crate) fn error(&self) -> ErrorShape {
         let mut entries: Vec<(StatusSpec, Option<Ty>)> = Vec::new();
         for (status, response) in &self.by_status {
             if !is_success_status(*status) {
@@ -387,7 +387,7 @@ fn is_success_status(status: StatusSpec) -> bool {
 
 /// The success return type of an operation (before wrapping in `ResponseValue<T>`).
 #[derive(Debug, Clone)]
-pub enum SuccessShape {
+pub(crate) enum SuccessShape {
     /// No success body.
     Unit,
     /// A single success body type.
@@ -401,7 +401,7 @@ pub enum SuccessShape {
 
 /// The typed error body `E` of an operation (matrix: Responses).
 #[derive(Debug, Clone)]
-pub enum ErrorShape {
+pub(crate) enum ErrorShape {
     /// No documented error body.
     None,
     /// A single documented error body type.

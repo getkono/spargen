@@ -1,6 +1,6 @@
 /// A security-scheme identifier (`components.securitySchemes` key).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SchemeId(pub String);
+pub(crate) struct SchemeId(pub(crate) String);
 
 /// A declared security scheme: how a credential attaches, plus the documentation the specification
 /// lets the scheme carry.
@@ -9,17 +9,17 @@ pub struct SchemeId(pub String);
 /// what to register and needs to know the token format, the flows that mint one, and whether the
 /// scheme is deprecated.
 #[derive(Debug, Clone)]
-pub struct SecuritySchemeDef {
+pub(crate) struct SecuritySchemeDef {
     /// How a credential for this scheme attaches to a request.
-    pub kind: SecurityScheme,
+    pub(crate) kind: SecurityScheme,
     /// Ready-to-render rustdoc lines, in display order. Empty when the scheme documents nothing.
-    pub docs: Vec<String>,
+    pub(crate) docs: Vec<String>,
 }
 
 /// A security scheme (matrix: Security). `http`/`apiKey` are fully plumbed; `oauth2`/`oidc` are
 /// W-class — the scheme metadata is retained but tokens are supplied by the caller.
 #[derive(Debug, Clone)]
-pub enum SecurityScheme {
+pub(crate) enum SecurityScheme {
     /// `http` scheme (`bearer` or `basic`).
     Http(HttpScheme),
     /// `apiKey` scheme carried in a header, query parameter, or cookie.
@@ -41,7 +41,7 @@ pub enum SecurityScheme {
 
 /// The `http` scheme kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HttpScheme {
+pub(crate) enum HttpScheme {
     /// `scheme: bearer`.
     Bearer,
     /// `scheme: basic`.
@@ -50,7 +50,7 @@ pub enum HttpScheme {
 
 /// Where an `apiKey` is carried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ApiKeyLoc {
+pub(crate) enum ApiKeyLoc {
     Header,
     Query,
     Cookie,
@@ -59,4 +59,4 @@ pub enum ApiKeyLoc {
 /// One operation-level `security` requirement: an AND of schemes (each with its required scopes).
 /// A list of these on an operation is an OR of alternatives.
 #[derive(Debug, Clone)]
-pub struct SecurityRequirement(pub Vec<(SchemeId, Vec<String>)>);
+pub(crate) struct SecurityRequirement(pub(crate) Vec<(SchemeId, Vec<String>)>);

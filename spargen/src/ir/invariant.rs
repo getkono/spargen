@@ -16,7 +16,7 @@ use super::{AdditionalProps, Api, Ty, TypeKind};
 /// document in hand and the diagnostics to point at it: discriminator property existence
 /// (`E007`, in `oas31::lower`), path-parameter/path-template agreement (`E011`, likewise), and
 /// unique operation IDs (`E011`).
-pub fn check_invariants(api: &Api, diags: &mut Diagnostics) {
+pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
     for operation in &api.operations {
         for parameter in &operation.params {
             check_ty(
