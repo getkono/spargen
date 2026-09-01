@@ -10,8 +10,8 @@
 //!
 //! The crate is internally partitioned into subsystems with a declared dependency DAG. Each
 //! subsystem module records its allowed dependencies in a machine-readable `//! layer-deps:`
-//! header; the future `xtask lint-layers` job diffs those declarations against the actual
-//! inter-module `use` edges and fails on any edge not in the table below.
+//! header; `spargen/tests/layering.rs` diffs those declarations against the actual inter-module
+//! `use` edges and fails on any edge not in the table below.
 //!
 //! | Subsystem | May depend on |
 //! |-----------|---------------|
@@ -33,7 +33,7 @@
 //! `surface` reads the lowered API for `diff` and never feeds generation.
 //!
 //! `cache`, `config`, and `runtime_contract` are facade plumbing rather than subsystems: they say
-//! so in their own module docs and carry no `layer-deps:` header for the lint to check.
+//! so in their own module docs and carry no `layer-deps:` header, so the lint skips them.
 
 mod diag;
 
@@ -1057,6 +1057,67 @@ mod tests {
             .iter()
             .map(|diagnostic| diagnostic.code.as_str())
             .collect()
+    }
+
+    /// Build a report with no diagnostics and the given outcome.
+    fn report(outcome: Outcome) -> Report {
+        Report {
+            diagnostics: Vec::new(),
+            outcome,
+            truncated: false,
+        }
+    }
+
+    /// `wrote_output` distinguishes a run that rewrote the file from one that did not. `Cached` is
+    /// the case that matters: it is a success, but nothing was written, and a build script keying
+    /// off it would otherwise re-run work on every warm build.
+    #[test]
+    fn only_a_generated_outcome_reports_that_output_was_written() {
+        assert!(Outcome::Generated.wrote_output());
+
+        for quiet in [Outcome::Cached, Outcome::Clean, Outcome::Rejected] {
+            assert!(
+                !quiet.wrote_output(),
+                "{quiet} must not claim it wrote output"
+            );
+        }
+
+        // `wrote_output` is narrower than `is_success`: `Cached` and `Clean` are both successes
+        // that wrote nothing, so one is never a substitute for the other.
+        assert!(Outcome::Cached.is_success() && !Outcome::Cached.wrote_output());
+        assert!(Outcome::Clean.is_success() && !Outcome::Clean.wrote_output());
+    }
+
+    /// `into_result` is the `?` form of `succeeded`, so it has to split on exactly what `succeeded`
+    /// splits on — including an error-severity diagnostic under a non-`Rejected` outcome, which is
+    /// the case a bare `outcome` check misses.
+    #[test]
+    fn into_result_agrees_with_succeeded_and_preserves_the_report() {
+        let generated = report(Outcome::Generated);
+        let diagnostics = generated.diagnostics().len();
+        let recovered = generated.into_result().expect("a clean run is Ok");
+        assert_eq!(recovered.outcome(), Outcome::Generated);
+        assert_eq!(recovered.diagnostics().len(), diagnostics);
+
+        // A rejection is Err, and the report survives so the caller can render it.
+        let rejected = report(Outcome::Rejected)
+            .into_result()
+            .expect_err("a rejected run is Err");
+        assert_eq!(rejected.outcome(), Outcome::Rejected);
+
+        // Errors reported without a rejection still fail: `succeeded` checks both halves.
+        let provenance = diag::Provenance::new(JsonPointer::root(), None);
+        let with_error = Report {
+            diagnostics: vec![
+                Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance)
+                    .message("an error under a non-rejecting outcome")
+                    .build(),
+            ],
+            outcome: Outcome::Generated,
+            truncated: false,
+        };
+        assert!(!with_error.succeeded());
+        assert!(with_error.into_result().is_err());
     }
 
     /// A rejection announced as a warning looks like the diagnostics that do *not* stop

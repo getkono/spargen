@@ -1,9 +1,9 @@
 //! Structural invariants CLAUDE.md states but nothing checked: the subsystem layering DAG, the
 //! shape of the embedded runtime sources, and the file list that embeds them.
 //!
-//! `lib.rs` promises that "the future `xtask lint-layers` job diffs those declarations against the
-//! actual inter-module `use` edges". The `xtask` member is still reserved, so until it exists the
-//! diff happens here — it needs no new workspace member and runs under the ordinary `test` gate.
+//! `lib.rs` promises that the declarations are diffed against the actual inter-module `use` edges.
+//! This suite is where that happens: it needs no extra workspace member and runs under the
+//! ordinary `test` gate.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
