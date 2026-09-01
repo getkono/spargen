@@ -4,7 +4,7 @@ use quote::ToTokens;
 /// A validated Rust identifier. Every `Ident` is a legal Rust identifier — raw-escaped (`r#type`)
 /// where that is legal, trailing-underscore otherwise — so codegen can splice it directly.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Ident(String);
+pub(crate) struct Ident(String);
 
 impl Ident {
     /// Construct an identifier from already-validated text.
@@ -13,7 +13,7 @@ impl Ident {
     }
 
     /// The identifier text (including any `r#` prefix).
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 }

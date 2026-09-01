@@ -15,9 +15,9 @@ use super::{parse_json, parse_yaml, SpannedValue};
 #[derive(Debug, Clone)]
 pub(crate) struct SourceFile {
     /// Path as loaded (relative to the bundle root, or the vendored path for a remote document).
-    pub path: Utf8PathBuf,
+    pub(crate) path: Utf8PathBuf,
     /// Exact bytes parsed from disk, retained for build-input fingerprinting.
-    pub bytes: Arc<[u8]>,
+    pub(crate) bytes: Arc<[u8]>,
 }
 
 /// Where a loaded file came from — used to resolve refs that appear *inside* it. A relative ref in a
@@ -35,7 +35,7 @@ enum Origin {
 /// unpinned remote ref is rejected with a narrowed `E003` (run `spargen lock`), and a vendored copy
 /// whose bytes disagree with the lock is refused as drift (`E021`) rather than silently used.
 #[derive(Debug, Default)]
-pub struct InputBundle {
+pub(crate) struct InputBundle {
     root: Option<FileId>,
     files: IndexMap<FileId, SourceFile>,
     values: IndexMap<FileId, SpannedValue>,
@@ -54,7 +54,7 @@ impl InputBundle {
     /// remote `$ref`s from the vendored, hash-pinned copies recorded in `spargen.lock` (looked up
     /// next to `root`). No network access occurs. The parse format is chosen by extension
     /// (`.json` vs `.yaml`/`.yml`). Diagnostics flow through `diags`.
-    pub fn load(root: &Utf8Path, diags: &mut Diagnostics) -> Result<InputBundle, Aborted> {
+    pub(crate) fn load(root: &Utf8Path, diags: &mut Diagnostics) -> Result<InputBundle, Aborted> {
         let mut bundle = InputBundle::default();
 
         let spec_dir = root.parent().unwrap_or_else(|| Utf8Path::new(""));
@@ -101,12 +101,12 @@ impl InputBundle {
     }
 
     /// The root document's value tree.
-    pub fn root(&self) -> &SpannedValue {
+    pub(crate) fn root(&self) -> &SpannedValue {
         self.value_at(self.root.expect("input bundle root is loaded"))
     }
 
     /// The value tree of a loaded `file`.
-    pub fn value_at(&self, file: FileId) -> &SpannedValue {
+    pub(crate) fn value_at(&self, file: FileId) -> &SpannedValue {
         self.values
             .get(&file)
             .expect("file id came from this input bundle")
@@ -120,7 +120,7 @@ impl InputBundle {
     }
 
     /// The loaded record for `file`, if present.
-    pub fn file(&self, file: FileId) -> Option<&SourceFile> {
+    pub(crate) fn file(&self, file: FileId) -> Option<&SourceFile> {
         self.files.get(&file)
     }
 
@@ -179,7 +179,7 @@ impl InputBundle {
     /// The filesystem paths of every loaded document: the root spec, each relative-file `$ref`
     /// target reachable from it, and each vendored remote copy. Used for build invalidation and
     /// macro dependency tracking. Order follows load order (root first).
-    pub fn source_paths(&self) -> impl Iterator<Item = &Utf8Path> {
+    pub(crate) fn source_paths(&self) -> impl Iterator<Item = &Utf8Path> {
         self.files.values().map(|file| file.path.as_path())
     }
 

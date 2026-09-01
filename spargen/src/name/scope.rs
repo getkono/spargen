@@ -10,7 +10,7 @@ use super::{Ident, IdentRole};
 /// order-independent, it stays deterministic under spec reordering. Injectivity within a
 /// scope is a property-tested invariant.
 #[derive(Debug, Default)]
-pub struct Scope {
+pub(crate) struct Scope {
     used: HashSet<String>,
 }
 
@@ -19,14 +19,14 @@ impl Scope {
     ///
     /// This is used when a binding is already part of an externally-derived surface and later
     /// generator-owned bindings must yield to it.
-    pub fn reserve(&mut self, hint: &str, role: IdentRole) {
+    pub(crate) fn reserve(&mut self, hint: &str, role: IdentRole) {
         let ident = super::escape(hint, role);
         self.used.insert(ident.as_str().to_owned());
     }
 
     /// Allocate a unique identifier for `hint` in `role`. If the cased/escaped name is already
     /// taken in this scope, `provenance` seeds a stable disambiguator.
-    pub fn alloc(&mut self, hint: &str, role: IdentRole, provenance: &JsonPointer) -> Ident {
+    pub(crate) fn alloc(&mut self, hint: &str, role: IdentRole, provenance: &JsonPointer) -> Ident {
         let base = super::escape(hint, role);
         if self.used.insert(base.as_str().to_owned()) {
             return base;

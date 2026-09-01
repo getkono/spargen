@@ -95,7 +95,7 @@ struct ScanDoc {
 /// and through fetched remote documents (whose relative refs resolve against their own URL).
 /// Recursion parsing is best-effort: a fetched doc that does not parse is still vendored, and any
 /// remote ref it hides surfaces later as an actionable `E003` on the next `generate`.
-pub fn vendor(
+pub(crate) fn vendor(
     spec: &Utf8Path,
     fetcher: &dyn RemoteFetch,
     diags: &mut Diagnostics,
@@ -264,7 +264,7 @@ fn input_error(diags: &mut Diagnostics, message: String) {
 /// The real, reqwest-backed fetcher used by `spargen lock`. Present only under the `remote-fetch`
 /// feature so a library-only build carries no HTTP stack.
 #[cfg(feature = "remote-fetch")]
-pub struct ReqwestFetcher;
+pub(crate) struct ReqwestFetcher;
 
 #[cfg(feature = "remote-fetch")]
 impl RemoteFetch for ReqwestFetcher {

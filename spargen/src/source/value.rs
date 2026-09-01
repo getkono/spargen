@@ -3,7 +3,7 @@ use crate::diag::{JsonPointer, Span};
 /// A JSON/YAML number. Preserved as one of three concrete kinds; arbitrary precision is not
 /// supported. Out-of-range wire values surface later as Decode errors, never silent wraps.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Number {
+pub(crate) enum Number {
     /// A signed integer that fits `i64`.
     Int(i64),
     /// An unsigned integer that exceeds `i64` but fits `u64`.
@@ -14,7 +14,7 @@ pub enum Number {
 
 /// A parsed value node, without its span.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Node {
+pub(crate) enum Node {
     /// `null`.
     Null,
     /// A boolean.
@@ -32,26 +32,26 @@ pub enum Node {
 /// A value node paired with the source [`Span`] it was parsed from — the unit of the
 /// span-preserving document tree.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SpannedValue {
+pub(crate) struct SpannedValue {
     /// The value.
-    pub node: Node,
+    pub(crate) node: Node,
     /// Where it came from.
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 impl SpannedValue {
     /// Construct a spanned value.
-    pub fn new(node: Node, span: Span) -> Self {
+    pub(crate) fn new(node: Node, span: Span) -> Self {
         Self { node, span }
     }
 
     /// The source span of this value.
-    pub fn span(&self) -> Span {
+    pub(crate) fn span(&self) -> Span {
         self.span
     }
 
     /// This value as an object, if it is one.
-    pub fn as_object(&self) -> Option<&SpannedMap> {
+    pub(crate) fn as_object(&self) -> Option<&SpannedMap> {
         match &self.node {
             Node::Object(object) => Some(object),
             _ => None,
@@ -59,7 +59,7 @@ impl SpannedValue {
     }
 
     /// This value as an array slice, if it is one.
-    pub fn as_array(&self) -> Option<&[SpannedValue]> {
+    pub(crate) fn as_array(&self) -> Option<&[SpannedValue]> {
         match &self.node {
             Node::Array(array) => Some(array),
             _ => None,
@@ -67,7 +67,7 @@ impl SpannedValue {
     }
 
     /// This value as a string, if it is one.
-    pub fn as_str(&self) -> Option<&str> {
+    pub(crate) fn as_str(&self) -> Option<&str> {
         match &self.node {
             Node::String(value) => Some(value),
             _ => None,
@@ -75,7 +75,7 @@ impl SpannedValue {
     }
 
     /// This value as a boolean, if it is one.
-    pub fn as_bool(&self) -> Option<bool> {
+    pub(crate) fn as_bool(&self) -> Option<bool> {
         match &self.node {
             Node::Bool(value) => Some(*value),
             _ => None,
@@ -83,7 +83,7 @@ impl SpannedValue {
     }
 
     /// Object-member lookup by key (first occurrence).
-    pub fn get(&self, key: &str) -> Option<&SpannedValue> {
+    pub(crate) fn get(&self, key: &str) -> Option<&SpannedValue> {
         self.as_object()?.get(key)
     }
 
@@ -143,28 +143,28 @@ impl SpannedValue {
 /// An object key together with its own span, so duplicate-key and unknown-key diagnostics can
 /// point at the key itself.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SpannedKey {
+pub(crate) struct SpannedKey {
     /// The key text.
-    pub name: String,
+    pub(crate) name: String,
     /// Where the key appears.
-    pub span: Span,
+    pub(crate) span: Span,
 }
 
 /// An ordered map of object members. Preserves source order (for deterministic downstream
 /// behavior) and retains duplicate keys (so they can be diagnosed rather than silently merged).
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct SpannedMap {
+pub(crate) struct SpannedMap {
     entries: Vec<(SpannedKey, SpannedValue)>,
 }
 
 impl SpannedMap {
     /// Push a member, preserving insertion order and duplicates.
-    pub fn push(&mut self, key: SpannedKey, value: SpannedValue) {
+    pub(crate) fn push(&mut self, key: SpannedKey, value: SpannedValue) {
         self.entries.push((key, value));
     }
 
     /// The value for `key` (first occurrence), if present.
-    pub fn get(&self, key: &str) -> Option<&SpannedValue> {
+    pub(crate) fn get(&self, key: &str) -> Option<&SpannedValue> {
         self.entries
             .iter()
             .find_map(|(candidate, value)| (candidate.name == key).then_some(value))
@@ -187,7 +187,7 @@ impl SpannedMap {
     }
 
     /// Iterate members in source order.
-    pub fn iter(&self) -> impl Iterator<Item = (&SpannedKey, &SpannedValue)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&SpannedKey, &SpannedValue)> {
         self.entries.iter().map(|(k, v)| (k, v))
     }
 
