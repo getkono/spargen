@@ -463,17 +463,36 @@ pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements
             };
         }
     };
-    let workspace_path = workspace_manifest_path(manifest_path, &manifest);
-    let workspace = workspace_path.as_deref().and_then(|path| {
-        manifests.push(path.to_path_buf());
-        match read_toml(path) {
-            Ok(value) => Some(value),
-            Err(message) => {
-                diagnostics.push(diagnostic(message));
-                None
+    let root = workspace_root(manifest_path, &manifest);
+    // Only a *separate* workspace manifest is read and reported: a self-rooted one is this very
+    // file, already parsed above and already in `manifests`.
+    let separate = root
+        .path
+        .as_deref()
+        .filter(|_| !root.is_self)
+        .and_then(|path| {
+            manifests.push(path.to_path_buf());
+            match read_toml(path) {
+                Ok(value) => Some(value),
+                Err(message) => {
+                    diagnostics.push(diagnostic(message));
+                    None
+                }
             }
-        }
-    });
+        });
+    let workspace = if root.is_self {
+        Some(&manifest)
+    } else {
+        separate.as_ref()
+    };
+    // Three outcomes, not two: a root that resolved, a root that was found and could not be read
+    // (already reported just above), and no root at all. Their remedies differ, so an unresolvable
+    // inheritance has to be able to tell them apart.
+    let origin = match (&root.path, workspace.is_some()) {
+        (Some(path), true) => WorkspaceOrigin::Resolved(path),
+        (Some(path), false) => WorkspaceOrigin::Unreadable(path),
+        (None, _) => WorkspaceOrigin::NotFound(&root.searched_from),
+    };
 
     for required in requirement_table(requirements) {
         if let Some(feature) = required.conditional {
@@ -483,13 +502,14 @@ pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements
         }
         check_dependency(
             &manifest,
-            workspace.as_ref(),
+            workspace,
             DependencyCheck {
                 table: required.table,
                 dependency: required.dependency,
                 features: required.features,
                 require_no_defaults: required.no_default_features,
                 require_optional: required.optional,
+                origin,
             },
             &mut diagnostics,
         );
@@ -537,23 +557,64 @@ fn read_toml(path: &Utf8Path) -> Result<toml::Value, String> {
         .map_err(|error| format!("failed to parse consumer manifest `{path}`: {error}"))
 }
 
-fn workspace_manifest_path(
-    manifest_path: &Utf8Path,
-    manifest: &toml::Value,
-) -> Option<Utf8PathBuf> {
+/// Which manifest a `workspace = true` dependency resolves its declaration against.
+struct WorkspaceRoot {
+    /// The manifest carrying `[workspace.dependencies]`, when one was found.
+    path: Option<Utf8PathBuf>,
+    /// Whether that manifest is the consumer manifest itself — `[package]` and `[workspace]` in
+    /// one file. It is already parsed, so it must not be read a second time.
+    is_self: bool,
+    /// The absolutized consumer manifest the search ran from. A diagnostic that names the caller's
+    /// raw spelling would say "resolved nothing from `./Cargo.toml`", which tells the reader
+    /// nothing at all.
+    searched_from: Utf8PathBuf,
+}
+
+/// Locate the workspace manifest a `workspace = true` dependency inherits from.
+///
+/// Three layouts reach here, and Cargo accepts all three:
+///
+/// - the manifest is itself the workspace root — `[package]` and `[workspace]` in one file, the
+///   single-crate repository — and inheritance resolves against the file already in hand;
+/// - `package.workspace` names the workspace root *directory*, which is Cargo's own spelling of
+///   that field;
+/// - otherwise the nearest *lexical* ancestor manifest that parses and declares `[workspace]` wins.
+///
+/// The ancestor walk runs over an absolutized path. `manifest_path` can legitimately be relative —
+/// the `generate_api!` shim falls back to a bare `./Cargo.toml` — and a relative path has no
+/// ancestors to walk, which would report every inherited dependency as unresolvable. Absolutizing
+/// is lexical and keeps any `..`, since folding those away changes which file a path names when a
+/// component is a symlink; the walk therefore climbs the path as written, not as the filesystem
+/// would resolve it.
+fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> WorkspaceRoot {
+    let absolute = std::path::absolute(manifest_path)
+        .ok()
+        .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
+        .unwrap_or_else(|| manifest_path.to_path_buf());
     if manifest.get("workspace").is_some() {
-        return None;
+        return WorkspaceRoot {
+            path: Some(manifest_path.to_path_buf()),
+            is_self: true,
+            searched_from: absolute,
+        };
     }
+    let separate = |path| WorkspaceRoot {
+        path,
+        is_self: false,
+        searched_from: absolute.clone(),
+    };
     if let Some(relative) = manifest
         .get("package")
         .and_then(|value| value.get("workspace"))
         .and_then(toml::Value::as_str)
     {
-        return manifest_path
-            .parent()
-            .map(|parent| parent.join(relative).join("Cargo.toml"));
+        return separate(
+            absolute
+                .parent()
+                .map(|parent| parent.join(relative).join("Cargo.toml")),
+        );
     }
-    let mut directory = manifest_path.parent()?.parent();
+    let mut directory = absolute.parent().and_then(Utf8Path::parent);
     while let Some(candidate_dir) = directory {
         let candidate = candidate_dir.join("Cargo.toml");
         if candidate.is_file()
@@ -562,11 +623,11 @@ fn workspace_manifest_path(
                 .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
                 .is_some_and(|value| value.get("workspace").is_some())
         {
-            return Some(candidate);
+            return separate(Some(candidate));
         }
         directory = candidate_dir.parent();
     }
-    None
+    separate(None)
 }
 
 struct DependencyCheck<'a> {
@@ -575,6 +636,20 @@ struct DependencyCheck<'a> {
     features: &'a [&'a str],
     require_no_defaults: bool,
     require_optional: bool,
+    /// Where a `workspace = true` dependency resolves from, so an unresolvable inheritance can say
+    /// what actually happened rather than only that it failed.
+    origin: WorkspaceOrigin<'a>,
+}
+
+/// What the workspace lookup found, for the one diagnostic that has to explain itself.
+#[derive(Clone, Copy)]
+enum WorkspaceOrigin<'a> {
+    /// A workspace manifest was found and parsed.
+    Resolved(&'a Utf8Path),
+    /// One was found but could not be read or parsed; that failure is already reported.
+    Unreadable(&'a Utf8Path),
+    /// None was found, having searched upwards from this manifest path.
+    NotFound(&'a Utf8Path),
 }
 
 fn check_dependency(
@@ -602,8 +677,22 @@ fn check_dependency(
         })
         .flatten();
     if inherited && workspace_declaration.is_none() {
+        // Name where the lookup actually went. The original report of this diagnostic could not
+        // tell "the workspace has no such entry" from "spargen never found the workspace", and the
+        // remedies for those are opposite.
+        let origin = match check.origin {
+            WorkspaceOrigin::Resolved(path) => {
+                format!("`{path}` declares no `{}` there", dependency.name)
+            }
+            WorkspaceOrigin::Unreadable(path) => {
+                format!("its workspace manifest `{path}` could not be read")
+            }
+            WorkspaceOrigin::NotFound(searched_from) => {
+                format!("no workspace manifest was found above `{searched_from}`")
+            }
+        };
         diagnostics.push(diagnostic(format!(
-            "`{}` inherits from `[workspace.dependencies]`, but no workspace declaration could be resolved",
+            "`{}` inherits from `[workspace.dependencies]`, but {origin}",
             dependency.name
         )));
         return;
@@ -930,6 +1019,247 @@ serde_json.workspace = true
         let result = audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         assert_eq!(result.manifests, vec![root, member]);
+    }
+
+    /// The five core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
+    /// the floors in these fixtures cannot drift from the ones every other test audits against.
+    fn core_workspace_dependencies() -> &'static str {
+        CORE_MANIFEST.split_once("[dependencies]\n").unwrap().1
+    }
+
+    const CORE_INHERITED: &str = "\
+[dependencies]
+bytes.workspace = true
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+";
+
+    #[test]
+    fn a_root_package_inherits_its_own_workspace_dependencies() {
+        // `[package]` and `[workspace]` in one file is the single-crate repository, and `workspace
+        // = true` there resolves against the table directly below it. Resolution used to give up
+        // the moment the consumer manifest declared `[workspace]` at all, so this layout reported
+        // every inherited dependency as unresolvable — about a table spargen had already parsed.
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &manifest,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[workspace]\n\n\
+                 [workspace.dependencies]\n{}\n{CORE_INHERITED}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&manifest, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        // Self-rooted: one manifest, not the same file reported twice.
+        assert_eq!(result.manifests, vec![manifest]);
+    }
+
+    #[test]
+    fn package_workspace_names_the_workspace_root_directory() {
+        // Cargo's `package.workspace` is a path to the root *directory*, not to its manifest. The
+        // root here is deliberately not an ancestor of the member, so only that field can resolve
+        // it and the assertion cannot pass through the ancestor walk by accident.
+        let directory = tempfile::tempdir().unwrap();
+        let root_dir = directory.path().join("root");
+        let member_dir = directory.path().join("outside");
+        std::fs::create_dir(&root_dir).unwrap();
+        std::fs::create_dir(&member_dir).unwrap();
+        let root = Utf8PathBuf::from_path_buf(root_dir.join("Cargo.toml")).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = []\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../root\"\n\n\
+                 {CORE_INHERITED}"
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        // The root is reported as the field spells it — `…/outside/../root/Cargo.toml`. `..` is
+        // deliberately not folded away: doing that lexically changes which file a path names when
+        // a component is a symlink, and Cargo accepts the unfolded form for `rerun-if-changed`
+        // just the same.
+        assert_eq!(result.manifests.len(), 2, "{:#?}", result.manifests);
+        assert!(
+            result
+                .manifests
+                .iter()
+                .any(|path| path.canonicalize().ok() == root.canonicalize().ok()),
+            "{:#?}",
+            result.manifests
+        );
+    }
+
+    /// The working directory is process-global, so the one test that has to change it restores it
+    /// on the way out — including on a panic — and holds a lock so a second such test cannot race
+    /// it.
+    static WORKING_DIRECTORY: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    struct RestoreWorkingDirectory(std::path::PathBuf);
+
+    impl Drop for RestoreWorkingDirectory {
+        fn drop(&mut self) {
+            let _ = std::env::set_current_dir(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_relative_manifest_path_still_resolves_the_workspace_root() {
+        // `generate_api!` falls back to a bare `./Cargo.toml` when Cargo names no manifest in the
+        // environment. A one-component path has no ancestors to walk, so the workspace root was
+        // never found and every inherited dependency reported as unresolvable.
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("Cargo.toml");
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            member_dir.join("Cargo.toml"),
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let _lock = WORKING_DIRECTORY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreWorkingDirectory(std::env::current_dir().unwrap());
+        std::env::set_current_dir(&member_dir).unwrap();
+
+        let result = audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        // The member as given plus the workspace root the walk reached. The root's textual form
+        // depends on how the platform resolves the temporary directory, so only the count is
+        // asserted.
+        assert_eq!(result.manifests.len(), 2, "{:#?}", result.manifests);
+    }
+
+    #[test]
+    fn an_unresolvable_inheritance_says_where_the_lookup_went() {
+        // One message used to cover two opposite situations: the workspace has no such entry (fix
+        // the root), and no workspace was found at all (fix the layout, or spell the version out).
+        // The report behind #71 landed in exactly that ambiguity.
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        // No workspace manifest anywhere above the member.
+        let orphaned = audit(&member, &RuntimeRequirements::default());
+        for dependency in ["bytes", "reqwest", "secrecy", "serde", "serde_json"] {
+            assert!(
+                orphaned.diagnostics.iter().any(|diagnostic| {
+                    diagnostic
+                        .message
+                        .contains(&format!("`{dependency}` inherits"))
+                        && diagnostic
+                            .message
+                            .contains("no workspace manifest was found above")
+                        && diagnostic.message.contains(member.as_str())
+                }),
+                "{:#?}",
+                orphaned.diagnostics
+            );
+        }
+
+        // A workspace that resolves, but declares four of the five.
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+                    .lines()
+                    .filter(|line| !line.starts_with("bytes"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        )
+        .unwrap();
+        let partial = audit(&member, &RuntimeRequirements::default());
+        assert_eq!(partial.diagnostics.len(), 1, "{:#?}", partial.diagnostics);
+        let message = &partial.diagnostics[0].message;
+        assert!(
+            message.contains("`bytes` inherits")
+                && message.contains(root.as_str())
+                && message.contains("declares no `bytes` there"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_workspace_root_that_cannot_be_read_is_not_reported_as_missing() {
+        // Found-but-broken is a third state. Reporting it as "no workspace manifest was found"
+        // contradicts the read failure reported beside it and points at the opposite remedy.
+        let directory = tempfile::tempdir().unwrap();
+        let root_dir = directory.path().join("root");
+        let member_dir = directory.path().join("outside");
+        std::fs::create_dir(&root_dir).unwrap();
+        std::fs::create_dir(&member_dir).unwrap();
+        let root = Utf8PathBuf::from_path_buf(root_dir.join("Cargo.toml")).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        // `package.workspace` names the root explicitly, so the walk does not get to pre-parse and
+        // silently skip it: the audit reads exactly this file, and it does not parse.
+        std::fs::write(&root, "[workspace\nthis is not toml\n").unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../root\"\n\n\
+                 {CORE_INHERITED}"
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("failed to parse consumer manifest")),
+            "{:#?}",
+            result.diagnostics
+        );
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains("`bytes` inherits")
+                    && diagnostic.message.contains("could not be read")
+            }),
+            "{:#?}",
+            result.diagnostics
+        );
+        assert!(
+            !result.diagnostics.iter().any(|diagnostic| diagnostic
+                .message
+                .contains("no workspace manifest was found")),
+            "found-but-broken must not be reported as missing: {:#?}",
+            result.diagnostics
+        );
     }
 
     /// The anti-drift property: the block `spargen deps` prints must be exactly a block the audit
