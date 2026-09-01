@@ -34,7 +34,10 @@ fn is_oas_dialect(uri: &str) -> bool {
 }
 
 /// Build the typed [`Document`] from a loaded [`InputBundle`], carrying spans through.
-pub fn parse_document(bundle: &InputBundle, diags: &mut Diagnostics) -> Result<Document, Aborted> {
+pub(crate) fn parse_document(
+    bundle: &InputBundle,
+    diags: &mut Diagnostics,
+) -> Result<Document, Aborted> {
     let root = bundle.root();
     let root_pointer = JsonPointer::root();
 

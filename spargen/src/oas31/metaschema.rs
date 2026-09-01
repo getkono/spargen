@@ -6,14 +6,14 @@ const OAS32_SCHEMA: &str = include_str!("spec/oas-3.2-2025-09-17.json");
 
 /// Structural validator against the vendored official OAS 3.1 and 3.2 document schemas.
 /// Targets fixed, checksummed in-repo artifacts under `spec/`, never a live URL.
-pub struct MetaSchemaValidator {
+pub(crate) struct MetaSchemaValidator {
     oas31: jsonschema::Validator,
     oas32: jsonschema::Validator,
 }
 
 impl MetaSchemaValidator {
     /// Load and parse the vendored meta-schemas from `spec/`.
-    pub fn load_vendored() -> Self {
+    pub(crate) fn load_vendored() -> Self {
         Self {
             oas31: compile(OAS31_SCHEMA, "OpenAPI 3.1"),
             oas32: compile(OAS32_SCHEMA, "OpenAPI 3.2"),
@@ -22,7 +22,7 @@ impl MetaSchemaValidator {
 
     /// Validate a raw document tree against the meta-schemas, reporting violations through `diags`
     /// (with pointer + span).
-    pub fn validate(&self, document: &SpannedValue, diags: &mut Diagnostics) {
+    pub(crate) fn validate(&self, document: &SpannedValue, diags: &mut Diagnostics) {
         let version = document.get("openapi").and_then(SpannedValue::as_str);
         let validator = match version {
             Some(version) if version.starts_with("3.1.") => &self.oas31,

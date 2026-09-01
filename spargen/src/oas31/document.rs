@@ -9,29 +9,29 @@ use super::Schema;
 /// [`parse_document`](super::parse_document) from the span-preserving source tree; every node
 /// retains provenance for diagnostics.
 #[derive(Debug, Clone)]
-pub struct Document {
+pub(crate) struct Document {
     /// Whether the declared OpenAPI feature version is 3.2.x.
-    pub is_oas32: bool,
+    pub(crate) is_oas32: bool,
     /// `info`.
-    pub info: Info,
+    pub(crate) info: Info,
     /// `servers`.
-    pub servers: Vec<Server>,
+    pub(crate) servers: Vec<Server>,
     /// `paths`.
-    pub paths: Paths,
+    pub(crate) paths: Paths,
     /// `components`.
-    pub components: Components,
+    pub(crate) components: Components,
     /// Top-level `security`.
-    pub security: Vec<SecurityRequirement>,
+    pub(crate) security: Vec<SecurityRequirement>,
     /// Top-level tag metadata, including OpenAPI 3.2 hierarchy fields.
-    pub tags: Vec<Tag>,
+    pub(crate) tags: Vec<Tag>,
     /// Provenance of the document root.
-    pub provenance: Provenance,
+    pub(crate) provenance: Provenance,
 }
 
 /// Either an inline item or a `$ref` to one. Resolution is performed by the
 /// [`Resolver`](super::Resolver); the frontend keeps refs symbolic until lowering.
 #[derive(Debug, Clone)]
-pub enum RefOr<T> {
+pub(crate) enum RefOr<T> {
     /// A `$ref`.
     Ref(Reference),
     /// An inline item.
@@ -40,183 +40,183 @@ pub enum RefOr<T> {
 
 /// A `$ref` with its provenance, for precise unresolved-ref diagnostics.
 #[derive(Debug, Clone)]
-pub struct Reference {
+pub(crate) struct Reference {
     /// The raw reference string.
-    pub reference: String,
+    pub(crate) reference: String,
     /// A Reference Object `summary`/`description`, which document the *reference site* rather than
     /// the target. Retained so the override has a disposition instead of vanishing.
-    pub summary: Option<String>,
-    pub description: Option<String>,
+    pub(crate) summary: Option<String>,
+    pub(crate) description: Option<String>,
     /// Where the reference occurred, including its source file.
-    pub provenance: Provenance,
+    pub(crate) provenance: Provenance,
 }
 
 /// `info`.
 #[derive(Debug, Clone)]
-pub struct Info {
-    pub title: String,
-    pub version: String,
-    pub summary: Option<String>,
-    pub description: Option<String>,
+pub(crate) struct Info {
+    pub(crate) title: String,
+    pub(crate) version: String,
+    pub(crate) summary: Option<String>,
+    pub(crate) description: Option<String>,
     /// `contact.name`/`url`/`email`, flattened into one displayable line.
-    pub contact: Option<String>,
+    pub(crate) contact: Option<String>,
     /// `license.name` plus its SPDX `identifier` or `url`.
-    pub license: Option<String>,
+    pub(crate) license: Option<String>,
     /// `externalDocs.url`, with its description when one is given.
-    pub external_docs: Option<String>,
+    pub(crate) external_docs: Option<String>,
 }
 
 /// A `servers` entry.
 #[derive(Debug, Clone)]
-pub struct Server {
-    pub name: Option<String>,
-    pub url: String,
-    pub description: Option<String>,
+pub(crate) struct Server {
+    pub(crate) name: Option<String>,
+    pub(crate) url: String,
+    pub(crate) description: Option<String>,
     /// `variables`: substitutions for the `{braces}` in `url`. Unlike a Schema Object `default`,
     /// a Server Variable `default` genuinely changes the wire — the specification says it SHALL be
     /// sent when the caller supplies no alternative.
-    pub variables: IndexMap<String, ServerVariable>,
-    pub provenance: Provenance,
+    pub(crate) variables: IndexMap<String, ServerVariable>,
+    pub(crate) provenance: Provenance,
 }
 
 /// An OAS Server Variable Object.
 #[derive(Debug, Clone)]
-pub struct ServerVariable {
+pub(crate) struct ServerVariable {
     /// The value sent when the caller supplies none. Required by the document schema.
-    pub default: String,
+    pub(crate) default: String,
     /// The closed set of permitted values, if the document declares one.
-    pub enum_values: Vec<String>,
-    pub description: Option<String>,
+    pub(crate) enum_values: Vec<String>,
+    pub(crate) description: Option<String>,
 }
 
 /// `paths`: a map from path template to its item.
 #[derive(Debug, Clone, Default)]
-pub struct Paths {
-    pub items: IndexMap<String, PathItem>,
+pub(crate) struct Paths {
+    pub(crate) items: IndexMap<String, PathItem>,
 }
 
 /// A `paths` entry: the per-method operations plus path-level shared parameters.
 #[derive(Debug, Clone)]
-pub struct PathItem {
+pub(crate) struct PathItem {
     /// A Path Item `$ref`, which replaces this item with the referenced one.
-    pub reference: Option<Reference>,
+    pub(crate) reference: Option<Reference>,
     /// Structural fields declared alongside a `$ref`. The specification leaves their interaction
     /// with the referenced item *undefined*, so they are rejected rather than guessed at.
-    pub reference_siblings: Vec<String>,
+    pub(crate) reference_siblings: Vec<String>,
     /// Operations keyed by HTTP method.
-    pub operations: IndexMap<Method, OperationObject>,
+    pub(crate) operations: IndexMap<Method, OperationObject>,
     /// Parameters shared across all operations on this path.
-    pub parameters: Vec<RefOr<ParameterObject>>,
+    pub(crate) parameters: Vec<RefOr<ParameterObject>>,
     /// `servers`: an alternative base URL for every operation on this path, overriding the
     /// document's.
-    pub servers: Vec<Server>,
+    pub(crate) servers: Vec<Server>,
     /// `summary`: applies to every operation on this path.
-    pub summary: Option<String>,
+    pub(crate) summary: Option<String>,
     /// `description`: applies to every operation on this path.
-    pub description: Option<String>,
+    pub(crate) description: Option<String>,
 }
 
 /// An OAS Operation Object.
 #[derive(Debug, Clone)]
-pub struct OperationObject {
-    pub operation_id: Option<String>,
-    pub summary: Option<String>,
-    pub description: Option<String>,
-    pub parameters: Vec<RefOr<ParameterObject>>,
-    pub request_body: Option<RefOr<RequestBodyObject>>,
-    pub responses: ResponsesObject,
-    pub security: Option<Vec<SecurityRequirement>>,
-    pub deprecated: bool,
-    pub tags: Vec<String>,
+pub(crate) struct OperationObject {
+    pub(crate) operation_id: Option<String>,
+    pub(crate) summary: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) parameters: Vec<RefOr<ParameterObject>>,
+    pub(crate) request_body: Option<RefOr<RequestBodyObject>>,
+    pub(crate) responses: ResponsesObject,
+    pub(crate) security: Option<Vec<SecurityRequirement>>,
+    pub(crate) deprecated: bool,
+    pub(crate) tags: Vec<String>,
     /// `servers`: an alternative base URL for this operation, overriding the path item's and the
     /// document's.
-    pub servers: Vec<Server>,
-    pub provenance: Provenance,
+    pub(crate) servers: Vec<Server>,
+    pub(crate) provenance: Provenance,
 }
 
 /// An OAS Parameter Object.
 #[derive(Debug, Clone)]
-pub struct ParameterObject {
-    pub name: String,
+pub(crate) struct ParameterObject {
+    pub(crate) name: String,
     /// `in`: `path` / `query` / `header` / `cookie`.
-    pub location: String,
-    pub required: bool,
-    pub deprecated: bool,
-    pub style: Option<String>,
-    pub explode: Option<bool>,
-    pub allow_reserved: bool,
+    pub(crate) location: String,
+    pub(crate) required: bool,
+    pub(crate) deprecated: bool,
+    pub(crate) style: Option<String>,
+    pub(crate) explode: Option<bool>,
+    pub(crate) allow_reserved: bool,
     /// `allowEmptyValue`. Deprecated in OpenAPI 3.2 and inert for a typed client: an absent
     /// optional parameter is simply not sent, so there is no case where a client would choose to
     /// send an empty string instead.
-    pub allow_empty_value: bool,
+    pub(crate) allow_empty_value: bool,
     /// A schema-typed parameter …
-    pub schema: Option<RefOr<Schema>>,
+    pub(crate) schema: Option<RefOr<Schema>>,
     /// … or a `content`-typed one (media type → schema).
-    pub content: IndexMap<String, MediaTypeObject>,
-    pub provenance: Provenance,
+    pub(crate) content: IndexMap<String, MediaTypeObject>,
+    pub(crate) provenance: Provenance,
 }
 
 /// An OAS Request Body Object.
 #[derive(Debug, Clone)]
-pub struct RequestBodyObject {
+pub(crate) struct RequestBodyObject {
     /// Media type → schema.
-    pub content: IndexMap<String, MediaTypeObject>,
+    pub(crate) content: IndexMap<String, MediaTypeObject>,
     /// `required`, defaulting to `false`. Decides whether the generated method takes the body by
     /// value or as an `Option`.
-    pub required: bool,
-    pub provenance: Provenance,
+    pub(crate) required: bool,
+    pub(crate) provenance: Provenance,
 }
 
 /// An OAS Responses Object: per-status entries keyed by `"200"`, `"2XX"`, or `"default"`.
 #[derive(Debug, Clone, Default)]
-pub struct ResponsesObject {
-    pub by_status: IndexMap<String, RefOr<ResponseObject>>,
-    pub default: Option<RefOr<ResponseObject>>,
+pub(crate) struct ResponsesObject {
+    pub(crate) by_status: IndexMap<String, RefOr<ResponseObject>>,
+    pub(crate) default: Option<RefOr<ResponseObject>>,
 }
 
 /// An OAS Response Object.
 #[derive(Debug, Clone)]
-pub struct ResponseObject {
-    pub summary: Option<String>,
-    pub description: Option<String>,
+pub(crate) struct ResponseObject {
+    pub(crate) summary: Option<String>,
+    pub(crate) description: Option<String>,
     /// Media type → schema.
-    pub content: IndexMap<String, MediaTypeObject>,
+    pub(crate) content: IndexMap<String, MediaTypeObject>,
     /// Documented response headers, keyed by header name.
-    pub headers: IndexMap<String, RefOr<HeaderObject>>,
-    pub provenance: Provenance,
+    pub(crate) headers: IndexMap<String, RefOr<HeaderObject>>,
+    pub(crate) provenance: Provenance,
 }
 
 /// Top-level Tag Object metadata.
 #[derive(Debug, Clone)]
-pub struct Tag {
-    pub name: String,
-    pub summary: Option<String>,
-    pub description: Option<String>,
-    pub parent: Option<String>,
-    pub kind: Option<String>,
-    pub provenance: Provenance,
+pub(crate) struct Tag {
+    pub(crate) name: String,
+    pub(crate) summary: Option<String>,
+    pub(crate) description: Option<String>,
+    pub(crate) parent: Option<String>,
+    pub(crate) kind: Option<String>,
+    pub(crate) provenance: Provenance,
 }
 
 /// An OAS Media Type Object.
 #[derive(Debug, Clone)]
-pub struct MediaTypeObject {
+pub(crate) struct MediaTypeObject {
     /// OpenAPI 3.2 allows a Media Type Object itself to be a Reference Object.
-    pub reference: Option<Reference>,
-    pub schema: Option<RefOr<Schema>>,
+    pub(crate) reference: Option<Reference>,
+    pub(crate) schema: Option<RefOr<Schema>>,
     /// OpenAPI 3.2 `itemSchema`: the per-item type for a sequential/streaming media
     /// (`text/event-stream`, `application/x-ndjson`). For a streaming response it supplies the
     /// streamed item type `T`; on a non-streaming media it is meaningless and acknowledged (`W010`).
-    pub item_schema: Option<RefOr<Schema>>,
+    pub(crate) item_schema: Option<RefOr<Schema>>,
     /// `encoding`: per-property wire encoding, keyed by body-schema property name. Applies only to
     /// `multipart` and `application/x-www-form-urlencoded` content; the specification says it is
     /// ignored elsewhere.
-    pub encoding: IndexMap<String, EncodingObject>,
+    pub(crate) encoding: IndexMap<String, EncodingObject>,
     /// OpenAPI 3.2 `prefixEncoding`: positional encodings for an array-shaped `multipart` body.
-    pub prefix_encoding: Vec<(EncodingObject, Provenance)>,
+    pub(crate) prefix_encoding: Vec<(EncodingObject, Provenance)>,
     /// OpenAPI 3.2 `itemEncoding`: the encoding applied to every remaining item of an
     /// array-shaped `multipart` body.
-    pub item_encoding: Option<(EncodingObject, Provenance)>,
-    pub provenance: Provenance,
+    pub(crate) item_encoding: Option<(EncodingObject, Provenance)>,
+    pub(crate) provenance: Provenance,
 }
 
 /// An OAS Encoding Object: how one property of a form or multipart body reaches the wire.
@@ -225,16 +225,16 @@ pub struct MediaTypeObject {
 /// *presence*, not their value: any one of them explicitly set selects query-style serialization
 /// and makes `contentType` inert; all three absent selects media-type serialization.
 #[derive(Debug, Clone)]
-pub struct EncodingObject {
-    pub content_type: Option<String>,
-    pub headers: IndexMap<String, RefOr<HeaderObject>>,
-    pub style: Option<String>,
-    pub explode: Option<bool>,
-    pub allow_reserved: Option<bool>,
+pub(crate) struct EncodingObject {
+    pub(crate) content_type: Option<String>,
+    pub(crate) headers: IndexMap<String, RefOr<HeaderObject>>,
+    pub(crate) style: Option<String>,
+    pub(crate) explode: Option<bool>,
+    pub(crate) allow_reserved: Option<bool>,
     /// Nested `encoding`/`prefixEncoding`/`itemEncoding` fields, retained so lowering can reject
     /// them with a message that names the offending field.
-    pub nested: Vec<(String, Provenance)>,
-    pub provenance: Provenance,
+    pub(crate) nested: Vec<(String, Provenance)>,
+    pub(crate) provenance: Provenance,
 }
 
 /// An OAS Header Object, as it appears under `encoding.headers` and `response.headers`.
@@ -242,80 +242,80 @@ pub struct EncodingObject {
 /// A Header Object *describes* a header rather than carrying a value, so only a schema that pins
 /// one — through `const`, or `default` in its absence — gives a client something to send.
 #[derive(Debug, Clone)]
-pub struct HeaderObject {
-    pub description: Option<String>,
-    pub required: bool,
-    pub deprecated: bool,
+pub(crate) struct HeaderObject {
+    pub(crate) description: Option<String>,
+    pub(crate) required: bool,
+    pub(crate) deprecated: bool,
     /// `explode` for the `simple` style. A Header Object may only use `simple`, which the
     /// document schema already enforces, so the style itself is not modeled.
-    pub explode: Option<bool>,
-    pub schema: Option<RefOr<Schema>>,
+    pub(crate) explode: Option<bool>,
+    pub(crate) schema: Option<RefOr<Schema>>,
     /// A `content`-typed header, as an alternative to `schema`.
-    pub content: IndexMap<String, MediaTypeObject>,
-    pub provenance: Provenance,
+    pub(crate) content: IndexMap<String, MediaTypeObject>,
+    pub(crate) provenance: Provenance,
 }
 
 /// `components`. Only the maps spargen consumes are modeled.
 #[derive(Debug, Clone, Default)]
-pub struct Components {
-    pub schemas: IndexMap<String, RefOr<Schema>>,
-    pub responses: IndexMap<String, RefOr<ResponseObject>>,
-    pub parameters: IndexMap<String, RefOr<ParameterObject>>,
-    pub request_bodies: IndexMap<String, RefOr<RequestBodyObject>>,
-    pub media_types: IndexMap<String, MediaTypeObject>,
-    pub security_schemes: IndexMap<String, RefOr<SecuritySchemeObject>>,
+pub(crate) struct Components {
+    pub(crate) schemas: IndexMap<String, RefOr<Schema>>,
+    pub(crate) responses: IndexMap<String, RefOr<ResponseObject>>,
+    pub(crate) parameters: IndexMap<String, RefOr<ParameterObject>>,
+    pub(crate) request_bodies: IndexMap<String, RefOr<RequestBodyObject>>,
+    pub(crate) media_types: IndexMap<String, MediaTypeObject>,
+    pub(crate) security_schemes: IndexMap<String, RefOr<SecuritySchemeObject>>,
     /// Reusable Path Items, referenced by a Path Item `$ref`.
-    pub path_items: IndexMap<String, PathItem>,
+    pub(crate) path_items: IndexMap<String, PathItem>,
     /// Reusable Header Objects, referenced from `response.headers` and `encoding.headers`.
-    pub headers: IndexMap<String, RefOr<HeaderObject>>,
+    pub(crate) headers: IndexMap<String, RefOr<HeaderObject>>,
 }
 
 /// An OAS Security Scheme Object.
 #[derive(Debug, Clone)]
-pub struct SecuritySchemeObject {
+pub(crate) struct SecuritySchemeObject {
     /// `type`: `http` / `apiKey` / `oauth2` / `openIdConnect` / `mutualTLS`.
-    pub scheme_type: String,
+    pub(crate) scheme_type: String,
     /// `scheme` (for `http`).
-    pub scheme: Option<String>,
+    pub(crate) scheme: Option<String>,
     /// `in` (for `apiKey`).
-    pub location: Option<String>,
+    pub(crate) location: Option<String>,
     /// `name` (for `apiKey`).
-    pub name: Option<String>,
+    pub(crate) name: Option<String>,
     /// `description`.
-    pub description: Option<String>,
+    pub(crate) description: Option<String>,
     /// `bearerFormat` (for `http` `bearer`) — a hint such as `JWT`.
-    pub bearer_format: Option<String>,
+    pub(crate) bearer_format: Option<String>,
     /// `openIdConnectUrl` (for `openIdConnect`).
-    pub open_id_connect_url: Option<String>,
+    pub(crate) open_id_connect_url: Option<String>,
     /// OpenAPI 3.2 `oauth2MetadataUrl` (for `oauth2`).
-    pub oauth2_metadata_url: Option<String>,
+    pub(crate) oauth2_metadata_url: Option<String>,
     /// `deprecated`.
-    pub deprecated: bool,
+    pub(crate) deprecated: bool,
     /// `flows` (for `oauth2`), in source order.
-    pub flows: Vec<OAuthFlow>,
-    pub provenance: Provenance,
+    pub(crate) flows: Vec<OAuthFlow>,
+    pub(crate) provenance: Provenance,
 }
 
 /// One entry of an OAuth Flows Object. Documentation only: spargen attaches a caller-supplied
 /// token as a bearer credential rather than driving a flow, so these fields describe *where* a
 /// caller obtains that token.
 #[derive(Debug, Clone)]
-pub struct OAuthFlow {
+pub(crate) struct OAuthFlow {
     /// The flow name: `implicit`, `password`, `clientCredentials`, `authorizationCode`, or the
     /// OpenAPI 3.2 `deviceAuthorization`.
-    pub name: String,
+    pub(crate) name: String,
     /// `authorizationUrl`.
-    pub authorization_url: Option<String>,
+    pub(crate) authorization_url: Option<String>,
     /// `tokenUrl`.
-    pub token_url: Option<String>,
+    pub(crate) token_url: Option<String>,
     /// `refreshUrl`.
-    pub refresh_url: Option<String>,
+    pub(crate) refresh_url: Option<String>,
     /// OpenAPI 3.2 `deviceAuthorizationUrl`.
-    pub device_authorization_url: Option<String>,
+    pub(crate) device_authorization_url: Option<String>,
     /// `scopes`: name → description, in source order.
-    pub scopes: Vec<(String, String)>,
+    pub(crate) scopes: Vec<(String, String)>,
 }
 
 /// A `security` requirement: scheme name → required scopes.
 #[derive(Debug, Clone)]
-pub struct SecurityRequirement(pub IndexMap<String, Vec<String>>);
+pub(crate) struct SecurityRequirement(pub(crate) IndexMap<String, Vec<String>>);

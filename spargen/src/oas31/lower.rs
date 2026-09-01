@@ -32,7 +32,7 @@ use super::{
 const MAX_SCHEMA_DEPTH: u32 = 128;
 
 /// Lower a typed OpenAPI 3.1 or 3.2 [`Document`] into the version-agnostic [`Api`] IR.
-pub fn lower(
+pub(crate) fn lower(
     document: &Document,
     resolver: &Resolver,
     diags: &mut Diagnostics,

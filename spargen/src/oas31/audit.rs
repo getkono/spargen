@@ -8,7 +8,7 @@ type AnnotationKey = (Option<FileId>, JsonPointer);
 
 /// The per-keyword W-class audit: walks every reachable schema and emits the once-per-site
 /// warnings (validation-only keywords). R-class rejections fire during parsing and lowering.
-pub fn audit(document: &Document, resolver: &Resolver<'_>, diags: &mut Diagnostics) {
+pub(crate) fn audit(document: &Document, resolver: &Resolver<'_>, diags: &mut Diagnostics) {
     let consumed_content = consumed_sse_content(document, resolver, diags);
     for (name, schema) in &document.components.schemas {
         if let RefOr::Item(schema) = schema {
