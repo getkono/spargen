@@ -90,7 +90,7 @@ Standing invariants:
 - Prefer `pub(crate)` over `pub` for anything not part of the `build.rs` facade or an emitted
   API; module privacy plus the layering DAG is how coupling stays controlled. The DAG is enforced
   by `spargen/tests/layering.rs`, which diffs each `//! layer-deps:` header against the module's
-  real `crate::` edges — the `xtask lint-layers` job `lib.rs` describes does not exist yet.
+  real `crate::` edges.
 
 ## Testing strategy (by subsystem)
 
