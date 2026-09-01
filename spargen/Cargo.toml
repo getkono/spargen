@@ -58,6 +58,8 @@ tempfile = { workspace = true }
 insta = { workspace = true }
 # Benchmark harness (`benches/generate.rs`, run via `cargo bench`). Dev-only.
 criterion = { workspace = true }
+# SHA-256 for the corpus integrity gate (`tests/corpus_manifest.rs`). Dev-only.
+sha2 = { workspace = true }
 
 [[bin]]
 name = "spargen"
