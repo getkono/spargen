@@ -3,8 +3,10 @@
 These OpenAPI Specification texts are vendored from the Apache-2.0 licensed
 [`OAI/OpenAPI-Specification`](https://github.com/OAI/OpenAPI-Specification)
 repository for implementation reference and auditability. Product scope and
-normative precedence remain defined in [`docs/prd.md`](../docs/prd.md); this
-file defines which vendored spec texts to consult.
+normative precedence are defined by [`README.md`](../README.md) and the
+operational surface it points at — [`docs/support-matrix.md`](../docs/support-matrix.md)
+and [`docs/errors.md`](../docs/errors.md); this file defines which vendored spec
+texts to consult.
 
 ## Patch-Version Policy
 
@@ -35,7 +37,7 @@ Use these as the sole active references for their minor lines:
 | --- | --- | --- |
 | 3.0 | [`3.0.4.md`](3.0.4.md) | Historical comparison and 3.0 rejection/dialect-difference checks |
 | 3.1 | [`3.1.2.md`](3.1.2.md) | OpenAPI 3.1 feature-set reference |
-| 3.2 | [`3.2.0.md`](3.2.0.md) | Future-minor comparison |
+| 3.2 | [`3.2.0.md`](3.2.0.md) | OpenAPI 3.2 feature-set reference — the ground truth for any 3.2 conformance question |
 
 Do not use `3.0.0.md`, `3.0.1.md`, `3.0.2.md`, `3.0.3.md`, `3.1.0.md`, or
 `3.1.1.md` for implementation decisions unless the task is explicitly auditing
