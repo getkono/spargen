@@ -4,7 +4,6 @@
 # shim exposing `generate_api!`). Neither ever enters a consumer's RUNTIME graph — a proc-macro
 # crate and everything it reaches are host/build-time only. Plus a `publish = false`
 # `support-runtime` member holding the freestanding runtime embedded verbatim into generated output.
-# The `xtask` member (layer lint, corpus tooling) is reserved for later.
 [workspace]
 resolver = "2"
 members = ["spargen", "spargen-macro", "support-runtime"]
@@ -25,8 +24,8 @@ description = "A compile-time-correct Rust client generator for OpenAPI 3.1.x an
 keywords = ["openapi", "codegen", "client"]
 categories = ["development-tools", "api-bindings"]
 
-# Shared dependency versions. Each subsystem opts in from its own crate manifest; entries are
-# added as the subsystem that first needs them lands (see the per-commit plan).
+# Shared dependency versions. Each subsystem opts in from its own crate manifest; an entry lands
+# here when the first member needs it, and leaves when the last member stops.
 [workspace.dependencies]
 bytes = "1.12.1"
 futures-core = "0.3.32"
@@ -37,7 +36,6 @@ serde = "1.0.229"
 serde_json = "1.0.151"
 time = "0.3.55"
 tokio = "1.53.1"
-uuid = "1.24.0"
 semver = "1.0"
 camino = "1.1"
 indexmap = "2.2"
