@@ -593,7 +593,11 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
         .unwrap_or_else(|| manifest_path.to_path_buf());
     if manifest.get("workspace").is_some() {
         return WorkspaceRoot {
-            path: Some(manifest_path.to_path_buf()),
+            // Absolutized for the same reason `searched_from` is: this path is what an
+            // unresolvable inheritance names, and `./Cargo.toml` tells the reader nothing. It is
+            // not added to `manifests` — a self-rooted manifest is the consumer manifest, already
+            // recorded — so naming it fully cannot duplicate a `rerun-if-changed` directive.
+            path: Some(absolute.clone()),
             is_self: true,
             searched_from: absolute,
         };
@@ -617,13 +621,24 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
     let mut directory = absolute.parent().and_then(Utf8Path::parent);
     while let Some(candidate_dir) = directory {
         let candidate = candidate_dir.join("Cargo.toml");
-        if candidate.is_file()
-            && std::fs::read_to_string(&candidate)
+        if candidate.is_file() {
+            match std::fs::read_to_string(&candidate)
                 .ok()
                 .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
-                .is_some_and(|value| value.get("workspace").is_some())
-        {
-            return separate(Some(candidate));
+            {
+                Some(value) if value.get("workspace").is_some() => {
+                    return separate(Some(candidate));
+                }
+                // A manifest that parses but declares no `[workspace]` is an ordinary member or an
+                // unrelated crate: keep climbing.
+                Some(_) => {}
+                // One that exists and does *not* parse stops the walk. Climbing past it could only
+                // answer a question it has already made unanswerable — whether this file was the
+                // workspace root — and reporting "no workspace manifest was found" would hide the
+                // unreadable file that is the actual problem. Returning it as the root reaches
+                // `WorkspaceOrigin::Unreadable`, since the read this hands back to fails too.
+                None => return separate(Some(candidate)),
+            }
         }
         directory = candidate_dir.parent();
     }
@@ -1154,6 +1169,88 @@ serde_json.workspace = true
         // depends on how the platform resolves the temporary directory, so only the count is
         // asserted.
         assert_eq!(result.manifests.len(), 2, "{:#?}", result.manifests);
+    }
+
+    #[test]
+    fn a_self_rooted_manifest_names_an_absolute_path_when_an_entry_is_missing() {
+        // The layout the relative-path fix exists for: a single-crate repository whose `[package]`
+        // and `[workspace]` share one file, reached through the `generate_api!` `./Cargo.toml`
+        // fallback. The diagnostic names the manifest it resolved against, and naming it
+        // `./Cargo.toml` would tell the reader nothing about which file to open.
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[workspace]\n\n\
+                 [workspace.dependencies]\n{}\n\n{CORE_INHERITED}",
+                core_workspace_dependencies()
+                    .lines()
+                    .filter(|line| !line.starts_with("bytes"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        )
+        .unwrap();
+
+        let _lock = WORKING_DIRECTORY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreWorkingDirectory(std::env::current_dir().unwrap());
+        std::env::set_current_dir(directory.path()).unwrap();
+
+        let result = audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
+        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
+        let message = &result.diagnostics[0].message;
+        assert!(
+            message.contains("`bytes` inherits") && message.contains("declares no `bytes` there"),
+            "{message}"
+        );
+        // The point of the fix: a path the reader can open, not the caller's bare spelling.
+        assert!(
+            !message.contains("`Cargo.toml` declares")
+                && !message.contains("`./Cargo.toml` declares"),
+            "the diagnostic names the raw spelling rather than a path the reader can open: \
+             {message}"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_root_reached_by_the_ancestor_walk_is_not_reported_as_missing() {
+        // The commonest layout reaches its root through the walk rather than through
+        // `package.workspace`, and the walk used to skip any candidate it could not parse and keep
+        // climbing — collapsing the three-way distinction back to "nothing found" for exactly the
+        // case where a file the reader can open is the problem.
+        let directory = tempfile::tempdir().unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(&root, "[workspace\nthis is not toml\n").unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains("`bytes` inherits")
+                    && diagnostic.message.contains("could not be read")
+                    && diagnostic.message.contains(root.as_str())
+            }),
+            "{:#?}",
+            result.diagnostics
+        );
+        assert!(
+            !result.diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("no workspace manifest was found above")
+            }),
+            "{:#?}",
+            result.diagnostics
+        );
     }
 
     #[test]
