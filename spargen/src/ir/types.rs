@@ -55,6 +55,12 @@ impl TypeGraph {
         self.defs.pop()
     }
 
+    /// The id of the most recently inserted definition, if any. Paired with
+    /// [`pop_last`](Self::pop_last) to retype a definition nothing else can reference yet.
+    pub(crate) fn last_id(&self) -> Option<TypeId> {
+        self.defs.last().map(|(id, _)| *id)
+    }
+
     /// The definition for `id`, if present.
     pub(crate) fn get(&self, id: TypeId) -> Option<&TypeDef> {
         self.defs.get(&id)

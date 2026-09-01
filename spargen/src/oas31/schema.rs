@@ -96,6 +96,76 @@ pub(crate) struct XmlHints {
     pub(crate) wrapped: bool,
 }
 
+impl Schema {
+    /// Whether this schema constrains the *storage shape* of a value at all.
+    ///
+    /// `{}` and `true` constrain nothing, and neither do the annotation- and validation-only
+    /// keywords, which are documented or reported (`W001`) rather than typed. This is what lets a
+    /// caller tell "an alternative that decodes to exactly the same thing" from one that does not,
+    /// before any of it has been lowered.
+    ///
+    /// The destructure is exhaustive on purpose: a field added to [`Schema`] fails to compile here
+    /// rather than silently letting a constrained schema pass as unconstrained.
+    pub(crate) fn constrains_no_shape(&self) -> bool {
+        let Schema {
+            boolean,
+            types,
+            reference,
+            properties,
+            required,
+            additional_properties,
+            pattern_properties,
+            items,
+            prefix_items,
+            all_of,
+            one_of,
+            any_of,
+            discriminator,
+            defs,
+            validation_children,
+            enum_values,
+            const_value,
+            format,
+            content_encoding,
+            content_media_type,
+            content_schema,
+            xml,
+            // Annotation- and validation-only: documented or reported, never typed.
+            default: _,
+            validation: _,
+            deprecated: _,
+            read_only: _,
+            write_only: _,
+            title: _,
+            description: _,
+            provenance: _,
+        } = self;
+        // `false` is the always-false schema — the one boolean that does constrain, to nothing.
+        !matches!(boolean, Some(false))
+            && types.types.is_empty()
+            && reference.is_none()
+            && properties.is_empty()
+            && required.is_empty()
+            && additional_properties.is_none()
+            && pattern_properties.is_empty()
+            && items.is_none()
+            && prefix_items.is_empty()
+            && all_of.is_empty()
+            && one_of.is_empty()
+            && any_of.is_empty()
+            && discriminator.is_none()
+            && defs.is_empty()
+            && validation_children.is_empty()
+            && enum_values.is_none()
+            && const_value.is_none()
+            && format.is_none()
+            && content_encoding.is_none()
+            && content_media_type.is_none()
+            && content_schema.is_none()
+            && xml.is_none()
+    }
+}
+
 /// A schema position that may be a boolean schema (`true`/`false`) or a full [`Schema`]. `{}` and
 /// `true` are the untyped schemas that faithfully lower to `Any`.
 #[derive(Debug, Clone)]

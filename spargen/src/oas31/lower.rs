@@ -2478,9 +2478,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
-        let (media_name, object) = choose_media(&body.content, &body.provenance, self.diags)?;
+        let (media_name, object) = choose_media(
+            &body.content,
+            &body.provenance,
+            self.diags,
+            media_object_is_opaque,
+        )?;
         let object = self.resolve_media_object(object, media_name)?;
         let media = lower_media_type(media_name, &body.provenance, self.diags)?;
+        // A media *range* describes what a server may return, not what a client sends: `Content-Type`
+        // requires a concrete type/subtype (RFC 9110 § 8.3), and a generated request puts its media
+        // key on the wire verbatim. Emitting `Content-Type: video/*` would be an undispatchable
+        // header, and picking a concrete member of the family would be spargen inventing what the
+        // document declined to say — so it is rejected rather than guessed at.
+        if classify_media_range(media_essence(media_name)).is_some() {
+            Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                .message(format!(
+                    "media type `{media_name}` is a media range, which describes a family rather \
+                     than the concrete `Content-Type` a request must send"
+                ))
+                .remedy(
+                    "name the concrete media type the request body is sent as, or omit this API \
+                     segment with spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
         // Streaming media is a response-only construct: a `text/event-stream` / `application/x-ndjson`
         // *request* body has no representation here, so it stays rejected (narrowed `E009`) rather
         // than silently degrade. (`choose_media` only picks it when no whole-body alternative exists.)
@@ -2538,6 +2561,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
             }
         }
+        let ty = if media == MediaType::OctetStream {
+            self.opaque_octets("RequestBody", ty, object.schema.is_some(), &body.provenance)
+        } else {
+            ty
+        };
         if let Some(ty) = ty {
             let compatible = match media {
                 MediaType::Text => raw_text_type_supported(&self.graph, ty),
@@ -2990,7 +3018,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn lower_response(&mut self, response: &ResponseObject) -> Option<Response> {
-        let body = choose_media(&response.content, &response.provenance, self.diags).and_then(
+        let body = choose_media(
+            &response.content,
+            &response.provenance,
+            self.diags,
+            media_object_is_opaque,
+        )
+        .and_then(
             |(media_name, object)| {
                 let object = self.resolve_media_object(object, media_name)?;
                 let media = lower_media_type(media_name, &response.provenance, self.diags)?;
@@ -3077,6 +3111,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .emit(self.diags);
                     return None;
                 }
+                let ty = if media == MediaType::OctetStream {
+                    self.opaque_octets(
+                        "ResponseBody",
+                        ty,
+                        object.schema.is_some(),
+                        &response.provenance,
+                    )
+                } else {
+                    ty
+                };
                 if let Some(ty) = ty {
                     let compatible = match media {
                         MediaType::Text => raw_text_type_supported(&self.graph, ty),
@@ -3160,7 +3204,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let Some(media) = lower_media_type(media, &header.provenance, self.diags) else {
                     continue;
                 };
-                if media != MediaType::Json {
+                // A textual `content` entry describes the field value itself, so it decodes exactly
+                // like the `schema:` spelling — the shape gate below is what decides. This is not a
+                // rare form: `Content-Range` on a ranged response is routinely documented this way,
+                // and refusing it cost a typed accessor for no reason.
+                if !matches!(media, MediaType::Json | MediaType::Text) {
                     Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
                         .message(format!(
                             "response header `{name}` uses a `content` media type spargen cannot \
@@ -3190,7 +3238,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let Some(ty) = self.lower_schema_ref(schema, &format!("Header{name}")) else {
                     continue;
                 };
-                (ty, crate::ir::HeaderShape::Json)
+                if media == MediaType::Json {
+                    (ty, crate::ir::HeaderShape::Json)
+                } else {
+                    // Textual content carries the field value verbatim, so only a scalar schema is
+                    // representable: a list or an object under `text/plain` says nothing about how
+                    // the value is framed, and `simple` is not that framing.
+                    let Some(shape @ crate::ir::HeaderShape::Scalar) = self.header_shape(ty) else {
+                        Diagnostic::warning(
+                            Code::DeclarationHasNoEffect,
+                            header.provenance.clone(),
+                        )
+                        .message(format!(
+                            "response header `{name}` declares a textual `content` schema that \
+                                 is not a single value, so no typed accessor is generated"
+                        ))
+                        .emit(self.diags);
+                        continue;
+                    };
+                    (ty, shape)
+                }
             } else {
                 continue;
             };
@@ -3623,6 +3690,84 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }
+    }
+
+    /// Whether this definition is a named component root — reachable by name from anywhere else in
+    /// the document, rather than owned by the single use site that produced it.
+    fn is_component_root(&self, id: TypeId) -> bool {
+        self.components
+            .values()
+            .chain(self.in_progress.values())
+            .chain(self.remote_components.values())
+            .chain(self.remote_in_progress.values())
+            .any(|&(root, _)| root == id)
+    }
+
+    /// Read an untyped body on a binary media type as raw octets.
+    ///
+    /// OpenAPI 3.1 aligned Schema Objects with JSON Schema 2020-12 and removed `format: binary`, so
+    /// an empty (always-true) Schema Object — or no `schema` at all — is now how a document says
+    /// *any octets*: the media type already carries the meaning, and `type: string` would be the
+    /// 3.0 spelling the release deliberately retired. Both lower to `Any`, which on
+    /// `application/octet-stream` would emit `serde_json::Value` for a byte stream, so the use site
+    /// is retyped to `Bytes`.
+    ///
+    /// `declared_but_unlowerable` is a schema that was written and failed to lower for its own
+    /// reason: it has already reported that, and must not be silently rewritten into bytes.
+    ///
+    /// `provenance` is the body's own, never the document root's: `Scope::alloc` disambiguates
+    /// colliding name hints by pointer precisely so that reordering paths renames nothing, and a
+    /// root pointer would collapse every `RequestBody`/`ResponseBody` here into arrival order.
+    fn opaque_octets(
+        &mut self,
+        hint: &str,
+        ty: Option<Ty>,
+        declared: bool,
+        provenance: &crate::diag::Provenance,
+    ) -> Option<Ty> {
+        let Some(ty) = ty else {
+            let declared_but_unlowerable = declared;
+            return (!declared_but_unlowerable).then(|| {
+                self.insert_type(
+                    hint,
+                    TypeKind::Bytes,
+                    Docs::default(),
+                    Some(provenance.clone()),
+                )
+            });
+        };
+        if !matches!(
+            self.graph.get(ty.id).map(|definition| &definition.kind),
+            Some(TypeKind::Any)
+        ) {
+            return Some(ty);
+        }
+        // An inline `{}` is the definition just inserted, and nothing can reference it yet, so it
+        // is replaced in place — left behind it would emit a second `pub type … =
+        // serde_json::Value` alias and take the name this body wants.
+        //
+        // Being the last definition is not enough to prove that, though: a *childless* component
+        // (`Opaque: {}`) is lifted into its reserved id, which is then the last id as well, and
+        // rewriting that would retype the component for every other reference in the document. A
+        // named root is therefore left exactly as declared and the use site gets its own type.
+        if self.graph.last_id() == Some(ty.id) && !self.is_component_root(ty.id) {
+            let (_, definition) = self
+                .graph
+                .pop_last()
+                .expect("a definition was just observed");
+            let id = self.graph.insert(TypeDef {
+                kind: TypeKind::Bytes,
+                ..definition
+            });
+            debug_assert_eq!(id, ty.id, "popping and reinserting reuses the dense id");
+            return Some(Ty { id, ..ty });
+        }
+        Some(self.insert_type(
+            hint,
+            TypeKind::Bytes,
+            Docs::default(),
+            Some(provenance.clone()),
+        ))
     }
 
     fn insert_schema_type(&mut self, schema: &Schema, hint: &str, kind: TypeKind) -> Ty {
@@ -4383,20 +4528,23 @@ fn lower_media_type(
     }
 }
 
+/// `opaque` answers, without lowering anything, whether an entry's body constrains no shape — the
+/// proof that an ignored alternative would decode exactly like the selection.
 fn choose_media<'a, T>(
     content: &'a IndexMap<String, T>,
     provenance: &crate::diag::Provenance,
     diags: &mut Diagnostics,
+    opaque: impl Fn(&T) -> bool,
 ) -> Option<(&'a str, &'a T)> {
     if content.is_empty() {
         return None;
     }
-    let mut selected: Option<(u8, usize, &str, &T)> = None;
+    let mut selected: Option<(u8, usize, &str, &T, MediaType)> = None;
     for (source_index, (media, value)) in content.iter().enumerate() {
-        let Some((_, rank)) = classify_media(media_essence(media)) else {
+        let Some((classified, rank)) = classify_media(media_essence(media)) else {
             continue;
         };
-        let candidate = (rank, source_index, media.as_str(), value);
+        let candidate = (rank, source_index, media.as_str(), value, classified);
         if selected
             .as_ref()
             .is_none_or(|current| (rank, source_index) < (current.0, current.1))
@@ -4404,14 +4552,29 @@ fn choose_media<'a, T>(
             selected = Some(candidate);
         }
     }
-    if let Some((_, _, media, value)) = selected {
+    if let Some((_, _, media, value, classified)) = selected {
         // A generated method sends and decodes exactly one media type, so the alternatives are not
         // generated. That narrows the documented surface — a server that also accepts XML will only
         // ever be sent JSON — so it is reported rather than dropped in silence.
+        //
+        // An alternative that decodes to the very same thing narrows nothing, though. An
+        // opaque-octets body that constrains no shape is `bytes::Bytes`, so a ranged media response
+        // offering `video/*`, `audio/*` and `application/octet-stream` gives up nothing by
+        // generating one of them, and saying otherwise is noise on a common shape.
+        //
+        // "Opaque" has to be proved, not assumed from the media type: an octet-classified
+        // alternative carrying an object schema would be *rejected* by the octet gate, not turned
+        // into bytes, so suppressing it would be the silent fourth behavior nothing is allowed.
         let ignored: Vec<&str> = content
-            .keys()
-            .map(String::as_str)
-            .filter(|candidate| *candidate != media)
+            .iter()
+            .filter(|(candidate, _)| candidate.as_str() != media)
+            .filter(|(candidate, value)| {
+                classified != MediaType::OctetStream
+                    || !opaque(value)
+                    || classify_media(media_essence(candidate)).map(|(media, _)| media)
+                        != Some(MediaType::OctetStream)
+            })
+            .map(|(candidate, _)| candidate.as_str())
             .collect();
         if !ignored.is_empty() {
             Diagnostic::warning(Code::AlternativeMediaIgnored, provenance.clone())
@@ -4434,6 +4597,19 @@ fn choose_media<'a, T>(
     None
 }
 
+/// Whether a Media Type Object's body constrains no shape: no `schema` at all, or one that says
+/// nothing about the value's storage. On a binary media that is exactly `bytes::Bytes`.
+///
+/// A `$ref` is never taken as opaque — proving it would mean resolving it here, and answering
+/// "unknown" as "not opaque" only costs a warning that was already being reported.
+fn media_object_is_opaque(object: &MediaTypeObject) -> bool {
+    match &object.schema {
+        None => true,
+        Some(RefOr::Item(schema)) => schema.constrains_no_shape(),
+        Some(RefOr::Ref(_)) => false,
+    }
+}
+
 fn media_essence(media: &str) -> &str {
     media.split(';').next().unwrap_or(media).trim()
 }
@@ -4442,6 +4618,9 @@ fn media_essence(media: &str) -> &str {
 /// suffixes use the JSON codec; textual types use raw UTF-8 except for the two streaming framings.
 /// GitHub's documented octocat representation is a textual vendor media type.
 fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
+    if let Some(range) = classify_media_range(essence) {
+        return Some(range);
+    }
     let classified = match essence {
         "application/json" => (MediaType::Json, 0),
         media if media.starts_with("application/") && media.ends_with("+json") => {
@@ -4462,6 +4641,27 @@ fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
         _ => return None,
     };
     Some(classified)
+}
+
+/// Classify a media **range** — `type/*`, or `*/*` — which the specification permits as a `content`
+/// key and which describes a whole family rather than one type.
+///
+/// `text/*` is the family read as raw UTF-8; every other family, `*/*` included, is opaque octets,
+/// which is the only honest reading of "whatever this server detected". A range ranks below every
+/// concrete media type, so a concrete sibling always outranks it.
+///
+/// The type before the slash must be present — `/*` names no family and stays unsupported — and is
+/// matched case-insensitively, because media types are (RFC 9110 § 8.3.1) and reading `TEXT/*` as
+/// binary would be silently wrong rather than loudly unsupported.
+fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
+    let family = essence
+        .strip_suffix("/*")
+        .filter(|family| !family.is_empty())?;
+    Some(if family.eq_ignore_ascii_case("text") {
+        (MediaType::Text, 7)
+    } else {
+        (MediaType::OctetStream, 8)
+    })
 }
 
 fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {
