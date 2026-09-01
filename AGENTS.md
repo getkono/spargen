@@ -60,11 +60,15 @@ mise run docs       # build the mdBook site (fails on broken links/includes)
 mise run doc-links  # rustdoc over the workspace, warnings denied, private items included
 ```
 
-`hk.pkl` wires four of these into git hooks through the same mise tasks CI runs: `fmt` and `lint`
-on pre-commit, `test` and the `convco` commit-message check on pre-push. The rest — `check`,
-`powerset`, `corpus-smoke`, `example`, `github-api`, `deny`, `docs`, `doc-links` — run only in
-CI; they are too slow for a hook, so a green pre-push is not a green CI. Run `mise run hooks`
-once to install them.
+`hk.pkl` wires these into git hooks, and every step delegates to a `mise` task rather than
+keeping a second copy of a gate: `fmt` and `lint` fix the working tree on pre-commit;
+`fmt-check`, `lint`, `test`, and `commit-range` (Conventional Commits over the outgoing range)
+gate pre-push; `commit-msg` validates each message as it is written. CI runs the same gates but
+spells the commands out itself rather than calling `mise`, so the two are kept in step by hand —
+`ci.yml` says so where it pins `mdbook` and `convco`. The rest — `check`, `powerset`,
+`corpus-smoke`, `example`, `github-api`, `deny`, `docs`, and the rustdoc link check `doc-links`
+runs (a step inside the `docs` job, not a job of its own) — never run in a hook; they are too
+slow, so a green pre-push is not a green CI. Run `mise run hooks` once to install them.
 
 CI additionally gates five things the list above does not name: `msrv` (the declared
 `rust-version` floor still compiles), `package` (`cargo publish --dry-run`, which is what keeps the
