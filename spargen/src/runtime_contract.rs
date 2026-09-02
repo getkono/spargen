@@ -619,6 +619,11 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
         );
     }
     let mut directory = absolute.parent().and_then(Utf8Path::parent);
+    // The nearest candidate that exists and does not parse. It is remembered rather than acted on,
+    // because it may or may not have been the workspace root and nothing here can tell: a valid
+    // root further up still wins, exactly as before. It only decides the *fallback*, where the
+    // alternative is claiming no workspace manifest was found while one sits unread on the path.
+    let mut unreadable = None;
     while let Some(candidate_dir) = directory {
         let candidate = candidate_dir.join("Cargo.toml");
         if candidate.is_file() {
@@ -632,17 +637,15 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
                 // A manifest that parses but declares no `[workspace]` is an ordinary member or an
                 // unrelated crate: keep climbing.
                 Some(_) => {}
-                // One that exists and does *not* parse stops the walk. Climbing past it could only
-                // answer a question it has already made unanswerable — whether this file was the
-                // workspace root — and reporting "no workspace manifest was found" would hide the
-                // unreadable file that is the actual problem. Returning it as the root reaches
-                // `WorkspaceOrigin::Unreadable`, since the read this hands back to fails too.
-                None => return separate(Some(candidate)),
+                None => unreadable = unreadable.or(Some(candidate)),
             }
         }
         directory = candidate_dir.parent();
     }
-    separate(None)
+    // Nothing on the path declared `[workspace]`. An unreadable candidate is the more useful of
+    // the two remaining answers: it names a file the reader can open and fix, where "no workspace
+    // manifest was found" points at the opposite remedy.
+    separate(unreadable)
 }
 
 struct DependencyCheck<'a> {
@@ -1251,6 +1254,37 @@ serde_json.workspace = true
             "{:#?}",
             result.diagnostics
         );
+    }
+
+    #[test]
+    fn a_broken_manifest_below_the_real_root_does_not_stop_the_walk() {
+        // Distinguishing "corrupt" from "missing" must not change *which* root resolves. An
+        // unrelated manifest that happens not to parse can sit between a member and its real
+        // workspace root — Cargo reaches the root regardless, and a spargen that stopped short
+        // would report `E023` for a layout that builds perfectly well.
+        let directory = tempfile::tempdir().unwrap();
+        let broken_dir = directory.path().join("group");
+        let member_dir = broken_dir.join("client");
+        std::fs::create_dir(&broken_dir).unwrap();
+        std::fs::create_dir(&member_dir).unwrap();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            format!(
+                "[workspace]\nmembers = [\"group/client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        std::fs::write(broken_dir.join("Cargo.toml"), "[package\nnot toml at all\n").unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
     }
 
     #[test]
