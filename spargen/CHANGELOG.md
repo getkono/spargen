@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/getkono/spargen/compare/spargen-v0.4.0...spargen-v0.4.1) - 2026-09-02
+
+### Fixed
+
+- *(runtime-contract)* keep climbing past a manifest that does not parse
+- *(oas31)* prove an alternative decodes identically before dropping W014
+- *(runtime-contract)* name the workspace root a reader can open
+- *(oas31)* accept the 3.1 spelling of a binary body and media ranges
+- *(runtime-contract)* resolve workspace-inherited deps in more layouts
+- *(surface)* serialize diff codes and impacts as their documented strings
+- *(name)* escape `gen`, reserved since edition 2024
+- *(codegen)* stop panicking on a keyword header or server variable
+
+### Other
+
+- Merge pull request #81 from getkono/refactor/scope-remaining-subsystems
+- Merge pull request #80 from getkono/refactor/scope-name-and-source
+- Merge pull request #79 from getkono/refactor/scope-oas31-to-crate
+- Merge pull request #78 from getkono/refactor/scope-ir-to-crate
+- Merge pull request #77 from getkono/refactor/scope-cli-fields
+- Merge pull request #75 from getkono/docs/facade-layering-claims
+- Merge pull request #74 from getkono/test/corpus-verifies-pinned-hashes
+- *(corpus)* verify the pinned hashes the docs already promise
+- Merge remote-tracking branch 'origin/master' into test/subsystem-strategy-compliance
+- correct the parity claim frontend.rs credits to E013
+- *(name)* guard the keyword table against a deleted entry
+- *(diff)* pin that a keyword-named operation is not a false rename
+- resolve the intra-doc links private modules hid
+- *(frontend)* assert check/generate parity as a property, not per fixture
+- *(corpus)* drive the corpus from its manifest, and close the drift it hid
+- *(config)* exercise precedence, not just discovery
+- *(surface)* classify every change kind, and keep the set complete
+- give emit its first tests, and compat a real fingerprint check
+- *(cache)* exercise the cache hit, and pin the fingerprint as complete
+- *(name)* pin determinism and identifier validity, the two claims with no test
+- lint the layering DAG and the runtime embed invariants
+- *(diag)* enforce the per-code fixture rule the docs already claim
+
 ## [0.4.0](https://github.com/getkono/spargen/compare/spargen-v0.3.0...spargen-v0.4.0) - 2026-08-29
 
 ### Fixed

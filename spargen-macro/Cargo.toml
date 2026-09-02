@@ -31,7 +31,7 @@ proc-macro = true
 # unconditional dependency of `spargen` — the config-file parser is library code, not CLI code.
 # `uuid`/`time` output mappings are controlled at call time through `Spec::uuid`/`Spec::time` (or
 # the macro's `no_uuid`/`no_time`), not by Cargo features, so none are needed here.
-spargen = { path = "../spargen", version = "0.4.0", default-features = false }
+spargen = { path = "../spargen", version = "0.4.1", default-features = false }
 syn = { workspace = true }
 quote = { workspace = true }
 proc-macro2 = { workspace = true }
