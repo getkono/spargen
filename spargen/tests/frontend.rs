@@ -4723,6 +4723,740 @@ paths:
 }
 
 #[test]
+fn an_empty_schema_on_a_binary_media_type_is_a_byte_body() {
+    // OpenAPI 3.1 aligned Schema Objects with JSON Schema 2020-12 and removed `format: binary`, so
+    // `schema: {}` — or no schema at all — is how a 3.1 document says "any octets" on a media type
+    // that already carries the meaning. It used to be rejected with `E009` for not being
+    // `type: string`, which is the 3.0 spelling 3.1 retired.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /blob:
+    post:
+      operationId: putBlob
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: {} }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: {}
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert_ne!(check(spec).outcome(), Outcome::Rejected, "{report:#?}");
+    // The point of the fix: a byte body must not degrade to `serde_json::Value`, and retyping the
+    // untyped schema must not leave a second alias behind.
+    assert!(
+        code.contains("pub type RequestBody = bytes::Bytes;"),
+        "{code}"
+    );
+    assert!(
+        code.contains("pub type ResponseBody = bytes::Bytes;"),
+        "{code}"
+    );
+    assert!(
+        !code.contains("= serde_json::Value;"),
+        "an octet body must not lower to an untyped value: {code}"
+    );
+}
+
+#[test]
+fn retyping_a_binary_body_never_rewrites_a_shared_component() {
+    // Retyping the untyped body replaces the definition in place when it is anonymous. A childless
+    // component (`Opaque: {}`) is lifted into its reserved id and is then the graph's *last*
+    // definition too, so "last inserted" alone cannot tell the two apart — and rewriting a named
+    // component would silently retype it for every other reference in the document.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /blob:
+    get:
+      operationId: getBlob
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream:
+              schema: { $ref: "#/components/schemas/Opaque" }
+  /doc:
+    get:
+      operationId: getDoc
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Opaque" }
+components:
+  schemas:
+    Opaque: {}
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("pub type Opaque = serde_json::Value;"),
+        "the component must stay exactly as declared: {code}"
+    );
+    assert!(!code.contains("pub type Opaque = bytes::Bytes;"), "{code}");
+}
+
+#[test]
+fn a_media_range_is_generated_as_the_family_it_names() {
+    // Media *ranges* are permitted `content` keys. They classified as nothing, so a response body
+    // whose only entry was `video/*` was rejected outright rather than read as its family.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /clip:
+    get:
+      operationId: getClip
+      responses:
+        "200":
+          description: OK
+          content:
+            video/*: { schema: {} }
+  /note:
+    get:
+      operationId: getNote
+      responses:
+        "200":
+          description: OK
+          content:
+            text/*: { schema: { type: string } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(
+        code.contains("pub type ResponseBody = bytes::Bytes;"),
+        "{code}"
+    );
+}
+
+#[test]
+fn a_concrete_media_type_outranks_a_range_that_precedes_it() {
+    // Ranges rank below every concrete type, so a concrete sibling wins wherever it sits in the
+    // document. (Two ranges at the same rank still tie by source order, as equal-ranked
+    // concrete media already do.)
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /thing:
+    get:
+      operationId: getThing
+      responses:
+        "200":
+          description: OK
+          content:
+            "*/*": { schema: {} }
+            application/json: { schema: { type: object, properties: { a: { type: string } } } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    // JSON won, so the alternative that was dropped is the range — and that one really is a
+    // narrowing, because a JSON body and an opaque one decode differently.
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+    assert!(
+        !code.contains("pub type ResponseBody = bytes::Bytes;"),
+        "{code}"
+    );
+}
+
+#[test]
+fn w014_is_silent_when_every_alternative_decodes_identically() {
+    // The ranged-media response shape from #72, as emitted for a byte range: three keys, one
+    // representation. Every opaque-octets body is `bytes::Bytes` whatever its schema says, so
+    // generating one of them gives up nothing and the warning was pure noise on a common shape.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /media/{id}:
+    get:
+      operationId: getMedia
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            video/*: { schema: {} }
+            audio/*: { schema: {} }
+            application/octet-stream: { schema: {} }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_still_fires_for_an_alternative_spargen_cannot_decode() {
+    // The narrowing above must not swallow a real one: an unregistered media type sitting beside a
+    // byte body is a documented surface that is genuinely not generated.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: {} }
+            application/sdp: { schema: { type: string } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn e009_a_media_range_cannot_be_a_request_content_type() {
+    // A range describes what a server may return, not what a client sends. A generated request puts
+    // its media key on the wire verbatim, and `Content-Type: video/*` is not a dispatchable header
+    // — while choosing a concrete member of the family would be spargen inventing what the document
+    // declined to say.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          video/*: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn w014_still_fires_when_an_octet_alternative_constrains_a_shape() {
+    // The suppression may only cover alternatives that really do decode identically. An
+    // octet-classified alternative carrying an object schema would be *rejected* by the octet gate,
+    // not turned into bytes, so it is a genuine narrowing and must still be reported.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: {}
+            video/*: { schema: { type: object, properties: { a: { type: string } } } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn w014_still_fires_when_an_alternative_is_a_referenced_media_object() {
+    // A 3.2 Media Type Object may itself be a Reference Object, which parses with no `schema` of
+    // its own. Reading that absence as "constrains nothing" would call the alternative opaque on
+    // the strength of a field the `$ref` spelling never sets, and drop the warning for a structured
+    // body — the byte-identical inline spelling reports it, so the two must agree.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: {} }
+            video/*: { $ref: "#/components/mediaTypes/Manifest" }
+components:
+  mediaTypes:
+    Manifest:
+      schema: { type: object, properties: { a: { type: string } } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_still_fires_when_an_alternative_schema_is_a_ref() {
+    // The other place a reference hides. Proving what a `$ref` points at would mean resolving it
+    // during selection; answering "unknown" as "not opaque" only keeps a warning that was already
+    // being reported.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: {} }
+            video/*: { schema: { $ref: "#/components/schemas/Manifest" } }
+components:
+  schemas:
+    Manifest: { type: object, properties: { a: { type: string } } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn w014_is_silent_for_identical_text_alternatives() {
+    // The identical-decode rule is about the codec, not about bytes: two textual bodies that
+    // constrain nothing are both a whole-body `String`, so generating one gives up nothing.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain: { schema: {} }
+            text/csv: { schema: {} }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_still_fires_when_the_text_selection_is_typed() {
+    // The *selection* has to reach the shared representation too. A textual body carrying a string
+    // enum lowers to a typed value rather than to `String`, so an opaque sibling beside it really
+    // does document something the client will never accept.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain: { schema: { type: string, enum: [a, b] } }
+            text/csv: { schema: {} }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn an_octet_selection_with_a_binary_schema_still_silences_an_opaque_range() {
+    // Octet-stream is the one codec whose gate admits only bodies that collapse to `bytes::Bytes`,
+    // so the selection does not have to be empty for the alternatives to decode identically. The
+    // 3.0 spelling of a binary body beside the 3.1 one narrows nothing.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: { type: string, format: binary } }
+            video/*: { schema: {} }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_still_fires_when_an_alternative_carries_a_validation_keyword() {
+    // A validation keyword never changes the storage type, so both bodies are `bytes::Bytes` — but
+    // the document still said something about one of them, and an alternative that says something
+    // is not interchangeable with one that says nothing.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: {} }
+            video/*: { schema: { maxLength: 10 } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn w014_still_fires_when_an_alternative_is_the_always_false_schema() {
+    // `false` is the one boolean schema that constrains — to nothing at all. It is not the empty
+    // schema and must not be read as one.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: {} }
+            video/*: { schema: false }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn w014_still_fires_for_every_kind_of_constraining_alternative() {
+    // `constrains_nothing` is a long conjunction, and dropping any one term would silently widen
+    // the suppression — the exhaustive destructure it is built on catches a field that is *added*
+    // to `Schema`, never one that stops being consulted. Each schema below trips exactly one term,
+    // so deleting that term turns this test red instead of turning a real narrowing silent.
+    for constraining in [
+        "{ type: object, properties: { a: { type: string } } }",
+        "{ required: [a] }",
+        "{ additionalProperties: false }",
+        "{ patternProperties: { \"^x-\": { type: string } } }",
+        "{ items: { type: string } }",
+        "{ prefixItems: [{ type: string }] }",
+        "{ allOf: [{ type: string }] }",
+        "{ oneOf: [{ type: string }] }",
+        "{ anyOf: [{ type: string }] }",
+        "{ enum: [a, b] }",
+        "{ const: a }",
+        "{ format: uuid }",
+        "{ contentEncoding: base64 }",
+        "{ contentMediaType: application/json }",
+        "{ maxLength: 10 }",
+        "false",
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: {{ schema: {{}} }}
+            video/*: {{ schema: {constraining} }}
+"##
+        );
+        let report = generate(&spec);
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "an alternative constrained by `{constraining}` was suppressed as decoding \
+             identically: {report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_binary_body_whose_schema_failed_to_lower_is_not_retyped_to_bytes() {
+    // Retyping to `Bytes` applies to a body that *said nothing*. A body that declared a schema
+    // which then failed to lower has already reported its own failure, and quietly handing it back
+    // as bytes would turn that error into a silently different type.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: { $ref: "#/components/schemas/Loop" } }
+components:
+  schemas:
+    Loop: { $ref: "#/components/schemas/Loop" }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    }
+}
+
+#[test]
+fn a_media_range_is_matched_case_insensitively() {
+    // Media types are case-insensitive (RFC 9110 § 8.3.1). Reading `TEXT/*` as a binary family
+    // would be silently wrong rather than loudly unsupported.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /note:
+    get:
+      operationId: getNote
+      responses:
+        "200":
+          description: OK
+          content:
+            TEXT/*: { schema: { type: string } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !code.contains("pub type ResponseBody = bytes::Bytes;"),
+        "an upper-case text range is still text: {code}"
+    );
+}
+
+#[test]
+fn e009_a_range_naming_no_family_is_unsupported() {
+    // `/*` has no type before the slash, so it names nothing. It stays unsupported rather than
+    // being read as opaque octets on the strength of its suffix alone.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            "/*": { schema: {} }
+"##,
+    );
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+}
+
+#[test]
+fn a_sequential_media_outranks_a_text_range() {
+    // `text/*` used to classify as `Text` by accident of the `text/` prefix arm, at the same rank
+    // as a concrete textual type and *above* sequential media — so this response was a whole-body
+    // `String`. As a range it now ranks below both, and the concrete streaming type wins. That is a
+    // change to the generated public API, so it is pinned rather than left to be rediscovered.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      operationId: getEvents
+      responses:
+        "200":
+          description: OK
+          content:
+            text/*: { schema: { type: string } }
+            text/event-stream:
+              schema: { type: object, required: [seq], properties: { seq: { type: integer } } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("EventStream"), "{code}");
+    // Two media types that decode differently: the range really is not generated.
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+}
+
+#[test]
+fn a_textual_content_response_header_gets_a_typed_accessor() {
+    // `Content-Range` on a ranged response is routinely documented with `content:` rather than
+    // `schema:`. A textual content entry describes the field value itself, so it decodes exactly
+    // like the `schema:` spelling — refusing it cost the accessor and reported `W011` on a shape
+    // that is neither rare nor wrong.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /clip:
+    get:
+      operationId: getClip
+      responses:
+        "206":
+          description: Partial Content
+          headers:
+            Content-Range:
+              content:
+                text/plain: { schema: { type: string } }
+          content:
+            application/octet-stream: { schema: {} }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
+    assert!(code.contains("content_range"), "{code}");
+    assert_ne!(check(spec).outcome(), Outcome::Rejected, "{report:#?}");
+}
+
+#[test]
+fn w011_response_header_content_media_spargen_cannot_decode_is_reported() {
+    // The other side of the change, and a raise site that had no fixture: a `content` media type
+    // that is neither JSON nor textual still drops the accessor, and still says so. `*/*` is here
+    // because it used to be rejected outright (`E009`, unclassifiable) and now classifies as a
+    // binary range — the operation generates and the header is acknowledged instead.
+    for media in ["application/xml", r#""*/*""#] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Detail:
+              content:
+                {media}: {{ schema: {{ type: string }} }}
+          content:
+            application/json: {{ schema: {{ type: string }} }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(
+                has_code(&report, Code::DeclarationHasNoEffect),
+                "{report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn w011_a_textual_content_response_header_that_is_not_a_single_value_is_reported() {
+    // Textual content carries the field value verbatim, so a list says nothing about how the value
+    // is framed — and `simple` is not that framing.
+    let report = generate(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Detail:
+              content:
+                text/plain: { schema: { type: array, items: { type: string } } }
+          content:
+            application/json: { schema: { type: string } }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
+}
+
+#[test]
 fn security_scheme_documentation_reaches_credential_registration() {
     // The support matrix promises `bearerFormat`, flows, `openIdConnectUrl` and deprecation become
     // rustdoc on credential registration. `SecuritySchemeObject` used to carry four fields and none

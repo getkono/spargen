@@ -96,6 +96,85 @@ pub(crate) struct XmlHints {
     pub(crate) wrapped: bool,
 }
 
+impl Schema {
+    /// Whether this schema constrains a value at all — neither its storage shape nor its
+    /// validation.
+    ///
+    /// `{}` and `true` constrain nothing. Annotations (`default`, `title`, `description`,
+    /// `deprecated`, `readOnly`/`writeOnly`) do not either: they are documented rather than
+    /// enforced, and two entries differing only in prose decode identically. A *validation*
+    /// keyword does count, even though it never changes the storage type — see
+    /// [`ValidationKeywords::constrains_nothing`].
+    ///
+    /// This is what lets a caller tell "an alternative that decodes to exactly the same thing"
+    /// from one that does not, before any of it has been lowered.
+    ///
+    /// The destructure is exhaustive on purpose: a field added to [`Schema`] fails to compile here
+    /// rather than silently letting a constrained schema pass as unconstrained.
+    pub(crate) fn constrains_nothing(&self) -> bool {
+        let Schema {
+            boolean,
+            types,
+            reference,
+            properties,
+            required,
+            additional_properties,
+            pattern_properties,
+            items,
+            prefix_items,
+            all_of,
+            one_of,
+            any_of,
+            discriminator,
+            defs,
+            validation_children,
+            enum_values,
+            const_value,
+            format,
+            content_encoding,
+            content_media_type,
+            content_schema,
+            xml,
+            validation,
+            // Annotation-only: documented or reported, never typed.
+            default: _,
+            deprecated: _,
+            read_only: _,
+            write_only: _,
+            title: _,
+            description: _,
+            provenance: _,
+        } = self;
+        // `false` is the always-false schema — the one boolean that does constrain, to nothing.
+        !matches!(boolean, Some(false))
+            && types.types.is_empty()
+            && reference.is_none()
+            && properties.is_empty()
+            && required.is_empty()
+            && additional_properties.is_none()
+            && pattern_properties.is_empty()
+            && items.is_none()
+            && prefix_items.is_empty()
+            && all_of.is_empty()
+            && one_of.is_empty()
+            && any_of.is_empty()
+            && discriminator.is_none()
+            && defs.is_empty()
+            && validation_children.is_empty()
+            && enum_values.is_none()
+            && const_value.is_none()
+            && format.is_none()
+            && content_encoding.is_none()
+            && content_media_type.is_none()
+            && content_schema.is_none()
+            && xml.is_none()
+            // A validation keyword does not change the storage type, but it is a constraint the
+            // document stated, so an entry carrying one is not interchangeable with one that
+            // says nothing.
+            && validation.constrains_nothing()
+    }
+}
+
 /// A schema position that may be a boolean schema (`true`/`false`) or a full [`Schema`]. `{}` and
 /// `true` are the untyped schemas that faithfully lower to `Any`.
 #[derive(Debug, Clone)]
@@ -162,4 +241,48 @@ pub(crate) struct ValidationKeywords {
     /// Another JSON Schema validation/applicator keyword is present (`not`, `if`/`then`/`else`,
     /// `contains`, `dependent*`, `unevaluated*`, `propertyNames`, or content validation).
     pub(crate) other: bool,
+}
+
+impl ValidationKeywords {
+    /// Whether no validation keyword is present at all.
+    ///
+    /// These keywords never change a body's storage type, so they are invisible to
+    /// [`Schema::constrains_nothing`]'s question. They are still something the document
+    /// *said*: a media alternative carrying `maxLength: 10` is not interchangeable with one that
+    /// says nothing, even though both decode to the same Rust type. Proving two entries decode
+    /// identically therefore requires this on top of the shape check.
+    ///
+    /// Destructured exhaustively so a new keyword fails to compile rather than silently passing.
+    pub(crate) fn constrains_nothing(&self) -> bool {
+        let ValidationKeywords {
+            pattern,
+            minimum,
+            maximum,
+            exclusive_minimum,
+            exclusive_maximum,
+            multiple_of,
+            min_length,
+            max_length,
+            min_items,
+            max_items,
+            unique_items,
+            min_properties,
+            max_properties,
+            other,
+        } = self;
+        pattern.is_none()
+            && minimum.is_none()
+            && maximum.is_none()
+            && exclusive_minimum.is_none()
+            && exclusive_maximum.is_none()
+            && multiple_of.is_none()
+            && min_length.is_none()
+            && max_length.is_none()
+            && min_items.is_none()
+            && max_items.is_none()
+            && !*unique_items
+            && min_properties.is_none()
+            && max_properties.is_none()
+            && !*other
+    }
 }

@@ -2315,6 +2315,29 @@ paths:
           content:
             application/octet-stream:
               schema: { type: string, format: binary }
+  # The OpenAPI 3.1 spelling of the same thing: `format: binary` is gone, so an empty (always-true)
+  # Schema Object — and an absent one — say "any octets", as do media ranges naming a binary family.
+  # All of them must reach `bytes::Bytes`, and the alternatives here decode identically so no `W014`
+  # is reported. `Content-Range` is documented with `content:` rather than `schema:`, which is how a
+  # ranged response routinely spells it and which must still produce a typed accessor.
+  /ranged:
+    put:
+      operationId: putRanged
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: {} }
+      responses:
+        "206":
+          description: partial content
+          headers:
+            Content-Range:
+              content:
+                text/plain: { schema: { type: string } }
+          content:
+            video/*: { schema: {} }
+            audio/*: {}
+            application/octet-stream: { schema: {} }
   /text-error:
     get:
       operationId: getTextError
