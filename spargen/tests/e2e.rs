@@ -675,6 +675,42 @@ fn multipart_parts_carry_their_resolved_content_types() {
     server.join().unwrap();
 }
 
+/// A raw byte request body is sent with the `Content-Type` its media key names: the octet gate
+/// admits only `bytes::Bytes`, and a `Bytes` body is emitted with the header before the media
+/// arms are consulted. This pins that wire fact directly, on the request the server actually reads.
+#[test]
+fn a_byte_request_body_declares_its_content_type() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+
+        assert!(request.starts_with("PUT /ranged HTTP/1.1"), "{request}");
+        assert!(
+            request.contains("content-type: application/octet-stream"),
+            "{request}"
+        );
+
+        stream
+            .write_all(
+                b"HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\n\
+                  Content-Range: bytes 0-2/3\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client
+        .put_ranged(&bytes::Bytes::from_static(b"abc"))
+        .unwrap();
+
+    server.join().unwrap();
+}
+
 #[test]
 fn required_path_query_parameter_is_not_shadowed_by_codegen_local() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
