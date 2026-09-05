@@ -677,7 +677,9 @@ fn multipart_parts_carry_their_resolved_content_types() {
 
 /// A raw byte request body is sent with the `Content-Type` its media key names: the octet gate
 /// admits only `bytes::Bytes`, and a `Bytes` body is emitted with the header before the media
-/// arms are consulted. This pins that wire fact directly, on the request the server actually reads.
+/// arms are consulted. This pins that wire fact directly, on the request the server actually reads,
+/// for `application/octet-stream` and for a concrete binary family member (`image/png`), which
+/// must go out under its own name rather than the generic one.
 #[test]
 fn a_byte_request_body_declares_its_content_type() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -706,6 +708,32 @@ fn a_byte_request_body_declares_its_content_type() {
     let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
     client
         .put_ranged(&bytes::Bytes::from_static(b"abc"))
+        .unwrap();
+
+    server.join().unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 8192];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+
+        assert!(request.starts_with("PUT /artwork/poster HTTP/1.1"), "{request}");
+        assert!(request.contains("content-type: image/png"), "{request}");
+
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client
+        .put_artwork("poster", &bytes::Bytes::from_static(b"\x89PNG"))
         .unwrap();
 
     server.join().unwrap();
@@ -2374,6 +2402,28 @@ paths:
             video/*: { schema: {} }
             audio/*: {}
             application/octet-stream: { schema: {} }
+  # The shape from #82: an image proxy whose only honest key is the family, and an upload that
+  # names its exact type. Both are `bytes::Bytes`; the upload goes out as `Content-Type: image/png`.
+  /artwork/{id}:
+    get:
+      operationId: getArtwork
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: the image
+          content:
+            image/*: { schema: {} }
+    put:
+      operationId: putArtwork
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          image/png: { schema: {} }
+      responses:
+        "204": { description: stored }
   /text-error:
     get:
       operationId: getTextError

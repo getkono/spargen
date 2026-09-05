@@ -4888,6 +4888,189 @@ paths:
 }
 
 #[test]
+fn a_concrete_image_audio_or_video_type_is_a_byte_body() {
+    // #82's second finding: `image/*` was accepted while `image/jpeg` — the same family, named
+    // exactly — still fell to `E009`. A concrete member of a family that RFC 6838 reserves for
+    // non-textual data is opaque octets under the same gate as `application/octet-stream`, in
+    // both 3.1 spellings (`schema: {}`, no schema) and the 3.0 one (`format: binary`).
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /photo:
+    get:
+      operationId: getPhoto
+      responses:
+        "200":
+          description: OK
+          content:
+            image/jpeg: { schema: {} }
+  /clip:
+    get:
+      operationId: getClip
+      responses:
+        "200":
+          description: OK
+          content:
+            video/mp4: { schema: { type: string, format: binary } }
+  /track:
+    get:
+      operationId: getTrack
+      responses:
+        "200":
+          description: OK
+          content:
+            audio/mpeg: {}
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert_ne!(check(spec).outcome(), Outcome::Rejected);
+    assert_eq!(code.matches("= bytes::Bytes;").count(), 3, "{code}");
+    assert!(!code.contains("= serde_json::Value;"), "{code}");
+}
+
+#[test]
+fn a_concrete_binary_request_body_is_sent_as_its_own_content_type() {
+    // Unlike a range, `image/png` is a dispatchable `Content-Type`, so it is accepted as a request
+    // body and the header names it verbatim rather than `application/octet-stream`.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /avatar:
+    put:
+      operationId: putAvatar
+      requestBody:
+        required: true
+        content:
+          image/png: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("pub type RequestBody = bytes::Bytes;"),
+        "{code}"
+    );
+    assert!(code.contains("\"image/png\""), "{code}");
+}
+
+#[test]
+fn w014_is_silent_across_concrete_and_ranged_byte_bodies() {
+    // `image/jpeg`, `image/png`, `image/*` and `application/octet-stream` over empty schemas are one
+    // representation four times over; picking one narrows nothing.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /artwork:
+    get:
+      operationId: getArtwork
+      responses:
+        "200":
+          description: OK
+          content:
+            image/jpeg: { schema: {} }
+            image/png: { schema: {} }
+            image/*: { schema: {} }
+            application/octet-stream: { schema: {} }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_concrete_binary_type_is_matched_case_insensitively() {
+    // `IMAGE/*` already reads as its family; `IMAGE/JPEG` must agree with it.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /photo:
+    get:
+      operationId: getPhoto
+      responses:
+        "200":
+          description: OK
+          content:
+            IMAGE/JPEG: { schema: {} }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("pub type ResponseBody = bytes::Bytes;"),
+        "{code}"
+    );
+}
+
+#[test]
+fn e009_a_concrete_binary_type_still_needs_a_binary_schema() {
+    // The family says "octets"; the schema still has to agree. An object under `image/jpeg` is
+    // rejected by the octet gate exactly as it is under `application/octet-stream`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /photo:
+    get:
+      operationId: getPhoto
+      responses:
+        "200":
+          description: OK
+          content:
+            image/jpeg: { schema: { type: object, properties: { a: { type: string } } } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_a_concrete_type_outside_the_byte_families_stays_unsupported() {
+    // `application/*` mixes binary (`pdf`) with textual (`sdp`) subtypes and `font/*` is not
+    // claimed, so none of them may be read as bytes on the strength of a prefix. This is the
+    // response-side twin of `e009_unsupported_media_type`, and what keeps the openai corpus
+    // expectation honest.
+    for media in ["application/pdf", "application/sdp", "font/woff2"] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            {media}: {{ schema: {{}} }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+            assert!(
+                has_code(&report, Code::UnsupportedMediaType),
+                "{media}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_concrete_media_type_outranks_a_range_that_precedes_it() {
     // Ranges rank below every concrete type, so a concrete sibling wins wherever it sits in the
     // document. (Two ranges at the same rank still tie by source order, as equal-ranked
