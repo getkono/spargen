@@ -2266,6 +2266,22 @@ pub(crate) fn emit_error_enum(
         // the inner value one step away.
         ErrorShape::Single(body_ty) => {
             let ty = ty_tokens(body_ty, names, options, true);
+            let body = ty_tokens(
+                Ty {
+                    nullable: false,
+                    boxed: false,
+                    ..body_ty
+                },
+                names,
+                options,
+                true,
+            );
+            let body_expr = match (body_ty.nullable, body_ty.boxed) {
+                (true, true) => quote! { self.0.as_deref() },
+                (true, false) => quote! { self.0.as_ref() },
+                (false, true) => quote! { Some(self.0.as_ref()) },
+                (false, false) => quote! { Some(&self.0) },
+            };
             // The derive is emitted exactly when the decode path actually uses serde. A binary body
             // is classified by `classify_error_bytes`, which builds the newtype through
             // `From<Bytes>` — so deriving `Deserialize` there would demand `bytes/serde` of the
@@ -2326,11 +2342,14 @@ pub(crate) fn emit_error_enum(
 
                 impl std::error::Error for #error_ident {}
 
-                // The one body is the inner value, so `Error::api_body` reaches it too.
+                // The one body is the inner value, so `Error::api_body` reaches it too. `Body`
+                // is the bare definition — unboxed, non-nullable — exactly as on the enum shape,
+                // so one bound covers both shapes of the same schema, and a `null` body answers
+                // `None` here as a nullable enum variant does.
                 impl support::ApiErrorBody for #error_ident {
-                    type Body = #ty;
-                    fn body(&self) -> Option<&#ty> {
-                        Some(&self.0)
+                    type Body = #body;
+                    fn body(&self) -> Option<&#body> {
+                        #body_expr
                     }
                 }
             }
