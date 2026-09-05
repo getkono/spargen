@@ -2873,10 +2873,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|encoding| encoding.provenance.clone())
                     .unwrap_or_else(|| at.clone()),
             )
-            .message(format!(
-                "property `{name}` is binary, which has no `application/x-www-form-urlencoded` \
-                 representation"
-            ))
+            // Name what the document wrote: a declared `contentType` is the reason a string
+            // property is binary here, while a property whose own schema is binary defaulted to
+            // octet-stream and never mentioned a `contentType` at all.
+            .message(if explicit.is_some() {
+                format!(
+                    "property `{name}` declares `contentType: {content_type}`, which is binary; a \
+                     form-urlencoded body cannot carry a binary part"
+                )
+            } else {
+                format!(
+                    "property `{name}` is binary, which has no \
+                     `application/x-www-form-urlencoded` representation"
+                )
+            })
             .remedy("send the body as `multipart/form-data`, or encode the value as text")
             .emit(self.diags);
             return None;
@@ -4560,8 +4570,8 @@ fn choose_media<'a, T>(
         // An alternative that decodes to the very same thing narrows nothing, though. Two entries
         // decode identically when they share a codec and both constrain nothing: a ranged media
         // response offering `video/*`, `audio/*` and `application/octet-stream` is `bytes::Bytes`
-        // three times over, and `text/plain` beside `text/csv` is `String` twice. Saying a
-        // narrowing happened there is noise.
+        // three times over, as is `image/jpeg` beside `image/png`, and `text/plain` beside
+        // `text/csv` is `String` twice. Saying a narrowing happened there is noise.
         //
         // This is decided before anything is lowered, so type identity is proved structurally
         // rather than by comparing lowered ids: within one codec, a body that constrains nothing
@@ -4640,7 +4650,8 @@ fn media_essence(media: &str) -> &str {
 
 /// Classify a content type into its wire codec and deterministic preference rank. Structured JSON
 /// suffixes use the JSON codec; textual types use raw UTF-8 except for the two streaming framings.
-/// GitHub's documented octocat representation is a textual vendor media type.
+/// GitHub's documented octocat representation is a textual vendor media type. Concrete members of
+/// the `image`, `audio`, and `video` families are opaque octets, like the ranges naming them.
 fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
     if let Some(range) = classify_media_range(essence) {
         return Some(range);
@@ -4654,6 +4665,8 @@ fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
         "multipart/form-data" => (MediaType::Multipart, 2),
         "application/x-www-form-urlencoded" => (MediaType::FormUrlEncoded, 3),
         "application/octet-stream" => (MediaType::OctetStream, 4),
+        // The sequential kinds are matched before the `text/` prefix arm so `text/event-stream` is
+        // a stream, not text; their rank (6) still sits below text (5).
         "text/event-stream" => (MediaType::EventStream, 6),
         "application/x-ndjson" | "application/jsonl" => (MediaType::Ndjson, 6),
         "application/json-seq" => (MediaType::JsonSequence, 6),
@@ -4662,7 +4675,11 @@ fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
         }
         "application/octocat-stream" => (MediaType::Text, 5),
         media if media.starts_with("text/") => (MediaType::Text, 5),
-        _ => return None,
+        // Rank 9, the end of the ladder, is a concrete member of a binary family
+        // (`classify_binary_family`): below every codec listed above and below both range ranks
+        // (7 and 8), so a family key is generated only when it is the sole key that classifies
+        // and never displaces a selection any other key already made.
+        _ => return classify_binary_family(essence),
     };
     Some(classified)
 }
@@ -4672,7 +4689,10 @@ fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
 ///
 /// `text/*` is the family read as raw UTF-8; every other family, `*/*` included, is opaque octets,
 /// which is the only honest reading of "whatever this server detected". A range ranks below every
-/// concrete media type, so a concrete sibling always outranks it.
+/// codec spargen has (`text/*` at 7, every other family at 8), so a concrete sibling outranks it —
+/// with one deliberate exception: a concrete `image`/`audio`/`video` member (9,
+/// `classify_binary_family`) sits *below* both, because a document listing a range beside
+/// `image/png` generated from the range before that family classified and must keep doing so.
 ///
 /// The type before the slash must be present — `/*` names no family and stays unsupported — and is
 /// matched case-insensitively, because media types are (RFC 9110 § 8.3.1) and reading `TEXT/*` as
@@ -4686,6 +4706,38 @@ fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
     } else {
         (MediaType::OctetStream, 8)
     })
+}
+
+/// Classify a concrete member of a family whose every subtype is an opaque payload — `image/jpeg`,
+/// `audio/mpeg`, `video/mp4`. RFC 6838 registers `image`, `audio`, and `video` as top-level types
+/// for non-textual data, so bytes is the only faithful reading of any member, exactly as it is for
+/// the family's range (`image/*`); the octet gate still demands a schema that collapses to
+/// `bytes::Bytes`. It sits at the very end of the ladder, below every other key spargen can
+/// classify — octet-stream, text, the sequential kinds, and the ranges, `*/*` included — so a
+/// family key is generated only when it is the sole key that classifies, which is exactly the
+/// shape #82 reports (`image/jpeg` as the only content key). Every document that generated before
+/// the family rule existed had selected some other key, and that key still outranks the family,
+/// so no such document changes its selection, its body type, its outcome, or a request's wire
+/// `Content-Type` — whatever schema `image/png` carries, since a losing alternative never reaches
+/// the octet gate.
+///
+/// `application/*` is deliberately not a family here: it mixes binary (`application/pdf`) with
+/// textual (`application/sdp`, `application/sql`) subtypes, and reading SDP as bytes would be
+/// silently wrong rather than loudly unsupported. For the same reason a subtype carrying an RFC
+/// 6838 structured-syntax suffix (`image/svg+xml`, or any `+suffix`) is not claimed: the suffix
+/// says the payload is a text syntax, so reading SVG as bytes would be silently wrong, and it stays
+/// unsupported until a codec for the suffix exists in this position. The family is matched
+/// case-insensitively for the same reason the range is (RFC 9110 § 8.3.1): `IMAGE/*` and
+/// `IMAGE/JPEG` must agree.
+fn classify_binary_family(essence: &str) -> Option<(MediaType, u8)> {
+    let (family, subtype) = essence.split_once('/')?;
+    if subtype.is_empty() || subtype.contains('*') || subtype.contains('+') {
+        return None;
+    }
+    ["image", "audio", "video"]
+        .iter()
+        .any(|binary| family.eq_ignore_ascii_case(binary))
+        .then_some((MediaType::OctetStream, 9))
 }
 
 fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {
