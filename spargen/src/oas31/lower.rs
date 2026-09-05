@@ -4655,17 +4655,19 @@ fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
         "multipart/form-data" => (MediaType::Multipart, 2),
         "application/x-www-form-urlencoded" => (MediaType::FormUrlEncoded, 3),
         "application/octet-stream" => (MediaType::OctetStream, 4),
-        // Rank 5 is a concrete member of a binary family (`classify_binary_family`): the same
-        // codec as octet-stream, ranked just below it so octet-stream wins whenever both are
-        // listed.
-        "text/event-stream" => (MediaType::EventStream, 7),
-        "application/x-ndjson" | "application/jsonl" => (MediaType::Ndjson, 7),
-        "application/json-seq" => (MediaType::JsonSequence, 7),
+        // The sequential kinds are matched before the `text/` prefix arm so `text/event-stream` is
+        // a stream, not text; their rank (6) still sits below text (5).
+        "text/event-stream" => (MediaType::EventStream, 6),
+        "application/x-ndjson" | "application/jsonl" => (MediaType::Ndjson, 6),
+        "application/json-seq" => (MediaType::JsonSequence, 6),
         media if media.starts_with("application/") && media.ends_with("+json-seq") => {
-            (MediaType::JsonSequence, 7)
+            (MediaType::JsonSequence, 6)
         }
-        "application/octocat-stream" => (MediaType::Text, 6),
-        media if media.starts_with("text/") => (MediaType::Text, 6),
+        "application/octocat-stream" => (MediaType::Text, 5),
+        media if media.starts_with("text/") => (MediaType::Text, 5),
+        // Rank 7 is a concrete member of a binary family (`classify_binary_family`): below every
+        // codec listed above, so a family key never displaces a selection these already made, and
+        // above the ranges (8 and 9), so a concrete type still beats `video/*`.
         _ => return classify_binary_family(essence),
     };
     Some(classified)
@@ -4696,10 +4698,12 @@ fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
 /// `audio/mpeg`, `video/mp4`. RFC 6838 registers `image`, `audio`, and `video` as top-level types
 /// for non-textual data, so bytes is the only faithful reading of any member, exactly as it is for
 /// the family's range (`image/*`); the octet gate still demands a schema that collapses to
-/// `bytes::Bytes`. It ranks just *below* `application/octet-stream`: the two decode identically,
-/// but octet-stream is the generic spelling every document that generated before the family rule
-/// existed was already selecting, so it keeps winning whenever both are listed — the selection, and
-/// with it a request's wire `Content-Type`, never changes for a document that already generated.
+/// `bytes::Bytes`. It ranks below every concrete codec spargen already had — octet-stream, text,
+/// and the sequential kinds — and above the ranges: a family key wins only when it is the sole
+/// classifiable key or sits beside ranges, so no document that generated before the family rule
+/// existed changes its selection, its body type, or a request's wire `Content-Type` (beside
+/// `application/octet-stream` the two decode identically anyway; beside `text/csv` or
+/// `text/event-stream` the text or stream key keeps winning as it did).
 ///
 /// `application/*` is deliberately not a family here: it mixes binary (`application/pdf`) with
 /// textual (`application/sdp`, `application/sql`) subtypes, and reading SDP as bytes would be
@@ -4717,7 +4721,7 @@ fn classify_binary_family(essence: &str) -> Option<(MediaType, u8)> {
     ["image", "audio", "video"]
         .iter()
         .any(|binary| family.eq_ignore_ascii_case(binary))
-        .then_some((MediaType::OctetStream, 5))
+        .then_some((MediaType::OctetStream, 7))
 }
 
 fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {

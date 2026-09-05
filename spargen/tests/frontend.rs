@@ -5033,6 +5033,121 @@ paths:
 }
 
 #[test]
+fn every_concrete_codec_outranks_a_concrete_binary_type_and_a_range_does_not() {
+    // A concrete family member ranks below every codec spargen already had — octet-stream, text,
+    // the sequential kinds — and above the ranges. Each document here generated before the family
+    // rule existed with `image/png` as an unsupported alternative; its selection, body type and
+    // wire `Content-Type` must not move now that `image/png` classifies. Below the ladder, a
+    // concrete type still beats a range, so `image/png` beside `video/*` is the one that is sent.
+
+    // (i) Text keeps a response: `String`, and `image/png` is the alternative not generated.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /report:
+    get:
+      operationId: getReport
+      responses:
+        "200":
+          description: OK
+          content:
+            text/csv: { schema: { type: string } }
+            image/png: { schema: {} }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("pub type ResponseBody = String;"), "{code}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::AlternativeMediaIgnored
+                && d.message.contains("`text/csv` is generated")
+                && d.message.contains("`image/png`")
+        }),
+        "{report:#?}"
+    );
+    assert_ne!(check(spec).outcome(), Outcome::Rejected);
+
+    // (ii) Text keeps a request, and with it the header a client already sent.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /note:
+    put:
+      operationId: putNote
+      requestBody:
+        required: true
+        content:
+          text/plain: { schema: { type: string } }
+          image/png: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("\"text/plain\""), "{code}");
+    assert!(!code.contains("\"image/png\""), "{code}");
+
+    // (iii) A sequential kind keeps a response: the stream is still the selection.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      operationId: getEvents
+      responses:
+        "200":
+          description: OK
+          content:
+            text/event-stream:
+              itemSchema: { type: object, required: [seq], properties: { seq: { type: integer } } }
+            image/png: { schema: {} }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("EventStream"), "{code}");
+    assert!(
+        !code.contains("pub type ResponseBody = bytes::Bytes;"),
+        "{code}"
+    );
+
+    // (iv) A concrete type still beats a range wherever it sits: the range is listed first, and a
+    // request naming only a range would be rejected, so generating with `image/png` on the wire
+    // is the proof that the concrete key won.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /clip:
+    put:
+      operationId: putClip
+      requestBody:
+        required: true
+        content:
+          video/*: { schema: {} }
+          image/png: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(
+        code.contains("pub type RequestBody = bytes::Bytes;"),
+        "{code}"
+    );
+    assert!(code.contains("\"image/png\""), "{code}");
+}
+
+#[test]
 fn w014_is_silent_across_concrete_and_ranged_byte_bodies() {
     // `image/jpeg`, `image/png`, `image/*` and `application/octet-stream` over empty schemas are one
     // representation four times over; picking one narrows nothing.
