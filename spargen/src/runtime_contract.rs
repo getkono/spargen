@@ -453,7 +453,7 @@ impl std::fmt::Display for Requirements {
 pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
     let mut diagnostics = Vec::new();
     let mut manifests = vec![manifest_path.to_path_buf()];
-    let manifest = match read_toml(manifest_path) {
+    let manifest = match read_toml(manifest_path, "consumer manifest") {
         Ok(value) => value,
         Err(message) => {
             diagnostics.push(diagnostic(message));
@@ -472,7 +472,7 @@ pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements
         .filter(|_| !root.is_self)
         .and_then(|path| {
             manifests.push(path.to_path_buf());
-            match read_toml(path) {
+            match read_toml(path, "workspace manifest") {
                 Ok(value) => Some(value),
                 Err(message) => {
                     diagnostics.push(diagnostic(message));
@@ -550,11 +550,12 @@ fn declares_feature(manifest: &toml::Value, feature: &str) -> bool {
         .is_some()
 }
 
-fn read_toml(path: &Utf8Path) -> Result<toml::Value, String> {
+/// `role` names the file in the diagnostic — the consumer manifest, or the workspace manifest a
+/// `workspace = true` dependency resolves against — so a failure says which of the two it was.
+fn read_toml(path: &Utf8Path, role: &str) -> Result<toml::Value, String> {
     let contents = std::fs::read_to_string(path)
-        .map_err(|error| format!("failed to read consumer manifest `{path}`: {error}"))?;
-    toml::from_str(&contents)
-        .map_err(|error| format!("failed to parse consumer manifest `{path}`: {error}"))
+        .map_err(|error| format!("failed to read {role} `{path}`: {error}"))?;
+    toml::from_str(&contents).map_err(|error| format!("failed to parse {role} `{path}`: {error}"))
 }
 
 /// Which manifest a `workspace = true` dependency resolves its declaration against.
@@ -1372,8 +1373,16 @@ serde_json.workspace = true
         assert!(
             result.diagnostics.iter().any(|diagnostic| diagnostic
                 .message
-                .contains("failed to parse consumer manifest")),
+                .contains("failed to parse workspace manifest")),
             "{:#?}",
+            result.diagnostics
+        );
+        assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("consumer manifest")),
+            "the file that failed is the workspace root, not the consumer's own manifest: {:#?}",
             result.diagnostics
         );
         assert!(
