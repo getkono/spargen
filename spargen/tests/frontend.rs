@@ -5402,8 +5402,11 @@ paths:
             report.diagnostics().iter().any(|d| {
                 d.code == Code::UnsupportedMediaType
                     && d.message.contains("`pic`")
-                    && d.message.contains("is binary")
-                    && !d.message.contains("declares `contentType`")
+                    && d.message.contains(
+                        "is binary, which has no `application/x-www-form-urlencoded` \
+                         representation",
+                    )
+                    && !d.message.contains("declares `contentType:")
             }),
             "{report:#?}"
         );
