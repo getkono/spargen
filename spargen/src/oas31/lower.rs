@@ -4703,11 +4703,15 @@ fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
 ///
 /// `application/*` is deliberately not a family here: it mixes binary (`application/pdf`) with
 /// textual (`application/sdp`, `application/sql`) subtypes, and reading SDP as bytes would be
-/// silently wrong rather than loudly unsupported. The family is matched case-insensitively for the
-/// same reason the range is (RFC 9110 § 8.3.1): `IMAGE/*` and `IMAGE/JPEG` must agree.
+/// silently wrong rather than loudly unsupported. For the same reason a subtype carrying an RFC
+/// 6838 structured-syntax suffix (`image/svg+xml`, or any `+suffix`) is not claimed: the suffix
+/// says the payload is a text syntax, so reading SVG as bytes would be silently wrong, and it stays
+/// unsupported until a codec for the suffix exists in this position. The family is matched
+/// case-insensitively for the same reason the range is (RFC 9110 § 8.3.1): `IMAGE/*` and
+/// `IMAGE/JPEG` must agree.
 fn classify_binary_family(essence: &str) -> Option<(MediaType, u8)> {
     let (family, subtype) = essence.split_once('/')?;
-    if subtype.is_empty() || subtype.contains('*') {
+    if subtype.is_empty() || subtype.contains('*') || subtype.contains('+') {
         return None;
     }
     ["image", "audio", "video"]

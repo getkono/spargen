@@ -5142,6 +5142,30 @@ paths:
 }
 
 #[test]
+fn e009_a_structured_suffix_member_of_a_byte_family_stays_unsupported() {
+    // `image/svg+xml` sits in the `image` family, but its RFC 6838 `+xml` suffix says the payload
+    // is a text syntax, so bytes would be the silently-wrong reading the family rule exists to
+    // avoid. It stays `E009`, as it was before the family rule existed.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /logo:
+    get:
+      operationId: getLogo
+      responses:
+        "200":
+          description: OK
+          content:
+            image/svg+xml: { schema: {} }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
 fn a_concrete_media_type_outranks_a_range_that_precedes_it() {
     // Ranges rank below every concrete type, so a concrete sibling wins wherever it sits in the
     // document. (Two ranges at the same rank still tie by source order, as equal-ranked
