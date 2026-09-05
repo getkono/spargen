@@ -5169,7 +5169,8 @@ paths:
 fn e009_a_form_urlencoded_string_property_declaring_a_binary_family_content_type() {
     // The family rule reaches Encoding Objects through the shared classifier: a form-urlencoded
     // property whose `contentType` names `image/png` is binary, which a form body cannot carry —
-    // the disposition `application/octet-stream` already has there.
+    // the disposition `application/octet-stream` already has there — and the message names what
+    // was declared, since the schema itself is a plain string a reader cannot call binary.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -5192,10 +5193,11 @@ paths:
     for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
-            report
-                .diagnostics()
-                .iter()
-                .any(|d| { d.code == Code::UnsupportedMediaType && d.message.contains("`pic`") }),
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains("`pic`")
+                    && d.message.contains("`contentType: image/png`")
+            }),
             "{report:#?}"
         );
     }

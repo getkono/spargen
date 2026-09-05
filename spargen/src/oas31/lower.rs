@@ -2874,8 +2874,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .unwrap_or_else(|| at.clone()),
             )
             .message(format!(
-                "property `{name}` is binary, which has no `application/x-www-form-urlencoded` \
-                 representation"
+                "property `{name}` declares `contentType: {content_type}`, which is binary; a \
+                 form-urlencoded body cannot carry a binary part"
             ))
             .remedy("send the body as `multipart/form-data`, or encode the value as text")
             .emit(self.diags);
