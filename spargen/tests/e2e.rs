@@ -3346,6 +3346,111 @@ components:
     assert!(!messages.contains("tokio"), "{messages}");
 }
 
+/// The report behind #71, end to end: a workspace root declaring `futures-core` and `uuid` under
+/// `[workspace.dependencies]`, a member inheriting them with `{ workspace = true }`, and a 3.2
+/// document with one `text/event-stream` operation and a `format: uuid` field. The report said
+/// both came back as `E023` "generated client requires …"; the layout resolves, and this pins the
+/// whole chain — spec, derived requirement set, manifest audit — as passing.
+#[test]
+fn macro_manifest_audit_follows_workspace_inherited_dependencies() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("Cargo.toml");
+    let member_dir = temp.path().join("client");
+    std::fs::create_dir(&member_dir).unwrap();
+    let manifest = member_dir.join("Cargo.toml");
+    std::fs::write(
+        &root,
+        r#"[workspace]
+members = ["client"]
+
+[workspace.dependencies]
+bytes = "1.12.1"
+reqwest = { version = "0.12.28", default-features = false, features = ["stream"] }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+futures-core = "0.3.32"
+uuid = { version = "1.26.0", features = ["v4", "serde"] }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &manifest,
+        r#"[package]
+name = "audit-consumer"
+version = "0.0.0"
+
+[dependencies]
+bytes = { workspace = true }
+reqwest = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures-core = { workspace = true }
+uuid = { workspace = true }
+"#,
+    )
+    .unwrap();
+    let spec = Utf8PathBuf::from_path_buf(member_dir.join("openapi.yaml")).unwrap();
+    std::fs::write(
+        &spec,
+        r##"openapi: 3.2.0
+info: { title: Inherited, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      operationId: streamEvents
+      responses:
+        "200":
+          description: events
+          content:
+            text/event-stream:
+              itemSchema: { $ref: "#/components/schemas/Event" }
+components:
+  schemas:
+    Event:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string, format: uuid }
+"##,
+    )
+    .unwrap();
+
+    let preview =
+        spargen::__private::preview_for_macro(&Spec::new(spec), manifest.to_str().unwrap());
+    assert_eq!(
+        preview.report.outcome(),
+        Outcome::Generated,
+        "{:#?}",
+        preview.report
+    );
+    assert!(
+        !preview
+            .report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == Code::RuntimeDependencyContract),
+        "{:#?}",
+        preview.report
+    );
+    // The requirement set really did include both crates: the module uses them. `mod stream` is
+    // embedded only for a sequential response (the word `EventStream` alone rides in doc comments
+    // every module carries), and `Uuid` appears only through the `format: uuid` mapping.
+    let generated = preview.contents.expect("generated module");
+    assert!(generated.contains("mod stream"), "{generated}");
+    assert!(generated.contains("Uuid"), "{generated}");
+    // The root is part of the input set — an edit there changes what the audit sees.
+    assert!(
+        preview
+            .source_files
+            .iter()
+            .any(|path| path.as_std_path() == root),
+        "{:#?}",
+        preview.source_files
+    );
+}
+
 /// A preview of a spec that uses an unsupported construct rejects loudly (matching `generate`) and
 /// retains no files — the proc-macro relies on this to raise a `compile_error!` instead of emitting
 /// half-generated code.
