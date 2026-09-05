@@ -78,7 +78,9 @@ the version it emits, and the idioms spargen handles.
 - `Client::with_credential(scheme, credential)` registers static secrets (via
   [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
   requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.
-  A missing required credential is a request-construction error, never a silent 401.
+  A missing required credential is a request-construction error — typed as
+  `RequestError::MissingCredential`, naming the schemes the operation's security requirement
+  declares — never a silent 401.
 - A closed error taxonomy, identical across all spargen output: request-construction, transport,
   timeout, protocol, redirect, documented API error (typed `E`), undocumented status (raw body
   preserved), decode failure (serde path + body, capped except on the two paths the emitted

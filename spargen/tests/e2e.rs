@@ -1439,6 +1439,26 @@ fn a_generated_error_boxes_and_renders() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+// A missing credential is the one request-construction cause an application routes on, so it is
+// a typed variant reachable from generated output — and it fails before anything is sent, so one
+// poll with a no-op waker is enough: no server, no runtime.
+#[test]
+fn a_missing_credential_is_a_typed_request_construction_error() {
+    use std::future::Future;
+    let client = basic_client::Client::new("http://127.0.0.1:1").unwrap();
+    let mut call = std::pin::pin!(client.get_user("1", None));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("a missing credential must fail before anything is sent");
+    };
+    match result {
+        Err(basic_client::Error::RequestConstruction(
+            basic_client::RequestError::MissingCredential { schemes },
+        )) => assert_eq!(schemes, ["apiKey", "bearer"]),
+        other => panic!("expected MissingCredential, got {other:?}"),
+    }
+}
+
 #[test]
 fn the_single_error_body_stays_one_deref_away() {
     let wrapped = basic_client::GetTextErrorError("nope".to_owned());

@@ -13,7 +13,7 @@ use reqwest::{Request, RequestBuilder, Response, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 
-use crate::{AuthKind, AuthScheme, ClientCore, Credential, Error, ResponseValue};
+use crate::{AuthKind, AuthScheme, ClientCore, Credential, Error, RequestError, ResponseValue};
 
 /// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
 /// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
@@ -120,7 +120,7 @@ pub fn build_url_with_query_string_on(
 /// of alternatives, each an AND of schemes; the first alternative whose schemes all have a
 /// registered credential wins, deterministically. An empty alternative (`{}` in the spec) marks
 /// security optional and always satisfies. If no alternative is satisfiable the request fails
-/// before it is sent — a request-construction error, never a silent 401.
+/// before it is sent — [`RequestError::MissingCredential`], never a silent 401.
 pub async fn attach_auth(
     core: &ClientCore,
     request: RequestBuilder,
@@ -136,17 +136,15 @@ pub async fn attach_auth(
             matches!(scheme.kind, AuthKind::MutualTls) || core.credential(scheme.name).is_some()
         })
     }) else {
-        let mut names: Vec<&str> = requirements
+        let mut schemes: Vec<&'static str> = requirements
             .iter()
             .flat_map(|alternative| alternative.iter().map(|scheme| scheme.name))
             .collect();
-        names.sort_unstable();
-        names.dedup();
-        return Err(Error::request_message(format!(
-            "no registered credential satisfies the operation's security requirement \
-             (schemes: {})",
-            names.join(", ")
-        )));
+        schemes.sort_unstable();
+        schemes.dedup();
+        return Err(Error::RequestConstruction(
+            RequestError::MissingCredential { schemes },
+        ));
     };
     let mut request = request;
     for scheme in *alternative {
@@ -540,7 +538,7 @@ mod tests {
 
     use secrecy::SecretString;
 
-    use crate::{AuthKind, AuthScheme, ClientCore, Credential, TokenFuture};
+    use crate::{AuthKind, AuthScheme, ClientCore, Credential, RequestError, TokenFuture};
 
     use super::attach_auth;
     use bytes::Bytes;
@@ -641,8 +639,46 @@ mod tests {
         let core = core();
         let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
         assert!(error.to_string().contains("request construction"));
+        // Typed, so a consumer routes on the variant rather than on the message text.
+        let Error::RequestConstruction(RequestError::MissingCredential { schemes }) = &error else {
+            panic!("expected MissingCredential, got {error:?}");
+        };
+        assert_eq!(*schemes, ["token"]);
+        // The rendered text is unchanged, and the chain ends at the typed cause.
         let source = std::error::Error::source(&error).unwrap();
-        assert!(source.to_string().contains("token"), "{source}");
+        assert_eq!(
+            source.to_string(),
+            "no registered credential satisfies the operation's security requirement \
+             (schemes: token)"
+        );
+        assert!(std::error::Error::source(source).is_none());
+    }
+
+    #[test]
+    fn missing_credential_names_every_scheme_sorted_and_deduplicated() {
+        let core = core();
+        let error = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[
+                BEARER,
+                &[
+                    AuthScheme {
+                        name: "key",
+                        kind: AuthKind::ApiKeyQuery("api_key"),
+                    },
+                    AuthScheme {
+                        name: "token",
+                        kind: AuthKind::Bearer,
+                    },
+                ],
+            ],
+        ))
+        .unwrap_err();
+        let Error::RequestConstruction(RequestError::MissingCredential { schemes }) = error else {
+            panic!("expected MissingCredential, got {error:?}");
+        };
+        assert_eq!(schemes, ["key", "token"]);
     }
 
     #[test]
@@ -656,6 +692,15 @@ mod tests {
             },
         );
         let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
+        // A mismatch is a misconfiguration at `with_credential`, not a state an application routes
+        // on, so it deliberately stays untyped.
+        assert!(
+            matches!(
+                error,
+                Error::RequestConstruction(RequestError::Other { .. })
+            ),
+            "{error:?}"
+        );
         let source = std::error::Error::source(&error).unwrap();
         assert!(source.to_string().contains("bearer"), "{source}");
     }
