@@ -151,6 +151,41 @@ impl Error<std::convert::Infallible> {
     }
 }
 
+/// Implemented by every generated operation error type, so code generic over operations can
+/// reach the documented error body without naming each `E`.
+///
+/// A multi-status enum implements this when every bodied variant carries one body type; its
+/// `body` is `None` for a documented bodyless status. The single-body newtype and the
+/// uninhabited `Infallible` shape implement it too, so `Error::api_body` exists on every
+/// generated client method's error. An enum whose statuses carry different body types has no
+/// implementation: there is no single body to hand back, and the compile error is the signal.
+pub trait ApiErrorBody {
+    /// The documented error body type.
+    type Body: ?Sized;
+    /// The documented body this value carries, if its status documents one.
+    fn body(&self) -> Option<&Self::Body>;
+}
+
+impl ApiErrorBody for std::convert::Infallible {
+    type Body = std::convert::Infallible;
+    fn body(&self) -> Option<&Self::Body> {
+        match *self {}
+    }
+}
+
+impl<E: ApiErrorBody> Error<E> {
+    /// The documented API error body, whichever status carried it: `Some` only for [`Error::Api`]
+    /// whose `E` reports a body. The status itself stays on the `ResponseValue` inside `Api`.
+    pub fn api_body(&self) -> Option<&E::Body> {
+        match self {
+            Error::Api(value) => value.inner().body(),
+            // Every other class carries no typed body; a wildcard so a variant added to the
+            // taxonomy does not have to be listed here.
+            _ => None,
+        }
+    }
+}
+
 impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -555,5 +590,40 @@ mod tests {
         assert_eq!(path, "a.b");
         assert_eq!(body, Bytes::from_static(b"raw"));
         assert!(truncated);
+    }
+
+    impl super::ApiErrorBody for ApiBody {
+        type Body = str;
+        fn body(&self) -> Option<&str> {
+            Some(self.0)
+        }
+    }
+
+    /// `api_body` is `Some` exactly on the documented-API variant; every other class carries no
+    /// typed body, and a future variant added to `every_variant` is classified here too.
+    #[test]
+    fn api_body_is_present_exactly_on_the_documented_api_error() {
+        for error in every_variant() {
+            let expected = matches!(error, Error::Api(_));
+            assert_eq!(
+                error.api_body().is_some(),
+                expected,
+                "api_body disagrees for {error}"
+            );
+        }
+        let api = Error::Api(ResponseValue::new(
+            StatusCode::BAD_REQUEST,
+            HeaderMap::new(),
+            ApiBody("bad request"),
+        ));
+        assert_eq!(api.api_body(), Some("bad request"));
+    }
+
+    /// The no-documented-error shape is `Error<Infallible>`; `api_body` must still exist there so
+    /// generic callers compile against every operation, and it can only ever be `None`.
+    #[test]
+    fn an_uninhabited_error_body_is_never_present() {
+        let error = Error::<std::convert::Infallible>::Timeout(TimeoutKind::Total);
+        assert!(error.api_body().is_none());
     }
 }
