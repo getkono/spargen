@@ -1379,8 +1379,13 @@ fn every_runtime_type_in_a_signature_is_nameable() {
     fn shape(shape: basic_client::HeaderShape) -> basic_client::HeaderShape {
         shape
     }
+    // `ApiErrorBody` is the bound a caller writes to be generic over operations' error bodies.
+    fn body_of<E: basic_client::ApiErrorBody>(error: &E) -> Option<&E::Body> {
+        error.body()
+    }
     // Naming each type above is the assertion; binding the items keeps them from reading as dead.
     let _ = (header_result, core, timeout_kind, config, shape);
+    let _ = body_of::<basic_client::GetTextErrorError>;
     let _: &dyn basic_client::RetryPolicy = &NeverRetry;
 }
 
@@ -1453,6 +1458,83 @@ fn a_multi_status_error_names_its_status() {
         basic_client::types::NotFoundError { reason: "gone".to_owned() },
     ));
     assert!(error.to_string().contains("404"), "{error}");
+}
+
+#[test]
+fn a_uniform_body_error_enum_hands_back_its_body_from_any_status() {
+    let problem = basic_client::types::Problem { title: "nope".to_owned(), detail: "gone".to_owned() };
+    let not_found = basic_client::GetSharedError::Status404(Box::new(problem.clone()));
+    let conflict = basic_client::GetSharedError::Status409(Box::new(problem));
+    assert_eq!(not_found.body().map(|p| p.detail.as_str()), Some("gone"));
+    assert_eq!(conflict.body().map(|p| p.detail.as_str()), Some("gone"));
+    // A documented bodyless status carries nothing to hand back.
+    assert!(basic_client::GetSharedError::Status401.body().is_none());
+}
+
+#[test]
+fn the_taxonomy_reaches_the_body_generically_over_the_operation() {
+    // Generic over `E`: this is the "thirty distinct error types" case from the issue.
+    fn detail<E>(error: &basic_client::Error<E>) -> Option<&str>
+    where
+        E: basic_client::ApiErrorBody<Body = basic_client::types::Problem>,
+    {
+        error.api_body().map(|problem| problem.detail.as_str())
+    }
+    let body = basic_client::GetSharedError::Status409(Box::new(basic_client::types::Problem {
+        title: "conflict".to_owned(),
+        detail: "dup".to_owned(),
+    }));
+    let error = basic_client::Error::Api(basic_client::ResponseValue::new(
+        reqwest::StatusCode::CONFLICT,
+        Default::default(),
+        body,
+    ));
+    assert_eq!(detail(&error), Some("dup"));
+    let transport: basic_client::Error<basic_client::GetSharedError> =
+        basic_client::Error::request_message("boom");
+    assert_eq!(detail(&transport), None);
+}
+
+#[test]
+fn every_error_shape_implements_api_error_body() {
+    use basic_client::ApiErrorBody;
+    // The single-body newtype: `Body` is the inner type.
+    let wrapped = basic_client::GetTextErrorError("nope".to_owned());
+    assert_eq!(wrapped.body().map(String::as_str), Some("nope"));
+    // The no-documented-error shape: exists so generic code compiles, and is always `None`.
+    fn never(error: &basic_client::Error<std::convert::Infallible>) -> bool {
+        error.api_body().is_none()
+    }
+    assert!(never(&basic_client::Error::request_message("x")));
+}
+
+#[test]
+fn a_nullable_error_body_answers_none_for_null_on_both_shapes() {
+    use basic_client::ApiErrorBody;
+    let problem = basic_client::types::MaybeProblem { title: "nope".to_owned() };
+    // The enum shape: a nullable payload is `Option<Box<T>>`, so `null` is `None`, a value is
+    // `Some`, and the `default` response's variant is reached like any exact status.
+    assert!(basic_client::GetMaybeError::Status404(None).body().is_none());
+    let not_found = basic_client::GetMaybeError::Status404(Some(Box::new(problem.clone())));
+    assert_eq!(not_found.body().map(|p| p.title.as_str()), Some("nope"));
+    let fallback = basic_client::GetMaybeError::Default(Some(Box::new(problem.clone())));
+    assert_eq!(fallback.body().map(|p| p.title.as_str()), Some("nope"));
+    // The newtype shape over the same component: `Body` is the bare `MaybeProblem`, not the
+    // `Option` the newtype wraps, and `null` answers `None` exactly as the enum does.
+    assert!(basic_client::GetMaybeSingleError(None).body().is_none());
+    let single = basic_client::GetMaybeSingleError(Some(problem.clone()));
+    assert_eq!(single.body().map(|p| p.title.as_str()), Some("nope"));
+    // One bound names the component and accepts both shapes.
+    fn title<E>(error: &E) -> Option<&str>
+    where
+        E: basic_client::ApiErrorBody<Body = basic_client::types::MaybeProblem>,
+    {
+        error.body().map(|p| p.title.as_str())
+    }
+    let conflict = basic_client::GetMaybeError::Status409(Some(Box::new(problem.clone())));
+    assert_eq!(title(&conflict), Some("nope"));
+    assert_eq!(title(&basic_client::GetMaybeSingleError(Some(problem))), Some("nope"));
+    assert_eq!(title(&basic_client::GetMaybeSingleError(None)), None);
 }
 "##,
     )
@@ -2218,6 +2300,72 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
+  # Two error statuses sharing ONE body schema plus a documented bodyless 401 → a `GetSharedError`
+  # enum whose bodied variants agree on `types::Problem`, so it gets `body()` and implements
+  # `ApiErrorBody` (the unit variant answers `None`). `getMulti` above is the heterogeneous
+  # counterpart and gets neither.
+  /shared:
+    get:
+      operationId: getShared
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Unauthorized
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  # The same shape over a NULLABLE component, plus a bodied `default`: every bodied variant is
+  # `Option<Box<types::MaybeProblem>>`, `body()` answers `None` for a `null` payload, and the
+  # `Default` variant is reached like any other status.
+  /maybe:
+    get:
+      operationId: getMaybe
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+  # The single-body newtype over the same nullable component: `GetMaybeSingleError(Option<T>)`,
+  # whose `ApiErrorBody::Body` is the bare `types::MaybeProblem` so one bound covers it and
+  # `GetMaybeError` alike.
+  /maybe-single:
+    get:
+      operationId: getMaybeSingle
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
   # multipart/form-data request body: the body is an object whose properties are the form
   # parts. `file` is `format: binary` → a `bytes::Bytes` file part; `caption` a required text part;
   # `count` an optional scalar text part; `tags` an optional array → a JSON-encoded text part. The
@@ -2905,6 +3053,23 @@ components:
       required: [detail]
       properties:
         detail:
+          type: string
+    # The one body shared by every documented error status of `getShared`.
+    Problem:
+      type: object
+      required: [title, detail]
+      properties:
+        title:
+          type: string
+        detail:
+          type: string
+    # A nullable error body: `getMaybe` and `getMaybeSingle` reference it, so every use is
+    # `Option<MaybeProblem>` and a `null` payload is a documented, body-less answer.
+    MaybeProblem:
+      type: [object, "null"]
+      required: [title]
+      properties:
+        title:
           type: string
     # Streamed item type for the `/chat/stream` SSE operation.
     ChatChunk:
