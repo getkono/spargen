@@ -4675,10 +4675,10 @@ fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
         }
         "application/octocat-stream" => (MediaType::Text, 5),
         media if media.starts_with("text/") => (MediaType::Text, 5),
-        // Rank 8 is a concrete member of a binary family (`classify_binary_family`): below every
-        // codec listed above and below the `text/*` range (7), so a family key never displaces a
-        // selection any of those already made, and above the non-text ranges (9), so a concrete
-        // type still beats `video/*`.
+        // Rank 9, the end of the ladder, is a concrete member of a binary family
+        // (`classify_binary_family`): below every codec listed above and below both range ranks
+        // (7 and 8), so a family key is generated only when it is the sole key that classifies
+        // and never displaces a selection any other key already made.
         _ => return classify_binary_family(essence),
     };
     Some(classified)
@@ -4689,10 +4689,10 @@ fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
 ///
 /// `text/*` is the family read as raw UTF-8; every other family, `*/*` included, is opaque octets,
 /// which is the only honest reading of "whatever this server detected". A range ranks below every
-/// codec spargen has, so a concrete sibling outranks it — with one deliberate exception: `text/*`
-/// (7) sits *above* a concrete `image`/`audio`/`video` member (8, `classify_binary_family`), because
-/// a document listing `text/*` beside `image/png` generated as text before that family classified
-/// and must keep doing so. The non-text ranges (9) rank below everything.
+/// codec spargen has (`text/*` at 7, every other family at 8), so a concrete sibling outranks it —
+/// with one deliberate exception: a concrete `image`/`audio`/`video` member (9,
+/// `classify_binary_family`) sits *below* both, because a document listing a range beside
+/// `image/png` generated from the range before that family classified and must keep doing so.
 ///
 /// The type before the slash must be present — `/*` names no family and stays unsupported — and is
 /// matched case-insensitively, because media types are (RFC 9110 § 8.3.1) and reading `TEXT/*` as
@@ -4704,7 +4704,7 @@ fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
     Some(if family.eq_ignore_ascii_case("text") {
         (MediaType::Text, 7)
     } else {
-        (MediaType::OctetStream, 9)
+        (MediaType::OctetStream, 8)
     })
 }
 
@@ -4712,14 +4712,14 @@ fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
 /// `audio/mpeg`, `video/mp4`. RFC 6838 registers `image`, `audio`, and `video` as top-level types
 /// for non-textual data, so bytes is the only faithful reading of any member, exactly as it is for
 /// the family's range (`image/*`); the octet gate still demands a schema that collapses to
-/// `bytes::Bytes`. It ranks below every codec spargen already had — octet-stream, text, the
-/// sequential kinds, and the `text/*` range — and above only the non-text ranges (`video/*`,
-/// `*/*`): a family key wins when it is the sole classifiable key or sits beside a non-text range,
-/// and nowhere else, so no document that generated before the family rule existed changes its
-/// selection, its body type, or a request's wire `Content-Type` (beside `application/octet-stream`
-/// the two decode identically anyway; beside `text/csv`, `text/event-stream` or `text/*` the text
-/// or stream key keeps winning as it did — whatever schema `image/png` carries, since a losing
-/// alternative never reaches the octet gate).
+/// `bytes::Bytes`. It sits at the very end of the ladder, below every other key spargen can
+/// classify — octet-stream, text, the sequential kinds, and the ranges, `*/*` included — so a
+/// family key is generated only when it is the sole key that classifies, which is exactly the
+/// shape #82 reports (`image/jpeg` as the only content key). Every document that generated before
+/// the family rule existed had selected some other key, and that key still outranks the family,
+/// so no such document changes its selection, its body type, its outcome, or a request's wire
+/// `Content-Type` — whatever schema `image/png` carries, since a losing alternative never reaches
+/// the octet gate.
 ///
 /// `application/*` is deliberately not a family here: it mixes binary (`application/pdf`) with
 /// textual (`application/sdp`, `application/sql`) subtypes, and reading SDP as bytes would be
@@ -4737,7 +4737,7 @@ fn classify_binary_family(essence: &str) -> Option<(MediaType, u8)> {
     ["image", "audio", "video"]
         .iter()
         .any(|binary| family.eq_ignore_ascii_case(binary))
-        .then_some((MediaType::OctetStream, 8))
+        .then_some((MediaType::OctetStream, 9))
 }
 
 fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {

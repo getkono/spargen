@@ -5033,13 +5033,12 @@ paths:
 }
 
 #[test]
-fn every_concrete_codec_outranks_a_concrete_binary_type_and_a_range_does_not() {
-    // A concrete family member ranks below every codec spargen already had — octet-stream, text,
-    // the sequential kinds, and the `text/*` range — and above only the non-text ranges. Each
-    // document here generated before the family rule existed with `image/png` as an unsupported
-    // alternative; its selection, body type and wire `Content-Type` must not move now that
-    // `image/png` classifies. At the bottom of the ladder a concrete type still beats a non-text
-    // range, so `image/png` beside `video/*` is the one that is sent.
+fn every_other_classifiable_key_outranks_a_concrete_binary_type() {
+    // A concrete family member sits at the very end of the ladder, below every other key spargen
+    // can classify — octet-stream, text, the sequential kinds, and every range. Each document here
+    // generated (or, for a request naming a range, was rejected) before the family rule existed
+    // with `image/png` as an unsupported alternative; its selection, body type, outcome and wire
+    // `Content-Type` must not move now that `image/png` classifies.
 
     // (i) Text keeps a response: `String`, and `image/png` is the alternative not generated.
     let spec = r##"
@@ -5116,11 +5115,10 @@ paths:
         "{code}"
     );
 
-    // (iv) A concrete type still beats a non-text range wherever it sits: the range is listed
-    // first, and a request naming only a range would be rejected, so generating with `image/png`
-    // on the wire is the proof that the concrete key won.
-    let (report, code) = generate_with_code(
-        r##"
+    // (iv) Even a non-text range keeps its selection: `video/*` still wins a request over
+    // `image/png`, and a range is not a `Content-Type` a request can send, so the document is
+    // rejected exactly as it was on master rather than quietly switching to `image/png`.
+    let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths:
@@ -5134,21 +5132,19 @@ paths:
           image/png: { schema: {} }
       responses:
         "204": { description: No Content }
-"##,
-    );
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::UnsupportedMediaType),
-        "{report:#?}"
-    );
-    assert!(
-        code.contains("pub type RequestBody = bytes::Bytes;"),
-        "{code}"
-    );
-    assert!(code.contains("\"image/png\""), "{code}");
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType && d.message.contains("`video/*`")
+            }),
+            "{report:#?}"
+        );
+    }
 
     // (v) The `text/*` range keeps a response too: it generated as text beside an unclassified
-    // `image/png` on master, and a concrete family member is the one type ranked below it.
+    // `image/png` on master, and a concrete family member ranks below it.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -5199,6 +5195,72 @@ paths:
         "{report:#?}"
     );
     assert!(code.contains("pub type ResponseBody = String;"), "{code}");
+    assert_ne!(check(spec).outcome(), Outcome::Rejected);
+
+    // (vii) `*/*` keeps a response the same way: it generated as bytes beside an unclassified
+    // `image/png` on master, and it still does whatever schema `image/png` carries — an object
+    // there is reported as the alternative not generated (`W014`), never rejected by the octet
+    // gate (`E009`).
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /blob:
+    get:
+      operationId: getBlob
+      responses:
+        "200":
+          description: OK
+          content:
+            "*/*": { schema: {} }
+            image/png: { schema: { type: object, properties: { a: { type: string } } } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::AlternativeMediaIgnored
+                && d.message.contains("`*/*` is generated")
+                && d.message.contains("`image/png`")
+        }),
+        "{report:#?}"
+    );
+    assert!(
+        code.contains("pub type ResponseBody = bytes::Bytes;"),
+        "{code}"
+    );
+    assert_ne!(check(spec).outcome(), Outcome::Rejected);
+
+    // (viii) The family's own range outranks its concrete member: `image/*` beside `image/png`
+    // with a constraining schema generates from the range, as on master.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /photo:
+    get:
+      operationId: getPhoto
+      responses:
+        "200":
+          description: OK
+          content:
+            image/*: { schema: {} }
+            image/png: { schema: { type: string, format: byte } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(
+        code.contains("pub type ResponseBody = bytes::Bytes;"),
+        "{code}"
+    );
     assert_ne!(check(spec).outcome(), Outcome::Rejected);
 }
 
@@ -5489,7 +5551,7 @@ paths:
 #[test]
 fn a_concrete_media_type_outranks_a_range_that_precedes_it() {
     // Ranges rank below every codec, so a concrete sibling wins wherever it sits in the document
-    // (the one type ranked below `text/*` is a concrete `image`/`audio`/`video` member, pinned
+    // (the one type ranked below the ranges is a concrete `image`/`audio`/`video` member, pinned
     // elsewhere). Two ranges at the same rank still tie by source order, as equal-ranked concrete
     // media already do.
     let (report, code) = generate_with_code(
