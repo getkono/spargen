@@ -199,6 +199,10 @@ impl std::error::Error for MessageError {}
 /// A missing credential is the one cause a consumer routes on — the caller never registered one,
 /// which is "unauthenticated", not "malformed request" — so it is a variant of its own. Every other
 /// cause arrives as [`RequestError::Other`] with its source attached.
+///
+/// This runtime is embedded in the consumer's own crate, where `#[non_exhaustive]` does not affect
+/// match exhaustiveness, so a new variant here is a breaking change of the generated output; the
+/// attribute is kept for a consumer that re-exports the generated module across a crate boundary.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RequestError {

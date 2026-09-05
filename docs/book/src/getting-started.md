@@ -159,7 +159,7 @@ Key points of the surface:
   token providers. Operation `security` requirements pick the first satisfiable alternative and
   attach bearer/basic/apiKey credentials; a missing required credential is a
   request-construction error — typed as `RequestError::MissingCredential`, naming the schemes
-  that would have satisfied the requirement — never a silent 401.
+  the operation's security requirement declares — never a silent 401.
 - A closed [error taxonomy](./errors.md), identical across all spargen output:
   request-construction, transport, timeout, protocol, redirect, documented API error (typed `E`),
   undocumented status (raw body preserved), decode failure, interrupted body.
