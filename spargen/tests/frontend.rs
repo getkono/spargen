@@ -5035,10 +5035,11 @@ paths:
 #[test]
 fn every_concrete_codec_outranks_a_concrete_binary_type_and_a_range_does_not() {
     // A concrete family member ranks below every codec spargen already had — octet-stream, text,
-    // the sequential kinds — and above the ranges. Each document here generated before the family
-    // rule existed with `image/png` as an unsupported alternative; its selection, body type and
-    // wire `Content-Type` must not move now that `image/png` classifies. Below the ladder, a
-    // concrete type still beats a range, so `image/png` beside `video/*` is the one that is sent.
+    // the sequential kinds, and the `text/*` range — and above only the non-text ranges. Each
+    // document here generated before the family rule existed with `image/png` as an unsupported
+    // alternative; its selection, body type and wire `Content-Type` must not move now that
+    // `image/png` classifies. At the bottom of the ladder a concrete type still beats a non-text
+    // range, so `image/png` beside `video/*` is the one that is sent.
 
     // (i) Text keeps a response: `String`, and `image/png` is the alternative not generated.
     let spec = r##"
@@ -5115,9 +5116,9 @@ paths:
         "{code}"
     );
 
-    // (iv) A concrete type still beats a range wherever it sits: the range is listed first, and a
-    // request naming only a range would be rejected, so generating with `image/png` on the wire
-    // is the proof that the concrete key won.
+    // (iv) A concrete type still beats a non-text range wherever it sits: the range is listed
+    // first, and a request naming only a range would be rejected, so generating with `image/png`
+    // on the wire is the proof that the concrete key won.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
@@ -5145,6 +5146,60 @@ paths:
         "{code}"
     );
     assert!(code.contains("\"image/png\""), "{code}");
+
+    // (v) The `text/*` range keeps a response too: it generated as text beside an unclassified
+    // `image/png` on master, and a concrete family member is the one type ranked below it.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /report:
+    get:
+      operationId: getReport
+      responses:
+        "200":
+          description: OK
+          content:
+            text/*: { schema: { type: string } }
+            image/png: { schema: {} }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("pub type ResponseBody = String;"), "{code}");
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::AlternativeMediaIgnored
+                && d.message.contains("`text/*` is generated")
+                && d.message.contains("`image/png`")
+        }),
+        "{report:#?}"
+    );
+    assert_ne!(check(spec).outcome(), Outcome::Rejected);
+
+    // (vi) ... whatever schema `image/png` carries: a losing alternative never reaches the octet
+    // gate, so an object under `image/png` beside `text/*` generates as text instead of `E009`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /report:
+    get:
+      operationId: getReport
+      responses:
+        "200":
+          description: OK
+          content:
+            text/*: { schema: { type: string } }
+            image/png: { schema: { type: object, properties: { a: { type: string } } } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(code.contains("pub type ResponseBody = String;"), "{code}");
+    assert_ne!(check(spec).outcome(), Outcome::Rejected);
 }
 
 #[test]
@@ -5430,9 +5485,10 @@ paths:
 
 #[test]
 fn a_concrete_media_type_outranks_a_range_that_precedes_it() {
-    // Ranges rank below every concrete type, so a concrete sibling wins wherever it sits in the
-    // document. (Two ranges at the same rank still tie by source order, as equal-ranked
-    // concrete media already do.)
+    // Ranges rank below every codec, so a concrete sibling wins wherever it sits in the document
+    // (the one type ranked below `text/*` is a concrete `image`/`audio`/`video` member, pinned
+    // elsewhere). Two ranges at the same rank still tie by source order, as equal-ranked concrete
+    // media already do.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0
