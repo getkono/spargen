@@ -4962,6 +4962,77 @@ paths:
 }
 
 #[test]
+fn octet_stream_outranks_a_concrete_binary_type_listed_before_it() {
+    // A concrete family member ranks just *below* `application/octet-stream`, so a document that
+    // generated before the family rule existed keeps its selection: here `image/png` came first
+    // and was merely an unsupported alternative, and it still is one. Octet-stream is selected,
+    // the body is `bytes::Bytes`, and `image/png` — whose `format: byte` schema constrains
+    // something, so it is not proved to decode identically — is reported as ignored (`W014`),
+    // never rejected by the octet gate (`E009`).
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /artwork:
+    get:
+      operationId: getArtwork
+      responses:
+        "200":
+          description: OK
+          content:
+            image/png: { schema: { type: string, format: byte } }
+            application/octet-stream: { schema: {} }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(
+        report.diagnostics().iter().any(|d| {
+            d.code == Code::AlternativeMediaIgnored
+                && d.message
+                    .contains("`application/octet-stream` is generated")
+                && d.message.contains("`image/png`")
+        }),
+        "{report:#?}"
+    );
+    assert!(
+        code.contains("pub type ResponseBody = bytes::Bytes;"),
+        "{code}"
+    );
+    assert_ne!(check(spec).outcome(), Outcome::Rejected);
+
+    // The same tie on the request side decides the wire `Content-Type`: octet-stream wins there
+    // too, so the header a client already sent does not switch to the family type.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /avatar:
+    put:
+      operationId: putAvatar
+      requestBody:
+        required: true
+        content:
+          image/png: { schema: {} }
+          application/octet-stream: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("pub type RequestBody = bytes::Bytes;"),
+        "{code}"
+    );
+    assert!(code.contains("\"application/octet-stream\""), "{code}");
+    assert!(!code.contains("\"image/png\""), "{code}");
+}
+
+#[test]
 fn w014_is_silent_across_concrete_and_ranged_byte_bodies() {
     // `image/jpeg`, `image/png`, `image/*` and `application/octet-stream` over empty schemas are one
     // representation four times over; picking one narrows nothing.
