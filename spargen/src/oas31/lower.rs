@@ -4557,40 +4557,43 @@ fn choose_media<'a, T>(
         // generated. That narrows the documented surface — a server that also accepts XML will only
         // ever be sent JSON — so it is reported rather than dropped in silence.
         //
-        // An alternative that decodes to the very same thing narrows nothing, though. Two entries
-        // decode identically when they share a codec and both constrain nothing: a ranged media
-        // response offering `video/*`, `audio/*` and `application/octet-stream` is `bytes::Bytes`
-        // three times over, and `text/plain` beside `text/csv` is `String` twice. Saying a
-        // narrowing happened there is noise.
+        // An alternative that decodes to the very same thing narrows nothing, though. An
+        // opaque-octets body that constrains nothing is `bytes::Bytes`, so a ranged media response
+        // offering `video/*`, `audio/*` and `application/octet-stream` gives up nothing by
+        // generating one of them, and saying otherwise is noise on a common shape.
         //
-        // This is decided before anything is lowered, so type identity is proved structurally
-        // rather than by comparing lowered ids: within one codec, a body that constrains nothing
-        // has exactly one representation, so codec identity plus proven emptiness is that proof.
-        // Distinct codecs are never merged even when they happen to agree — `application/xml` and
-        // `application/json` both lower to the same struct, and a client that sends only JSON to a
-        // server offering both has still narrowed what the document promised.
+        // The rule is deliberately confined to octet-stream, and the confinement is load-bearing
+        // rather than conservatism waiting to be relaxed. Octet-stream is the one codec whose gate
+        // collapses every body it admits onto a single type: `opaque_octets` maps an absent or
+        // empty schema to `Bytes`, `format: binary` and `contentEncoding: base64` are `Bytes`, and
+        // anything else is rejected outright. No other codec has that property, and three things
+        // go wrong the moment the rule is widened on the strength of "both sides constrain
+        // nothing":
         //
-        // "Constrains nothing" has to be proved, not assumed from the media type: an
+        // - *Constrains nothing* has two spellings that do not agree outside this gate. A media
+        //   type with no `schema` at all lowers to `()`; one with `schema: {}` lowers to `Any`,
+        //   i.e. `serde_json::Value`. Suppressing between them makes the *order* of two content
+        //   keys decide the response type, silently.
+        // - `itemSchema` lives outside the body schema entirely. Two sequential entries can both
+        //   constrain nothing and still stream different item types.
+        // - A *request* narrows at the wire, not at the type. The chosen media key becomes the
+        //   `Content-Type` verbatim, so a server offering two media it would both accept is
+        //   genuinely being sent only one, whatever the Rust types do. Octet-stream escapes this
+        //   only because the sole octet siblings are ranges, and a range is rejected as a request
+        //   body above.
+        //
+        // "Constrains nothing" also has to be proved, not assumed from the media type: an
         // octet-classified alternative carrying an object schema would be *rejected* by the octet
         // gate, not turned into bytes, so suppressing it would be the silent fourth behavior
         // nothing is allowed.
-        //
-        // The selection's own body has to reach that shared representation too. For every codec
-        // but octet-stream it must therefore constrain nothing itself — a `text/plain` body
-        // carrying a string enum lowers to a typed value rather than to `String`, so an opaque
-        // `text/csv` beside it really is a narrowing. Octet-stream is the exception, and it is one
-        // because of the gate rather than for convenience: the gate admits only bodies that
-        // collapse to `bytes::Bytes`, so every entry that survives it already shares the one
-        // representation.
-        let selection_is_canonical = classified == MediaType::OctetStream || opaque(value);
         let ignored: Vec<&str> = content
             .iter()
             .filter(|(candidate, _)| candidate.as_str() != media)
             .filter(|(candidate, candidate_value)| {
-                !selection_is_canonical
+                classified != MediaType::OctetStream
                     || !opaque(candidate_value)
                     || classify_media(media_essence(candidate)).map(|(media, _)| media)
-                        != Some(classified)
+                        != Some(MediaType::OctetStream)
             })
             .map(|(candidate, _)| candidate.as_str())
             .collect();
@@ -4615,8 +4618,12 @@ fn choose_media<'a, T>(
     None
 }
 
-/// Whether a Media Type Object constrains nothing: no `schema` at all, or one that says nothing
-/// about the value. On a binary media that is exactly `bytes::Bytes`.
+/// Whether a Media Type Object constrains nothing about the body it describes.
+///
+/// Only ever asked of an octet-classified entry, where "constrains nothing" and every other body
+/// the gate admits mean the same type, `bytes::Bytes`. It is deliberately not a general answer to
+/// "do these two entries decode alike" — see the caller for why that question needs more than
+/// this one does.
 ///
 /// A `$ref` is never taken as opaque — proving it would mean resolving it here, and answering
 /// "unknown" as "not opaque" only costs a warning that was already being reported. That holds for
@@ -4624,10 +4631,28 @@ fn choose_media<'a, T>(
 /// *itself* a Reference Object, which parses with `schema: None` and would otherwise take the
 /// no-schema arm and be called opaque on the strength of a field the `$ref` spelling never sets.
 fn media_object_is_opaque(object: &MediaTypeObject) -> bool {
-    if object.reference.is_some() {
+    // Destructured exhaustively, like the schema predicates it delegates to. A Media Type Object
+    // carries four fields besides `schema` that can describe the body, and reading only `schema`
+    // is how `itemSchema` — which is where a sequential media's item type actually lives — slipped
+    // past this question entirely. A field added here must be classified, not silently ignored.
+    let MediaTypeObject {
+        reference,
+        schema,
+        item_schema,
+        encoding,
+        prefix_encoding,
+        item_encoding,
+        provenance: _,
+    } = object;
+    if reference.is_some()
+        || item_schema.is_some()
+        || !encoding.is_empty()
+        || !prefix_encoding.is_empty()
+        || item_encoding.is_some()
+    {
         return false;
     }
-    match &object.schema {
+    match schema {
         None => true,
         Some(RefOr::Item(schema)) => schema.constrains_nothing(),
         Some(RefOr::Ref(_)) => false,

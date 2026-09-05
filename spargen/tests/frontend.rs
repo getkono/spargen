@@ -5063,9 +5063,11 @@ components:
 }
 
 #[test]
-fn w014_is_silent_for_identical_text_alternatives() {
-    // The identical-decode rule is about the codec, not about bytes: two textual bodies that
-    // constrain nothing are both a whole-body `String`, so generating one gives up nothing.
+fn w014_fires_for_text_alternatives_that_only_look_identical() {
+    // The identical-decode rule stays confined to octet-stream. Two textual bodies that constrain
+    // nothing look interchangeable and are not: this pair is `serde_json::Value` twice, while the
+    // same pair written without `schema:` at all is `()` twice, and a mixed pair is one of each.
+    // Only the octet gate collapses every body it admits onto one type.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -5083,7 +5085,98 @@ paths:
     for report in [generate(spec), check(spec)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
-            !has_code(&report, Code::AlternativeMediaIgnored),
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_fires_when_two_empty_spellings_lower_differently() {
+    // `constrains nothing` has two spellings that disagree outside the octet gate: no `schema` key
+    // lowers to `()`, `schema: {}` lowers to `Any`. Suppressing between them would make the *order*
+    // of two content keys decide the response type, in silence.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain: {}
+            text/csv: { schema: {} }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+    // The selection is the one with no schema at all, so the body really is unit-typed. The
+    // `schema: {}` sibling would have been `serde_json::Value`, which is the whole point: the two
+    // spellings are not interchangeable, so neither may silence the other.
+    assert!(
+        code.contains("support::ResponseValue<()>"),
+        "the no-schema selection should lower to `()`: {code}"
+    );
+}
+
+#[test]
+fn w014_fires_for_sequential_alternatives_with_different_item_types() {
+    // A sequential media's item type lives in `itemSchema`, outside the body schema entirely. Two
+    // entries can both constrain nothing in `schema` and still stream different types.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/x-ndjson: { itemSchema: { type: string } }
+            application/jsonl: { itemSchema: { type: integer } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_fires_for_request_body_alternatives_that_decode_alike() {
+    // A request narrows at the wire, not at the type. The chosen media key becomes `Content-Type`
+    // verbatim, so a server documented as accepting both is only ever sent one — whatever the Rust
+    // types do.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /u:
+    post:
+      operationId: postU
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: {} }
+          application/vnd.acme.v2+json: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
             "{report:#?}"
         );
     }
