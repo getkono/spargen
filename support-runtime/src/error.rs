@@ -151,13 +151,14 @@ impl Error<std::convert::Infallible> {
     }
 }
 
-/// Implemented by every generated operation error type, so code generic over operations can
-/// reach the documented error body without naming each `E`.
+/// Implemented by the generated error shapes that carry one documented body type, so code
+/// generic over operations can reach that body without naming each `E`.
 ///
-/// A multi-status enum implements this when every bodied variant carries one body type; its
-/// `body` is `None` for a documented bodyless status. The single-body newtype and the
-/// uninhabited `Infallible` shape implement it too, so `Error::api_body` exists on every
-/// generated client method's error. An enum whose statuses carry different body types has no
+/// Three shapes implement it: a multi-status enum whose bodied statuses reference the same
+/// schema (its `body` is `None` for a documented bodyless status, or a `null` payload), the
+/// single-body newtype (`Body` is the bare schema type, so a nullable body answers `None` for
+/// `null` exactly as the enum does), and the uninhabited `Infallible` shape, so `Error::api_body`
+/// exists on those operations. An enum whose statuses carry different body types has no
 /// implementation: there is no single body to hand back, and the compile error is the signal.
 pub trait ApiErrorBody {
     /// The documented error body type.

@@ -165,10 +165,11 @@ Key points of the surface:
   Every generated error type implements `Display` and `std::error::Error`, so `Error<E>` works
   with `?` into `Box<dyn Error>`, `anyhow`, and `thiserror`. `Error::is_transient()` classifies
   retry-worthy failures — spargen ships no retry policy, but the runtime offers a bring-your-own
-  [retry adapter](./runtime.md). Every generated error type implements `ApiErrorBody`: an error
-  enum whose documented statuses share one body type gets `body()`, and `Error::api_body()` hands
-  that body back whichever status carried it (the status itself is `ResponseValue::status()` on
-  `Error::Api`); an enum mixing body types is matched by variant instead.
+  [retry adapter](./runtime.md). An error enum whose documented statuses reference the same
+  schema gets `body()`, and it, the single-body newtype, and the uninhabited shape implement
+  `ApiErrorBody`, so `Error::api_body()` hands that body back whichever status carried it (the
+  status itself is `ResponseValue::status()` on `Error::Api`); an enum mixing body types is
+  matched by variant instead.
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ## Next steps
