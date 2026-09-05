@@ -3434,9 +3434,11 @@ components:
         "{:#?}",
         preview.report
     );
-    // The requirement set really did include both crates: the module uses them.
+    // The requirement set really did include both crates: the module uses them. `mod stream` is
+    // embedded only for a sequential response (the word `EventStream` alone rides in doc comments
+    // every module carries), and `Uuid` appears only through the `format: uuid` mapping.
     let generated = preview.contents.expect("generated module");
-    assert!(generated.contains("EventStream"), "{generated}");
+    assert!(generated.contains("mod stream"), "{generated}");
     assert!(generated.contains("Uuid"), "{generated}");
     // The root is part of the input set — an edit there changes what the audit sees.
     assert!(
