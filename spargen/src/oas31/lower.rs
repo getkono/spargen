@@ -2873,10 +2873,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|encoding| encoding.provenance.clone())
                     .unwrap_or_else(|| at.clone()),
             )
-            .message(format!(
-                "property `{name}` declares `contentType: {content_type}`, which is binary; a \
-                 form-urlencoded body cannot carry a binary part"
-            ))
+            // Name what the document wrote: a declared `contentType` is the reason a string
+            // property is binary here, while a property whose own schema is binary defaulted to
+            // octet-stream and never mentioned a `contentType` at all.
+            .message(if explicit.is_some() {
+                format!(
+                    "property `{name}` declares `contentType: {content_type}`, which is binary; a \
+                     form-urlencoded body cannot carry a binary part"
+                )
+            } else {
+                format!(
+                    "property `{name}` is binary, which has no \
+                     `application/x-www-form-urlencoded` representation"
+                )
+            })
             .remedy("send the body as `multipart/form-data`, or encode the value as text")
             .emit(self.diags);
             return None;

@@ -5319,6 +5319,43 @@ paths:
 }
 
 #[test]
+fn e009_a_form_urlencoded_binary_property_without_a_declared_content_type() {
+    // The other arm of the same rejection: no Encoding Object at all, so the property is binary
+    // on the strength of its own schema (`contentEncoding: base64`, which lowers to bytes) and its
+    // `contentType` merely defaulted to `application/octet-stream`. The message must not name a
+    // `contentType` the document never wrote.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /profile:
+    post:
+      operationId: postProfile
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                pic: { type: string, contentEncoding: base64 }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains("`pic`")
+                    && d.message.contains("is binary")
+                    && !d.message.contains("declares `contentType`")
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn a_multipart_string_property_declaring_a_binary_family_content_type_is_a_text_part() {
     // The same declaration on multipart is unchanged by the family rule: a part is rendered by its
     // property's own lowered type, so a string stays a text part, and the declared `contentType`
