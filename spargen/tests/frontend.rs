@@ -4849,6 +4849,45 @@ paths:
 }
 
 #[test]
+fn an_image_or_audio_range_as_the_only_response_key_is_a_byte_body() {
+    // The repro from #82 verbatim: `image/*` (and `audio/*`) as the *sole* `content` key, with
+    // `schema: {}`. It was rejected outright, and only generated when an unrelated
+    // `application/octet-stream` sibling happened to be listed.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /artwork/{id}:
+    get:
+      operationId: getArtwork
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: An image
+          content:
+            image/*: { schema: {} }
+  /clip:
+    get:
+      operationId: getClip
+      responses:
+        "200":
+          description: A clip
+          content:
+            audio/*: { schema: {} }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert_ne!(check(spec).outcome(), Outcome::Rejected);
+    assert_eq!(code.matches("= bytes::Bytes;").count(), 2, "{code}");
+    assert!(!code.contains("= serde_json::Value;"), "{code}");
+}
+
+#[test]
 fn a_concrete_media_type_outranks_a_range_that_precedes_it() {
     // Ranges rank below every concrete type, so a concrete sibling wins wherever it sits in the
     // document. (Two ranges at the same rank still tie by source order, as equal-ranked
