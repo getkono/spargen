@@ -5166,6 +5166,115 @@ paths:
 }
 
 #[test]
+fn e009_a_form_urlencoded_string_property_declaring_a_binary_family_content_type() {
+    // The family rule reaches Encoding Objects through the shared classifier: a form-urlencoded
+    // property whose `contentType` names `image/png` is binary, which a form body cannot carry —
+    // the disposition `application/octet-stream` already has there.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /profile:
+    post:
+      operationId: postProfile
+      requestBody:
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                pic: { type: string }
+            encoding:
+              pic: { contentType: image/png }
+      responses:
+        '204': { description: ok }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| { d.code == Code::UnsupportedMediaType && d.message.contains("`pic`") }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_multipart_string_property_declaring_a_binary_family_content_type_is_a_text_part() {
+    // The same declaration on multipart is unchanged by the family rule: a part is rendered by its
+    // property's own lowered type, so a string stays a text part, and the declared `contentType`
+    // rides on it as the part's header, exactly as `application/sdp` does.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /profile:
+    post:
+      operationId: postProfile
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                pic: { type: string }
+            encoding:
+              pic: { contentType: image/png }
+      responses:
+        '204': { description: ok }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(code.contains("reqwest::multipart::Part::text("), "{code}");
+    assert!(code.contains(".mime_str(\"image/png\")"), "{code}");
+}
+
+#[test]
+fn w011_a_response_header_with_binary_family_content_is_acknowledged() {
+    // A response header's `content` keyed `image/png` now classifies (as opaque octets) instead of
+    // failing to classify, and lands on the existing header rule either way: octets are not a
+    // header value spargen decodes, so the accessor is dropped with `W011` and the operation
+    // generates — the disposition `*/*` already has there.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Thumbnail:
+              content:
+                image/png: { schema: {} }
+          content:
+            application/json: { schema: { type: string } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::DeclarationHasNoEffect && d.message.contains("`X-Thumbnail`")
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn a_concrete_media_type_outranks_a_range_that_precedes_it() {
     // Ranges rank below every concrete type, so a concrete sibling wins wherever it sits in the
     // document. (Two ranges at the same rank still tie by source order, as equal-ranked
