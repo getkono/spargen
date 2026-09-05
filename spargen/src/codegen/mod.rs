@@ -98,14 +98,15 @@ pub(crate) fn generate(
         // emits: `HeaderError` is the return type of each `…Headers::from_headers`, `RetryWait` is
         // what a caller's `RetryPolicy` must return, `ClientCore` is what `Client::core` hands
         // back, and the taxonomy's payload types are matched on. Anything short of that leaves a
-        // generated signature a caller can call but cannot write down.
+        // generated signature a caller can call but cannot write down. `ApiErrorBody` is the
+        // bound `Error::api_body` needs and the trait every generated error type implements.
         #[allow(unused_imports)]
         pub use support::{
-            AuthError, ClientConfig, ClientCore, Credential, Error, ExecuteFuture, ExposeSecret,
-            HeaderError, HeaderShape, HttpBackend, LinkPaginator, Middleware, MiddlewareBackend,
-            Next, ProtocolError, RedirectError, ReqwestBackend, RequestError, ResponseValue,
-            RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
-            TokenFuture, TokenProvider, TransportError, exponential_backoff, next_link,
+            ApiErrorBody, AuthError, ClientConfig, ClientCore, Credential, Error, ExecuteFuture,
+            ExposeSecret, HeaderError, HeaderShape, HttpBackend, LinkPaginator, Middleware,
+            MiddlewareBackend, Next, ProtocolError, RedirectError, ReqwestBackend, RequestError,
+            ResponseValue, RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString,
+            TimeoutKind, TokenFuture, TokenProvider, TransportError, exponential_backoff, next_link,
         };
 
         #stream_exports

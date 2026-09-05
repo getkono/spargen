@@ -2148,6 +2148,20 @@ fn status_label(spec: crate::ir::StatusSpec) -> String {
     }
 }
 
+/// The one body type every bodied variant of a multi-status error enum carries, when there is
+/// one. Compared by definition only: payloads are uniformly boxed, and a variant's nullability is
+/// per status and absorbed by the accessor (`Option::as_deref`). The returned `Ty` is the bare
+/// definition — unboxed, non-nullable — which is the accessor's `&T`.
+fn shared_error_body(entries: &[(crate::ir::StatusSpec, Option<Ty>)]) -> Option<Ty> {
+    let mut bodies = entries.iter().filter_map(|(_, ty)| *ty);
+    let first = bodies.next()?;
+    bodies.all(|ty| ty.id == first.id).then_some(Ty {
+        nullable: false,
+        boxed: false,
+        ..first
+    })
+}
+
 /// Emit an operation's typed error type: a payload-carrying enum for several documented error
 /// bodies, a transparent newtype for one, and the uninhabited alias for none.
 pub(crate) fn emit_error_enum(
@@ -2180,6 +2194,48 @@ pub(crate) fn emit_error_enum(
                     None => quote! { #error_ident::#variant_ident => #label, },
                 }
             });
+            // When every bodied variant carries one body definition, the body is reachable
+            // without matching the status: an inherent `body()` (one arm per variant, in the
+            // enum's own order, so the output is as deterministic as the enum) and the runtime's
+            // `ApiErrorBody`, which is what `Error::api_body` needs. An enum mixing body types
+            // gets neither — there is no single body to hand back — and is matched by variant.
+            let accessor = shared_error_body(&entries).map(|body| {
+                let body_ty = ty_tokens(body, names, options, true);
+                let body_arms = entries.iter().map(|(spec, ty)| {
+                    let variant_ident = status_variant_ident(*spec);
+                    match ty {
+                        // A nullable payload is `Option<Box<T>>`: `as_deref` reaches the `T`.
+                        Some(ty) if ty.nullable => {
+                            quote! { #error_ident::#variant_ident(body) => body.as_deref(), }
+                        }
+                        // A boxed payload: `as_ref` reaches the `T` inside the `Box`.
+                        Some(_) => {
+                            quote! { #error_ident::#variant_ident(body) => Some(body.as_ref()), }
+                        }
+                        None => quote! { #error_ident::#variant_ident => None, },
+                    }
+                });
+                quote! {
+                    #[allow(dead_code)]
+                    impl #error_ident {
+                        /// The documented error body, whichever status carried it; `None` for a
+                        /// documented bodyless status. The status is on the `ResponseValue` that
+                        /// wraps this value.
+                        pub fn body(&self) -> Option<&#body_ty> {
+                            match self {
+                                #(#body_arms)*
+                            }
+                        }
+                    }
+
+                    impl support::ApiErrorBody for #error_ident {
+                        type Body = #body_ty;
+                        fn body(&self) -> Option<&#body_ty> {
+                            #error_ident::body(self)
+                        }
+                    }
+                }
+            });
             quote! {
                 #[allow(dead_code)]
                 #[derive(Debug, Clone)]
@@ -2196,6 +2252,8 @@ pub(crate) fn emit_error_enum(
                 }
 
                 impl std::error::Error for #error_ident {}
+
+                #accessor
             }
         }
         // A single documented error body: a transparent newtype over that type.
@@ -2267,6 +2325,14 @@ pub(crate) fn emit_error_enum(
                 }
 
                 impl std::error::Error for #error_ident {}
+
+                // The one body is the inner value, so `Error::api_body` reaches it too.
+                impl support::ApiErrorBody for #error_ident {
+                    type Body = #ty;
+                    fn body(&self) -> Option<&#ty> {
+                        Some(&self.0)
+                    }
+                }
             }
         }
         // No documented error body: every non-success status is Error::UnexpectedStatus, and the
@@ -2357,7 +2423,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
             pub use dispatch::{attach_auth, build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
-            pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
+            pub use error::{ApiErrorBody, Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use header::{parse_header, require_header, HeaderError, HeaderShape};
             pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
@@ -3167,6 +3233,7 @@ fn reqwest_method(method: &crate::ir::Method) -> TokenStream {
 /// conditional re-exports too (streaming, dates), so an operation's type name never changes because
 /// an unrelated part of the spec started or stopped using streams.
 const RUNTIME_PRELUDE: &[&str] = &[
+    "ApiErrorBody",
     "AuthError",
     "ClientConfig",
     "ClientCore",
