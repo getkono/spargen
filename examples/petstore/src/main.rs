@@ -18,8 +18,8 @@ mod petstore {
 }
 
 use petstore::{
-    exponential_backoff, types, Client, Credential, Error, HttpBackend, ReqwestBackend,
-    RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    exponential_backoff, types, Client, Credential, Error, HttpBackend, RequestError,
+    ReqwestBackend, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
 };
 
 const TOKEN: &str = "let-me-in";
@@ -154,13 +154,15 @@ async fn main() {
     assert_eq!(deleted.status(), 204);
     println!("deleted pet #1");
 
-    // A missing credential fails before anything is sent — never a silent 401.
+    // A missing credential fails before anything is sent — never a silent 401 — and it is typed, so
+    // an application can route it to "unauthenticated" rather than to "malformed request".
     let unauthenticated = Client::new(&base_url).unwrap();
     match unauthenticated.get_pet("1").await {
-        Err(Error::RequestConstruction(error)) => {
-            println!("missing credential rejected up front: {error}");
+        Err(Error::RequestConstruction(RequestError::MissingCredential { schemes })) => {
+            assert_eq!(schemes, ["bearerAuth"]);
+            println!("missing credential rejected up front, naming {schemes:?}");
         }
-        other => panic!("expected a request-construction error, got {other:?}"),
+        other => panic!("expected a missing-credential error, got {other:?}"),
     }
 
     // A wrong token draws the server's (undocumented) 401: preserved raw, and not retry-worthy.
