@@ -2482,6 +2482,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             &body.content,
             &body.provenance,
             self.diags,
+            BodyPosition::Request,
             media_object_is_opaque,
         )?;
         let object = self.resolve_media_object(object, media_name)?;
@@ -3022,6 +3023,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             &response.content,
             &response.provenance,
             self.diags,
+            BodyPosition::Response,
             media_object_is_opaque,
         )
         .and_then(
@@ -4528,12 +4530,21 @@ fn lower_media_type(
     }
 }
 
+/// Where a body sits, which decides whether an alternative that decodes identically may go
+/// unreported. A response narrows only at the type; a request narrows at the wire as well.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BodyPosition {
+    Request,
+    Response,
+}
+
 /// `opaque` answers, without lowering anything, whether an entry's body constrains nothing — the
 /// proof that an ignored alternative would decode exactly like the selection.
 fn choose_media<'a, T>(
     content: &'a IndexMap<String, T>,
     provenance: &crate::diag::Provenance,
     diags: &mut Diagnostics,
+    position: BodyPosition,
     opaque: impl Fn(&T) -> bool,
 ) -> Option<(&'a str, &'a T)> {
     if content.is_empty() {
@@ -4576,21 +4587,24 @@ fn choose_media<'a, T>(
         //   keys decide the response type, silently.
         // - `itemSchema` lives outside the body schema entirely. Two sequential entries can both
         //   constrain nothing and still stream different item types.
-        // - A *request* narrows at the wire, not at the type. The chosen media key becomes the
-        //   `Content-Type` verbatim, so a server offering two media it would both accept is
-        //   genuinely being sent only one, whatever the Rust types do. Octet-stream escapes this
-        //   only because the sole octet siblings are ranges, and a range is rejected as a request
-        //   body above.
+        // A *request* narrows at the wire whatever the types do, so nothing is suppressed there at
+        // all. The chosen media key becomes the `Content-Type` verbatim, and a server documented as
+        // accepting `application/octet-stream` and `video/*` is only ever sent the first — a real
+        // narrowing even though both decode to `Bytes`. It is tempting to think ranges cannot reach
+        // a request anyway, since one is rejected as a request `Content-Type` below; that rejection
+        // fires on the media actually *selected*, and a suppressed alternative is never selected.
         //
         // "Constrains nothing" also has to be proved, not assumed from the media type: an
         // octet-classified alternative carrying an object schema would be *rejected* by the octet
         // gate, not turned into bytes, so suppressing it would be the silent fourth behavior
         // nothing is allowed.
+        let suppressible =
+            position == BodyPosition::Response && classified == MediaType::OctetStream;
         let ignored: Vec<&str> = content
             .iter()
             .filter(|(candidate, _)| candidate.as_str() != media)
             .filter(|(candidate, candidate_value)| {
-                classified != MediaType::OctetStream
+                !suppressible
                     || !opaque(candidate_value)
                     || classify_media(media_essence(candidate)).map(|(media, _)| media)
                         != Some(MediaType::OctetStream)

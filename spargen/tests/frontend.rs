@@ -5127,6 +5127,64 @@ paths:
 }
 
 #[test]
+fn w014_fires_for_an_octet_request_alternative_that_decodes_alike() {
+    // A request narrows at the wire even when both entries are `bytes::Bytes`: the selected media
+    // key becomes the `Content-Type` verbatim, so this client only ever sends octet-stream to a
+    // server documented as also accepting `video/*`. The range-as-request rejection does not cover
+    // this — that fires on the media actually selected, and a suppressed alternative never is.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /u:
+    post:
+      operationId: postU
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: {} }
+          video/*: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_fires_when_an_octet_alternative_describes_itself_outside_its_schema() {
+    // A Media Type Object says things outside `schema`. `itemSchema` in particular carries a type,
+    // so an entry declaring one is not interchangeable with an empty body even though its `schema`
+    // is empty — reading only `schema` is how that slipped through before.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: {} }
+            video/*: { itemSchema: { type: string } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn w014_fires_for_sequential_alternatives_with_different_item_types() {
     // A sequential media's item type lives in `itemSchema`, outside the body schema entirely. Two
     // entries can both constrain nothing in `schema` and still stream different types.
