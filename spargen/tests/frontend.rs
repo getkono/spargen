@@ -5182,6 +5182,30 @@ paths:
             "{report:#?}"
         );
     }
+
+    // `encoding` is the other half of the same claim, and the explain text names it. It is inert on
+    // an octet media, but an entry that spells it out is still saying more than an empty one.
+    let with_encoding = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: {} }
+            video/*: { encoding: { part: { contentType: text/plain } } }
+"##;
+    for report in [generate(with_encoding), check(with_encoding)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
 }
 
 #[test]

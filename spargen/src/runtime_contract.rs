@@ -583,11 +583,11 @@ struct WorkspaceRoot {
     /// it, when the search ended without a root.
     ///
     /// Strictly a better *message* than "no workspace manifest was found": it names a file the
-    /// reader can open, and says what is wrong with it. It is never read again and never joins
-    /// `manifests`, because nothing here knows it was the workspace root — the walk gave up on it
-    /// precisely because it could not tell. Treating it as a root would turn an ordinary crate
-    /// that happens to sit under an unparseable `Cargo.toml` into a hard `E023`, which is a far
-    /// worse answer than a vague one.
+    /// reader can open, and says what is wrong with it. It is never treated as a manifest and
+    /// never joins `manifests`, because nothing here knows it was the workspace root — the walk
+    /// gave up on it precisely because it could not tell. Treating it as a root would turn an
+    /// ordinary crate that happens to sit under an unparseable `Cargo.toml` into a hard `E023`,
+    /// which is a far worse answer than a vague one.
     unreadable: Option<(Utf8PathBuf, String)>,
 }
 
@@ -649,35 +649,29 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
     while let Some(candidate_dir) = directory {
         let candidate = candidate_dir.join("Cargo.toml");
         if candidate.is_file() {
+            // One read, keeping the failure rather than discarding it: it is the only account of
+            // what is wrong with this file that anything will ever print.
             match std::fs::read_to_string(&candidate)
-                .ok()
-                .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
-            {
-                Some(value) if value.get("workspace").is_some() => {
+                .map_err(|error| error.to_string())
+                .and_then(|contents| {
+                    toml::from_str::<toml::Value>(&contents).map_err(|error| error.to_string())
+                }) {
+                Ok(value) if value.get("workspace").is_some() => {
                     return separate(Some(candidate));
                 }
                 // A manifest that parses but declares no `[workspace]` is an ordinary member or an
                 // unrelated crate: keep climbing.
-                Some(_) => {}
-                None => {
-                    unreadable = unreadable.or_else(|| {
-                        // Re-read for the reason alone. The message is the only consumer, and a
-                        // candidate that fails is by definition small enough not to matter.
-                        let reason = read_toml(&candidate, "workspace manifest")
-                            .err()
-                            .unwrap_or_else(|| "could not be read".to_owned());
-                        Some((candidate, reason))
-                    });
-                }
+                Ok(_) => {}
+                Err(reason) => unreadable = unreadable.or(Some((candidate, reason))),
             }
         }
         directory = candidate_dir.parent();
     }
-    // Nothing on the path declared `[workspace]`, so there is no root to read. The unreadable
+    // Nothing on the path declared `[workspace]`, so there is no root to audit. The unreadable
     // candidate rides along as `unreadable` rather than as `path`: it sharpens the message an
     // unresolvable inheritance prints, and nothing else. Handing it back as a root would have it
-    // read and recorded as a dependency of the build, turning an ordinary crate that merely sits
-    // beneath a broken `Cargo.toml` into a hard `E023`.
+    // audited and recorded as a dependency of the build, turning an ordinary crate that merely
+    // sits beneath a broken `Cargo.toml` into a hard `E023`.
     WorkspaceRoot {
         path: None,
         is_self: false,
@@ -704,10 +698,11 @@ enum WorkspaceOrigin<'a> {
     Resolved(&'a Utf8Path),
     /// One was found but could not be read or parsed.
     ///
-    /// `reason` carries the read failure for the walk's fallback, where nothing else reports it —
-    /// that candidate is deliberately never read, so no separate parse diagnostic accompanies it.
-    /// It is `None` for a root named by `package.workspace`, which *is* read, and whose failure is
-    /// therefore already reported as its own diagnostic.
+    /// `reason` carries the read failure for the walk's fallback, where nothing else reports it:
+    /// that candidate is never audited as a manifest, so no separate parse diagnostic accompanies
+    /// it and this message is the only place the failure appears. It is `None` for a root named by
+    /// `package.workspace`, which *is* audited, and whose failure is therefore already reported as
+    /// its own diagnostic — repeating it here would print it twice.
     Unreadable {
         path: &'a Utf8Path,
         reason: Option<&'a str>,
@@ -1293,8 +1288,8 @@ serde_json.workspace = true
                 diagnostic.message.contains("`bytes` inherits")
                     && diagnostic.message.contains("could not be read")
                     && diagnostic.message.contains(root.as_str())
-                    // The candidate is deliberately never read a second time, so nothing else
-                    // prints why it failed. The message has to carry the reason itself.
+                    // The candidate is never audited as a manifest, so nothing else prints why
+                    // it failed. The message has to carry the reason itself.
                     && diagnostic.message.contains("TOML parse error")
             }),
             "{:#?}",
