@@ -1481,6 +1481,86 @@ serde_json.workspace = true
     }
 
     #[test]
+    fn a_consumer_manifest_that_cannot_be_read_or_parsed_is_named_as_the_consumer_manifest() {
+        // The other half of the role noun: the consumer's own manifest is never called the
+        // workspace manifest, on either failure. Swapping the two call-site nouns fails this test.
+        let directory = tempfile::tempdir().unwrap();
+
+        let unparseable = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        std::fs::write(&unparseable, "[package\nnot toml at all\n").unwrap();
+        let result = audit(&unparseable, &RuntimeRequirements::default());
+        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
+        let message = &result.diagnostics[0].message;
+        assert!(
+            message.contains("failed to parse consumer manifest"),
+            "{message}"
+        );
+        assert!(!message.contains("workspace manifest"), "{message}");
+        // Nothing past the consumer manifest was looked up, so nothing else is a rebuild input.
+        assert_eq!(result.manifests, vec![unparseable]);
+
+        let absent =
+            Utf8PathBuf::from_path_buf(directory.path().join("absent").join("Cargo.toml")).unwrap();
+        let result = audit(&absent, &RuntimeRequirements::default());
+        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
+        let message = &result.diagnostics[0].message;
+        assert!(
+            message.contains("failed to read consumer manifest"),
+            "{message}"
+        );
+        assert!(!message.contains("workspace manifest"), "{message}");
+    }
+
+    #[test]
+    fn a_package_workspace_naming_a_directory_without_a_manifest_is_a_workspace_read_failure() {
+        // `package.workspace` is taken at its word, so a root directory holding no `Cargo.toml` is
+        // a workspace manifest that could not be *read* — not a parse failure, and not a missing
+        // root.
+        let directory = tempfile::tempdir().unwrap();
+        let root_dir = directory.path().join("root");
+        let member_dir = directory.path().join("outside");
+        std::fs::create_dir(&root_dir).unwrap();
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../root\"\n\n\
+                 {CORE_INHERITED}"
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        let any = |needle: &str| {
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(needle))
+        };
+        assert!(
+            any("failed to read workspace manifest"),
+            "{:#?}",
+            result.diagnostics
+        );
+        assert!(!any("failed to parse"), "{:#?}", result.diagnostics);
+        assert!(!any("consumer manifest"), "{:#?}", result.diagnostics);
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains("`bytes` inherits")
+                    && diagnostic.message.contains("could not be read")
+            }),
+            "{:#?}",
+            result.diagnostics
+        );
+        assert!(
+            !any("no workspace manifest was found"),
+            "{:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
     fn the_manifests_reported_in_issue_71_pass_as_written() {
         // The layout exactly as #71 reported it: the root spells `futures-core` as a plain string
         // and `uuid` as a table with its own features; the member inherits both beside the five
