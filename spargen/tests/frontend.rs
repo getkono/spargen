@@ -5501,6 +5501,149 @@ paths:
 }
 
 #[test]
+fn e009_a_media_range_with_an_extra_slash_is_unsupported() {
+    // `a/b/*` ends in `/*`, but what precedes the suffix is `a/b`, which is not a type name. It was
+    // read as the family `a/b` and generated as opaque octets. A key that is not a media range names
+    // no family, so it is unsupported like any other key that is not a media type.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            "a/b/*": { schema: {} }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+#[test]
+fn e009_a_media_key_that_is_not_a_restricted_name_is_unsupported() {
+    // A media type is exactly one `/` between two RFC 6838 § 4.2 restricted names. Each key below
+    // breaks that, yet most reached a codec through an arm that matched only part of the key: the
+    // `text/` prefix, the `application/…+json` suffix, or a range's `/*`. `image/jpeg/extra` pins
+    // the concrete binary family, which must not be read as `image` octets.
+    fn document(key: &str, request: bool, schema: &str) -> String {
+        if request {
+            format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    post:
+      operationId: postX
+      requestBody:
+        required: true
+        content:
+          "{key}": {{ schema: {schema} }}
+      responses:
+        "204": {{ description: No Content }}
+"##
+            )
+        } else {
+            format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            "{key}": {{ schema: {schema} }}
+"##
+            )
+        }
+    }
+    // One byte past the 127-byte limit on a restricted name.
+    let too_long = format!("text/{}", "a".repeat(128));
+    let cases = [
+        ("image/jpeg/extra", true, "{}"),
+        ("text/plain/extra", false, "{ type: string }"),
+        ("application/vnd.a/b+json", true, "{ type: object }"),
+        ("text/", false, "{ type: string }"),
+        ("text/pl ain", false, "{ type: string }"),
+        ("**/*", false, "{}"),
+        (too_long.as_str(), false, "{ type: string }"),
+    ];
+    for (key, request, schema) in cases {
+        let spec = document(key, request, schema);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{key}` through {entry}: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::UnsupportedMediaType),
+                "`{key}` through {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn well_formed_media_keys_still_generate() {
+    // The restricted-name check must not reject what real descriptions write: dotted vendor `+json`
+    // types, a key with parameters (stripped before the check), both kinds of range, every
+    // non-alphanumeric byte RFC 6838 permits, and a subtype at exactly the 127-byte limit.
+    let at_limit = format!("text/{}", "a".repeat(127));
+    let keys = [
+        ("application/vnd.github+json", "{ type: object }"),
+        ("application/vnd.github.v3.star+json", "{ type: object }"),
+        ("text/plain; charset=utf-8", "{ type: string }"),
+        ("*/*", "{}"),
+        ("application/*", "{}"),
+        ("text/x-a!b#c$d&e^f_g.h+i", "{ type: string }"),
+        (at_limit.as_str(), "{ type: string }"),
+    ];
+    // One operation per key, each with a single content entry, so no key competes with another.
+    let mut spec = String::from("openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n");
+    for (index, (key, schema)) in keys.into_iter().enumerate() {
+        spec += &format!(
+            r##"  /op{index}:
+    get:
+      operationId: op{index}
+      responses:
+        "200":
+          description: OK
+          content:
+            "{key}": {{ schema: {schema} }}
+"##
+        );
+    }
+    let (report, code) = generate_with_code(&spec);
+    let checked = check(&spec);
+    for report in [&report, &checked] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+    // Seven operations share the `ResponseBody` name, so each alias carries a disambiguating suffix.
+    let opaque = code
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            line.starts_with("pub type ResponseBody") && line.ends_with(" = bytes::Bytes;")
+        })
+        .count();
+    assert_eq!(
+        opaque, 2,
+        "exactly the `*/*` and `application/*` ranges are opaque octets: {code}"
+    );
+}
+
+#[test]
 fn a_sequential_media_outranks_a_text_range() {
     // `text/*` used to classify as `Text` by accident of the `text/` prefix arm, at the same rank
     // as a concrete textual type and *above* sequential media — so this response was a whole-body

@@ -4673,6 +4673,40 @@ fn media_object_is_opaque(object: &MediaTypeObject) -> bool {
     }
 }
 
+/// Whether a media type essence is a media type or range at all: exactly one `/` between two
+/// RFC 6838 § 4.2 `restricted-name`s, with `*` allowed only as the whole subtype (`type/*`) or as
+/// the whole key (`*/*`).
+///
+/// [`classify_media`] asks this first, so no arm can accept a key on the strength of a prefix or a
+/// suffix alone: not `text/plain/extra`, not `application/vnd.a/b+json`, and not the range `a/b/*`.
+/// Parameters are already gone, because every caller passes [`media_essence`] output. A key that
+/// fails is not a media type, so it classifies as nothing and takes the existing unsupported path:
+/// `E009` when it is the only candidate, or an ignored alternative under `W014` otherwise.
+fn media_type_is_well_formed(essence: &str) -> bool {
+    /// `restricted-name = restricted-name-first *126restricted-name-chars` (RFC 6838 § 4.2). ASCII
+    /// letters of either case are accepted; case sensitivity is left to the arms that match names.
+    fn restricted_name(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        matches!(bytes.first(), Some(first) if first.is_ascii_alphanumeric())
+            && bytes.len() <= 127
+            && bytes.iter().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#' | b'$' | b'&' | b'-' | b'^' | b'_' | b'.' | b'+'
+                    )
+            })
+    }
+    let Some((kind, subtype)) = essence.split_once('/') else {
+        return false;
+    };
+    match (kind, subtype) {
+        ("*", "*") => true,
+        (_, "*") => restricted_name(kind),
+        _ => restricted_name(kind) && restricted_name(subtype),
+    }
+}
+
 fn media_essence(media: &str) -> &str {
     media.split(';').next().unwrap_or(media).trim()
 }
@@ -4681,6 +4715,9 @@ fn media_essence(media: &str) -> &str {
 /// suffixes use the JSON codec; textual types use raw UTF-8 except for the two streaming framings.
 /// GitHub's documented octocat representation is a textual vendor media type.
 fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
+    if !media_type_is_well_formed(essence) {
+        return None;
+    }
     if let Some(range) = classify_media_range(essence) {
         return Some(range);
     }
