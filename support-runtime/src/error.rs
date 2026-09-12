@@ -205,8 +205,11 @@ pub enum RequestError {
     /// The operation carries a security requirement and no registered credential satisfies any of
     /// its alternatives. Raised before anything is sent.
     MissingCredential {
-        /// Every `securitySchemes` key the requirement names, sorted and deduplicated.
-        schemes: Vec<&'static str>,
+        /// One entry per alternative of the requirement, in declaration order: that alternative's
+        /// `securitySchemes` keys that have no registered credential, in declaration order.
+        /// `mutualTLS` keys never appear (the transport satisfies them). Never empty, and no
+        /// inner list is empty.
+        alternatives: Vec<Vec<&'static str>>,
     },
     /// The selected alternative's token provider returned an error. Raised before anything is
     /// sent; `source()` is the provider's [`AuthError`].
@@ -285,12 +288,19 @@ pub struct RedirectError {
 impl std::fmt::Display for RequestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RequestError::MissingCredential { schemes } => write!(
-                f,
-                "no registered credential satisfies the operation's security requirement \
-                 (schemes: {})",
-                schemes.join(", ")
-            ),
+            RequestError::MissingCredential { alternatives } => {
+                f.write_str(
+                    "no registered credential satisfies the operation's security requirement \
+                     (missing: ",
+                )?;
+                for (index, alternative) in alternatives.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(" or ")?;
+                    }
+                    f.write_str(&alternative.join(" + "))?;
+                }
+                f.write_str(")")
+            }
             RequestError::CredentialProvider { scheme, .. } => write!(
                 f,
                 "the token provider registered for security scheme `{scheme}` failed"
@@ -387,7 +397,7 @@ mod tests {
     #[test]
     fn a_missing_credential_is_typed_and_ends_the_cause_chain() {
         let error = Error::<ApiBody>::RequestConstruction(RequestError::MissingCredential {
-            schemes: vec!["key", "token"],
+            alternatives: vec![vec!["key", "token"]],
         });
         assert!(!error.is_transient());
         assert_eq!(error.to_string(), "request construction failed");
@@ -395,7 +405,7 @@ mod tests {
         assert_eq!(
             source.to_string(),
             "no registered credential satisfies the operation's security requirement \
-             (schemes: key, token)"
+             (missing: key + token)"
         );
         assert!(std::error::Error::source(source).is_none());
     }
@@ -604,7 +614,7 @@ mod tests {
         let narrow: Vec<Error<std::convert::Infallible>> = vec![
             Error::request_message("bad path segment"),
             Error::RequestConstruction(RequestError::MissingCredential {
-                schemes: vec!["token"],
+                alternatives: vec![vec!["token"]],
             }),
             Error::RequestConstruction(RequestError::CredentialProvider {
                 scheme: "token",
@@ -665,14 +675,14 @@ mod tests {
         // The typed request-construction cause keeps its payload too.
         let widened: Error<ApiBody> = Error::<std::convert::Infallible>::RequestConstruction(
             RequestError::MissingCredential {
-                schemes: vec!["a", "b"],
+                alternatives: vec![vec!["a"], vec!["b"]],
             },
         )
         .widen();
-        let Error::RequestConstruction(RequestError::MissingCredential { schemes }) = widened
+        let Error::RequestConstruction(RequestError::MissingCredential { alternatives }) = widened
         else {
             panic!("widen changed the variant");
         };
-        assert_eq!(schemes, ["a", "b"]);
+        assert_eq!(alternatives, [vec!["a"], vec!["b"]]);
     }
 }

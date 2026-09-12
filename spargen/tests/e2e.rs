@@ -1455,8 +1455,8 @@ fn a_missing_credential_is_a_typed_request_construction_error() {
     };
     match result {
         Err(basic_client::Error::RequestConstruction(
-            basic_client::RequestError::MissingCredential { schemes },
-        )) => assert_eq!(schemes, ["apiKey", "bearer"]),
+            basic_client::RequestError::MissingCredential { alternatives },
+        )) => assert_eq!(alternatives, [vec!["bearer"], vec!["apiKey"]]),
         other => panic!("expected MissingCredential, got {other:?}"),
     }
 }

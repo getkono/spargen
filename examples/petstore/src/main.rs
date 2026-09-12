@@ -158,9 +158,9 @@ async fn main() {
     // an application can route it to "unauthenticated" rather than to "malformed request".
     let unauthenticated = Client::new(&base_url).unwrap();
     match unauthenticated.get_pet("1").await {
-        Err(Error::RequestConstruction(RequestError::MissingCredential { schemes })) => {
-            assert_eq!(schemes, ["bearerAuth"]);
-            println!("missing credential rejected up front, naming {schemes:?}");
+        Err(Error::RequestConstruction(RequestError::MissingCredential { alternatives })) => {
+            assert_eq!(alternatives, [vec!["bearerAuth"]]);
+            println!("missing credential rejected up front, naming {alternatives:?}");
         }
         other => panic!("expected a missing-credential error, got {other:?}"),
     }

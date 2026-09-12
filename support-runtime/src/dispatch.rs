@@ -137,14 +137,22 @@ pub async fn attach_auth(
             matches!(scheme.kind, AuthKind::MutualTls) || core.credential(scheme.name).is_some()
         })
     }) else {
-        let mut schemes: Vec<&'static str> = requirements
+        // Nothing was satisfied, so every alternative names at least one unregistered scheme.
+        let alternatives: Vec<Vec<&'static str>> = requirements
             .iter()
-            .flat_map(|alternative| alternative.iter().map(|scheme| scheme.name))
+            .map(|alternative| {
+                alternative
+                    .iter()
+                    .filter(|scheme| {
+                        !matches!(scheme.kind, AuthKind::MutualTls)
+                            && core.credential(scheme.name).is_none()
+                    })
+                    .map(|scheme| scheme.name)
+                    .collect::<Vec<_>>()
+            })
             .collect();
-        schemes.sort_unstable();
-        schemes.dedup();
         return Err(Error::RequestConstruction(
-            RequestError::MissingCredential { schemes },
+            RequestError::MissingCredential { alternatives },
         ));
     };
     let mut request = request;
@@ -646,23 +654,28 @@ mod tests {
         let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
         assert!(error.to_string().contains("request construction"));
         // Typed, so a consumer routes on the variant rather than on the message text.
-        let Error::RequestConstruction(RequestError::MissingCredential { schemes }) = &error else {
+        let Error::RequestConstruction(RequestError::MissingCredential { alternatives }) = &error
+        else {
             panic!("expected MissingCredential, got {error:?}");
         };
-        assert_eq!(*schemes, ["token"]);
-        // The rendered text is unchanged, and the chain ends at the typed cause.
+        assert_eq!(*alternatives, [vec!["token"]]);
+        // The chain ends at the typed cause.
         let source = std::error::Error::source(&error).unwrap();
         assert_eq!(
             source.to_string(),
             "no registered credential satisfies the operation's security requirement \
-             (schemes: token)"
+             (missing: token)"
         );
         assert!(std::error::Error::source(source).is_none());
     }
 
+    /// Each alternative reports only what the caller still has to register: declaration order
+    /// (not sorted), a registered key and a transport-satisfied `mutualTLS` key omitted, and a key
+    /// shared by two alternatives listed under each.
     #[test]
-    fn missing_credential_names_every_scheme_sorted_and_deduplicated() {
-        let core = core();
+    fn missing_credential_lists_each_alternatives_unregistered_schemes_in_declared_order() {
+        let mut core = core();
+        core.set_credential("key", Credential::ApiKey(SecretString::from("k3y")));
         let error = poll_ready(attach_auth(
             &core,
             get(&core),
@@ -670,8 +683,22 @@ mod tests {
                 BEARER,
                 &[
                     AuthScheme {
+                        name: "zeta",
+                        kind: AuthKind::Bearer,
+                    },
+                    AuthScheme {
                         name: "key",
                         kind: AuthKind::ApiKeyQuery("api_key"),
+                    },
+                    AuthScheme {
+                        name: "alpha",
+                        kind: AuthKind::Bearer,
+                    },
+                ],
+                &[
+                    AuthScheme {
+                        name: "mtls",
+                        kind: AuthKind::MutualTls,
                     },
                     AuthScheme {
                         name: "token",
@@ -681,10 +708,19 @@ mod tests {
             ],
         ))
         .unwrap_err();
-        let Error::RequestConstruction(RequestError::MissingCredential { schemes }) = error else {
+        let rendered = std::error::Error::source(&error).unwrap().to_string();
+        let Error::RequestConstruction(RequestError::MissingCredential { alternatives }) = error
+        else {
             panic!("expected MissingCredential, got {error:?}");
         };
-        assert_eq!(schemes, ["key", "token"]);
+        assert_eq!(
+            alternatives,
+            [vec!["token"], vec!["zeta", "alpha"], vec!["token"]]
+        );
+        assert!(
+            rendered.ends_with("(missing: token or zeta + alpha or token)"),
+            "{rendered}"
+        );
     }
 
     /// A client that registers a token provider always has a credential registered, so a failed
