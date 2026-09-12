@@ -174,16 +174,21 @@ async fn apply_credential(
     scheme: &AuthScheme,
     credential: &Credential,
 ) -> Result<RequestBuilder, Error<Infallible>> {
-    // A provider yields a single secret, usable anywhere a bearer token or apiKey fits.
+    // A provider yields a single secret, usable anywhere a bearer token or apiKey fits. Only a kind
+    // that takes a token asks it for one, so a provider registered under a scheme that takes none
+    // is the same mismatch whether or not a refresh would have succeeded.
+    let takes_token = !matches!(scheme.kind, AuthKind::Basic | AuthKind::MutualTls);
     let token: Option<SecretString> = match credential {
         Credential::Bearer(secret) | Credential::ApiKey(secret) => Some(secret.clone()),
-        Credential::Provider(provider) => Some(provider().await.map_err(|source| {
-            Error::RequestConstruction(RequestError::CredentialProvider {
-                scheme: scheme.name,
-                source,
-            })
-        })?),
-        Credential::Basic { .. } => None,
+        Credential::Provider(provider) if takes_token => {
+            Some(provider().await.map_err(|source| {
+                Error::RequestConstruction(RequestError::CredentialProvider {
+                    scheme: scheme.name,
+                    source,
+                })
+            })?)
+        }
+        Credential::Provider(_) | Credential::Basic { .. } => None,
     };
     match scheme.kind {
         AuthKind::Basic => match credential {
@@ -750,6 +755,40 @@ mod tests {
         );
         let provider = std::error::Error::source(cause).expect("the provider's error is the cause");
         assert!(provider.downcast_ref::<AuthError>().is_some());
+    }
+
+    /// A provider under a scheme that takes no token is a registration mismatch, and it must stay
+    /// one regardless of whether a refresh would have worked: the provider is never asked.
+    #[test]
+    fn a_token_provider_under_a_basic_scheme_is_a_mismatch_without_calling_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let called = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&called);
+        let mut core = core();
+        core.set_credential(
+            "login",
+            Credential::Provider(Arc::new(move || {
+                flag.store(true, Ordering::SeqCst);
+                Box::pin(async { Err(AuthError::new("refresh rejected")) }) as TokenFuture
+            })),
+        );
+        let error = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "login",
+                kind: AuthKind::Basic,
+            }]],
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+            "{error:?}"
+        );
+        let source = std::error::Error::source(&error).unwrap();
+        assert!(source.to_string().contains("http basic"), "{source}");
+        assert!(!called.load(Ordering::SeqCst), "the provider was called");
     }
 
     #[test]
