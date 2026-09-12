@@ -180,9 +180,16 @@ impl<E: ApiErrorBody> Error<E> {
     pub fn api_body(&self) -> Option<&E::Body> {
         match self {
             Error::Api(value) => value.inner().body(),
-            // Every other class carries no typed body; a wildcard so a variant added to the
-            // taxonomy does not have to be listed here.
-            _ => None,
+            // Every other class carries no typed body. Listed, not wildcarded, like every other
+            // match over the taxonomy here: a new variant must decide whether it carries one.
+            Error::RequestConstruction(_)
+            | Error::Transport(_)
+            | Error::Timeout(_)
+            | Error::Protocol(_)
+            | Error::Redirect(_)
+            | Error::UnexpectedStatus { .. }
+            | Error::Decode { .. }
+            | Error::InterruptedBody(_) => None,
         }
     }
 }
@@ -605,7 +612,19 @@ mod tests {
     #[test]
     fn api_body_is_present_exactly_on_the_documented_api_error() {
         for error in every_variant() {
-            let expected = matches!(error, Error::Api(_));
+            let expected = match &error {
+                // The documented API error carries the operation's typed body.
+                Error::Api(_) => true,
+                // Every other class carries none.
+                Error::RequestConstruction(_)
+                | Error::Transport(_)
+                | Error::Timeout(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::UnexpectedStatus { .. }
+                | Error::Decode { .. }
+                | Error::InterruptedBody(_) => false,
+            };
             assert_eq!(
                 error.api_body().is_some(),
                 expected,
