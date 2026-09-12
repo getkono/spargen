@@ -1086,6 +1086,106 @@ serde_json.workspace = true
         assert_eq!(result.manifests, vec![root, member]);
     }
 
+    /// Audits a root/member pair that differ from the core fixtures only in how `reqwest` is
+    /// declared, and returns every diagnostic message the audit produced.
+    fn inherited_reqwest_default_feature_diagnostics(
+        root_reqwest: &str,
+        member_reqwest: &str,
+    ) -> Vec<String> {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies().replace(
+                    "reqwest = { version = \"0.12.28\", default-features = false }",
+                    root_reqwest
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{}",
+                CORE_INHERITED.replace("reqwest.workspace = true", member_reqwest)
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code == Code::RuntimeDependencyContract),
+            "{:#?}",
+            result.diagnostics
+        );
+        result
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    }
+
+    #[test]
+    fn a_member_default_features_false_cannot_turn_off_defaults_the_root_leaves_on() {
+        // Cargo's rule for inheritance: the workspace entry decides, and a member's `false` is
+        // ignored when that entry leaves defaults on. The fix belongs in the root.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            "reqwest = \"0.12.28\"",
+            "reqwest = { workspace = true, default-features = false }",
+        );
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("`reqwest` must set `default-features = false`"),
+            "{messages:#?}"
+        );
+    }
+
+    #[test]
+    fn a_member_default_features_true_turns_on_defaults_the_root_turned_off() {
+        // The other direction: a member may re-enable defaults, so a root that already disables
+        // them does not satisfy the audit on its own.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            "reqwest = { version = \"0.12.28\", default-features = false }",
+            "reqwest = { workspace = true, default-features = true }",
+        );
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("`reqwest` must set `default-features = false`"),
+            "{messages:#?}"
+        );
+    }
+
+    #[test]
+    fn a_silent_member_keeps_the_defaults_the_root_turned_off() {
+        // No diagnostic at all, not merely no default-features one: a root that failed to resolve
+        // reports the inheritance instead, and must not pass this test.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            "reqwest = { version = \"0.12.28\", default-features = false }",
+            "reqwest = { workspace = true }",
+        );
+        assert!(messages.is_empty(), "{messages:#?}");
+    }
+
+    #[test]
+    fn a_member_default_features_false_keeps_the_defaults_the_root_turned_off() {
+        // The layout the E023 explain text advises: defaults disabled in the root, and the member
+        // repeating `false`. Only a member `true` re-enables them, so any explicit member flag must
+        // not count as one.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            "reqwest = { version = \"0.12.28\", default-features = false }",
+            "reqwest = { workspace = true, default-features = false }",
+        );
+        assert!(messages.is_empty(), "{messages:#?}");
+    }
+
     /// The five core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
     /// the floors in these fixtures cannot drift from the ones every other test audits against.
     fn core_workspace_dependencies() -> &'static str {
@@ -1456,6 +1556,14 @@ serde_json.workspace = true
             result.diagnostics
         );
         assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("consumer manifest")),
+            "the file that failed is the workspace root, not the consumer's own manifest: {:#?}",
+            result.diagnostics
+        );
+        assert!(
             result.diagnostics.iter().any(|diagnostic| {
                 diagnostic.message.contains("`bytes` inherits")
                     && diagnostic.message.contains("could not be read")
@@ -1469,6 +1577,176 @@ serde_json.workspace = true
                 .contains("no workspace manifest was found")),
             "found-but-broken must not be reported as missing: {:#?}",
             result.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_consumer_manifest_that_cannot_be_read_or_parsed_is_named_as_the_consumer_manifest() {
+        // The other half of the role noun: the consumer's own manifest is never called the
+        // workspace manifest, on either failure. Swapping the two call-site nouns fails this test.
+        let directory = tempfile::tempdir().unwrap();
+
+        let unparseable = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        std::fs::write(&unparseable, "[package\nnot toml at all\n").unwrap();
+        let result = audit(&unparseable, &RuntimeRequirements::default());
+        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
+        let message = &result.diagnostics[0].message;
+        assert!(
+            message.contains("failed to parse consumer manifest"),
+            "{message}"
+        );
+        assert!(!message.contains("workspace manifest"), "{message}");
+        // Nothing past the consumer manifest was looked up, so nothing else is a rebuild input.
+        assert_eq!(result.manifests, vec![unparseable]);
+
+        let absent =
+            Utf8PathBuf::from_path_buf(directory.path().join("absent").join("Cargo.toml")).unwrap();
+        let result = audit(&absent, &RuntimeRequirements::default());
+        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
+        let message = &result.diagnostics[0].message;
+        assert!(
+            message.contains("failed to read consumer manifest"),
+            "{message}"
+        );
+        assert!(!message.contains("workspace manifest"), "{message}");
+    }
+
+    #[test]
+    fn a_package_workspace_naming_a_directory_without_a_manifest_is_a_workspace_read_failure() {
+        // `package.workspace` is taken at its word, so a root directory holding no `Cargo.toml` is
+        // a workspace manifest that could not be *read* — not a parse failure, and not a missing
+        // root.
+        let directory = tempfile::tempdir().unwrap();
+        let root_dir = directory.path().join("root");
+        let member_dir = directory.path().join("outside");
+        std::fs::create_dir(&root_dir).unwrap();
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../root\"\n\n\
+                 {CORE_INHERITED}"
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        let any = |needle: &str| {
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(needle))
+        };
+        assert!(
+            any("failed to read workspace manifest"),
+            "{:#?}",
+            result.diagnostics
+        );
+        assert!(!any("failed to parse"), "{:#?}", result.diagnostics);
+        assert!(!any("consumer manifest"), "{:#?}", result.diagnostics);
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains("`bytes` inherits")
+                    && diagnostic.message.contains("could not be read")
+            }),
+            "{:#?}",
+            result.diagnostics
+        );
+        assert!(
+            !any("no workspace manifest was found"),
+            "{:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn the_manifests_reported_in_issue_71_pass_as_written() {
+        // The layout exactly as #71 reported it: the root spells `futures-core` as a plain string
+        // and `uuid` as a table with its own features; the member inherits both beside the five
+        // core crates. The report said both came back as "generated client requires …". The
+        // member adds `stream` to the inherited `reqwest`, which is the feature union a stream
+        // needs and the half of it no other fixture exercises.
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
+                 futures-core = \"0.3.32\"\n\
+                 uuid = {{ version = \"1.26.0\", features = [\"v4\", \"serde\"] }}\n",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{}\
+                 futures-core = {{ workspace = true }}\nuuid = {{ workspace = true }}\n",
+                CORE_INHERITED.replace(
+                    "reqwest.workspace = true",
+                    "reqwest = { workspace = true, features = [\"stream\"] }"
+                )
+            ),
+        )
+        .unwrap();
+
+        let requirements = RuntimeRequirements {
+            streams: true,
+            uuid: true,
+            ..RuntimeRequirements::default()
+        };
+        let result = audit(&member, &requirements);
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        assert_eq!(result.manifests, vec![root, member]);
+    }
+
+    #[test]
+    fn an_inherited_optional_dependency_in_a_target_table_resolves() {
+        // The one optional requirement lives in a `[target.'cfg(…)'.dependencies]` table, and
+        // Cargo does not inherit `optional`: the root declares version and features, the member
+        // adds `optional = true` beside `workspace = true`. Every other inheritance fixture sits
+        // in `[dependencies]`, so the target table's lookup was unpinned.
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
+                 tokio = {{ version = \"1.53.1\", features = [\"rt\"] }}\n",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        let inherited_optional = format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[features]\n\
+             blocking = [\"dep:tokio\"]\n\n{CORE_INHERITED}\n\
+             [target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]\n\
+             tokio = {{ workspace = true, optional = true }}\n"
+        );
+        std::fs::write(&member, &inherited_optional).unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+
+        // `optional` is the member's to declare, exactly as Cargo reads it: the inherited entry
+        // still resolves, and only the optional rule fires.
+        std::fs::write(&member, inherited_optional.replace(", optional = true", "")).unwrap();
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
+        assert!(
+            result.diagnostics[0]
+                .message
+                .contains("`tokio` must be optional"),
+            "{}",
+            result.diagnostics[0].message
         );
     }
 
