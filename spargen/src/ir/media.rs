@@ -66,9 +66,10 @@ pub(crate) struct RequestBody {
     pub(crate) media: MediaType,
     /// The selected content type essence, preserved for the emitted `Content-Type` header.
     pub(crate) content_type: String,
-    /// The body's type, or `None` for a body declared without a schema. The type of an
-    /// octet-stream body always has a `bytes::Bytes` definition, but the reference may still be
-    /// nullable, which the emitter does not handle yet (#104).
+    /// The body's type, or `None` for a non-octet-stream body declared without a schema, or for
+    /// any body whose declared schema failed to lower (already reported). An octet-stream body
+    /// without a schema lowers to `bytes::Bytes`; the reference may still be nullable, which the
+    /// emitter does not handle yet (#104).
     pub(crate) ty: Option<Ty>,
     /// Whether the body is `required`. A required body is a plain argument; an optional one is
     /// passed as `Option<&T>` and omitted from the request when absent.
