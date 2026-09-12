@@ -684,4 +684,25 @@ mod tests {
             Some(ApiErrorBodyImpl::Body(ty(0)))
         );
     }
+
+    /// `api_error_body` bares its inputs before comparing, so it never reaches the nullability
+    /// check itself; call `same_generated_type` directly. `T` and `Option<T>` over one definition
+    /// are different Rust types, at the top level and as an array item.
+    #[test]
+    fn nullability_distinguishes_otherwise_identical_types() {
+        let nullable = Ty {
+            nullable: true,
+            ..ty(0)
+        };
+        let graph = graph(vec![
+            TypeKind::Primitive(Prim::String),
+            TypeKind::Array(Box::new(ty(0))),
+            TypeKind::Array(Box::new(nullable)),
+        ]);
+        assert!(!graph.same_generated_type(ty(0), nullable));
+        assert!(!graph.same_generated_type(nullable, ty(0)));
+        assert!(graph.same_generated_type(nullable, nullable));
+        // `Vec<T>` against `Vec<Option<T>>`.
+        assert!(!graph.same_generated_type(ty(1), ty(2)));
+    }
 }

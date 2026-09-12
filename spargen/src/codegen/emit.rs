@@ -3310,3 +3310,91 @@ fn error_type_ident(method_ident: &str) -> proc_macro2::Ident {
 fn to_pascal(value: &str) -> String {
     crate::name::to_pascal_case(value.trim_start_matches("r#"))
 }
+
+#[cfg(test)]
+mod tests {
+    use indexmap::IndexMap;
+
+    use super::{emit_error_enum, CodegenOptions};
+    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::ir::{
+        Api, Docs, Info, MediaType, Method, Operation, OperationId, PathSegment, PathTemplate,
+        Prim, Response, Responses, StatusSpec, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+    };
+
+    /// The error type emitted for `get /message`, whose only documented error is a `400` carrying
+    /// `body`, a reference to the one `Message` string definition.
+    fn single_error_type(body: Ty) -> String {
+        let mut types = TypeGraph::default();
+        types.insert(TypeDef {
+            name_hint: "Message".to_owned(),
+            kind: TypeKind::Primitive(Prim::String),
+            docs: Docs::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+        });
+        let operation = Operation {
+            id: OperationId("getMessage".to_owned()),
+            method: Method::Get,
+            path: PathTemplate {
+                raw: "/message".to_owned(),
+                segments: vec![PathSegment::Literal("/message".to_owned())],
+            },
+            params: Vec::new(),
+            request_body: None,
+            responses: Responses {
+                by_status: vec![(
+                    StatusSpec::Exact(400),
+                    Response {
+                        body: Some(body),
+                        media: Some(MediaType::Json),
+                        stream: None,
+                        headers: Vec::new(),
+                    },
+                )],
+                default: None,
+            },
+            security: Vec::new(),
+            deprecated: false,
+            docs: Docs::default(),
+            server: None,
+            provenance: Provenance::new(JsonPointer::root(), None),
+        };
+        let api = Api {
+            info: Info {
+                title: "T".to_owned(),
+                version: "1".to_owned(),
+                description: None,
+            },
+            servers: Vec::new(),
+            operations: vec![operation],
+            types,
+            security_schemes: IndexMap::new(),
+        };
+        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        emit_error_enum(&api.operations[0], &api, &names, &CodegenOptions::default()).to_string()
+    }
+
+    /// Lowering never hands `ErrorShape::Single` a boxed body today (components are lowered before
+    /// operations, so a response body is never a cycle back-edge), and the single-body arm relies
+    /// on that only through its `boxed: false` normalisation. Pin the normalisation itself, so a
+    /// lowering change that does box a response body still emits the finite, compiling newtype and
+    /// its accessor rather than an arm nobody has compiled.
+    #[test]
+    fn a_boxed_single_error_body_emits_the_unboxed_newtype() {
+        for nullable in [false, true] {
+            let unboxed = single_error_type(Ty {
+                id: TypeId(0),
+                nullable,
+                boxed: false,
+            });
+            let boxed = single_error_type(Ty {
+                id: TypeId(0),
+                nullable,
+                boxed: true,
+            });
+            assert!(unboxed.contains("ApiErrorBody"), "{unboxed}");
+            assert_eq!(boxed, unboxed, "boxing changed the emitted error type");
+            assert!(!boxed.contains("Box"), "{boxed}");
+        }
+    }
+}
