@@ -1118,7 +1118,21 @@ fn check_native_target(
                         parsed.unevaluable(Subject::Builtin(domain[index]))
                     ));
                 } else {
-                    rejected.push(format!("{table} applies to no non-wasm target"));
+                    rejected.push(match &parsed {
+                        // Cargo accepts any triple as a key, a custom target's included. Missing
+                        // from the builtin list only means spargen cannot tell, not that the table
+                        // applies to nothing native.
+                        TableKey::Triple(triple)
+                            if get_builtin_target_by_triple(triple).is_none() =>
+                        {
+                            format!(
+                                "{table} names `{triple}`, which is not a target spargen knows, so \
+                                 without the build target it cannot be shown to apply to the one \
+                                 being built"
+                            )
+                        }
+                        _ => format!("{table} applies to no known non-wasm target"),
+                    });
                 }
             }
         }
@@ -2040,6 +2054,56 @@ serde_json = "1.0.151"
             messages.contains(
                 "`[target.'cfg(my_flag)'.dependencies]` cannot be evaluated: `my_flag` depends on \
                  the build's flags, which are not known for `wasm32-unknown-unknown`"
+            ),
+            "{messages}"
+        );
+    }
+
+    #[test]
+    fn a_target_triple_spargen_does_not_know_is_named_as_unknown() {
+        // Cargo accepts any triple as a table key, including a custom target's. Without a build
+        // target spargen can only compare it against the builtin list, so a triple missing from
+        // that list is reported as unknown, not as a table that applies to no native target.
+        let custom = blocking_manifest(&format!(
+            "[target.x86_64-custom-none.dependencies]\n{TOKIO_DECLARATION}\n"
+        ));
+        let macro_messages = messages(&audit_manifest_for(&custom, &TargetContext::Unknown));
+        assert!(
+            macro_messages.contains(
+                "`[target.x86_64-custom-none.dependencies]` names `x86_64-custom-none`, which is \
+                 not a target spargen knows, so without the build target it cannot be shown to \
+                 apply to the one being built"
+            ),
+            "{macro_messages}"
+        );
+        assert!(
+            !macro_messages.contains("applies to no"),
+            "{macro_messages}"
+        );
+
+        // A build script building that custom target applies the table exactly as Cargo does.
+        let custom_build = build_target(
+            "x86_64-custom-none",
+            &[
+                ("TARGET_ARCH", "x86_64"),
+                ("TARGET_OS", "none"),
+                ("TARGET_VENDOR", "unknown"),
+                ("TARGET_POINTER_WIDTH", "64"),
+                ("TARGET_ENDIAN", "little"),
+                ("PANIC", "abort"),
+            ],
+        );
+        let diagnostics = audit_manifest_for(&custom, &custom_build);
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+
+        // A cfg that genuinely matches no known native target keeps saying so.
+        let contradictory =
+            blocking_manifest(&tokio_table("cfg(all(unix, windows))", TOKIO_DECLARATION));
+        let messages = messages(&audit_manifest_for(&contradictory, &TargetContext::Unknown));
+        assert!(
+            messages.contains(
+                "`[target.'cfg(all(unix, windows))'.dependencies]` applies to no known non-wasm \
+                 target"
             ),
             "{messages}"
         );
