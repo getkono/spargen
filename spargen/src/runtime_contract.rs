@@ -490,8 +490,18 @@ pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements
     // inheritance has to be able to tell them apart.
     let origin = match (&root.path, workspace.is_some()) {
         (Some(path), true) => WorkspaceOrigin::Resolved(path),
-        (Some(path), false) => WorkspaceOrigin::Unreadable(path),
-        (None, _) => WorkspaceOrigin::NotFound(&root.searched_from),
+        // Read and failed, so `read_toml` has already reported why on its own line.
+        (Some(path), false) => WorkspaceOrigin::Unreadable { path, reason: None },
+        // No root was read. A candidate the walk could not parse is still the better answer than
+        // "nothing found" — it names a file to open — but it stays a message and nothing more, so
+        // it has to carry its own reason: nothing else is going to print one.
+        (None, _) => match &root.unreadable {
+            Some((path, reason)) => WorkspaceOrigin::Unreadable {
+                path,
+                reason: Some(reason),
+            },
+            None => WorkspaceOrigin::NotFound(&root.searched_from),
+        },
     };
 
     for required in requirement_table(requirements) {
@@ -550,12 +560,12 @@ fn declares_feature(manifest: &toml::Value, feature: &str) -> bool {
         .is_some()
 }
 
-/// `role` names the file in the diagnostic — the consumer manifest, or the workspace manifest a
-/// `workspace = true` dependency resolves against — so a failure says which of the two it was.
-fn read_toml(path: &Utf8Path, role: &str) -> Result<toml::Value, String> {
+/// `kind` names which manifest failed. Both call sites read a different file, and calling the
+/// workspace root "the consumer manifest" contradicted the very diagnostic printed beside it.
+fn read_toml(path: &Utf8Path, kind: &str) -> Result<toml::Value, String> {
     let contents = std::fs::read_to_string(path)
-        .map_err(|error| format!("failed to read {role} `{path}`: {error}"))?;
-    toml::from_str(&contents).map_err(|error| format!("failed to parse {role} `{path}`: {error}"))
+        .map_err(|error| format!("failed to read {kind} `{path}`: {error}"))?;
+    toml::from_str(&contents).map_err(|error| format!("failed to parse {kind} `{path}`: {error}"))
 }
 
 /// Which manifest a `workspace = true` dependency resolves its declaration against.
@@ -569,6 +579,16 @@ struct WorkspaceRoot {
     /// raw spelling would say "resolved nothing from `./Cargo.toml`", which tells the reader
     /// nothing at all.
     searched_from: Utf8PathBuf,
+    /// The nearest ancestor manifest that exists and does not parse, with the failure that stopped
+    /// it, when the search ended without a root.
+    ///
+    /// Strictly a better *message* than "no workspace manifest was found": it names a file the
+    /// reader can open, and says what is wrong with it. It is never treated as a manifest and
+    /// never joins `manifests`, because nothing here knows it was the workspace root — the walk
+    /// gave up on it precisely because it could not tell. Treating it as a root would turn an
+    /// ordinary crate that happens to sit under an unparseable `Cargo.toml` into a hard `E023`,
+    /// which is a far worse answer than a vague one.
+    unreadable: Option<(Utf8PathBuf, String)>,
 }
 
 /// Locate the workspace manifest a `workspace = true` dependency inherits from.
@@ -601,12 +621,14 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
             path: Some(absolute.clone()),
             is_self: true,
             searched_from: absolute,
+            unreadable: None,
         };
     }
     let separate = |path| WorkspaceRoot {
         path,
         is_self: false,
         searched_from: absolute.clone(),
+        unreadable: None,
     };
     if let Some(relative) = manifest
         .get("package")
@@ -620,33 +642,42 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
         );
     }
     let mut directory = absolute.parent().and_then(Utf8Path::parent);
-    // The nearest candidate that exists and does not parse. It is remembered rather than acted on,
-    // because it may or may not have been the workspace root and nothing here can tell: a valid
-    // root further up still wins, exactly as before. It only decides the *fallback*, where the
-    // alternative is claiming no workspace manifest was found while one sits unread on the path.
+    // The nearest candidate that exists and does not parse. Remembered, never acted on: a valid
+    // root further up still wins, exactly as before, and nothing here can tell whether this file
+    // was the root at all — the walk skipped it precisely because it could not read it.
     let mut unreadable = None;
     while let Some(candidate_dir) = directory {
         let candidate = candidate_dir.join("Cargo.toml");
         if candidate.is_file() {
+            // One read, keeping the failure rather than discarding it: it is the only account of
+            // what is wrong with this file that anything will ever print.
             match std::fs::read_to_string(&candidate)
-                .ok()
-                .and_then(|contents| toml::from_str::<toml::Value>(&contents).ok())
-            {
-                Some(value) if value.get("workspace").is_some() => {
+                .map_err(|error| error.to_string())
+                .and_then(|contents| {
+                    toml::from_str::<toml::Value>(&contents).map_err(|error| error.to_string())
+                }) {
+                Ok(value) if value.get("workspace").is_some() => {
                     return separate(Some(candidate));
                 }
                 // A manifest that parses but declares no `[workspace]` is an ordinary member or an
                 // unrelated crate: keep climbing.
-                Some(_) => {}
-                None => unreadable = unreadable.or(Some(candidate)),
+                Ok(_) => {}
+                Err(reason) => unreadable = unreadable.or(Some((candidate, reason))),
             }
         }
         directory = candidate_dir.parent();
     }
-    // Nothing on the path declared `[workspace]`. An unreadable candidate is the more useful of
-    // the two remaining answers: it names a file the reader can open and fix, where "no workspace
-    // manifest was found" points at the opposite remedy.
-    separate(unreadable)
+    // Nothing on the path declared `[workspace]`, so there is no root to audit. The unreadable
+    // candidate rides along as `unreadable` rather than as `path`: it sharpens the message an
+    // unresolvable inheritance prints, and nothing else. Handing it back as a root would have it
+    // audited and recorded as a dependency of the build, turning an ordinary crate that merely
+    // sits beneath a broken `Cargo.toml` into a hard `E023`.
+    WorkspaceRoot {
+        path: None,
+        is_self: false,
+        searched_from: absolute,
+        unreadable,
+    }
 }
 
 struct DependencyCheck<'a> {
@@ -665,8 +696,17 @@ struct DependencyCheck<'a> {
 enum WorkspaceOrigin<'a> {
     /// A workspace manifest was found and parsed.
     Resolved(&'a Utf8Path),
-    /// One was found but could not be read or parsed; that failure is already reported.
-    Unreadable(&'a Utf8Path),
+    /// One was found but could not be read or parsed.
+    ///
+    /// `reason` carries the read failure for the walk's fallback, where nothing else reports it:
+    /// that candidate is never audited as a manifest, so no separate parse diagnostic accompanies
+    /// it and this message is the only place the failure appears. It is `None` for a root named by
+    /// `package.workspace`, which *is* audited, and whose failure is therefore already reported as
+    /// its own diagnostic — repeating it here would print it twice.
+    Unreadable {
+        path: &'a Utf8Path,
+        reason: Option<&'a str>,
+    },
     /// None was found, having searched upwards from this manifest path.
     NotFound(&'a Utf8Path),
 }
@@ -703,8 +743,14 @@ fn check_dependency(
             WorkspaceOrigin::Resolved(path) => {
                 format!("`{path}` declares no `{}` there", dependency.name)
             }
-            WorkspaceOrigin::Unreadable(path) => {
+            WorkspaceOrigin::Unreadable { path, reason: None } => {
                 format!("its workspace manifest `{path}` could not be read")
+            }
+            WorkspaceOrigin::Unreadable {
+                path,
+                reason: Some(reason),
+            } => {
+                format!("its workspace manifest `{path}` could not be read: {reason}")
             }
             WorkspaceOrigin::NotFound(searched_from) => {
                 format!("no workspace manifest was found above `{searched_from}`")
@@ -1242,6 +1288,9 @@ serde_json.workspace = true
                 diagnostic.message.contains("`bytes` inherits")
                     && diagnostic.message.contains("could not be read")
                     && diagnostic.message.contains(root.as_str())
+                    // The candidate is never audited as a manifest, so nothing else prints why
+                    // it failed. The message has to carry the reason itself.
+                    && diagnostic.message.contains("TOML parse error")
             }),
             "{:#?}",
             result.diagnostics
@@ -1255,6 +1304,32 @@ serde_json.workspace = true
             "{:#?}",
             result.diagnostics
         );
+    }
+
+    #[test]
+    fn an_unparseable_ancestor_manifest_is_not_an_error_on_its_own() {
+        // The walk climbs to the filesystem root on every standalone crate, because a `cargo new`
+        // manifest declares no `[workspace]`. Anything unreadable it passes on the way — a broken
+        // `Cargo.toml`, one it lacks permission to read — must stay invisible to a consumer that
+        // inherits nothing: it is not this crate's workspace root, and nothing here can tell
+        // whether it is anyone's. Treating it as one turned an ordinary build into a hard `E023`.
+        let directory = tempfile::tempdir().unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            "[workspace\nthis is not toml\n",
+        )
+        .unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        // Declares every runtime dependency directly — nothing inherits, so nothing needs a root.
+        std::fs::write(&member, CORE_MANIFEST).unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        // And it is not recorded as a build input either: a `rerun-if-changed` on an unrelated
+        // file would rebuild the consumer whenever it changed.
+        assert_eq!(result.manifests, vec![member], "{:#?}", result.manifests);
     }
 
     #[test]
@@ -1370,6 +1445,9 @@ serde_json.workspace = true
         .unwrap();
 
         let result = audit(&member, &RuntimeRequirements::default());
+        // The read failure names the file for what it is. Calling the workspace root "the consumer
+        // manifest" contradicted the inheritance diagnostic asserted just below, which calls the
+        // same path a workspace manifest.
         assert!(
             result.diagnostics.iter().any(|diagnostic| diagnostic
                 .message
