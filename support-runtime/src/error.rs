@@ -13,8 +13,10 @@ use crate::{AuthError, ResponseValue};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error<E> {
-    /// #1 — invalid base URL, or parameter/body serialization failure (near-impossible by
-    /// construction).
+    /// #1 — the request could not be built before it was sent: no registered credential satisfies
+    /// the operation's security requirement, a registered token provider failed, the base URL is
+    /// invalid, or a parameter or body did not serialize. [`RequestError`] types the two credential
+    /// causes.
     RequestConstruction(RequestError),
     /// #2 — DNS failure, connection refused/reset, TLS handshake or certificate error.
     Transport(TransportError),
@@ -192,9 +194,11 @@ impl std::error::Error for MessageError {}
 
 /// Request-construction failure (taxonomy #1).
 ///
-/// A missing credential is the one cause a consumer routes on — the caller never registered one,
-/// which is "unauthenticated", not "malformed request" — so it is a variant of its own. Every other
-/// cause arrives as [`RequestError::Other`] with its source attached.
+/// The two credential causes are the ones a consumer routes on — they mean "unauthenticated", not
+/// "malformed request" — so each is a variant of its own: [`RequestError::MissingCredential`] when
+/// no registered credential satisfies the requirement, and [`RequestError::CredentialProvider`]
+/// when a registered token provider fails. Every other cause arrives as [`RequestError::Other`]
+/// with its source attached.
 ///
 /// This runtime is embedded in the consumer's own crate, where `#[non_exhaustive]` does not affect
 /// match exhaustiveness, so a new variant here is a breaking change of the generated output; the
@@ -203,7 +207,8 @@ impl std::error::Error for MessageError {}
 #[non_exhaustive]
 pub enum RequestError {
     /// The operation carries a security requirement and no registered credential satisfies any of
-    /// its alternatives. Raised before anything is sent.
+    /// its alternatives. Raised before anything is sent. The payload is the whole cause, so
+    /// `source()` is `None`.
     MissingCredential {
         /// One entry per alternative of the requirement, in declaration order: that alternative's
         /// `securitySchemes` keys that have no registered credential, in declaration order.
