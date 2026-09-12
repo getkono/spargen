@@ -5891,6 +5891,90 @@ paths:
     }
 }
 
+/// A request body whose `content` lists `application/*+json` first and then `sibling`.
+fn suffix_range_request_document(sibling: &str, sibling_schema: &str) -> String {
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    post:
+      operationId: postX
+      requestBody:
+        required: true
+        content:
+          "application/*+json": {{ schema: {{ type: object }} }}
+          "{sibling}": {{ schema: {sibling_schema} }}
+      responses:
+        "204": {{ description: No Content }}
+"##
+    )
+}
+
+#[test]
+fn w014_a_structured_suffix_range_yields_to_a_sendable_request_sibling() {
+    // `application/*+json` ranks with the concrete JSON types, so listed first it would win the
+    // tie by source order and then be refused as a range, rejecting a body that offered something
+    // sendable. While a concrete sibling can be sent, the range is not a candidate: the sibling is
+    // generated and the range is reported as the alternative that is not, whatever the sibling's
+    // rank (`text/plain` ranks below every JSON type).
+    for (sibling, schema) in [
+        ("application/json", "{ type: object }"),
+        ("application/merge-patch+json", "{ type: object }"),
+        ("text/plain", "{ type: string }"),
+    ] {
+        let spec = suffix_range_request_document(sibling, schema);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::UnsupportedMediaType),
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+            let expected = format!(
+                "`{sibling}` is generated; the alternative media type(s) `application/*+json` are not"
+            );
+            assert!(
+                report.diagnostics().iter().any(|diagnostic| {
+                    diagnostic.code == Code::AlternativeMediaIgnored
+                        && diagnostic.message == expected
+                }),
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn e009_a_structured_suffix_range_with_no_sendable_request_sibling_is_unsupported() {
+    // With nothing beside it that a request could send, the suffix range is still what the body
+    // offers, and it is still refused as a range. Neither another range nor a streaming media
+    // counts as sendable.
+    for (sibling, schema) in [("video/*", "{}"), ("text/event-stream", "{ type: string }")] {
+        let spec = suffix_range_request_document(sibling, schema);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|diagnostic| {
+                    diagnostic.code == Code::UnsupportedMediaType
+                        && diagnostic
+                            .message
+                            .starts_with("media type `application/*+json` is a media range")
+                }),
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_sequential_media_outranks_a_text_range() {
     // `text/*` used to classify as `Text` by accident of the `text/` prefix arm, at the same rank

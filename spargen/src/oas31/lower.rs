@@ -2478,13 +2478,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
+        // A structured-suffix range such as `application/*+json` ranks with the concrete types its
+        // suffix covers, so it could win a tie or a rank and then be refused below as a range. While
+        // a sibling can be sent, it is withheld from the choice and reported as not generated.
+        let (candidates, withheld) = request_media_candidates(&body.content);
         let (media_name, object) = choose_media(
-            &body.content,
+            &candidates,
             &body.provenance,
             self.diags,
             BodyPosition::Request,
-            media_object_is_opaque,
+            |object: &&super::MediaTypeObject| media_object_is_opaque(object),
         )?;
+        if !withheld.is_empty() {
+            Diagnostic::warning(Code::AlternativeMediaIgnored, body.provenance.clone())
+                .message(format!(
+                    "`{media_name}` is generated; the alternative media type(s) `{}` are not",
+                    withheld.join("`, `")
+                ))
+                .remedy(
+                    "remove the alternatives, or omit this API segment with spargen::omit! and \
+                     hand-write the call",
+                )
+                .emit(self.diags);
+        }
         let object = self.resolve_media_object(object, media_name)?;
         let media = lower_media_type(media_name, &body.provenance, self.diags)?;
         // A media *range* describes what a server may return, not what a client sends: `Content-Type`
@@ -4740,6 +4756,35 @@ fn media_essence_is_suffix_range(essence: &str) -> bool {
     essence
         .split_once('/')
         .is_some_and(|(_, subtype)| subtype.starts_with("*+"))
+}
+
+/// The request body `content` entries [`choose_media`] may select from, plus the structured-suffix
+/// ranges withheld from that choice.
+///
+/// A suffix range is withheld only while another entry is *sendable*: it classifies, it is neither
+/// kind of range, and it is not streaming media. Then the range, which a request cannot send,
+/// never outranks something it could. With no sendable sibling, nothing is withheld, the range is
+/// selected as before, and the request range check refuses it. Keys keep their document order.
+fn request_media_candidates<T>(content: &IndexMap<String, T>) -> (IndexMap<String, &T>, Vec<&str>) {
+    let suffix_range =
+        |essence: &str| media_essence_is_suffix_range(essence) && classify_media(essence).is_some();
+    let sendable = content.keys().any(|media| {
+        let essence = media_essence(media);
+        !suffix_range(essence)
+            && classify_media_range(essence).is_none()
+            && classify_media(essence)
+                .is_some_and(|(classified, _)| classified.stream_framing().is_none())
+    });
+    let mut candidates = IndexMap::new();
+    let mut withheld = Vec::new();
+    for (media, value) in content {
+        if sendable && suffix_range(media_essence(media)) {
+            withheld.push(media.as_str());
+        } else {
+            candidates.insert(media.clone(), value);
+        }
+    }
+    (candidates, withheld)
 }
 
 fn media_essence(media: &str) -> &str {
