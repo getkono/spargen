@@ -2265,22 +2265,28 @@ pub(crate) fn emit_error_enum(
         // keeps the wire representation identical, and `Deref` plus `From` in both directions keep
         // the inner value one step away.
         ErrorShape::Single(body_ty) => {
+            // A response body is never a cycle back-edge: every component is lowered before any
+            // operation, and the in-progress set is cleared when a component finishes, so `boxed`
+            // is always false here. Normalised once, so the payload type and the accessor agree,
+            // and a top-level newtype field never needs a `Box` to be finite anyway.
+            let body_ty = Ty {
+                boxed: false,
+                ..body_ty
+            };
             let ty = ty_tokens(body_ty, names, options, true);
             let body = ty_tokens(
                 Ty {
                     nullable: false,
-                    boxed: false,
                     ..body_ty
                 },
                 names,
                 options,
                 true,
             );
-            let body_expr = match (body_ty.nullable, body_ty.boxed) {
-                (true, true) => quote! { self.0.as_deref() },
-                (true, false) => quote! { self.0.as_ref() },
-                (false, true) => quote! { Some(self.0.as_ref()) },
-                (false, false) => quote! { Some(&self.0) },
+            let body_expr = if body_ty.nullable {
+                quote! { self.0.as_ref() }
+            } else {
+                quote! { Some(&self.0) }
             };
             // The derive is emitted exactly when the decode path actually uses serde. A binary body
             // is classified by `classify_error_bytes`, which builds the newtype through
