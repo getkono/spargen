@@ -8,10 +8,13 @@ use super::{AdditionalProps, Api, MediaType, Ty, TypeKind};
 /// referential integrity of the type graph: every [`super::Ty`] reachable from the API —
 /// operation parameters, request bodies, response bodies, response headers, and, transitively,
 /// struct fields, typed additional properties, array items, tuple elements, and union variants —
-/// names a `TypeId` that resolves in the [`TypeGraph`](super::TypeGraph). The second is one
-/// codegen precondition: a request body with [`MediaType::OctetStream`] media is typed as
-/// `bytes::Bytes` ([`TypeKind::Bytes`]), because the emitter sends such a body only through its
-/// raw-bytes path, which sets `Content-Type`. A failure here is a frontend bug, not a spec
+/// names a `TypeId` that resolves in the [`TypeGraph`](super::TypeGraph). The second is the kind
+/// of an octet-stream request body's type: when a request body with [`MediaType::OctetStream`]
+/// media has a type whose definition resolves, that definition's kind is [`TypeKind::Bytes`],
+/// because the emitter sends such a body only through its raw-bytes path, which sets
+/// `Content-Type`. Only the definition's kind is checked, not the reference's `nullable` flag: a
+/// nullable byte body passes here yet generates `.body(..)` over an `Option<bytes::Bytes>` that
+/// does not compile, a known gap tracked as #104. A failure here is a frontend bug, not a spec
 /// problem, so it is reported as [`Code::InvalidInput`] against the construct that carries the
 /// violation.
 ///

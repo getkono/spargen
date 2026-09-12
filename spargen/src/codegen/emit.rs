@@ -457,10 +457,12 @@ pub(crate) fn emit_operation(
                         .header(reqwest::header::CONTENT_TYPE, #content_type)
                         .body(#body_binding.to_string());
                 },
-                // An octet-stream request body always lowers to `bytes::Bytes` (the gate in
-                // `oas31::lower::lower_request_body`, checked again by `ir::check_invariants`), so
-                // the `Bytes` branch above takes it and this arm is never reached. It sends the
-                // same tokens, so even a looser gate cannot drop the header.
+                // An octet-stream request body's type definition always has kind `TypeKind::Bytes`
+                // (the gate in `oas31::lower::lower_request_body`, checked again by
+                // `ir::check_invariants`), so the `Bytes` branch above takes it and this arm is
+                // never reached. It sends the same tokens, so even a looser gate cannot drop the
+                // header. Neither check looks at nullability: a nullable byte body also takes the
+                // `Bytes` branch and generates code that does not compile (#104).
                 MediaType::OctetStream => raw_bytes_send,
                 MediaType::Multipart => {
                     emit_multipart_body(ty, api, names, request_binding, body_binding, &encoding)
