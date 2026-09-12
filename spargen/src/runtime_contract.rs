@@ -1087,7 +1087,7 @@ serde_json.workspace = true
     }
 
     /// Audits a root/member pair that differ from the core fixtures only in how `reqwest` is
-    /// declared, and returns the diagnostics that complain about its default features.
+    /// declared, and returns every diagnostic message the audit produced.
     fn inherited_reqwest_default_feature_diagnostics(
         root_reqwest: &str,
         member_reqwest: &str,
@@ -1130,7 +1130,6 @@ serde_json.workspace = true
             .diagnostics
             .into_iter()
             .map(|diagnostic| diagnostic.message)
-            .filter(|message| message.contains("default-features"))
             .collect()
     }
 
@@ -1166,9 +1165,23 @@ serde_json.workspace = true
 
     #[test]
     fn a_silent_member_keeps_the_defaults_the_root_turned_off() {
+        // No diagnostic at all, not merely no default-features one: a root that failed to resolve
+        // reports the inheritance instead, and must not pass this test.
         let messages = inherited_reqwest_default_feature_diagnostics(
             "reqwest = { version = \"0.12.28\", default-features = false }",
             "reqwest = { workspace = true }",
+        );
+        assert!(messages.is_empty(), "{messages:#?}");
+    }
+
+    #[test]
+    fn a_member_default_features_false_keeps_the_defaults_the_root_turned_off() {
+        // The layout the E023 explain text advises: defaults disabled in the root, and the member
+        // repeating `false`. Only a member `true` re-enables them, so any explicit member flag must
+        // not count as one.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            "reqwest = { version = \"0.12.28\", default-features = false }",
+            "reqwest = { workspace = true, default-features = false }",
         );
         assert!(messages.is_empty(), "{messages:#?}");
     }
