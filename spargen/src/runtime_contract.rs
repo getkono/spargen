@@ -1996,6 +1996,56 @@ serde_json = "1.0.151"
     }
 
     #[test]
+    fn build_flag_predicates_have_no_value_on_a_builtin_target() {
+        // A flag, a key-value cfg or a target feature has no value on a builtin target, where
+        // `RUSTFLAGS` could set anything. Without a build target every native table is judged on
+        // builtins, so a table that needs one to apply cannot be evaluated, and says so.
+        let first_native = ALL_BUILTINS
+            .iter()
+            .find(|info| !info.families.iter().any(|family| family.as_str() == "wasm"))
+            .expect("cfg-expr knows native targets")
+            .triple
+            .as_str();
+        for (predicate, spelled) in [
+            ("my_flag", "`my_flag`"),
+            (r#"my_key = "on""#, "`my_key = \"on\"`"),
+            (
+                r#"target_feature = "crt-static""#,
+                "`target_feature = \"crt-static\"`",
+            ),
+        ] {
+            let key = format!(r#"cfg(all(not(target_arch = "wasm32"), {predicate}))"#);
+            let manifest = blocking_manifest(&tokio_table(&key, TOKIO_DECLARATION));
+            let messages = messages(&audit_manifest_for(&manifest, &TargetContext::Unknown));
+            let expected = format!(
+                "`[target.'{key}'.dependencies]` cannot be evaluated: {spelled} depends on the \
+                 build's flags, which are not known for `{first_native}`"
+            );
+            assert!(
+                messages.contains("requires `tokio`") && messages.contains(&expected),
+                "{expected}\n{messages}"
+            );
+        }
+
+        // The native-only check runs on the builtin wasm anchor on both paths, so from a build
+        // script too a table whose only native evidence is a flag never counts, even when the flag
+        // is set for the target being built.
+        let flag_only = blocking_manifest(&tokio_table("cfg(my_flag)", TOKIO_DECLARATION));
+        let flagged_linux = build_target(
+            "x86_64-unknown-linux-gnu",
+            &[LINUX_CFGS, &[("MY_FLAG", "")]].concat(),
+        );
+        let messages = messages(&audit_manifest_for(&flag_only, &flagged_linux));
+        assert!(
+            messages.contains(
+                "`[target.'cfg(my_flag)'.dependencies]` cannot be evaluated: `my_flag` depends on \
+                 the build's flags, which are not known for `wasm32-unknown-unknown`"
+            ),
+            "{messages}"
+        );
+    }
+
+    #[test]
     fn workspace_inherited_tokio_under_an_alternative_spelling_resolves() {
         let directory = tempfile::tempdir().unwrap();
         let member_dir = directory.path().join("client");
