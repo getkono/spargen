@@ -2,7 +2,7 @@ use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 
-use crate::ResponseValue;
+use crate::{AuthError, ResponseValue};
 
 /// The closed error taxonomy shared by every spargen-generated client. `E` is the
 /// operation's typed error body (an enum when several error statuses are documented).
@@ -208,6 +208,14 @@ pub enum RequestError {
         /// Every `securitySchemes` key the requirement names, sorted and deduplicated.
         schemes: Vec<&'static str>,
     },
+    /// The selected alternative's token provider returned an error. Raised before anything is
+    /// sent; `source()` is the provider's [`AuthError`].
+    CredentialProvider {
+        /// The `securitySchemes` key the provider is registered under.
+        scheme: &'static str,
+        /// What the provider reported.
+        source: AuthError,
+    },
     /// Any other request-construction failure — an unparseable base URL, a parameter or body that
     /// did not serialize, a credential registered under the wrong kind for its scheme, or an error
     /// reqwest classifies as a request error — with the cause reachable through `source()`.
@@ -283,6 +291,10 @@ impl std::fmt::Display for RequestError {
                  (schemes: {})",
                 schemes.join(", ")
             ),
+            RequestError::CredentialProvider { scheme, .. } => write!(
+                f,
+                "the token provider registered for security scheme `{scheme}` failed"
+            ),
             RequestError::Other(cause) => write!(f, "{cause}"),
         }
     }
@@ -292,6 +304,7 @@ impl std::error::Error for RequestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             RequestError::MissingCredential { .. } => None,
+            RequestError::CredentialProvider { source, .. } => Some(source),
             // The boxed cause itself, not its wrapper, so the chain and `downcast_ref` stay exactly
             // as they were when the box was a private field.
             RequestError::Other(cause) => {
@@ -327,7 +340,7 @@ mod tests {
     use reqwest::header::HeaderMap;
     use reqwest::StatusCode;
 
-    use crate::{ResponseValue, TransportError};
+    use crate::{AuthError, ResponseValue, TransportError};
 
     use super::{Error, RequestError, TimeoutKind};
 
@@ -592,6 +605,10 @@ mod tests {
             Error::request_message("bad path segment"),
             Error::RequestConstruction(RequestError::MissingCredential {
                 schemes: vec!["token"],
+            }),
+            Error::RequestConstruction(RequestError::CredentialProvider {
+                scheme: "token",
+                source: AuthError::new("x"),
             }),
             Error::Transport(TransportError::new(reqwest_error())),
             Error::Timeout(TimeoutKind::Connect),

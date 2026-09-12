@@ -120,7 +120,8 @@ pub fn build_url_with_query_string_on(
 /// of alternatives, each an AND of schemes; the first alternative whose schemes all have a
 /// registered credential wins, deterministically. An empty alternative (`{}` in the spec) marks
 /// security optional and always satisfies. If no alternative is satisfiable the request fails
-/// before it is sent — [`RequestError::MissingCredential`], never a silent 401.
+/// before it is sent — [`RequestError::MissingCredential`], never a silent 401 — and a registered
+/// token provider that fails does too, as [`RequestError::CredentialProvider`].
 pub async fn attach_auth(
     core: &ClientCore,
     request: RequestBuilder,
@@ -168,9 +169,12 @@ async fn apply_credential(
     // A provider yields a single secret, usable anywhere a bearer token or apiKey fits.
     let token: Option<SecretString> = match credential {
         Credential::Bearer(secret) | Credential::ApiKey(secret) => Some(secret.clone()),
-        Credential::Provider(provider) => {
-            Some(provider().await.map_err(Error::request_construction)?)
-        }
+        Credential::Provider(provider) => Some(provider().await.map_err(|source| {
+            Error::RequestConstruction(RequestError::CredentialProvider {
+                scheme: scheme.name,
+                source,
+            })
+        })?),
         Credential::Basic { .. } => None,
     };
     match scheme.kind {
@@ -538,7 +542,9 @@ mod tests {
 
     use secrecy::SecretString;
 
-    use crate::{AuthKind, AuthScheme, ClientCore, Credential, RequestError, TokenFuture};
+    use crate::{
+        AuthError, AuthKind, AuthScheme, ClientCore, Credential, RequestError, TokenFuture,
+    };
 
     use super::attach_auth;
     use bytes::Bytes;
@@ -679,6 +685,35 @@ mod tests {
             panic!("expected MissingCredential, got {error:?}");
         };
         assert_eq!(schemes, ["key", "token"]);
+    }
+
+    /// A client that registers a token provider always has a credential registered, so a failed
+    /// refresh is its "unauthenticated" state — typed, with the provider's error as the cause.
+    #[test]
+    fn a_failed_token_provider_is_a_typed_credential_provider_error() {
+        let mut core = core();
+        core.set_credential(
+            "token",
+            Credential::Provider(Arc::new(|| {
+                Box::pin(async { Err(AuthError::new("refresh rejected")) }) as TokenFuture
+            })),
+        );
+        let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
+        let Error::RequestConstruction(RequestError::CredentialProvider { scheme, source }) =
+            &error
+        else {
+            panic!("expected CredentialProvider, got {error:?}");
+        };
+        assert_eq!(*scheme, "token");
+        assert_eq!(source.to_string(), "refresh rejected");
+        assert!(!error.is_transient());
+        let cause = std::error::Error::source(&error).unwrap();
+        assert_eq!(
+            cause.to_string(),
+            "the token provider registered for security scheme `token` failed"
+        );
+        let provider = std::error::Error::source(cause).expect("the provider's error is the cause");
+        assert!(provider.downcast_ref::<AuthError>().is_some());
     }
 
     #[test]
