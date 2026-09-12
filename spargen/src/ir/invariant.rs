@@ -327,6 +327,30 @@ mod tests {
     }
 
     #[test]
+    fn a_dangling_octet_stream_request_body_type_is_reported_once_as_a_missing_type() {
+        // A missing definition is the reference check's to report; the octet-stream check must
+        // not add a second diagnostic for the same dangling `TypeId`.
+        let mut api =
+            api_with_request_body(MediaType::OctetStream, "application/octet-stream", None);
+        api.operations[0]
+            .request_body
+            .as_mut()
+            .expect("request body installed")
+            .ty = Some(ty(999));
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&api, &mut diags);
+        let [diagnostic] = diags.items() else {
+            panic!("expected exactly one diagnostic: {diags:#?}");
+        };
+        assert_eq!(diagnostic.code, Code::InvalidInput, "{diags:#?}");
+        assert!(
+            diagnostic.message.contains("references missing type 999")
+                && !diagnostic.message.contains("octet-stream"),
+            "{diags:#?}"
+        );
+    }
+
+    #[test]
     fn a_non_octet_request_body_over_a_string_is_not_an_octet_violation() {
         let api = api_with_request_body(
             MediaType::Text,
