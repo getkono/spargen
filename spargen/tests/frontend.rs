@@ -5601,10 +5601,14 @@ fn e009_a_media_key_that_is_not_a_restricted_name_is_unsupported() {
 #[test]
 fn e009_a_wildcard_inside_a_name_is_unsupported() {
     // `*` is a whole-name wildcard, never part of a name: `*/json` is no range (a range fixes the
-    // type and wildcards the subtype), and `image/pn*` is no type at all.
+    // type and wildcards the subtype), and `image/pn*` is no type at all. Neither ever reached an
+    // arm, so `text/pl*in` and `application/vn*+json` are here to discriminate: without the rule,
+    // the `text/` prefix arm and the `+json` suffix arm would accept them.
     assert_each_media_key_is_unsupported(&[
         ("*/json", false, "{ type: object }"),
         ("image/pn*", false, "{}"),
+        ("text/pl*in", false, "{ type: string }"),
+        ("application/vn*+json", false, "{ type: object }"),
     ]);
 }
 
