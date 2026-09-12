@@ -112,6 +112,24 @@ impl<E> Error<E> {
             | Error::Decode { .. } => false,
         }
     }
+
+    /// The HTTP status the failed call's response carried: `Some` for a documented error status
+    /// ([`Error::Api`], the same value as its `ResponseValue::status()`) and for an undocumented one
+    /// ([`Error::UnexpectedStatus`]), `None` for every class that has no status. That includes
+    /// [`Error::Decode`], which does not keep the status of the response it failed to decode.
+    pub fn status(&self) -> Option<StatusCode> {
+        match self {
+            Error::Api(value) => Some(value.status()),
+            Error::UnexpectedStatus { status, .. } => Some(*status),
+            Error::RequestConstruction(_)
+            | Error::Transport(_)
+            | Error::Timeout(_)
+            | Error::Protocol(_)
+            | Error::Redirect(_)
+            | Error::Decode { .. }
+            | Error::InterruptedBody(_) => None,
+        }
+    }
 }
 
 impl Error<std::convert::Infallible> {
@@ -423,6 +441,28 @@ mod tests {
                 "is_transient disagrees for {error}"
             );
         }
+    }
+
+    /// `status` answers exactly for the two classes that carry a response status; every other class,
+    /// including `Decode`, has none to report.
+    #[test]
+    fn status_is_present_exactly_on_the_two_status_variants() {
+        for error in every_variant() {
+            let expected = match &error {
+                Error::Api(value) => Some(value.status()),
+                Error::UnexpectedStatus { status, .. } => Some(*status),
+                Error::RequestConstruction(_)
+                | Error::Transport(_)
+                | Error::Timeout(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::Decode { .. }
+                | Error::InterruptedBody(_) => None,
+            };
+            assert_eq!(error.status(), expected, "status() disagrees for {error}");
+        }
+        let statuses: Vec<_> = every_variant().iter().filter_map(Error::status).collect();
+        assert_eq!(statuses, [StatusCode::BAD_REQUEST, StatusCode::IM_A_TEAPOT]);
     }
 
     #[test]
