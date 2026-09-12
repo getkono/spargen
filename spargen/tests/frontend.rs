@@ -5653,6 +5653,73 @@ paths:
 }
 
 #[test]
+fn a_binary_family_parameter_content_is_rejected_by_its_position() {
+    // Parameter `content` shares the body classifier, so `image/png` there classifies as octets
+    // and meets each position's own rule instead of the generic "not supported": a querystring
+    // takes only JSON or form content (`E010`, as `video/*` already gets there), and any other
+    // `content` parameter needs a single-token codec (`E009`).
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    get:
+      operationId: search
+      parameters:
+        - name: q
+          in: querystring
+          content:
+            image/png: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedParameterStyle
+                    && d.message
+                        .contains("querystring media type `image/png` is not supported")
+            }),
+            "{report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+    }
+
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /search:
+    get:
+      operationId: search
+      parameters:
+        - name: thumb
+          in: query
+          content:
+            image/png: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains(
+                        "`content` parameter media type `image/png` has no single-token \
+                         serialization",
+                    )
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn a_concrete_media_type_outranks_a_range_that_precedes_it() {
     // Ranges rank below every codec, so a concrete sibling wins wherever it sits in the document
     // (the one type ranked below the ranges is a concrete `image`/`audio`/`video` member, pinned
