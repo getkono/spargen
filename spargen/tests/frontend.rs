@@ -5644,6 +5644,70 @@ fn well_formed_media_keys_still_generate() {
 }
 
 #[test]
+fn a_structured_suffix_range_response_generates_json() {
+    // `application/*+json` is a media range over every structured JSON subtype (RFC 9110's
+    // media-range grammar, with RFC 6838 § 4.2.8 structured syntax suffixes). The support matrix
+    // promises it as JSON, and a response offering it alone is decoded as JSON rather than
+    // rejected for its `*`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            "application/*+json":
+              schema: { type: object, required: [id], properties: { id: { type: integer } } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for report in [&report, &checked] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+    assert!(
+        code.contains("pub struct ResponseBody {")
+            && code.contains("pub type ResponseBodyid = i64;"),
+        "a typed JSON body, not bytes or text: {code}"
+    );
+}
+
+#[test]
+fn e009_a_structured_suffix_range_cannot_be_a_request_content_type() {
+    // A request puts its media key on the wire verbatim, and `Content-Type: application/*+json`
+    // names a family rather than a type, exactly like `video/*`. It is rejected as a range.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      operationId: postX
+      requestBody:
+        required: true
+        content:
+          "application/*+json": { schema: { type: object } }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == Code::UnsupportedMediaType
+                    && diagnostic.message.contains("is a media range")),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn a_sequential_media_outranks_a_text_range() {
     // `text/*` used to classify as `Text` by accident of the `text/` prefix arm, at the same rank
     // as a concrete textual type and *above* sequential media — so this response was a whole-body

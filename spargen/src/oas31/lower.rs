@@ -2492,7 +2492,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // key on the wire verbatim. Emitting `Content-Type: video/*` would be an undispatchable
         // header, and picking a concrete member of the family would be spargen inventing what the
         // document declined to say — so it is rejected rather than guessed at.
-        if classify_media_range(media_essence(media_name)).is_some() {
+        if media_essence_is_range(media_essence(media_name)) {
             Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                 .message(format!(
                     "media type `{media_name}` is a media range, which describes a family rather \
@@ -4674,8 +4674,9 @@ fn media_object_is_opaque(object: &MediaTypeObject) -> bool {
 }
 
 /// Whether a media type essence is a media type or range at all: exactly one `/` between two
-/// RFC 6838 § 4.2 `restricted-name`s, with `*` allowed only as the whole subtype (`type/*`) or as
-/// the whole key (`*/*`).
+/// RFC 6838 § 4.2 `restricted-name`s, with `*` allowed only as the whole key (`*/*`), as the whole
+/// subtype (`type/*`), or in front of a structured syntax suffix (`application/*+json`, the range
+/// over every subtype carrying that suffix).
 ///
 /// [`classify_media`] asks this first, so no arm can accept a key on the strength of a prefix or a
 /// suffix alone: not `text/plain/extra`, not `application/vnd.a/b+json`, and not the range `a/b/*`.
@@ -4703,8 +4704,27 @@ fn media_type_is_well_formed(essence: &str) -> bool {
     match (kind, subtype) {
         ("*", "*") => true,
         (_, "*") => restricted_name(kind),
-        _ => restricted_name(kind) && restricted_name(subtype),
+        _ => {
+            restricted_name(kind)
+                && match subtype.strip_prefix("*+") {
+                    Some(suffix) => restricted_name(suffix),
+                    None => restricted_name(subtype),
+                }
+        }
     }
+}
+
+/// Whether a well-formed essence is a media **range** rather than one concrete type: `*/*`,
+/// `type/*`, or a structured-suffix range such as `application/*+json`.
+///
+/// [`classify_media_range`] gives the first two their own family codec. A suffix range needs none,
+/// because the suffix arms of [`classify_media`] already read it the way the suffix says. It is
+/// still a range, though, and so it can no more be a request's `Content-Type` than `video/*` can.
+fn media_essence_is_range(essence: &str) -> bool {
+    classify_media_range(essence).is_some()
+        || essence
+            .split_once('/')
+            .is_some_and(|(_, subtype)| subtype.starts_with("*+"))
 }
 
 fn media_essence(media: &str) -> &str {
