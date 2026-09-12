@@ -5379,6 +5379,34 @@ paths:
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
     }
+
+    // The request gate is reached through the same octet classification, and must name the
+    // schema it refuses rather than call the family unsupported.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /photo:
+    put:
+      operationId: putPhoto
+      requestBody:
+        required: true
+        content:
+          image/jpeg: { schema: { type: object, properties: { a: { type: string } } } }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message
+                        .contains("requires a string-like or binary schema")
+            }),
+            "{report:#?}"
+        );
+    }
 }
 
 #[test]
@@ -5387,7 +5415,15 @@ fn e009_a_concrete_type_outside_the_byte_families_stays_unsupported() {
     // claimed, so none of them may be read as bytes on the strength of a prefix. This is the
     // response-side twin of `e009_unsupported_media_type`, and what keeps the openai corpus
     // expectation honest.
-    for media in ["application/pdf", "application/sdp", "font/woff2"] {
+    // A family key with no subtype, or with a wildcard that does not make it a range, is not a
+    // member of the family either.
+    for media in [
+        "application/pdf",
+        "application/sdp",
+        "font/woff2",
+        "image/",
+        "image/pn*",
+    ] {
         let spec = format!(
             r##"
 openapi: 3.1.0
@@ -5400,7 +5436,35 @@ paths:
         "200":
           description: OK
           content:
-            {media}: {{ schema: {{}} }}
+            "{media}": {{ schema: {{}} }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{media}: {report:#?}");
+            assert!(
+                has_code(&report, Code::UnsupportedMediaType),
+                "{media}: {report:#?}"
+            );
+        }
+    }
+
+    // On a request such a key would be sent verbatim as `Content-Type`, so it must be rejected
+    // there too rather than read as bytes.
+    for media in ["image/", "image/pn*"] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    put:
+      operationId: putX
+      requestBody:
+        required: true
+        content:
+          "{media}": {{ schema: {{}} }}
+      responses:
+        "204": {{ description: No Content }}
 "##
         );
         for report in [generate(&spec), check(&spec)] {
