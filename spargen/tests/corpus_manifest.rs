@@ -191,6 +191,20 @@ fn the_corpus_smoke_gate_covers_every_manifest_case() {
 }
 
 #[test]
+fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
+    // A fixed name under the shared /tmp is owned by whoever ran the gate first; on a sticky
+    // /tmp every later user's redirect fails with `Permission denied` before spargen runs
+    // (#93). Both copies of the gate write under the gitignored `target/corpus-smoke/`.
+    for file in ["mise.toml", ".github/workflows/ci.yml"] {
+        let text = read(file);
+        assert!(
+            !text.contains("/tmp/"),
+            "`{file}` writes to a fixed `/tmp/` path; corpus-smoke outputs belong under `target/corpus-smoke/`"
+        );
+    }
+}
+
+#[test]
 fn the_snapshot_suite_covers_every_manifest_case() {
     // "Per-corpus outcome plus a sorted diagnostic histogram" — five of nine cases had one, so
     // four real-world specs could change what they produce with no reviewable diff anywhere.

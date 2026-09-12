@@ -44,8 +44,13 @@ replayed.
   send a corrupt body.
 
 `Error::is_transient()` on the generated error type classifies retry-worthy failures, so a policy
-that retries only transient outcomes is a few lines. `RetryWait` is re-exported by the generated
-client, so a policy names it rather than spelling out
+that retries only transient outcomes is a few lines. `Error::status()` returns the HTTP status of a
+documented error response (`Api`) or of an undocumented status (`UnexpectedStatus`, which includes
+an undocumented 2xx), and `None` for every other class, so a log line can report which status failed
+without matching variants. That includes `Decode`: it keeps no status for the response it failed
+to decode, so `status()` is `None` there even when an error status arrived. A `RetryPolicy` is
+handed a `RetryOutcome`, not an `Error`, and reads the status with `RetryOutcome::status()`.
+`RetryWait` is re-exported by the generated client, so a policy names it rather than spelling out
 `Pin<Box<dyn Future<Output = ()> + Send + 'a>>`. The
 [petstore example](https://github.com/getkono/spargen/tree/master/examples/petstore) ships a
 complete `RetryPolicy` driven by a tokio timer.

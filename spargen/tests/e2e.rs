@@ -247,6 +247,115 @@ paths: {}
     );
 }
 
+/// The blocking client's `tokio` table is evaluated for the target Cargo is building, read from the
+/// `TARGET`/`CARGO_CFG_*` a real build script receives. This is the only test that proves that
+/// mapping matches what Cargo actually sets.
+#[test]
+fn cargo_build_evaluates_the_tokio_table_for_the_target_being_built() {
+    let temp = tempfile::tempdir().unwrap();
+    let crate_dir = temp.path().join("consumer");
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+    let spargen_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = |tokio_tables: &str| {
+        format!(
+            r#"[package]
+name = "target-table-consumer"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+blocking = ["dep:tokio"]
+
+[dependencies]
+bytes = "1.12.1"
+reqwest = {{ version = "0.12.28", default-features = false }}
+secrecy = "0.10.3"
+serde = {{ version = "1.0.229", features = ["derive"] }}
+serde_json = "1.0.151"
+
+{tokio_tables}
+[build-dependencies]
+spargen = {{ path = {spargen_path:?}, default-features = false }}
+
+[workspace]
+"#
+        )
+    };
+    const TOKIO: &str = r#"tokio = { version = "1.53.1", features = ["rt"], optional = true }"#;
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        manifest(&format!(
+            "[target.'cfg(unix)'.dependencies]\n{TOKIO}\n\n\
+             [target.'cfg(windows)'.dependencies]\n{TOKIO}\n"
+        )),
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("build.rs"),
+        r#"fn main() {
+    let build = spargen::Spec::new("openapi.yaml").build("src/generated.rs");
+    let report = spargen::generate(&build);
+    for diagnostic in report.diagnostics() {
+        eprintln!("{}: {}", diagnostic.code.as_str(), diagnostic.message);
+    }
+    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("src/lib.rs"),
+        "include!(\"generated.rs\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("openapi.yaml"),
+        r#"openapi: 3.1.0
+info: { title: Minimal, version: 1.0.0 }
+paths: {}
+"#,
+    )
+    .unwrap();
+
+    // One table per OS family: Cargo applies exactly one of them on any unix or windows host.
+    let output = Command::new("cargo")
+        .arg("check")
+        .current_dir(&crate_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a tokio table applying to the build target must pass the audit:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A native-only table that applies to no host this test runs on.
+    std::fs::remove_file(crate_dir.join("src/generated.rs")).unwrap();
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        manifest(&format!(
+            "[target.'cfg(target_os = \"none\")'.dependencies]\n{TOKIO}\n"
+        )),
+    )
+    .unwrap();
+    let output = Command::new("cargo")
+        .arg("check")
+        .current_dir(&crate_dir)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "a tokio table that does not apply to the build target unexpectedly compiled"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E023"), "{stderr}");
+    assert!(stderr.contains("does not apply to"), "{stderr}");
+    assert!(
+        !crate_dir.join("src/generated.rs").exists(),
+        "a rejected runtime contract must not write generated output"
+    );
+}
+
 #[test]
 #[ignore = "nightly direct-minimal-versions proof; run by the runtime-dependencies CI job"]
 fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
