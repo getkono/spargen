@@ -5979,6 +5979,176 @@ fn e009_a_structured_suffix_range_with_no_sendable_request_sibling_is_unsupporte
     }
 }
 
+/// A request body whose `content` lists each `(key, schema)` entry in order.
+fn request_body_document(entries: &[(&str, &str)]) -> String {
+    let content: String = entries
+        .iter()
+        .map(|(key, schema)| format!("          \"{key}\": {{ schema: {schema} }}\n"))
+        .collect();
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    post:
+      operationId: postX
+      requestBody:
+        required: true
+        content:
+{content}      responses:
+        "204": {{ description: No Content }}
+"##
+    )
+}
+
+/// The message of every `code` diagnostic in `report`, in report order.
+fn messages_with_code(report: &Report, code: Code) -> Vec<&str> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == code)
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect()
+}
+
+#[test]
+fn w014_a_suffix_range_listed_after_a_sendable_request_sibling_is_withheld() {
+    // Order does not decide it. A sendable sibling listed before the range is generated and the
+    // range is named as not generated, even for a sibling whose rank the range's rank 0 would
+    // otherwise beat (`text/plain`).
+    for (sibling, schema) in [
+        ("application/json", "{ type: object }"),
+        ("text/plain", "{ type: string }"),
+    ] {
+        let spec = request_body_document(&[
+            (sibling, schema),
+            ("application/*+json", "{ type: object }"),
+        ]);
+        let expected = format!(
+            "`{sibling}` is generated; the alternative media type(s) `application/*+json` are not"
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::UnsupportedMediaType),
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+            assert_eq!(
+                messages_with_code(&report, Code::AlternativeMediaIgnored),
+                [expected.as_str()],
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn w014_every_suffix_range_beside_a_sendable_request_sibling_is_withheld() {
+    // Every structured-suffix range that classifies is withheld, not only the first, and all of
+    // them are named in one report.
+    let spec = request_body_document(&[
+        ("application/*+json", "{ type: object }"),
+        ("application/*+json-seq", "{ type: object }"),
+        ("application/json", "{ type: object }"),
+    ]);
+    for report in [generate(&spec), check(&spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+        assert_eq!(
+            messages_with_code(&report, Code::AlternativeMediaIgnored),
+            [
+                "`application/json` is generated; the alternative media type(s) \
+                 `application/*+json`, `application/*+json-seq` are not"
+            ],
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_a_suffix_range_beside_only_an_unclassified_request_sibling_is_a_media_range() {
+    // A sibling that does not classify is not sendable, so nothing is withheld: the range is still
+    // the only thing the body offers, and it is refused as a range.
+    let spec = request_body_document(&[
+        ("application/*+json", "{ type: object }"),
+        ("application/pdf", "{}"),
+    ]);
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            messages_with_code(&report, Code::UnsupportedMediaType)
+                .iter()
+                .any(|message| message
+                    .starts_with("media type `application/*+json` is a media range")),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_a_sendable_request_sibling_that_fails_its_own_gate_is_reported_for_itself() {
+    // Sendable is decided by classification alone. A `text/plain` sibling carrying an object schema
+    // is still chosen over the range, and then refused by the raw-text gate for its own reason
+    // rather than the range's.
+    let spec = request_body_document(&[
+        ("application/*+json", "{ type: object }"),
+        ("text/plain", "{ type: object }"),
+    ]);
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let unsupported = messages_with_code(&report, Code::UnsupportedMediaType);
+        assert!(
+            unsupported
+                .iter()
+                .all(|message| !message.contains("is a media range")),
+            "{report:#?}"
+        );
+        assert!(
+            unsupported
+                .iter()
+                .any(|message| message.contains("text/plain")),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_a_withheld_suffix_range_beside_two_request_entries_is_reported_separately() {
+    // Pinned as it stands. `choose_media` names the alternatives it passed over, and the withheld
+    // range gets its own W014 right after, so this body carries two: both true, always in this
+    // order.
+    let spec = request_body_document(&[
+        ("application/*+json", "{ type: object }"),
+        ("application/json", "{ type: object }"),
+        ("application/xml", "{ type: object }"),
+    ]);
+    for report in [generate(&spec), check(&spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+        assert_eq!(
+            messages_with_code(&report, Code::AlternativeMediaIgnored),
+            [
+                "`application/json` is generated; the alternative media type(s) \
+                 `application/xml` are not",
+                "`application/json` is generated; the alternative media type(s) \
+                 `application/*+json` are not",
+            ],
+            "{report:#?}"
+        );
+    }
+}
+
 #[test]
 fn a_sequential_media_outranks_a_text_range() {
     // `text/*` used to classify as `Text` by accident of the `text/` prefix arm, at the same rank
