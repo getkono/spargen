@@ -1892,6 +1892,110 @@ serde_json = "1.0.151"
     }
 
     #[test]
+    fn a_below_floor_tokio_in_one_of_two_counting_tables_names_that_table() {
+        // Both tables count on either path: `cfg(unix)` applies to the unix builtins and to linux,
+        // and `cfg(not(target_family = "wasm"))` covers everything else. Each counting declaration
+        // meets the version floor on its own, and with more than one the message says which.
+        let manifest = blocking_manifest(&format!(
+            "{}{}",
+            tokio_table(
+                "cfg(unix)",
+                "tokio = { version = \"1.53.0\", features = [\"rt\"], optional = true }"
+            ),
+            tokio_table(r#"cfg(not(target_family = "wasm"))"#, TOKIO_DECLARATION)
+        ));
+        for target in [TargetContext::Unknown, linux()] {
+            let diagnostics = audit_manifest_for(&manifest, &target);
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+            assert_eq!(
+                diagnostics[0].message,
+                "`tokio` version requirement `1.53.0` is outside the supported range >=1.53.1, \
+                 <2.0.0; use `1.53.1` or a higher compatible caret requirement (in \
+                 `[target.'cfg(unix)'.dependencies]`)"
+            );
+        }
+    }
+
+    #[test]
+    fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
+        // Untargeted, the rule has two halves: a `package` key on the canonical name is rejected,
+        // and the crate declared under another name is not found at all.
+        let untargeted_package = CORE_MANIFEST.replace(
+            "secrecy = \"0.10.3\"",
+            "secrecy = { package = \"secrecy\", version = \"0.10.3\" }",
+        );
+        assert_eq!(
+            messages(&audit_manifest_for(
+                &untargeted_package,
+                &TargetContext::Unknown
+            )),
+            "`secrecy` cannot be renamed because generated code references that canonical crate \
+             name"
+        );
+        let untargeted_alias = CORE_MANIFEST.replace(
+            "secrecy = \"0.10.3\"",
+            "secret = { package = \"secrecy\", version = \"0.10.3\" }",
+        );
+        assert_eq!(
+            messages(&audit_manifest_for(
+                &untargeted_alias,
+                &TargetContext::Unknown
+            )),
+            "generated client requires `secrecy`; add `secrecy` with version `0.10.3`"
+        );
+
+        // A target table applies the same two halves to `tokio`, on both paths.
+        let key = r#"cfg(not(target_family = "wasm"))"#;
+        let targeted_package = blocking_manifest(&tokio_table(
+            key,
+            "tokio = { package = \"tokio\", version = \"1.53.1\", features = [\"rt\"], optional = \
+             true }",
+        ));
+        let targeted_alias = blocking_manifest(&tokio_table(
+            key,
+            "tokio_rt = { package = \"tokio\", version = \"1.53.1\", features = [\"rt\"], \
+             optional = true }",
+        ));
+        for target in [TargetContext::Unknown, linux()] {
+            assert_eq!(
+                messages(&audit_manifest_for(&targeted_package, &target)),
+                "`tokio` cannot be renamed because generated code references that canonical crate \
+                 name"
+            );
+            let alias_messages = messages(&audit_manifest_for(&targeted_alias, &target));
+            assert!(
+                alias_messages
+                    .starts_with("generated client requires `tokio`; add `tokio` with version")
+                    && !alias_messages.contains('\n'),
+                "{alias_messages}"
+            );
+        }
+    }
+
+    #[test]
+    fn tokio_optional_in_one_counting_table_and_not_the_other_is_reported_on_that_table() {
+        // Assumption A2: every counting declaration is held to `optional = true`, so a pair that
+        // disagrees is reported on the declaration that is not optional rather than accepted.
+        let manifest = blocking_manifest(&format!(
+            "{}{}",
+            tokio_table("cfg(unix)", TOKIO_DECLARATION),
+            tokio_table(
+                r#"cfg(not(target_family = "wasm"))"#,
+                "tokio = { version = \"1.53.1\", features = [\"rt\"] }"
+            )
+        ));
+        for target in [TargetContext::Unknown, linux()] {
+            let diagnostics = audit_manifest_for(&manifest, &target);
+            assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+            assert_eq!(
+                diagnostics[0].message,
+                "`tokio` must be optional because it is enabled only by the generated `blocking` \
+                 feature (in `[target.'cfg(not(target_family = \"wasm\"))'.dependencies]`)"
+            );
+        }
+    }
+
+    #[test]
     fn workspace_inherited_tokio_under_an_alternative_spelling_resolves() {
         let directory = tempfile::tempdir().unwrap();
         let member_dir = directory.path().join("client");
