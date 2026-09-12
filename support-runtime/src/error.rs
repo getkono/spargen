@@ -154,8 +154,9 @@ impl Error<std::convert::Infallible> {
 /// Implemented by the generated error shapes that carry one documented body type, so code
 /// generic over operations can reach that body without naming each `E`.
 ///
-/// Three shapes implement it: a multi-status enum whose bodied statuses reference the same
-/// schema (its `body` is `None` for a documented bodyless status, or a `null` payload), the
+/// Three shapes implement it: a multi-status enum whose bodied statuses carry the same body type
+/// (one schema, or schemas that generate the same Rust type; its `body` is `None` for a
+/// documented bodyless status, or a `null` payload), the
 /// single-body newtype (`Body` is the bare schema type, so a nullable body answers `None` for
 /// `null` exactly as the enum does), and the uninhabited `Infallible` shape, so `Error::api_body`
 /// exists on those operations. An enum whose statuses carry different body types has no

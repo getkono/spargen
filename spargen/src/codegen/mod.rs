@@ -100,7 +100,8 @@ pub(crate) fn generate(
         // back, and the taxonomy's payload types are matched on. Anything short of that leaves a
         // generated signature a caller can call but cannot write down. `ApiErrorBody` is the
         // bound `Error::api_body` needs, implemented by the uniform-body error enum, the
-        // single-body newtype, and the uninhabited shape (an enum mixing bodies gets none).
+        // single-body newtype, and the uninhabited shape (an enum whose bodies are different
+        // generated types gets none).
         #[allow(unused_imports)]
         pub use support::{
             ApiErrorBody, AuthError, ClientConfig, ClientCore, Credential, Error, ExecuteFuture,

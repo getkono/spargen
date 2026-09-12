@@ -1536,6 +1536,21 @@ fn a_nullable_error_body_answers_none_for_null_on_both_shapes() {
     assert_eq!(title(&basic_client::GetMaybeSingleError(Some(problem))), Some("nope"));
     assert_eq!(title(&basic_client::GetMaybeSingleError(None)), None);
 }
+
+#[test]
+fn an_alias_equal_error_body_is_one_body_type() {
+    // `PlainMessage` and the inline 409 schema are distinct schemas, but both generate `String`:
+    // one body type, so the inherent accessor and the trait both exist.
+    let not_found = basic_client::GetAliasSharedError::Status404(Box::new("gone".to_owned()));
+    let conflict = basic_client::GetAliasSharedError::Status409(Box::new("dup".to_owned()));
+    assert_eq!(not_found.body().map(String::as_str), Some("gone"));
+    assert_eq!(conflict.body().map(String::as_str), Some("dup"));
+    fn text<E: basic_client::ApiErrorBody<Body = String>>(error: &E) -> Option<&str> {
+        error.body().map(String::as_str)
+    }
+    assert_eq!(text(&not_found), Some("gone"));
+    assert_eq!(text(&conflict), Some("dup"));
+}
 "##,
     )
     .unwrap();
@@ -2366,6 +2381,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MaybeProblem"
+  # Two error statuses whose bodies are different schemas generating the SAME Rust type: a `$ref`
+  # to a string component and an inline string. Their type ids differ, but both are `String`, so
+  # `GetAliasSharedError` still gets `body()` and implements `ApiErrorBody`.
+  /alias-shared:
+    get:
+      operationId: getAliasShared
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlainMessage"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                type: string
   # multipart/form-data request body: the body is an object whose properties are the form
   # parts. `file` is `format: binary` → a `bytes::Bytes` file part; `caption` a required text part;
   # `count` an optional scalar text part; `tags` an optional array → a JSON-encoded text part. The
@@ -3071,6 +3107,10 @@ components:
       properties:
         title:
           type: string
+    # A string component `getAliasShared` pairs with an inline string body: two schemas, one
+    # generated body type.
+    PlainMessage:
+      type: string
     # Streamed item type for the `/chat/stream` SSE operation.
     ChatChunk:
       type: object

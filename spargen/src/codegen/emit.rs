@@ -2148,20 +2148,6 @@ fn status_label(spec: crate::ir::StatusSpec) -> String {
     }
 }
 
-/// The one body type every bodied variant of a multi-status error enum carries, when there is
-/// one. Compared by definition only: payloads are uniformly boxed, and a variant's nullability is
-/// per status and absorbed by the accessor (`Option::as_deref`). The returned `Ty` is the bare
-/// definition — unboxed, non-nullable — which is the accessor's `&T`.
-fn shared_error_body(entries: &[(crate::ir::StatusSpec, Option<Ty>)]) -> Option<Ty> {
-    let mut bodies = entries.iter().filter_map(|(_, ty)| *ty);
-    let first = bodies.next()?;
-    bodies.all(|ty| ty.id == first.id).then_some(Ty {
-        nullable: false,
-        boxed: false,
-        ..first
-    })
-}
-
 /// Emit an operation's typed error type: a payload-carrying enum for several documented error
 /// bodies, a transparent newtype for one, and the uninhabited alias for none.
 pub(crate) fn emit_error_enum(
@@ -2175,7 +2161,9 @@ pub(crate) fn emit_error_enum(
         .get(&operation.id)
         .expect("operation name allocated");
     let error_ident = error_type_ident(method_ident.as_str());
-    match operation.responses.error() {
+    let shape = operation.responses.error();
+    let api_error_body = shape.api_error_body(&api.types);
+    match shape {
         // Multiple documented error bodies → a payload-carrying enum, one variant per status. The
         // variant is chosen by HTTP status at classification time, so it derives no whole-enum
         // `Deserialize` (and never `serde(untagged)`); each variant's body is decoded on its own.
@@ -2194,12 +2182,19 @@ pub(crate) fn emit_error_enum(
                     None => quote! { #error_ident::#variant_ident => #label, },
                 }
             });
-            // When every bodied variant carries one body definition, the body is reachable
+            // When every bodied variant carries one generated body type, the body is reachable
             // without matching the status: an inherent `body()` (one arm per variant, in the
             // enum's own order, so the output is as deterministic as the enum) and the runtime's
-            // `ApiErrorBody`, which is what `Error::api_body` needs. An enum mixing body types
-            // gets neither — there is no single body to hand back — and is matched by variant.
-            let accessor = shared_error_body(&entries).map(|body| {
+            // `ApiErrorBody`, which is what `Error::api_body` needs. `body` names the first bodied
+            // status's type, which is the same Rust type as every other variant's. An enum whose
+            // bodies are different types gets neither — there is no single body to hand back —
+            // and is matched by variant.
+            let shared_body = match api_error_body {
+                Some(crate::ir::ApiErrorBodyImpl::Body(body)) => Some(body),
+                // `Uninhabited` is the bodyless shape's answer, never an enum's.
+                Some(crate::ir::ApiErrorBodyImpl::Uninhabited) | None => None,
+            };
+            let accessor = shared_body.map(|body| {
                 let body_ty = ty_tokens(body, names, options, true);
                 let body_arms = entries.iter().map(|(spec, ty)| {
                     let variant_ident = status_variant_ident(*spec);

@@ -85,7 +85,8 @@ the version it emits, and the idioms spargen handles.
   `ClientConfig::max_error_body` doc names), interrupted body. Every generated error
   type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
   `thiserror`. `Error::is_transient()` classifies retry-worthy failures. An error enum whose
-  documented statuses reference the same schema gets `body()`, and it, the single-body newtype,
+  bodied statuses carry the same body type (one schema, or schemas that generate the same Rust
+  type) gets `body()`, and it, the single-body newtype,
   and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()` hands that body back
   whichever status carried it (the status itself is `ResponseValue::status()` on `Error::Api`);
   an enum mixing body types is matched by variant instead.
