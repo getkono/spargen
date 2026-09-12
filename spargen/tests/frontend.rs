@@ -5294,6 +5294,46 @@ paths:
 }
 
 #[test]
+fn w014_fires_for_a_concrete_binary_request_alternative() {
+    // A request sends exactly one `Content-Type`, so a server documented as also accepting
+    // `image/png` is narrowed at the wire whatever the decoded type — the octet exemption is a
+    // response rule, and a concrete family alternative must not slip into it on a request.
+    for (selection, alternative) in [
+        ("application/octet-stream", "image/png"),
+        ("image/jpeg", "image/png"),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /avatar:
+    put:
+      operationId: putAvatar
+      requestBody:
+        required: true
+        content:
+          {selection}: {{ schema: {{}} }}
+          {alternative}: {{ schema: {{}} }}
+      responses:
+        "204": {{ description: No Content }}
+"##
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::AlternativeMediaIgnored
+                        && d.message.contains(&format!("`{selection}` is generated"))
+                        && d.message.contains(&format!("`{alternative}`"))
+                }),
+                "{report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_concrete_binary_type_is_matched_case_insensitively() {
     // `IMAGE/*` already reads as its family; `IMAGE/JPEG` must agree with it.
     let (report, code) = generate_with_code(
