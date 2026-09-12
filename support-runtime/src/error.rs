@@ -114,9 +114,10 @@ impl<E> Error<E> {
     }
 
     /// The HTTP status the failed call's response carried: `Some` for a documented error status
-    /// ([`Error::Api`], the same value as its `ResponseValue::status()`) and for an undocumented one
-    /// ([`Error::UnexpectedStatus`]), `None` for every class that has no status. That includes
-    /// [`Error::Decode`], which does not keep the status of the response it failed to decode.
+    /// ([`Error::Api`], the same value as its `ResponseValue::status()`) and for an undocumented
+    /// status ([`Error::UnexpectedStatus`], which includes an undocumented 2xx), `None` for every
+    /// class that has no status. That includes [`Error::Decode`], which does not keep the status of
+    /// the response it failed to decode.
     pub fn status(&self) -> Option<StatusCode> {
         match self {
             Error::Api(value) => Some(value.status()),
