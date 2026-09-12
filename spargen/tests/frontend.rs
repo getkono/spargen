@@ -5524,12 +5524,9 @@ paths:
     }
 }
 
-#[test]
-fn e009_a_media_key_that_is_not_a_restricted_name_is_unsupported() {
-    // A media type is exactly one `/` between two RFC 6838 § 4.2 restricted names. Each key below
-    // breaks that, yet most reached a codec through an arm that matched only part of the key: the
-    // `text/` prefix, the `application/…+json` suffix, or a range's `/*`. `image/jpeg/extra` pins
-    // the concrete binary family, which must not be read as `image` octets.
+/// Assert that each `(key, request, schema)` case, as the sole `content` key of a request body
+/// (`request`) or a response, is rejected with `E009` through both `generate` and `check`.
+fn assert_each_media_key_is_unsupported(cases: &[(&str, bool, &str)]) {
     fn document(key: &str, request: bool, schema: &str) -> String {
         if request {
             format!(
@@ -5566,18 +5563,7 @@ paths:
             )
         }
     }
-    // One byte past the 127-byte limit on a restricted name.
-    let too_long = format!("text/{}", "a".repeat(128));
-    let cases = [
-        ("image/jpeg/extra", true, "{}"),
-        ("text/plain/extra", false, "{ type: string }"),
-        ("application/vnd.a/b+json", true, "{ type: object }"),
-        ("text/", false, "{ type: string }"),
-        ("text/pl ain", false, "{ type: string }"),
-        ("**/*", false, "{}"),
-        (too_long.as_str(), false, "{ type: string }"),
-    ];
-    for (key, request, schema) in cases {
+    for &(key, request, schema) in cases {
         let spec = document(key, request, schema);
         for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
             assert_eq!(
@@ -5591,6 +5577,204 @@ paths:
             );
         }
     }
+}
+
+#[test]
+fn e009_a_media_key_that_is_not_a_restricted_name_is_unsupported() {
+    // A media type is exactly one `/` between two RFC 6838 § 4.2 restricted names. Each key below
+    // breaks that, yet most reached a codec through an arm that matched only part of the key: the
+    // `text/` prefix, the `application/…+json` suffix, or a range's `/*`. `image/jpeg/extra` pins
+    // the concrete binary family, which must not be read as `image` octets.
+    // One byte past the 127-byte limit on a restricted name.
+    let too_long = format!("text/{}", "a".repeat(128));
+    assert_each_media_key_is_unsupported(&[
+        ("image/jpeg/extra", true, "{}"),
+        ("text/plain/extra", false, "{ type: string }"),
+        ("application/vnd.a/b+json", true, "{ type: object }"),
+        ("text/", false, "{ type: string }"),
+        ("text/pl ain", false, "{ type: string }"),
+        ("**/*", false, "{}"),
+        (too_long.as_str(), false, "{ type: string }"),
+    ]);
+}
+
+#[test]
+fn e009_a_wildcard_inside_a_name_is_unsupported() {
+    // `*` is a whole-name wildcard, never part of a name: `*/json` is no range (a range fixes the
+    // type and wildcards the subtype), and `image/pn*` is no type at all.
+    assert_each_media_key_is_unsupported(&[
+        ("*/json", false, "{ type: object }"),
+        ("image/pn*", false, "{}"),
+    ]);
+}
+
+#[test]
+fn e009_a_name_starting_with_a_symbol_is_unsupported() {
+    // `.`, `-` and the other symbols RFC 6838 § 4.2 permits may follow the first byte of a
+    // restricted name but may not be it, in the type position or the subtype position.
+    assert_each_media_key_is_unsupported(&[
+        (".type/x", false, "{ type: string }"),
+        ("-x/y", false, "{ type: string }"),
+        ("text/.plain", false, "{ type: string }"),
+        ("text/-plain", false, "{ type: string }"),
+    ]);
+}
+
+#[test]
+fn e009_a_malformed_parameter_content_key_is_unsupported() {
+    // Both parameter call sites classify their `content` key: a `content` parameter and a 3.2
+    // `in: querystring` parameter. Neither may render a value through a key that is not a type.
+    let content_parameter = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      parameters:
+        - name: filter
+          in: query
+          content:
+            "text/plain/extra": { schema: { type: string } }
+      responses:
+        "204": { description: No Content }
+"##;
+    let querystring_parameter = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      parameters:
+        - name: q
+          in: querystring
+          content:
+            "text/plain/extra": { schema: { type: object } }
+      responses:
+        "204": { description: No Content }
+"##;
+    for spec in [content_parameter, querystring_parameter] {
+        for report in [generate(spec), check(spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(
+                report.diagnostics().iter().any(|diagnostic| {
+                    diagnostic.code == Code::UnsupportedMediaType
+                        && diagnostic.message == "media type `text/plain/extra` is not supported"
+                }),
+                "{report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn e009_a_malformed_response_header_content_key_is_unsupported() {
+    // A response header's `content` key is classified like any other, so a key that is not a type
+    // is reported rather than decoded as text on the strength of its `text/` prefix.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Detail:
+              content:
+                "text/plain/extra": { schema: { type: string } }
+          content:
+            application/json: { schema: { type: string } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == Code::UnsupportedMediaType
+                    && diagnostic.message == "media type `text/plain/extra` is not supported"
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_multipart_part_content_type_is_not_diagnosed() {
+    // Pinned as it stands, not endorsed. A multipart part's `contentType` is a header value, not a
+    // `content` key: the part is built from the property's own type, and the declared string is
+    // attached verbatim through `mime_str`. Generation reports nothing for a malformed one. It
+    // surfaces only when a request is built, as a request-construction error, because reqwest's
+    // media type parser rejects the extra `/`.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                note: { type: string }
+            encoding:
+              note: { contentType: "text/plain/extra" }
+      responses:
+        "204": { description: No Content }
+"##;
+    let (report, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for report in [&report, &checked] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+    assert!(code.contains("mime_str(\"text/plain/extra\")"), "{code}");
+    assert!(
+        code.contains("reqwest::multipart::Part::text(value.to_string())"),
+        "the part is built from the string property, not from the declared type: {code}"
+    );
+}
+
+#[test]
+fn w014_a_malformed_key_beside_a_well_formed_sibling_is_ignored() {
+    // A malformed key does not reject the whole map when a well-formed sibling exists: only that
+    // key is dropped, and it is named under W014 like any other alternative that is not generated.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            "text/plain/extra": { schema: { type: string } }
+            application/json:
+              schema: { type: object, required: [id], properties: { id: { type: integer } } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for report in [&report, &checked] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == Code::AlternativeMediaIgnored
+                    && diagnostic.message
+                        == "`application/json` is generated; the alternative media type(s) \
+                            `text/plain/extra` are not"
+            }),
+            "{report:#?}"
+        );
+    }
+    assert!(code.contains("pub type ResponseBodyid = i64;"), "{code}");
 }
 
 #[test]
