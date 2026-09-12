@@ -103,9 +103,9 @@ pub(crate) fn generate(
         pub use support::{
             AuthError, ClientConfig, ClientCore, Credential, Error, ExecuteFuture, ExposeSecret,
             HeaderError, HeaderShape, HttpBackend, LinkPaginator, Middleware, MiddlewareBackend,
-            Next, ProtocolError, RedirectError, ReqwestBackend, RequestError, ResponseValue,
-            RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString, TimeoutKind,
-            TokenFuture, TokenProvider, TransportError, exponential_backoff, next_link,
+            Next, ProtocolError, RedirectError, ReqwestBackend, RequestCause, RequestError,
+            ResponseValue, RetryBackend, RetryOutcome, RetryPolicy, RetryWait, SecretString,
+            TimeoutKind, TokenFuture, TokenProvider, TransportError, exponential_backoff, next_link,
         };
 
         #stream_exports

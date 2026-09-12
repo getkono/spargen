@@ -1445,6 +1445,8 @@ fn a_generated_error_boxes_and_renders() -> Result<(), Box<dyn std::error::Error
 #[test]
 fn a_missing_credential_is_a_typed_request_construction_error() {
     use std::future::Future;
+    // The opaque cause of every other request-construction failure is nameable too.
+    let _: Option<basic_client::RequestCause> = None;
     let client = basic_client::Client::new("http://127.0.0.1:1").unwrap();
     let mut call = std::pin::pin!(client.get_user("1", None));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());

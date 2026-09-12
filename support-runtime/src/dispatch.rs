@@ -695,10 +695,7 @@ mod tests {
         // A mismatch is a misconfiguration at `with_credential`, not a state an application routes
         // on, so it deliberately stays untyped.
         assert!(
-            matches!(
-                error,
-                Error::RequestConstruction(RequestError::Other { .. })
-            ),
+            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
             "{error:?}"
         );
         let source = std::error::Error::source(&error).unwrap();

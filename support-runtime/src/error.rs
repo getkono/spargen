@@ -65,16 +65,14 @@ pub enum Error<E> {
 impl<E> Error<E> {
     /// Build a request-construction error from any owned error value.
     pub fn request_construction(source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::RequestConstruction(RequestError::Other {
-            source: Box::new(source),
-        })
+        Self::RequestConstruction(RequestError::Other(RequestCause(Box::new(source))))
     }
 
     /// Build a request-construction error from a static message.
     pub fn request_message(message: impl Into<String>) -> Self {
-        Self::RequestConstruction(RequestError::Other {
-            source: Box::new(MessageError(message.into())),
-        })
+        Self::RequestConstruction(RequestError::Other(RequestCause(Box::new(MessageError(
+            message.into(),
+        )))))
     }
 
     /// Classify a reqwest error into the closest runtime taxonomy class.
@@ -86,9 +84,7 @@ impl<E> Error<E> {
         } else if error.is_decode() {
             Error::Protocol(ProtocolError { source: error })
         } else if error.is_request() {
-            Error::RequestConstruction(RequestError::Other {
-                source: Box::new(error),
-            })
+            Error::RequestConstruction(RequestError::Other(RequestCause(Box::new(error))))
         } else {
             Error::Transport(TransportError { source: error })
         }
@@ -213,12 +209,26 @@ pub enum RequestError {
         schemes: Vec<&'static str>,
     },
     /// Any other request-construction failure — an unparseable base URL, a parameter or body that
-    /// did not serialize, a credential registered under the wrong kind for its scheme — with the
-    /// cause reachable through `source()`.
-    Other {
-        /// The underlying failure.
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
+    /// did not serialize, a credential registered under the wrong kind for its scheme, or an error
+    /// reqwest classifies as a request error — with the cause reachable through `source()`.
+    Other(RequestCause),
+}
+
+/// The opaque cause of [`RequestError::Other`]. It displays as the underlying failure; reach the
+/// failure itself (and downcast it) through [`std::error::Error::source`] on the [`RequestError`].
+#[derive(Debug)]
+pub struct RequestCause(Box<dyn std::error::Error + Send + Sync>);
+
+impl std::fmt::Display for RequestCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for RequestCause {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
 }
 
 /// Transport-layer failure (taxonomy #2 / #9).
@@ -273,7 +283,7 @@ impl std::fmt::Display for RequestError {
                  (schemes: {})",
                 schemes.join(", ")
             ),
-            RequestError::Other { source } => write!(f, "{source}"),
+            RequestError::Other(cause) => write!(f, "{cause}"),
         }
     }
 }
@@ -282,8 +292,10 @@ impl std::error::Error for RequestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             RequestError::MissingCredential { .. } => None,
-            RequestError::Other { source } => {
-                Some(source.as_ref() as &(dyn std::error::Error + 'static))
+            // The boxed cause itself, not its wrapper, so the chain and `downcast_ref` stay exactly
+            // as they were when the box was a private field.
+            RequestError::Other(cause) => {
+                Some(cause.0.as_ref() as &(dyn std::error::Error + 'static))
             }
         }
     }
@@ -373,6 +385,33 @@ mod tests {
              (schemes: key, token)"
         );
         assert!(std::error::Error::source(source).is_none());
+    }
+
+    /// Any other cause is opaque: it cannot be moved out of `Other`, but it renders as itself and
+    /// `source()` reaches the cause (not its wrapper) at the same depth, so it still downcasts.
+    #[test]
+    fn an_other_cause_is_opaque_and_reachable_through_source() {
+        #[derive(Debug)]
+        struct Cause;
+
+        impl std::fmt::Display for Cause {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("cause")
+            }
+        }
+
+        impl std::error::Error for Cause {}
+
+        let error = Error::<ApiBody>::request_construction(Cause);
+        let Error::RequestConstruction(RequestError::Other(cause)) = &error else {
+            panic!("expected Other, got {error:?}");
+        };
+        assert_eq!(cause.to_string(), "cause");
+        let source = std::error::Error::source(&error).expect("the request error is the source");
+        assert_eq!(source.to_string(), "cause");
+        let inner = std::error::Error::source(source).expect("the cause is reachable");
+        assert!(inner.downcast_ref::<Cause>().is_some());
+        assert!(std::error::Error::source(inner).is_none());
     }
 
     /// A typed API error body that is itself an `Error`, so `Error::source` can reach it.
