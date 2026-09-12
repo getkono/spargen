@@ -5033,12 +5033,13 @@ paths:
 }
 
 #[test]
-fn every_other_classifiable_key_outranks_a_concrete_binary_type() {
+fn a_concrete_binary_type_ranks_last_except_against_a_request_range() {
     // A concrete family member sits at the very end of the ladder, below every other key spargen
-    // can classify — octet-stream, text, the sequential kinds, and every range. Each document here
-    // generated (or, for a request naming a range, was rejected) before the family rule existed
-    // with `image/png` as an unsupported alternative; its selection, body type, outcome and wire
-    // `Content-Type` must not move now that `image/png` classifies.
+    // can classify — octet-stream, text, the sequential kinds, and on a response every range. Each
+    // document here but (iv) generated before the family rule existed with `image/png` as an
+    // unsupported alternative; its selection, body type, outcome and wire `Content-Type` must not
+    // move now that `image/png` classifies. The exception is a request offering a range, which it
+    // cannot send as `Content-Type`: that was rejected before, and now sends the concrete key.
 
     // (i) Text keeps a response: `String`, and `image/png` is the alternative not generated.
     let spec = r##"
@@ -5115,9 +5116,59 @@ paths:
         "{code}"
     );
 
-    // (iv) Even a non-text range keeps its selection: `video/*` still wins a request over
-    // `image/png`, and a range is not a `Content-Type` a request can send, so the document is
-    // rejected exactly as it was on master rather than quietly switching to `image/png`.
+    // (iv) A range is the one key a request cannot send — `Content-Type` must be concrete — so
+    // on a request it is considered only once no concrete key classifies. Beside `image/png` the
+    // concrete key is sent and the range is reported as the alternative not generated, rather
+    // than the whole operation being rejected because an unsendable alternative was listed.
+    for range in ["video/*", "*/*", "text/*"] {
+        let range_schema = if range == "text/*" {
+            "{ type: string }"
+        } else {
+            "{}"
+        };
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /clip:
+    put:
+      operationId: putClip
+      requestBody:
+        required: true
+        content:
+          "{range}": {{ schema: {range_schema} }}
+          image/png: {{ schema: {{}} }}
+      responses:
+        "204": {{ description: No Content }}
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{range}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{range}: {report:#?}"
+        );
+        assert!(
+            code.contains("pub type RequestBody = bytes::Bytes;"),
+            "{range}: {code}"
+        );
+        assert!(code.contains("\"image/png\""), "{range}: {code}");
+        assert!(!code.contains(&format!("\"{range}\"")), "{range}: {code}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::AlternativeMediaIgnored
+                    && d.message.contains("`image/png` is generated")
+                    && d.message.contains(&format!("`{range}`"))
+            }),
+            "{range}: {report:#?}"
+        );
+        assert_ne!(check(&spec).outcome(), Outcome::Rejected, "{range}");
+    }
+
+    // ... but only a concrete key that classifies: `application/pdf` names no codec, so the range
+    // is still the selection and the request is still rejected for naming no sendable
+    // `Content-Type`.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -5129,7 +5180,7 @@ paths:
         required: true
         content:
           video/*: { schema: {} }
-          image/png: { schema: {} }
+          application/pdf: { schema: {} }
       responses:
         "204": { description: No Content }
 "##;
@@ -5137,7 +5188,37 @@ paths:
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
             report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedMediaType && d.message.contains("`video/*`")
+                d.code == Code::UnsupportedMediaType
+                    && d.message.contains("`video/*` is a media range")
+            }),
+            "{report:#?}"
+        );
+    }
+
+    // ... and the preferred concrete key still meets the octet gate: an object under `image/png`
+    // is rejected on its own account, not waved through because a range stood beside it.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /clip:
+    put:
+      operationId: putClip
+      requestBody:
+        required: true
+        content:
+          video/*: { schema: {} }
+          image/png: { schema: { type: object, properties: { a: { type: string } } } }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedMediaType
+                    && d.message
+                        .contains("`image/png` requires a string-like or binary schema")
             }),
             "{report:#?}"
         );
@@ -5722,9 +5803,9 @@ paths:
 #[test]
 fn a_concrete_media_type_outranks_a_range_that_precedes_it() {
     // Ranges rank below every codec, so a concrete sibling wins wherever it sits in the document
-    // (the one type ranked below the ranges is a concrete `image`/`audio`/`video` member, pinned
-    // elsewhere). Two ranges at the same rank still tie by source order, as equal-ranked concrete
-    // media already do.
+    // (the one type ranked below the ranges is a concrete `image`/`audio`/`video` member, and only
+    // on a response; pinned elsewhere). Two ranges at the same rank still tie by source order, as
+    // equal-ranked concrete media already do.
     let (report, code) = generate_with_code(
         r##"
 openapi: 3.1.0

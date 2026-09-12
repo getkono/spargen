@@ -2491,7 +2491,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // requires a concrete type/subtype (RFC 9110 § 8.3), and a generated request puts its media
         // key on the wire verbatim. Emitting `Content-Type: video/*` would be an undispatchable
         // header, and picking a concrete member of the family would be spargen inventing what the
-        // document declined to say — so it is rejected rather than guessed at.
+        // document declined to say — so it is rejected rather than guessed at. `choose_media`
+        // selects a range for a request only once no concrete key beside it classifies, so this
+        // fires only when the document offers nothing else spargen can send.
         if classify_media_range(media_essence(media_name)).is_some() {
             Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                 .message(format!(
@@ -4560,20 +4562,31 @@ fn choose_media<'a, T>(
     if content.is_empty() {
         return None;
     }
-    let mut selected: Option<(u8, usize, &str, &T, MediaType)> = None;
+    let mut selected: Option<(bool, u8, usize, &str, &T, MediaType)> = None;
     for (source_index, (media, value)) in content.iter().enumerate() {
         let Some((classified, rank)) = classify_media(media_essence(media)) else {
             continue;
         };
-        let candidate = (rank, source_index, media.as_str(), value, classified);
-        if selected
-            .as_ref()
-            .is_none_or(|current| (rank, source_index) < (current.0, current.1))
-        {
+        // A request sends its media key as `Content-Type`, which must be concrete (RFC 9110 § 8.3),
+        // so a range is only a candidate there once no concrete key classifies — and then it is
+        // selected and rejected by `lower_request_body`, never silently skipped.
+        let unsendable = position == BodyPosition::Request
+            && classify_media_range(media_essence(media)).is_some();
+        let candidate = (
+            unsendable,
+            rank,
+            source_index,
+            media.as_str(),
+            value,
+            classified,
+        );
+        if selected.as_ref().is_none_or(|current| {
+            (unsendable, rank, source_index) < (current.0, current.1, current.2)
+        }) {
             selected = Some(candidate);
         }
     }
-    if let Some((_, _, media, value, classified)) = selected {
+    if let Some((_, _, _, media, value, classified)) = selected {
         // A generated method sends and decodes exactly one media type, so the alternatives are not
         // generated. That narrows the documented surface — a server that also accepts XML will only
         // ever be sent JSON — so it is reported rather than dropped in silence.
@@ -4716,8 +4729,9 @@ fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
         media if media.starts_with("text/") => (MediaType::Text, 5),
         // Rank 9, the end of the ladder, is a concrete member of a binary family
         // (`classify_binary_family`): below every codec listed above and below both range ranks
-        // (7 and 8), so a family key is generated only when it is the sole key that classifies
-        // and never displaces a selection any other key already made.
+        // (7 and 8), so on a response a family key is generated only when it is the sole key that
+        // classifies; a request additionally prefers it to a range, which it cannot send
+        // (`choose_media`).
         _ => return classify_binary_family(essence),
     };
     Some(classified)
@@ -4729,9 +4743,11 @@ fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
 /// `text/*` is the family read as raw UTF-8; every other family, `*/*` included, is opaque octets,
 /// which is the only honest reading of "whatever this server detected". A range ranks below every
 /// codec spargen has (`text/*` at 7, every other family at 8), so a concrete sibling outranks it —
-/// with one deliberate exception: a concrete `image`/`audio`/`video` member (9,
-/// `classify_binary_family`) sits *below* both, because a document listing a range beside
-/// `image/png` generated from the range before that family classified and must keep doing so.
+/// with one deliberate exception on responses: a concrete `image`/`audio`/`video` member (9,
+/// `classify_binary_family`) sits *below* both, because a response listing a range beside
+/// `image/png` generated from the range before that family classified and must keep doing so. A
+/// request never selects a range while a concrete key classifies (`choose_media`), since a range
+/// is not a `Content-Type`.
 ///
 /// The type before the slash must be present — `/*` names no family and stays unsupported — and is
 /// matched case-insensitively, because media types are (RFC 9110 § 8.3.1) and reading `TEXT/*` as
@@ -4752,13 +4768,13 @@ fn classify_media_range(essence: &str) -> Option<(MediaType, u8)> {
 /// for non-textual data, so bytes is the only faithful reading of any member, exactly as it is for
 /// the family's range (`image/*`); the octet gate still demands a schema that collapses to
 /// `bytes::Bytes`. It sits at the very end of the ladder, below every other key spargen can
-/// classify — octet-stream, text, the sequential kinds, and the ranges, `*/*` included — so a
-/// family key is generated only when it is the sole key that classifies, which is exactly the
-/// shape #82 reports (`image/jpeg` as the only content key). Every document that generated before
-/// the family rule existed had selected some other key, and that key still outranks the family,
-/// so no such document changes its selection, its body type, its outcome, or a request's wire
-/// `Content-Type` — whatever schema `image/png` carries, since a losing alternative never reaches
-/// the octet gate.
+/// classify — octet-stream, text, the sequential kinds, and the ranges, `*/*` included — so on a
+/// response a family key is generated only when it is the sole key that classifies, which is
+/// exactly the shape #82 reports (`image/jpeg` as the only content key), and no response that
+/// generated before the family rule existed changes its selection or body type. A request body is
+/// the one place a family key outranks a range: a range cannot be sent as `Content-Type`, and
+/// every such request was rejected before, so preferring the concrete key only turns a rejection
+/// into a client.
 ///
 /// `application/*` is deliberately not a family here: it mixes binary (`application/pdf`) with
 /// textual (`application/sdp`, `application/sql`) subtypes, and reading SDP as bytes would be
