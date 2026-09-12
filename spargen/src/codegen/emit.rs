@@ -2357,7 +2357,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
             pub use dispatch::{attach_auth, build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
-            pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
+            pub use error::{Error, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use header::{parse_header, require_header, HeaderError, HeaderShape};
             pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
@@ -3189,6 +3189,7 @@ const RUNTIME_PRELUDE: &[&str] = &[
     "ReconnectReason",
     "ReconnectWait",
     "RedirectError",
+    "RequestCause",
     "RequestError",
     "ReqwestBackend",
     "ResponseValue",

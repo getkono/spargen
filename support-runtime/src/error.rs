@@ -2,7 +2,7 @@ use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 
-use crate::ResponseValue;
+use crate::{AuthError, ResponseValue};
 
 /// The closed error taxonomy shared by every spargen-generated client. `E` is the
 /// operation's typed error body (an enum when several error statuses are documented).
@@ -13,8 +13,10 @@ use crate::ResponseValue;
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error<E> {
-    /// #1 — invalid base URL, or parameter/body serialization failure (near-impossible by
-    /// construction).
+    /// #1 — the request could not be built before it was sent: no registered credential satisfies
+    /// the operation's security requirement, a registered token provider failed, the base URL is
+    /// invalid, or a parameter or body did not serialize. [`RequestError`] types the two credential
+    /// causes.
     RequestConstruction(RequestError),
     /// #2 — DNS failure, connection refused/reset, TLS handshake or certificate error.
     Transport(TransportError),
@@ -65,16 +67,14 @@ pub enum Error<E> {
 impl<E> Error<E> {
     /// Build a request-construction error from any owned error value.
     pub fn request_construction(source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::RequestConstruction(RequestError {
-            source: Some(Box::new(source)),
-        })
+        Self::RequestConstruction(RequestError::Other(RequestCause(Box::new(source))))
     }
 
     /// Build a request-construction error from a static message.
     pub fn request_message(message: impl Into<String>) -> Self {
-        Self::RequestConstruction(RequestError {
-            source: Some(Box::new(MessageError(message.into()))),
-        })
+        Self::RequestConstruction(RequestError::Other(RequestCause(Box::new(MessageError(
+            message.into(),
+        )))))
     }
 
     /// Classify a reqwest error into the closest runtime taxonomy class.
@@ -86,9 +86,7 @@ impl<E> Error<E> {
         } else if error.is_decode() {
             Error::Protocol(ProtocolError { source: error })
         } else if error.is_request() {
-            Error::RequestConstruction(RequestError {
-                source: Some(Box::new(error)),
-            })
+            Error::RequestConstruction(RequestError::Other(RequestCause(Box::new(error))))
         } else {
             Error::Transport(TransportError { source: error })
         }
@@ -195,9 +193,58 @@ impl std::fmt::Display for MessageError {
 impl std::error::Error for MessageError {}
 
 /// Request-construction failure (taxonomy #1).
+///
+/// The two credential causes are the ones a consumer routes on — they mean "unauthenticated", not
+/// "malformed request" — so each is a variant of its own: [`RequestError::MissingCredential`] when
+/// no registered credential satisfies the requirement, and [`RequestError::CredentialProvider`]
+/// when a registered token provider fails. Every other cause arrives as [`RequestError::Other`]
+/// with its source attached.
+///
+/// This runtime is embedded in the consumer's own crate, where `#[non_exhaustive]` does not affect
+/// match exhaustiveness, so a new variant here is a breaking change of the generated output; the
+/// attribute is kept for a consumer that re-exports the generated module across a crate boundary.
 #[derive(Debug)]
-pub struct RequestError {
-    source: Option<Box<dyn std::error::Error + Send + Sync>>,
+#[non_exhaustive]
+pub enum RequestError {
+    /// The operation carries a security requirement and no registered credential satisfies any of
+    /// its alternatives. Raised before anything is sent. The payload is the whole cause, so
+    /// `source()` is `None`.
+    MissingCredential {
+        /// One entry per alternative of the requirement, in declaration order: that alternative's
+        /// `securitySchemes` keys that have no registered credential, in declaration order.
+        /// `mutualTLS` keys never appear (the transport satisfies them). Never empty, and no
+        /// inner list is empty.
+        alternatives: Vec<Vec<&'static str>>,
+    },
+    /// The selected alternative's token provider returned an error. Raised before anything is
+    /// sent; `source()` is the provider's [`AuthError`].
+    CredentialProvider {
+        /// The `securitySchemes` key the provider is registered under.
+        scheme: &'static str,
+        /// What the provider reported.
+        source: AuthError,
+    },
+    /// Any other request-construction failure — an unparseable base URL, a parameter or body that
+    /// did not serialize, a credential registered under the wrong kind for its scheme, or an error
+    /// reqwest classifies as a request error — with the cause reachable through `source()`.
+    Other(RequestCause),
+}
+
+/// The opaque cause of [`RequestError::Other`]. It displays as the underlying failure; reach the
+/// failure itself (and downcast it) through [`std::error::Error::source`] on the [`RequestError`].
+#[derive(Debug)]
+pub struct RequestCause(Box<dyn std::error::Error + Send + Sync>);
+
+impl std::fmt::Display for RequestCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for RequestCause {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
 }
 
 /// Transport-layer failure (taxonomy #2 / #9).
@@ -245,18 +292,40 @@ pub struct RedirectError {
 
 impl std::fmt::Display for RequestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.source {
-            Some(source) => write!(f, "{source}"),
-            None => f.write_str("request construction failed"),
+        match self {
+            RequestError::MissingCredential { alternatives } => {
+                f.write_str(
+                    "no registered credential satisfies the operation's security requirement \
+                     (missing: ",
+                )?;
+                for (index, alternative) in alternatives.iter().enumerate() {
+                    if index > 0 {
+                        f.write_str(" or ")?;
+                    }
+                    f.write_str(&alternative.join(" + "))?;
+                }
+                f.write_str(")")
+            }
+            RequestError::CredentialProvider { scheme, .. } => write!(
+                f,
+                "the token provider registered for security scheme `{scheme}` failed"
+            ),
+            RequestError::Other(cause) => write!(f, "{cause}"),
         }
     }
 }
 
 impl std::error::Error for RequestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_ref()
-            .map(|source| source.as_ref() as &(dyn std::error::Error + 'static))
+        match self {
+            RequestError::MissingCredential { .. } => None,
+            RequestError::CredentialProvider { source, .. } => Some(source),
+            // The boxed cause itself, not its wrapper, so the chain and `downcast_ref` stay exactly
+            // as they were when the box was a private field.
+            RequestError::Other(cause) => {
+                Some(cause.0.as_ref() as &(dyn std::error::Error + 'static))
+            }
+        }
     }
 }
 
@@ -286,9 +355,9 @@ mod tests {
     use reqwest::header::HeaderMap;
     use reqwest::StatusCode;
 
-    use crate::{ResponseValue, TransportError};
+    use crate::{AuthError, ResponseValue, TransportError};
 
-    use super::{Error, TimeoutKind};
+    use super::{Error, RequestError, TimeoutKind};
 
     #[test]
     fn retry_classifier_includes_timeouts_and_5xx() {
@@ -326,6 +395,51 @@ mod tests {
         assert!(matches!(error, Error::RequestConstruction(_)));
         let source = std::error::Error::source(&error).expect("request errors carry a source");
         assert_eq!(source.to_string(), "no credential for `token`");
+    }
+
+    /// The missing-credential cause is the payload itself, so the chain ends at `RequestError`
+    /// and the rendered text is exactly what the message-only error used to say.
+    #[test]
+    fn a_missing_credential_is_typed_and_ends_the_cause_chain() {
+        let error = Error::<ApiBody>::RequestConstruction(RequestError::MissingCredential {
+            alternatives: vec![vec!["key", "token"]],
+        });
+        assert!(!error.is_transient());
+        assert_eq!(error.to_string(), "request construction failed");
+        let source = std::error::Error::source(&error).expect("the typed cause is the source");
+        assert_eq!(
+            source.to_string(),
+            "no registered credential satisfies the operation's security requirement \
+             (missing: key + token)"
+        );
+        assert!(std::error::Error::source(source).is_none());
+    }
+
+    /// Any other cause is opaque: it cannot be moved out of `Other`, but it renders as itself and
+    /// `source()` reaches the cause (not its wrapper) at the same depth, so it still downcasts.
+    #[test]
+    fn an_other_cause_is_opaque_and_reachable_through_source() {
+        #[derive(Debug)]
+        struct Cause;
+
+        impl std::fmt::Display for Cause {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("cause")
+            }
+        }
+
+        impl std::error::Error for Cause {}
+
+        let error = Error::<ApiBody>::request_construction(Cause);
+        let Error::RequestConstruction(RequestError::Other(cause)) = &error else {
+            panic!("expected Other, got {error:?}");
+        };
+        assert_eq!(cause.to_string(), "cause");
+        let source = std::error::Error::source(&error).expect("the request error is the source");
+        assert_eq!(source.to_string(), "cause");
+        let inner = std::error::Error::source(source).expect("the cause is reachable");
+        assert!(inner.downcast_ref::<Cause>().is_some());
+        assert!(std::error::Error::source(inner).is_none());
     }
 
     /// A typed API error body that is itself an `Error`, so `Error::source` can reach it.
@@ -504,6 +618,13 @@ mod tests {
     fn widen_preserves_every_reachable_variant() {
         let narrow: Vec<Error<std::convert::Infallible>> = vec![
             Error::request_message("bad path segment"),
+            Error::RequestConstruction(RequestError::MissingCredential {
+                alternatives: vec![vec!["token"]],
+            }),
+            Error::RequestConstruction(RequestError::CredentialProvider {
+                scheme: "token",
+                source: AuthError::new("x"),
+            }),
             Error::Transport(TransportError::new(reqwest_error())),
             Error::Timeout(TimeoutKind::Connect),
             Error::Protocol(super::ProtocolError {
@@ -555,5 +676,18 @@ mod tests {
         assert_eq!(path, "a.b");
         assert_eq!(body, Bytes::from_static(b"raw"));
         assert!(truncated);
+
+        // The typed request-construction cause keeps its payload too.
+        let widened: Error<ApiBody> = Error::<std::convert::Infallible>::RequestConstruction(
+            RequestError::MissingCredential {
+                alternatives: vec![vec!["a"], vec!["b"]],
+            },
+        )
+        .widen();
+        let Error::RequestConstruction(RequestError::MissingCredential { alternatives }) = widened
+        else {
+            panic!("widen changed the variant");
+        };
+        assert_eq!(alternatives, [vec!["a"], vec!["b"]]);
     }
 }
