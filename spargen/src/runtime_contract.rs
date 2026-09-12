@@ -1086,6 +1086,93 @@ serde_json.workspace = true
         assert_eq!(result.manifests, vec![root, member]);
     }
 
+    /// Audits a root/member pair that differ from the core fixtures only in how `reqwest` is
+    /// declared, and returns the diagnostics that complain about its default features.
+    fn inherited_reqwest_default_feature_diagnostics(
+        root_reqwest: &str,
+        member_reqwest: &str,
+    ) -> Vec<String> {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies().replace(
+                    "reqwest = { version = \"0.12.28\", default-features = false }",
+                    root_reqwest
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{}",
+                CORE_INHERITED.replace("reqwest.workspace = true", member_reqwest)
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code == Code::RuntimeDependencyContract),
+            "{:#?}",
+            result.diagnostics
+        );
+        result
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .filter(|message| message.contains("default-features"))
+            .collect()
+    }
+
+    #[test]
+    fn a_member_default_features_false_cannot_turn_off_defaults_the_root_leaves_on() {
+        // Cargo's rule for inheritance: the workspace entry decides, and a member's `false` is
+        // ignored when that entry leaves defaults on. The fix belongs in the root.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            "reqwest = \"0.12.28\"",
+            "reqwest = { workspace = true, default-features = false }",
+        );
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("`reqwest` must set `default-features = false`"),
+            "{messages:#?}"
+        );
+    }
+
+    #[test]
+    fn a_member_default_features_true_turns_on_defaults_the_root_turned_off() {
+        // The other direction: a member may re-enable defaults, so a root that already disables
+        // them does not satisfy the audit on its own.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            "reqwest = { version = \"0.12.28\", default-features = false }",
+            "reqwest = { workspace = true, default-features = true }",
+        );
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("`reqwest` must set `default-features = false`"),
+            "{messages:#?}"
+        );
+    }
+
+    #[test]
+    fn a_silent_member_keeps_the_defaults_the_root_turned_off() {
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            "reqwest = { version = \"0.12.28\", default-features = false }",
+            "reqwest = { workspace = true }",
+        );
+        assert!(messages.is_empty(), "{messages:#?}");
+    }
+
     /// The five core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
     /// the floors in these fixtures cannot drift from the ones every other test audits against.
     fn core_workspace_dependencies() -> &'static str {
