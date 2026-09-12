@@ -5764,9 +5764,11 @@ components:
 }
 
 #[test]
-fn w014_is_silent_for_identical_text_alternatives() {
-    // The identical-decode rule is about the codec, not about bytes: two textual bodies that
-    // constrain nothing are both a whole-body `String`, so generating one gives up nothing.
+fn w014_fires_for_text_alternatives_that_only_look_identical() {
+    // The identical-decode rule stays confined to octet-stream. Two textual bodies that constrain
+    // nothing look interchangeable and are not: this pair is `serde_json::Value` twice, while the
+    // same pair written without `schema:` at all is `()` twice, and a mixed pair is one of each.
+    // Only the octet gate collapses every body it admits onto one type.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -5784,7 +5786,180 @@ paths:
     for report in [generate(spec), check(spec)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(
-            !has_code(&report, Code::AlternativeMediaIgnored),
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_fires_when_two_empty_spellings_lower_differently() {
+    // `constrains nothing` has two spellings that disagree outside the octet gate: no `schema` key
+    // lowers to `()`, `schema: {}` lowers to `Any`. Suppressing between them would make the *order*
+    // of two content keys decide the response type, in silence.
+    let (report, code) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain: {}
+            text/csv: { schema: {} }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::AlternativeMediaIgnored),
+        "{report:#?}"
+    );
+    // The selection is the one with no schema at all, so the body really is unit-typed. The
+    // `schema: {}` sibling would have been `serde_json::Value`, which is the whole point: the two
+    // spellings are not interchangeable, so neither may silence the other.
+    assert!(
+        code.contains("support::ResponseValue<()>"),
+        "the no-schema selection should lower to `()`: {code}"
+    );
+}
+
+#[test]
+fn w014_fires_for_an_octet_request_alternative_that_decodes_alike() {
+    // A request narrows at the wire even when both entries are `bytes::Bytes`: the selected media
+    // key becomes the `Content-Type` verbatim, so this client only ever sends octet-stream to a
+    // server documented as also accepting `video/*`. The range-as-request rejection does not cover
+    // this — that fires on the media actually selected, and a suppressed alternative never is.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /u:
+    post:
+      operationId: postU
+      requestBody:
+        required: true
+        content:
+          application/octet-stream: { schema: {} }
+          video/*: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_fires_when_an_octet_alternative_describes_itself_outside_its_schema() {
+    // A Media Type Object says things outside `schema`. `itemSchema` in particular carries a type,
+    // so an entry declaring one is not interchangeable with an empty body even though its `schema`
+    // is empty — reading only `schema` is how that slipped through before.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: {} }
+            video/*: { itemSchema: { type: string } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+
+    // `encoding` is the other half of the same claim, and the explain text names it. It is inert on
+    // an octet media, but an entry that spells it out is still saying more than an empty one.
+    let with_encoding = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/octet-stream: { schema: {} }
+            video/*: { encoding: { part: { contentType: text/plain } } }
+"##;
+    for report in [generate(with_encoding), check(with_encoding)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_fires_for_sequential_alternatives_with_different_item_types() {
+    // A sequential media's item type lives in `itemSchema`, outside the body schema entirely. Two
+    // entries can both constrain nothing in `schema` and still stream different types.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/x-ndjson: { itemSchema: { type: string } }
+            application/jsonl: { itemSchema: { type: integer } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_fires_for_request_body_alternatives_that_decode_alike() {
+    // A request narrows at the wire, not at the type. The chosen media key becomes `Content-Type`
+    // verbatim, so a server documented as accepting both is only ever sent one — whatever the Rust
+    // types do.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /u:
+    post:
+      operationId: postU
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: {} }
+          application/vnd.acme.v2+json: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            has_code(&report, Code::AlternativeMediaIgnored),
             "{report:#?}"
         );
     }
