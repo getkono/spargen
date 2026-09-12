@@ -465,6 +465,51 @@ mod tests {
         assert_eq!(statuses, [StatusCode::BAD_REQUEST, StatusCode::IM_A_TEAPOT]);
     }
 
+    /// Generated clients hold `Error<Infallible>` for an operation with no documented error body,
+    /// so `status` is pinned on that instantiation too, over every variant it can hold (`Api` is
+    /// statically unreachable there): only `UnexpectedStatus` answers, with its own code.
+    #[test]
+    fn status_on_an_uninhabited_api_error_is_present_only_for_unexpected_status() {
+        let narrow: Vec<Error<std::convert::Infallible>> = vec![
+            Error::request_message("bad path segment"),
+            Error::Transport(TransportError::new(reqwest_error())),
+            Error::Timeout(TimeoutKind::Connect),
+            Error::Protocol(super::ProtocolError {
+                source: reqwest_error(),
+            }),
+            Error::Redirect(super::RedirectError {
+                source: reqwest_error(),
+            }),
+            Error::UnexpectedStatus {
+                status: StatusCode::IM_A_TEAPOT,
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(b"teapot"),
+            },
+            Error::Decode {
+                path: "items[0].id".to_owned(),
+                body: Bytes::from_static(b"{}"),
+                truncated: true,
+            },
+            Error::InterruptedBody(TransportError::new(reqwest_error())),
+        ];
+        for error in &narrow {
+            let expected = match error {
+                Error::Api(value) => match *value.inner() {},
+                Error::UnexpectedStatus { status, .. } => Some(*status),
+                Error::RequestConstruction(_)
+                | Error::Transport(_)
+                | Error::Timeout(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::Decode { .. }
+                | Error::InterruptedBody(_) => None,
+            };
+            assert_eq!(error.status(), expected, "status() disagrees for {error}");
+        }
+        let statuses: Vec<_> = narrow.iter().filter_map(Error::status).collect();
+        assert_eq!(statuses, [StatusCode::IM_A_TEAPOT]);
+    }
+
     #[test]
     fn a_retryable_status_is_retryable_through_both_status_variants() {
         for status in [StatusCode::TOO_MANY_REQUESTS, StatusCode::BAD_GATEWAY] {
