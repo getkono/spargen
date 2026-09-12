@@ -5346,6 +5346,102 @@ paths:
 }
 
 #[test]
+fn a_request_prefers_a_concrete_binary_key_listed_before_a_range() {
+    // Source order is only the last tie-break: a concrete `image/png` listed *before* `video/*`
+    // is sent for the same reason it is when listed after — a range is no `Content-Type` — and
+    // the range is still reported as the alternative not generated.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /clip:
+    put:
+      operationId: putClip
+      requestBody:
+        required: true
+        content:
+          image/png: { schema: {} }
+          video/*: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(
+        code.contains("pub type RequestBody = bytes::Bytes;"),
+        "{code}"
+    );
+    assert!(code.contains("\"image/png\""), "{code}");
+    assert!(!code.contains("\"video/*\""), "{code}");
+    for report in [report, check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::AlternativeMediaIgnored
+                    && d.message.contains("`image/png` is generated")
+                    && d.message.contains("`video/*`")
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_a_request_offering_only_ranges_is_rejected_on_the_first() {
+    // With no concrete key at all every candidate is a range, so the ladder and then source order
+    // decide as before: `video/*` ties `*/*` at the same rank and, listed first, is selected; the
+    // other range is reported as not generated (`W014`) and the selection is then rejected as a
+    // request `Content-Type` (`E009`) — both diagnostics, naming each key once.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /clip:
+    put:
+      operationId: putClip
+      requestBody:
+        required: true
+        content:
+          video/*: { schema: {} }
+          "*/*": { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let rejections: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnsupportedMediaType)
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            rejections,
+            [
+                "media type `video/*` is a media range, which describes a family rather than the \
+                 concrete `Content-Type` a request must send"
+            ],
+            "{report:#?}"
+        );
+        let ignored: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::AlternativeMediaIgnored)
+            .map(|d| d.message.as_str())
+            .collect();
+        assert_eq!(
+            ignored,
+            ["`video/*` is generated; the alternative media type(s) `*/*` are not"],
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn w014_is_silent_across_concrete_and_ranged_byte_bodies() {
     // `image/jpeg`, `image/png`, `image/*` and `application/octet-stream` over empty schemas are one
     // representation four times over; picking one narrows nothing.
