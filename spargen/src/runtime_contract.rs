@@ -2110,6 +2110,66 @@ serde_json = "1.0.151"
     }
 
     #[test]
+    fn predicates_that_never_select_target_tables_are_explained_on_both_paths() {
+        // Pins existing behaviour. `feature`, `test`, `debug_assertions` and `proc_macro` have no
+        // value for any target: Cargo does not select target tables by them. The key rules wasm
+        // out first, so it passes the native-only check and the unknown predicate is what the build
+        // target, or every native builtin, has to answer.
+        for (predicate, reason) in [
+            (
+                r#"feature = "x""#,
+                "`feature = \"x\"` does not select target tables",
+            ),
+            ("test", "`test` does not select target tables"),
+            (
+                "debug_assertions",
+                "`debug_assertions` does not select target tables",
+            ),
+            ("proc_macro", "`proc_macro` does not select target tables"),
+        ] {
+            let key = format!(r#"cfg(all(not(target_arch = "wasm32"), not({predicate})))"#);
+            let manifest = blocking_manifest(&tokio_table(&key, TOKIO_DECLARATION));
+            let clause = format!("; `[target.'{key}'.dependencies]` cannot be evaluated: {reason}");
+            for (target, rule) in [
+                (
+                    linux(),
+                    "(evaluated for the build target `x86_64-unknown-linux-gnu`)",
+                ),
+                (
+                    TargetContext::Unknown,
+                    "(a proc-macro cannot see the build target",
+                ),
+            ] {
+                let diagnostics = audit_manifest_for(&manifest, &target);
+                assert_eq!(diagnostics.len(), 1, "{key}: {diagnostics:#?}");
+                let message = &diagnostics[0].message;
+                assert!(
+                    message.starts_with("generated client requires `tokio`")
+                        && message.contains(rule)
+                        && message.ends_with(&clause),
+                    "{rule}\n{clause}\n{message}"
+                );
+            }
+        }
+
+        // Without `not(target_arch = "wasm32")` the same predicate already fails the native-only
+        // check on the wasm anchor, from a build script as well.
+        let feature_only = blocking_manifest(&tokio_table(
+            r#"cfg(not(feature = "x"))"#,
+            TOKIO_DECLARATION,
+        ));
+        let messages = messages(&audit_manifest_for(&feature_only, &linux()));
+        assert!(
+            messages.contains("(evaluated for the build target `x86_64-unknown-linux-gnu`)")
+                && messages.ends_with(
+                    "; `[target.'cfg(not(feature = \"x\"))'.dependencies]` cannot be evaluated: \
+                     `feature = \"x\"` does not select target tables"
+                ),
+            "{messages}"
+        );
+    }
+
+    #[test]
     fn workspace_inherited_tokio_under_an_alternative_spelling_resolves() {
         let directory = tempfile::tempdir().unwrap();
         let member_dir = directory.path().join("client");
