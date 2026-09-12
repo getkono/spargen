@@ -197,6 +197,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cfg-expr"
+version = "0.20.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe4ece8474b5f766c63426647e7b4b316b67431ade1036a8313cee24a03ae917"
+dependencies = [
+ "smallvec",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1778,6 +1787,7 @@ name = "spargen"
 version = "0.4.0"
 dependencies = [
  "camino",
+ "cfg-expr",
  "clap",
  "criterion",
  "indexmap",
