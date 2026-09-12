@@ -173,9 +173,9 @@ Key points of the surface:
   [retry adapter](./runtime.md). An error enum whose bodied statuses carry the same body type
   (one schema, or schemas that generate the same Rust type) gets `body()`, and it, the
   single-body newtype, and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()`
-  hands that body back whichever status carried it (the status itself is
-  `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by variant
-  instead.
+  hands that body back whichever status carried it (`Error::status()` reports that status, the
+  same value as `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by
+  variant instead.
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ## Next steps

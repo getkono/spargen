@@ -196,7 +196,8 @@ impl ApiErrorBody for std::convert::Infallible {
 
 impl<E: ApiErrorBody> Error<E> {
     /// The documented API error body, whichever status carried it: `Some` only for [`Error::Api`]
-    /// whose `E` reports a body. The status itself stays on the `ResponseValue` inside `Api`.
+    /// whose `E` reports a body. Its status is [`Error::status`], the same value as the
+    /// `ResponseValue::status()` inside `Api`.
     pub fn api_body(&self) -> Option<&E::Body> {
         match self {
             Error::Api(value) => value.inner().body(),
@@ -724,6 +725,43 @@ mod tests {
             ApiBody("bad request"),
         ));
         assert_eq!(api.api_body(), Some("bad request"));
+    }
+
+    /// `status` and `api_body` read one `Error` from two sides, so they must agree on what each
+    /// class carries: a documented API error answers both from the same `ResponseValue`, an
+    /// undocumented status has a status but no typed body, and every other class has neither.
+    #[test]
+    fn status_and_api_body_agree_on_every_variant() {
+        for error in every_variant() {
+            match &error {
+                Error::Api(value) => {
+                    assert_eq!(error.status(), Some(value.status()), "{error}");
+                    let same_body =
+                        match (error.api_body(), super::ApiErrorBody::body(value.inner())) {
+                            (Some(answered), Some(carried)) => std::ptr::eq(answered, carried),
+                            _ => false,
+                        };
+                    assert!(
+                        same_body,
+                        "api_body is not the Api value's own body: {error}"
+                    );
+                }
+                Error::UnexpectedStatus { status, .. } => {
+                    assert_eq!(error.status(), Some(*status), "{error}");
+                    assert!(error.api_body().is_none(), "{error}");
+                }
+                Error::RequestConstruction(_)
+                | Error::Transport(_)
+                | Error::Timeout(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::Decode { .. }
+                | Error::InterruptedBody(_) => {
+                    assert!(error.status().is_none(), "{error}");
+                    assert!(error.api_body().is_none(), "{error}");
+                }
+            }
+        }
     }
 
     /// The no-documented-error shape is `Error<Infallible>`; `api_body` must still exist there so
