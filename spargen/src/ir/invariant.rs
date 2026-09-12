@@ -1,16 +1,22 @@
 use crate::diag::{Code, Diagnostic, Diagnostics};
 
-use super::{AdditionalProps, Api, Ty, TypeKind};
+use super::{AdditionalProps, Api, MediaType, Ty, TypeKind};
 
 /// Check the IR's well-formedness invariants, reporting any violation through `diags`.
 ///
-/// Run unconditionally after every lowering, on every entry point. The invariant is referential
-/// integrity of the type graph: every [`super::Ty`] reachable from the API — operation
-/// parameters, request bodies, response bodies, response headers, and, transitively, struct
-/// fields, typed additional properties, array items, tuple elements, and union variants — names a
-/// `TypeId` that resolves in the [`TypeGraph`](super::TypeGraph). A failure here is a frontend
-/// bug, not a spec problem, so it is reported as [`Code::InvalidInput`] against the construct that
-/// carries the dangling reference.
+/// Run unconditionally after every lowering, on every entry point. The first invariant is
+/// referential integrity of the type graph: every [`super::Ty`] reachable from the API —
+/// operation parameters, request bodies, response bodies, response headers, and, transitively,
+/// struct fields, typed additional properties, array items, tuple elements, and union variants —
+/// names a `TypeId` that resolves in the [`TypeGraph`](super::TypeGraph). The second is the kind
+/// of an octet-stream request body's type: when a request body with [`MediaType::OctetStream`]
+/// media has a type whose definition resolves, that definition's kind is [`TypeKind::Bytes`],
+/// because the emitter sends such a body only through its raw-bytes path, which sets
+/// `Content-Type`. Only the definition's kind is checked, not the reference's `nullable` flag: a
+/// nullable byte body passes here yet generates `.body(..)` over an `Option<bytes::Bytes>` that
+/// does not compile, a known gap tracked as #104. A failure here is a frontend bug, not a spec
+/// problem, so it is reported as [`Code::InvalidInput`] against the construct that carries the
+/// violation.
 ///
 /// Semantic checks that are *not* here, because the frontend enforces them where it has the
 /// document in hand and the diagnostics to point at it: discriminator property existence
@@ -30,6 +36,22 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
         if let Some(body) = &operation.request_body {
             if let Some(ty) = body.ty {
                 check_ty(api, ty, diags, "request body", operation.provenance.clone());
+                // A missing definition is already reported by `check_ty`; only a definition that
+                // exists with the wrong kind is an octet-stream violation.
+                if body.media == MediaType::OctetStream
+                    && api
+                        .types
+                        .get(ty.id)
+                        .is_some_and(|def| !matches!(def.kind, TypeKind::Bytes))
+                {
+                    Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
+                        .message(format!(
+                            "IR invariant failed: request body `{}` is an octet-stream body whose \
+                             type is not `bytes::Bytes`",
+                            body.content_type
+                        ))
+                        .emit(diags);
+                }
             }
         }
         for (_, response) in &operation.responses.by_status {
@@ -140,11 +162,11 @@ fn check_ty(
 #[cfg(test)]
 mod tests {
     use super::check_invariants;
-    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::diag::{Code, Diagnostics, JsonPointer, Provenance};
     use crate::ir::{
-        Api, HeaderShape, Info, MediaType, Method, Operation, OperationId, PathSegment,
-        PathTemplate, Prim, Response, ResponseHeader, Responses, StatusSpec, Ty, TypeDef,
-        TypeGraph, TypeId, TypeKind,
+        Api, BodyEncoding, HeaderShape, Info, MediaType, Method, Operation, OperationId,
+        PathSegment, PathTemplate, Prim, RequestBody, Response, ResponseHeader, Responses,
+        StatusSpec, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
     };
     use indexmap::IndexMap;
 
@@ -233,5 +255,113 @@ mod tests {
         let mut diags = Diagnostics::new(100);
         check_invariants(&api, &mut diags);
         assert!(diags.has_errors(), "{diags:#?}");
+    }
+
+    /// The resolvable header API with one request body of `media` / `content_type`. When `kind` is
+    /// supplied, the body is typed by a freshly inserted definition of that kind; otherwise it is
+    /// untyped (`ty: None`).
+    fn api_with_request_body(media: MediaType, content_type: &str, kind: Option<TypeKind>) -> Api {
+        let mut api = api_with_header_ty(ty(0));
+        let body_ty = kind.map(|kind| {
+            let id = api.types.insert(TypeDef {
+                name_hint: "RequestBody".to_owned(),
+                kind,
+                docs: Default::default(),
+                provenance: Provenance::new(JsonPointer::root(), None),
+            });
+            Ty {
+                id,
+                nullable: false,
+                boxed: false,
+            }
+        });
+        api.operations[0].request_body = Some(RequestBody {
+            media,
+            content_type: content_type.to_owned(),
+            ty: body_ty,
+            required: true,
+            encoding: BodyEncoding::default(),
+        });
+        api
+    }
+
+    #[test]
+    fn an_octet_stream_request_body_over_bytes_is_accepted() {
+        let api = api_with_request_body(
+            MediaType::OctetStream,
+            "application/octet-stream",
+            Some(TypeKind::Bytes),
+        );
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&api, &mut diags);
+        assert!(!diags.has_errors(), "{diags:#?}");
+    }
+
+    #[test]
+    fn an_octet_stream_request_body_over_a_non_byte_type_is_caught() {
+        // The emitter sends an octet-stream body only through its raw-bytes path; a non-`Bytes`
+        // type there would generate code that does not compile, so the frontend must never let
+        // one through.
+        let api = api_with_request_body(
+            MediaType::OctetStream,
+            "image/png",
+            Some(TypeKind::Primitive(Prim::String)),
+        );
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&api, &mut diags);
+        assert!(diags.has_errors(), "{diags:#?}");
+        let [diagnostic] = diags.items() else {
+            panic!("expected exactly one diagnostic: {diags:#?}");
+        };
+        assert_eq!(diagnostic.code, Code::InvalidInput, "{diags:#?}");
+        assert!(
+            diagnostic.message.contains("`image/png`")
+                && diagnostic.message.contains("octet-stream"),
+            "{diags:#?}"
+        );
+    }
+
+    #[test]
+    fn an_untyped_octet_stream_request_body_is_left_to_the_frontend() {
+        let api = api_with_request_body(MediaType::OctetStream, "application/octet-stream", None);
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&api, &mut diags);
+        assert!(!diags.has_errors(), "{diags:#?}");
+    }
+
+    #[test]
+    fn a_dangling_octet_stream_request_body_type_is_reported_once_as_a_missing_type() {
+        // A missing definition is the reference check's to report; the octet-stream check must
+        // not add a second diagnostic for the same dangling `TypeId`.
+        let mut api =
+            api_with_request_body(MediaType::OctetStream, "application/octet-stream", None);
+        api.operations[0]
+            .request_body
+            .as_mut()
+            .expect("request body installed")
+            .ty = Some(ty(999));
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&api, &mut diags);
+        let [diagnostic] = diags.items() else {
+            panic!("expected exactly one diagnostic: {diags:#?}");
+        };
+        assert_eq!(diagnostic.code, Code::InvalidInput, "{diags:#?}");
+        assert!(
+            diagnostic.message.contains("references missing type 999")
+                && !diagnostic.message.contains("octet-stream"),
+            "{diags:#?}"
+        );
+    }
+
+    #[test]
+    fn a_non_octet_request_body_over_a_string_is_not_an_octet_violation() {
+        let api = api_with_request_body(
+            MediaType::Text,
+            "text/plain",
+            Some(TypeKind::Primitive(Prim::String)),
+        );
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&api, &mut diags);
+        assert!(!diags.has_errors(), "{diags:#?}");
     }
 }

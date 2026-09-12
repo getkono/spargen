@@ -405,16 +405,18 @@ pub(crate) fn emit_operation(
         // A raw byte body (`bytes::Bytes`, from `format: binary` / `contentEncoding: base64`) is sent
         // as-is regardless of the declared media — `Bytes` is not `Display`, so it can never go
         // through `.to_string()`. This must be checked before the media match so a `text/plain` (or
-        // any) media over a `Bytes` schema does not miscompile.
+        // any) media over a `Bytes` schema does not miscompile. This one raw-bytes send is shared
+        // with the octet-stream arm below, so no path sends raw bytes without `Content-Type`.
+        let raw_bytes_send = quote! {
+            #request_binding = #request_binding
+                .header(reqwest::header::CONTENT_TYPE, #content_type)
+                .body(#body_binding.clone());
+        };
         if matches!(
             api.types.get(ty.id).map(|def| &def.kind),
             Some(TypeKind::Bytes)
         ) {
-            quote! {
-                #request_binding = #request_binding
-                    .header(reqwest::header::CONTENT_TYPE, #content_type)
-                    .body(#body_binding.clone());
-            }
+            raw_bytes_send
         } else {
             match media {
                 MediaType::Json => {
@@ -455,9 +457,13 @@ pub(crate) fn emit_operation(
                         .header(reqwest::header::CONTENT_TYPE, #content_type)
                         .body(#body_binding.to_string());
                 },
-                MediaType::OctetStream => {
-                    quote! { #request_binding = #request_binding.body(#body_binding.clone()); }
-                }
+                // An octet-stream request body's type definition always has kind `TypeKind::Bytes`
+                // (the gate in `oas31::lower::lower_request_body`, checked again by
+                // `ir::check_invariants`), so the `Bytes` branch above takes it and this arm is
+                // never reached. It sends the same tokens, so even a looser gate cannot drop the
+                // header. Neither check looks at nullability: a nullable byte body also takes the
+                // `Bytes` branch and generates code that does not compile (#104).
+                MediaType::OctetStream => raw_bytes_send,
                 MediaType::Multipart => {
                     emit_multipart_body(ty, api, names, request_binding, body_binding, &encoding)
                 }
