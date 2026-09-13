@@ -247,6 +247,115 @@ paths: {}
     );
 }
 
+/// The blocking client's `tokio` table is evaluated for the target Cargo is building, read from the
+/// `TARGET`/`CARGO_CFG_*` a real build script receives. This is the only test that proves that
+/// mapping matches what Cargo actually sets.
+#[test]
+fn cargo_build_evaluates_the_tokio_table_for_the_target_being_built() {
+    let temp = tempfile::tempdir().unwrap();
+    let crate_dir = temp.path().join("consumer");
+    std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+    let spargen_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let manifest = |tokio_tables: &str| {
+        format!(
+            r#"[package]
+name = "target-table-consumer"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+blocking = ["dep:tokio"]
+
+[dependencies]
+bytes = "1.12.1"
+reqwest = {{ version = "0.12.28", default-features = false }}
+secrecy = "0.10.3"
+serde = {{ version = "1.0.229", features = ["derive"] }}
+serde_json = "1.0.151"
+
+{tokio_tables}
+[build-dependencies]
+spargen = {{ path = {spargen_path:?}, default-features = false }}
+
+[workspace]
+"#
+        )
+    };
+    const TOKIO: &str = r#"tokio = { version = "1.53.1", features = ["rt"], optional = true }"#;
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        manifest(&format!(
+            "[target.'cfg(unix)'.dependencies]\n{TOKIO}\n\n\
+             [target.'cfg(windows)'.dependencies]\n{TOKIO}\n"
+        )),
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("build.rs"),
+        r#"fn main() {
+    let build = spargen::Spec::new("openapi.yaml").build("src/generated.rs");
+    let report = spargen::generate(&build);
+    for diagnostic in report.diagnostics() {
+        eprintln!("{}: {}", diagnostic.code.as_str(), diagnostic.message);
+    }
+    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("src/lib.rs"),
+        "include!(\"generated.rs\");\n",
+    )
+    .unwrap();
+    std::fs::write(
+        crate_dir.join("openapi.yaml"),
+        r#"openapi: 3.1.0
+info: { title: Minimal, version: 1.0.0 }
+paths: {}
+"#,
+    )
+    .unwrap();
+
+    // One table per OS family: Cargo applies exactly one of them on any unix or windows host.
+    let output = Command::new("cargo")
+        .arg("check")
+        .current_dir(&crate_dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "a tokio table applying to the build target must pass the audit:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // A native-only table that applies to no host this test runs on.
+    std::fs::remove_file(crate_dir.join("src/generated.rs")).unwrap();
+    std::fs::write(
+        crate_dir.join("Cargo.toml"),
+        manifest(&format!(
+            "[target.'cfg(target_os = \"none\")'.dependencies]\n{TOKIO}\n"
+        )),
+    )
+    .unwrap();
+    let output = Command::new("cargo")
+        .arg("check")
+        .current_dir(&crate_dir)
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "a tokio table that does not apply to the build target unexpectedly compiled"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("E023"), "{stderr}");
+    assert!(stderr.contains("does not apply to"), "{stderr}");
+    assert!(
+        !crate_dir.join("src/generated.rs").exists(),
+        "a rejected runtime contract must not write generated output"
+    );
+}
+
 #[test]
 #[ignore = "nightly direct-minimal-versions proof; run by the runtime-dependencies CI job"]
 fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
@@ -1443,8 +1552,13 @@ fn every_runtime_type_in_a_signature_is_nameable() {
     fn shape(shape: basic_client::HeaderShape) -> basic_client::HeaderShape {
         shape
     }
+    // `ApiErrorBody` is the bound a caller writes to be generic over operations' error bodies.
+    fn body_of<E: basic_client::ApiErrorBody>(error: &E) -> Option<&E::Body> {
+        error.body()
+    }
     // Naming each type above is the assertion; binding the items keeps them from reading as dead.
     let _ = (header_result, core, timeout_kind, config, shape);
+    let _ = body_of::<basic_client::GetTextErrorError>;
     let _: &dyn basic_client::RetryPolicy = &NeverRetry;
 }
 
@@ -1517,6 +1631,98 @@ fn a_multi_status_error_names_its_status() {
         basic_client::types::NotFoundError { reason: "gone".to_owned() },
     ));
     assert!(error.to_string().contains("404"), "{error}");
+}
+
+#[test]
+fn a_uniform_body_error_enum_hands_back_its_body_from_any_status() {
+    let problem = basic_client::types::Problem { title: "nope".to_owned(), detail: "gone".to_owned() };
+    let not_found = basic_client::GetSharedError::Status404(Box::new(problem.clone()));
+    let conflict = basic_client::GetSharedError::Status409(Box::new(problem));
+    assert_eq!(not_found.body().map(|p| p.detail.as_str()), Some("gone"));
+    assert_eq!(conflict.body().map(|p| p.detail.as_str()), Some("gone"));
+    // A documented bodyless status carries nothing to hand back.
+    assert!(basic_client::GetSharedError::Status401.body().is_none());
+}
+
+#[test]
+fn the_taxonomy_reaches_the_body_generically_over_the_operation() {
+    // Generic over `E`: this is the "thirty distinct error types" case from the issue.
+    fn detail<E>(error: &basic_client::Error<E>) -> Option<&str>
+    where
+        E: basic_client::ApiErrorBody<Body = basic_client::types::Problem>,
+    {
+        error.api_body().map(|problem| problem.detail.as_str())
+    }
+    let body = basic_client::GetSharedError::Status409(Box::new(basic_client::types::Problem {
+        title: "conflict".to_owned(),
+        detail: "dup".to_owned(),
+    }));
+    let error = basic_client::Error::Api(basic_client::ResponseValue::new(
+        reqwest::StatusCode::CONFLICT,
+        Default::default(),
+        body,
+    ));
+    assert_eq!(detail(&error), Some("dup"));
+    let transport: basic_client::Error<basic_client::GetSharedError> =
+        basic_client::Error::request_message("boom");
+    assert_eq!(detail(&transport), None);
+}
+
+#[test]
+fn every_error_shape_implements_api_error_body() {
+    use basic_client::ApiErrorBody;
+    // The single-body newtype: `Body` is the inner type.
+    let wrapped = basic_client::GetTextErrorError("nope".to_owned());
+    assert_eq!(wrapped.body().map(String::as_str), Some("nope"));
+    // The no-documented-error shape: exists so generic code compiles, and is always `None`.
+    fn never(error: &basic_client::Error<std::convert::Infallible>) -> bool {
+        error.api_body().is_none()
+    }
+    assert!(never(&basic_client::Error::request_message("x")));
+}
+
+#[test]
+fn a_nullable_error_body_answers_none_for_null_on_both_shapes() {
+    use basic_client::ApiErrorBody;
+    let problem = basic_client::types::MaybeProblem { title: "nope".to_owned() };
+    // The enum shape: a nullable payload is `Option<Box<T>>`, so `null` is `None`, a value is
+    // `Some`, and the `default` response's variant is reached like any exact status.
+    assert!(basic_client::GetMaybeError::Status404(None).body().is_none());
+    let not_found = basic_client::GetMaybeError::Status404(Some(Box::new(problem.clone())));
+    assert_eq!(not_found.body().map(|p| p.title.as_str()), Some("nope"));
+    let fallback = basic_client::GetMaybeError::Default(Some(Box::new(problem.clone())));
+    assert_eq!(fallback.body().map(|p| p.title.as_str()), Some("nope"));
+    // The newtype shape over the same component: `Body` is the bare `MaybeProblem`, not the
+    // `Option` the newtype wraps, and `null` answers `None` exactly as the enum does.
+    assert!(basic_client::GetMaybeSingleError(None).body().is_none());
+    let single = basic_client::GetMaybeSingleError(Some(problem.clone()));
+    assert_eq!(single.body().map(|p| p.title.as_str()), Some("nope"));
+    // One bound names the component and accepts both shapes.
+    fn title<E>(error: &E) -> Option<&str>
+    where
+        E: basic_client::ApiErrorBody<Body = basic_client::types::MaybeProblem>,
+    {
+        error.body().map(|p| p.title.as_str())
+    }
+    let conflict = basic_client::GetMaybeError::Status409(Some(Box::new(problem.clone())));
+    assert_eq!(title(&conflict), Some("nope"));
+    assert_eq!(title(&basic_client::GetMaybeSingleError(Some(problem))), Some("nope"));
+    assert_eq!(title(&basic_client::GetMaybeSingleError(None)), None);
+}
+
+#[test]
+fn an_alias_equal_error_body_is_one_body_type() {
+    // `PlainMessage` and the inline 409 schema are distinct schemas, but both generate `String`:
+    // one body type, so the inherent accessor and the trait both exist.
+    let not_found = basic_client::GetAliasSharedError::Status404(Box::new("gone".to_owned()));
+    let conflict = basic_client::GetAliasSharedError::Status409(Box::new("dup".to_owned()));
+    assert_eq!(not_found.body().map(String::as_str), Some("gone"));
+    assert_eq!(conflict.body().map(String::as_str), Some("dup"));
+    fn text<E: basic_client::ApiErrorBody<Body = String>>(error: &E) -> Option<&str> {
+        error.body().map(String::as_str)
+    }
+    assert_eq!(text(&not_found), Some("gone"));
+    assert_eq!(text(&conflict), Some("dup"));
 }
 "##,
     )
@@ -2282,6 +2488,93 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ConflictError"
+  # Two error statuses sharing ONE body schema plus a documented bodyless 401 → a `GetSharedError`
+  # enum whose bodied variants agree on `types::Problem`, so it gets `body()` and implements
+  # `ApiErrorBody` (the unit variant answers `None`). `getMulti` above is the heterogeneous
+  # counterpart and gets neither.
+  /shared:
+    get:
+      operationId: getShared
+      responses:
+        "200":
+          description: OK
+        "401":
+          description: Unauthorized
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  # The same shape over a NULLABLE component, plus a bodied `default`: every bodied variant is
+  # `Option<Box<types::MaybeProblem>>`, `body()` answers `None` for a `null` payload, and the
+  # `Default` variant is reached like any other status.
+  /maybe:
+    get:
+      operationId: getMaybe
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+  # The single-body newtype over the same nullable component: `GetMaybeSingleError(Option<T>)`,
+  # whose `ApiErrorBody::Body` is the bare `types::MaybeProblem` so one bound covers it and
+  # `GetMaybeError` alike.
+  /maybe-single:
+    get:
+      operationId: getMaybeSingle
+      responses:
+        "204":
+          description: No Content
+        "400":
+          description: Bad Request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaybeProblem"
+  # Two error statuses whose bodies are different schemas generating the SAME Rust type: a `$ref`
+  # to a string component and an inline string. Their type ids differ, but both are `String`, so
+  # `GetAliasSharedError` still gets `body()` and implements `ApiErrorBody`.
+  /alias-shared:
+    get:
+      operationId: getAliasShared
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlainMessage"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                type: string
   # multipart/form-data request body: the body is an object whose properties are the form
   # parts. `file` is `format: binary` → a `bytes::Bytes` file part; `caption` a required text part;
   # `count` an optional scalar text part; `tags` an optional array → a JSON-encoded text part. The
@@ -2992,6 +3285,27 @@ components:
       properties:
         detail:
           type: string
+    # The one body shared by every documented error status of `getShared`.
+    Problem:
+      type: object
+      required: [title, detail]
+      properties:
+        title:
+          type: string
+        detail:
+          type: string
+    # A nullable error body: `getMaybe` and `getMaybeSingle` reference it, so every use is
+    # `Option<MaybeProblem>` and a `null` payload is a documented, body-less answer.
+    MaybeProblem:
+      type: [object, "null"]
+      required: [title]
+      properties:
+        title:
+          type: string
+    # A string component `getAliasShared` pairs with an inline string body: two schemas, one
+    # generated body type.
+    PlainMessage:
+      type: string
     # Streamed item type for the `/chat/stream` SSE operation.
     ChatChunk:
       type: object

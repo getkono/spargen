@@ -112,6 +112,25 @@ impl<E> Error<E> {
             | Error::Decode { .. } => false,
         }
     }
+
+    /// The HTTP status the failed call's response carried: `Some` for a documented error status
+    /// ([`Error::Api`], the same value as its `ResponseValue::status()`) and for an undocumented
+    /// status ([`Error::UnexpectedStatus`], which includes an undocumented 2xx), `None` for every
+    /// class that has no status. That includes [`Error::Decode`], which does not keep the status of
+    /// the response it failed to decode.
+    pub fn status(&self) -> Option<StatusCode> {
+        match self {
+            Error::Api(value) => Some(value.status()),
+            Error::UnexpectedStatus { status, .. } => Some(*status),
+            Error::RequestConstruction(_)
+            | Error::Transport(_)
+            | Error::Timeout(_)
+            | Error::Protocol(_)
+            | Error::Redirect(_)
+            | Error::Decode { .. }
+            | Error::InterruptedBody(_) => None,
+        }
+    }
 }
 
 impl Error<std::convert::Infallible> {
@@ -147,6 +166,51 @@ impl Error<std::convert::Infallible> {
                 truncated,
             },
             Error::InterruptedBody(e) => Error::InterruptedBody(e),
+        }
+    }
+}
+
+/// Implemented by the generated error shapes that carry one documented body type, so code
+/// generic over operations can reach that body without naming each `E`.
+///
+/// Three shapes implement it: a multi-status enum whose bodied statuses carry the same body type
+/// (one schema, or schemas that generate the same Rust type; its `body` is `None` for a
+/// documented bodyless status, or a `null` payload), the
+/// single-body newtype (`Body` is the bare schema type, so a nullable body answers `None` for
+/// `null` exactly as the enum does), and the uninhabited `Infallible` shape, so `Error::api_body`
+/// exists on those operations. An enum whose statuses carry different body types has no
+/// implementation: there is no single body to hand back, and the compile error is the signal.
+pub trait ApiErrorBody {
+    /// The documented error body type.
+    type Body: ?Sized;
+    /// The documented body this value carries, if its status documents one.
+    fn body(&self) -> Option<&Self::Body>;
+}
+
+impl ApiErrorBody for std::convert::Infallible {
+    type Body = std::convert::Infallible;
+    fn body(&self) -> Option<&Self::Body> {
+        match *self {}
+    }
+}
+
+impl<E: ApiErrorBody> Error<E> {
+    /// The documented API error body, whichever status carried it: `Some` only for [`Error::Api`]
+    /// whose `E` reports a body. Its status is [`Error::status`], the same value as the
+    /// `ResponseValue::status()` inside `Api`.
+    pub fn api_body(&self) -> Option<&E::Body> {
+        match self {
+            Error::Api(value) => value.inner().body(),
+            // Every other class carries no typed body. Listed, not wildcarded, like every other
+            // match over the taxonomy here: a new variant must decide whether it carries one.
+            Error::RequestConstruction(_)
+            | Error::Transport(_)
+            | Error::Timeout(_)
+            | Error::Protocol(_)
+            | Error::Redirect(_)
+            | Error::UnexpectedStatus { .. }
+            | Error::Decode { .. }
+            | Error::InterruptedBody(_) => None,
         }
     }
 }
@@ -425,6 +489,73 @@ mod tests {
         }
     }
 
+    /// `status` answers exactly for the two classes that carry a response status; every other class,
+    /// including `Decode`, has none to report.
+    #[test]
+    fn status_is_present_exactly_on_the_two_status_variants() {
+        for error in every_variant() {
+            let expected = match &error {
+                Error::Api(value) => Some(value.status()),
+                Error::UnexpectedStatus { status, .. } => Some(*status),
+                Error::RequestConstruction(_)
+                | Error::Transport(_)
+                | Error::Timeout(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::Decode { .. }
+                | Error::InterruptedBody(_) => None,
+            };
+            assert_eq!(error.status(), expected, "status() disagrees for {error}");
+        }
+        let statuses: Vec<_> = every_variant().iter().filter_map(Error::status).collect();
+        assert_eq!(statuses, [StatusCode::BAD_REQUEST, StatusCode::IM_A_TEAPOT]);
+    }
+
+    /// Generated clients hold `Error<Infallible>` for an operation with no documented error body,
+    /// so `status` is pinned on that instantiation too, over every variant it can hold (`Api` is
+    /// statically unreachable there): only `UnexpectedStatus` answers, with its own code.
+    #[test]
+    fn status_on_an_uninhabited_api_error_is_present_only_for_unexpected_status() {
+        let narrow: Vec<Error<std::convert::Infallible>> = vec![
+            Error::request_message("bad path segment"),
+            Error::Transport(TransportError::new(reqwest_error())),
+            Error::Timeout(TimeoutKind::Connect),
+            Error::Protocol(super::ProtocolError {
+                source: reqwest_error(),
+            }),
+            Error::Redirect(super::RedirectError {
+                source: reqwest_error(),
+            }),
+            Error::UnexpectedStatus {
+                status: StatusCode::IM_A_TEAPOT,
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(b"teapot"),
+            },
+            Error::Decode {
+                path: "items[0].id".to_owned(),
+                body: Bytes::from_static(b"{}"),
+                truncated: true,
+            },
+            Error::InterruptedBody(TransportError::new(reqwest_error())),
+        ];
+        for error in &narrow {
+            let expected = match error {
+                Error::Api(value) => match *value.inner() {},
+                Error::UnexpectedStatus { status, .. } => Some(*status),
+                Error::RequestConstruction(_)
+                | Error::Transport(_)
+                | Error::Timeout(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::Decode { .. }
+                | Error::InterruptedBody(_) => None,
+            };
+            assert_eq!(error.status(), expected, "status() disagrees for {error}");
+        }
+        let statuses: Vec<_> = narrow.iter().filter_map(Error::status).collect();
+        assert_eq!(statuses, [StatusCode::IM_A_TEAPOT]);
+    }
+
     #[test]
     fn a_retryable_status_is_retryable_through_both_status_variants() {
         for status in [StatusCode::TOO_MANY_REQUESTS, StatusCode::BAD_GATEWAY] {
@@ -555,5 +686,89 @@ mod tests {
         assert_eq!(path, "a.b");
         assert_eq!(body, Bytes::from_static(b"raw"));
         assert!(truncated);
+    }
+
+    impl super::ApiErrorBody for ApiBody {
+        type Body = str;
+        fn body(&self) -> Option<&str> {
+            Some(self.0)
+        }
+    }
+
+    /// `api_body` is `Some` exactly on the documented-API variant; every other class carries no
+    /// typed body, and a future variant added to `every_variant` is classified here too.
+    #[test]
+    fn api_body_is_present_exactly_on_the_documented_api_error() {
+        for error in every_variant() {
+            let expected = match &error {
+                // The documented API error carries the operation's typed body.
+                Error::Api(_) => true,
+                // Every other class carries none.
+                Error::RequestConstruction(_)
+                | Error::Transport(_)
+                | Error::Timeout(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::UnexpectedStatus { .. }
+                | Error::Decode { .. }
+                | Error::InterruptedBody(_) => false,
+            };
+            assert_eq!(
+                error.api_body().is_some(),
+                expected,
+                "api_body disagrees for {error}"
+            );
+        }
+        let api = Error::Api(ResponseValue::new(
+            StatusCode::BAD_REQUEST,
+            HeaderMap::new(),
+            ApiBody("bad request"),
+        ));
+        assert_eq!(api.api_body(), Some("bad request"));
+    }
+
+    /// `status` and `api_body` read one `Error` from two sides, so they must agree on what each
+    /// class carries: a documented API error answers both from the same `ResponseValue`, an
+    /// undocumented status has a status but no typed body, and every other class has neither.
+    #[test]
+    fn status_and_api_body_agree_on_every_variant() {
+        for error in every_variant() {
+            match &error {
+                Error::Api(value) => {
+                    assert_eq!(error.status(), Some(value.status()), "{error}");
+                    let same_body =
+                        match (error.api_body(), super::ApiErrorBody::body(value.inner())) {
+                            (Some(answered), Some(carried)) => std::ptr::eq(answered, carried),
+                            _ => false,
+                        };
+                    assert!(
+                        same_body,
+                        "api_body is not the Api value's own body: {error}"
+                    );
+                }
+                Error::UnexpectedStatus { status, .. } => {
+                    assert_eq!(error.status(), Some(*status), "{error}");
+                    assert!(error.api_body().is_none(), "{error}");
+                }
+                Error::RequestConstruction(_)
+                | Error::Transport(_)
+                | Error::Timeout(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::Decode { .. }
+                | Error::InterruptedBody(_) => {
+                    assert!(error.status().is_none(), "{error}");
+                    assert!(error.api_body().is_none(), "{error}");
+                }
+            }
+        }
+    }
+
+    /// The no-documented-error shape is `Error<Infallible>`; `api_body` must still exist there so
+    /// generic callers compile against every operation, and it can only ever be `None`.
+    #[test]
+    fn an_uninhabited_error_body_is_never_present() {
+        let error = Error::<std::convert::Infallible>::Timeout(TimeoutKind::Total);
+        assert!(error.api_body().is_none());
     }
 }

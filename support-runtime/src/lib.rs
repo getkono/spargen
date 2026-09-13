@@ -68,7 +68,9 @@ pub use dispatch::{
     decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body,
     read_success_body, send, unexpected_status, StatusSpec,
 };
-pub use error::{Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError};
+pub use error::{
+    ApiErrorBody, Error, ProtocolError, RedirectError, RequestError, TimeoutKind, TransportError,
+};
 pub use header::{parse_header, require_header, HeaderError, HeaderShape};
 pub use middleware::{Middleware, MiddlewareBackend, Next};
 pub use paginate::{next_link, LinkPaginator};

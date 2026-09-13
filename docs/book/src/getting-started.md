@@ -82,6 +82,11 @@ requirement that could resolve below these versions or beyond the next semver br
 | `time = "0.3.55"` | `formatting`, `parsing` | Only when an enabled date/date-time mapping is actually emitted |
 | `tokio = "1.53.1"` | `rt`; optional and native-only | Only when your package declares the generated `blocking` feature |
 
+`tokio` may sit in any native-only `[target.…]` table, not only the spelling `spargen deps` prints: a
+`build.rs` audit evaluates those tables for the target being built, as Cargo does (a wasm32 build
+needs none), while `generate_api!`, which cannot see the target, requires them to jointly cover
+every non-wasm target.
+
 The audit happens during both `build.rs` and proc-macro expansion and fails compilation with
 `E023` before generated output is accepted. Cargo cannot add spec-derived features after it has
 resolved dependencies: build scripts and proc macros run later in the compilation. Spargen
@@ -165,7 +170,12 @@ Key points of the surface:
   Every generated error type implements `Display` and `std::error::Error`, so `Error<E>` works
   with `?` into `Box<dyn Error>`, `anyhow`, and `thiserror`. `Error::is_transient()` classifies
   retry-worthy failures — spargen ships no retry policy, but the runtime offers a bring-your-own
-  [retry adapter](./runtime.md).
+  [retry adapter](./runtime.md). An error enum whose bodied statuses carry the same body type
+  (one schema, or schemas that generate the same Rust type) gets `body()`, and it, the
+  single-body newtype, and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()`
+  hands that body back whichever status carried it (`Error::status()` reports that status, the
+  same value as `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by
+  variant instead.
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ## Next steps

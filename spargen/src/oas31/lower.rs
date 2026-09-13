@@ -2478,13 +2478,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
+        // A structured-suffix range such as `application/*+json` ranks with the concrete types its
+        // suffix covers, so it could win a tie or a rank and then be refused below as a range. While
+        // a sibling can be sent, it is withheld from the choice and reported as not generated.
+        let (candidates, withheld) = request_media_candidates(&body.content);
         let (media_name, object) = choose_media(
-            &body.content,
+            &candidates,
             &body.provenance,
             self.diags,
             BodyPosition::Request,
-            media_object_is_opaque,
+            |object: &&super::MediaTypeObject| media_object_is_opaque(object),
         )?;
+        if !withheld.is_empty() {
+            Diagnostic::warning(Code::AlternativeMediaIgnored, body.provenance.clone())
+                .message(format!(
+                    "`{media_name}` is generated; the alternative media type(s) `{}` are not",
+                    withheld.join("`, `")
+                ))
+                .remedy(
+                    "remove the alternatives, or omit this API segment with spargen::omit! and \
+                     hand-write the call",
+                )
+                .emit(self.diags);
+        }
         let object = self.resolve_media_object(object, media_name)?;
         let media = lower_media_type(media_name, &body.provenance, self.diags)?;
         // A media *range* describes what a server may return, not what a client sends: `Content-Type`
@@ -2495,6 +2511,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // selects a range for a request only once no concrete key beside it classifies, so this
         // fires only when the document offers nothing else spargen can send.
         if classify_media_range(media_essence(media_name)).is_some() {
+            Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                .message(format!(
+                    "media type `{media_name}` is a media range, which describes a family rather \
+                     than the concrete `Content-Type` a request must send"
+                ))
+                .remedy(
+                    "name the concrete media type the request body is sent as, or omit this API \
+                     segment with spargen::omit!",
+                )
+                .emit(self.diags);
+            return None;
+        }
+        // A structured-suffix range such as `application/*+json` is a range for the same reason,
+        // even though the suffix arms classify it as the codec its suffix names.
+        if media_essence_is_suffix_range(media_essence(media_name)) {
             Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
                 .message(format!(
                     "media type `{media_name}` is a media range, which describes a family rather \
@@ -4696,6 +4727,89 @@ fn media_object_is_opaque(object: &MediaTypeObject) -> bool {
     }
 }
 
+/// Whether a media type essence is a media type or range at all: exactly one `/` between two
+/// RFC 6838 § 4.2 `restricted-name`s, with `*` allowed only as the whole key (`*/*`), as the whole
+/// subtype (`type/*`), or in front of a structured syntax suffix (`application/*+json`, the range
+/// over every subtype carrying that suffix).
+///
+/// [`classify_media`] asks this first, so no arm can accept a key on the strength of a prefix or a
+/// suffix alone: not `text/plain/extra`, not `application/vnd.a/b+json`, and not the range `a/b/*`.
+/// Parameters are already gone, because every caller passes [`media_essence`] output. A key that
+/// fails is not a media type, so it classifies as nothing and takes the existing unsupported path:
+/// `E009` when it is the only candidate, or an ignored alternative under `W014` otherwise.
+fn media_type_is_well_formed(essence: &str) -> bool {
+    /// `restricted-name = restricted-name-first *126restricted-name-chars` (RFC 6838 § 4.2). ASCII
+    /// letters of either case are accepted; case sensitivity is left to the arms that match names.
+    fn restricted_name(name: &str) -> bool {
+        let bytes = name.as_bytes();
+        matches!(bytes.first(), Some(first) if first.is_ascii_alphanumeric())
+            && bytes.len() <= 127
+            && bytes.iter().all(|byte| {
+                byte.is_ascii_alphanumeric()
+                    || matches!(
+                        byte,
+                        b'!' | b'#' | b'$' | b'&' | b'-' | b'^' | b'_' | b'.' | b'+'
+                    )
+            })
+    }
+    let Some((kind, subtype)) = essence.split_once('/') else {
+        return false;
+    };
+    match (kind, subtype) {
+        ("*", "*") => true,
+        (_, "*") => restricted_name(kind),
+        _ => {
+            restricted_name(kind)
+                && match subtype.strip_prefix("*+") {
+                    Some(suffix) => restricted_name(suffix),
+                    None => restricted_name(subtype),
+                }
+        }
+    }
+}
+
+/// Whether a well-formed essence is a structured-suffix media **range** such as
+/// `application/*+json`, the range over every subtype carrying that suffix.
+///
+/// Unlike `type/*` and `*/*`, which [`classify_media_range`] gives their own family codec, a suffix
+/// range needs no codec of its own: the suffix arms of [`classify_media`] already read it the way
+/// the suffix says. It is still a range, though, and so it can no more be a request's
+/// `Content-Type` than `video/*` can.
+fn media_essence_is_suffix_range(essence: &str) -> bool {
+    essence
+        .split_once('/')
+        .is_some_and(|(_, subtype)| subtype.starts_with("*+"))
+}
+
+/// The request body `content` entries [`choose_media`] may select from, plus the structured-suffix
+/// ranges withheld from that choice.
+///
+/// A suffix range is withheld only while another entry is *sendable*: it classifies, it is neither
+/// kind of range, and it is not streaming media. Then the range, which a request cannot send,
+/// never outranks something it could. With no sendable sibling, nothing is withheld, the range is
+/// selected as before, and the request range check refuses it. Keys keep their document order.
+fn request_media_candidates<T>(content: &IndexMap<String, T>) -> (IndexMap<String, &T>, Vec<&str>) {
+    let suffix_range =
+        |essence: &str| media_essence_is_suffix_range(essence) && classify_media(essence).is_some();
+    let sendable = content.keys().any(|media| {
+        let essence = media_essence(media);
+        !suffix_range(essence)
+            && classify_media_range(essence).is_none()
+            && classify_media(essence)
+                .is_some_and(|(classified, _)| classified.stream_framing().is_none())
+    });
+    let mut candidates = IndexMap::new();
+    let mut withheld = Vec::new();
+    for (media, value) in content {
+        if sendable && suffix_range(media_essence(media)) {
+            withheld.push(media.as_str());
+        } else {
+            candidates.insert(media.clone(), value);
+        }
+    }
+    (candidates, withheld)
+}
+
 fn media_essence(media: &str) -> &str {
     media.split(';').next().unwrap_or(media).trim()
 }
@@ -4705,6 +4819,9 @@ fn media_essence(media: &str) -> &str {
 /// GitHub's documented octocat representation is a textual vendor media type. Concrete members of
 /// the `image`, `audio`, and `video` families are opaque octets, like the ranges naming them.
 fn classify_media(essence: &str) -> Option<(MediaType, u8)> {
+    if !media_type_is_well_formed(essence) {
+        return None;
+    }
     if let Some(range) = classify_media_range(essence) {
         return Some(range);
     }

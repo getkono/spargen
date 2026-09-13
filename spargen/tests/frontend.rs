@@ -6550,6 +6550,655 @@ paths:
 }
 
 #[test]
+fn e009_a_media_range_with_an_extra_slash_is_unsupported() {
+    // `a/b/*` ends in `/*`, but what precedes the suffix is `a/b`, which is not a type name. It was
+    // read as the family `a/b` and generated as opaque octets. A key that is not a media range names
+    // no family, so it is unsupported like any other key that is not a media type.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            "a/b/*": { schema: {} }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+}
+
+/// Assert that each `(key, request, schema)` case, as the sole `content` key of a request body
+/// (`request`) or a response, is rejected with `E009` through both `generate` and `check`.
+fn assert_each_media_key_is_unsupported(cases: &[(&str, bool, &str)]) {
+    fn document(key: &str, request: bool, schema: &str) -> String {
+        if request {
+            format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    post:
+      operationId: postX
+      requestBody:
+        required: true
+        content:
+          "{key}": {{ schema: {schema} }}
+      responses:
+        "204": {{ description: No Content }}
+"##
+            )
+        } else {
+            format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            "{key}": {{ schema: {schema} }}
+"##
+            )
+        }
+    }
+    for &(key, request, schema) in cases {
+        let spec = document(key, request, schema);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{key}` through {entry}: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::UnsupportedMediaType),
+                "`{key}` through {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn e009_a_media_key_that_is_not_a_restricted_name_is_unsupported() {
+    // A media type is exactly one `/` between two RFC 6838 § 4.2 restricted names. Each key below
+    // breaks that, yet most reached a codec through an arm that matched only part of the key: the
+    // `text/` prefix, the `application/…+json` suffix, or a range's `/*`. `image/jpeg/extra` pins
+    // the concrete binary family, which must not be read as `image` octets.
+    // One byte past the 127-byte limit on a restricted name.
+    let too_long = format!("text/{}", "a".repeat(128));
+    assert_each_media_key_is_unsupported(&[
+        ("image/jpeg/extra", true, "{}"),
+        ("text/plain/extra", false, "{ type: string }"),
+        ("application/vnd.a/b+json", true, "{ type: object }"),
+        ("text/", false, "{ type: string }"),
+        ("text/pl ain", false, "{ type: string }"),
+        ("**/*", false, "{}"),
+        (too_long.as_str(), false, "{ type: string }"),
+    ]);
+}
+
+#[test]
+fn e009_a_wildcard_inside_a_name_is_unsupported() {
+    // `*` is a whole-name wildcard, never part of a name: `*/json` is no range (a range fixes the
+    // type and wildcards the subtype), and `image/pn*` is no type at all. Neither ever reached an
+    // arm, so `text/pl*in` and `application/vn*+json` are here to discriminate: without the rule,
+    // the `text/` prefix arm and the `+json` suffix arm would accept them.
+    assert_each_media_key_is_unsupported(&[
+        ("*/json", false, "{ type: object }"),
+        ("image/pn*", false, "{}"),
+        ("text/pl*in", false, "{ type: string }"),
+        ("application/vn*+json", false, "{ type: object }"),
+    ]);
+}
+
+#[test]
+fn e009_a_name_starting_with_a_symbol_is_unsupported() {
+    // `.`, `-` and the other symbols RFC 6838 § 4.2 permits may follow the first byte of a
+    // restricted name but may not be it, in the type position or the subtype position.
+    assert_each_media_key_is_unsupported(&[
+        (".type/x", false, "{ type: string }"),
+        ("-x/y", false, "{ type: string }"),
+        ("text/.plain", false, "{ type: string }"),
+        ("text/-plain", false, "{ type: string }"),
+    ]);
+}
+
+#[test]
+fn e009_a_malformed_parameter_content_key_is_unsupported() {
+    // Both parameter call sites classify their `content` key: a `content` parameter and a 3.2
+    // `in: querystring` parameter. Neither may render a value through a key that is not a type.
+    let content_parameter = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      parameters:
+        - name: filter
+          in: query
+          content:
+            "text/plain/extra": { schema: { type: string } }
+      responses:
+        "204": { description: No Content }
+"##;
+    let querystring_parameter = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      parameters:
+        - name: q
+          in: querystring
+          content:
+            "text/plain/extra": { schema: { type: object } }
+      responses:
+        "204": { description: No Content }
+"##;
+    for spec in [content_parameter, querystring_parameter] {
+        for report in [generate(spec), check(spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(
+                report.diagnostics().iter().any(|diagnostic| {
+                    diagnostic.code == Code::UnsupportedMediaType
+                        && diagnostic.message == "media type `text/plain/extra` is not supported"
+                }),
+                "{report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn e009_a_malformed_response_header_content_key_is_unsupported() {
+    // A response header's `content` key is classified like any other, so a key that is not a type
+    // is reported rather than decoded as text on the strength of its `text/` prefix.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          headers:
+            X-Detail:
+              content:
+                "text/plain/extra": { schema: { type: string } }
+          content:
+            application/json: { schema: { type: string } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == Code::UnsupportedMediaType
+                    && diagnostic.message == "media type `text/plain/extra` is not supported"
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_multipart_part_content_type_is_not_diagnosed() {
+    // Pinned as it stands, not endorsed. A multipart part's `contentType` is a header value, not a
+    // `content` key: the part is built from the property's own type, and the declared string is
+    // attached verbatim through `mime_str`. Generation reports nothing for a malformed one. It
+    // surfaces only when a request is built, as a request-construction error, because reqwest's
+    // media type parser rejects the extra `/`.
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                note: { type: string }
+            encoding:
+              note: { contentType: "text/plain/extra" }
+      responses:
+        "204": { description: No Content }
+"##;
+    let (report, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for report in [&report, &checked] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+    assert!(code.contains("mime_str(\"text/plain/extra\")"), "{code}");
+    assert!(
+        code.contains("reqwest::multipart::Part::text(value.to_string())"),
+        "the part is built from the string property, not from the declared type: {code}"
+    );
+}
+
+#[test]
+fn w014_a_malformed_key_beside_a_well_formed_sibling_is_ignored() {
+    // A malformed key does not reject the whole map when a well-formed sibling exists: only that
+    // key is dropped, and it is named under W014 like any other alternative that is not generated.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            "text/plain/extra": { schema: { type: string } }
+            application/json:
+              schema: { type: object, required: [id], properties: { id: { type: integer } } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for report in [&report, &checked] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|diagnostic| {
+                diagnostic.code == Code::AlternativeMediaIgnored
+                    && diagnostic.message
+                        == "`application/json` is generated; the alternative media type(s) \
+                            `text/plain/extra` are not"
+            }),
+            "{report:#?}"
+        );
+    }
+    assert!(code.contains("pub type ResponseBodyid = i64;"), "{code}");
+}
+
+#[test]
+fn well_formed_media_keys_still_generate() {
+    // The restricted-name check must not reject what real descriptions write: dotted vendor `+json`
+    // types, a key with parameters (stripped before the check), both kinds of range, every
+    // non-alphanumeric byte RFC 6838 permits, and a subtype at exactly the 127-byte limit.
+    let at_limit = format!("text/{}", "a".repeat(127));
+    let keys = [
+        ("application/vnd.github+json", "{ type: object }"),
+        ("application/vnd.github.v3.star+json", "{ type: object }"),
+        ("text/plain; charset=utf-8", "{ type: string }"),
+        ("*/*", "{}"),
+        ("application/*", "{}"),
+        ("text/x-a!b#c$d&e^f_g.h+i", "{ type: string }"),
+        (at_limit.as_str(), "{ type: string }"),
+    ];
+    // One operation per key, each with a single content entry, so no key competes with another.
+    let mut spec = String::from("openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n");
+    for (index, (key, schema)) in keys.into_iter().enumerate() {
+        spec += &format!(
+            r##"  /op{index}:
+    get:
+      operationId: op{index}
+      responses:
+        "200":
+          description: OK
+          content:
+            "{key}": {{ schema: {schema} }}
+"##
+        );
+    }
+    let (report, code) = generate_with_code(&spec);
+    let checked = check(&spec);
+    for report in [&report, &checked] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+    // Seven operations share the `ResponseBody` name, so each alias carries a disambiguating suffix.
+    let opaque = code
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            line.starts_with("pub type ResponseBody") && line.ends_with(" = bytes::Bytes;")
+        })
+        .count();
+    assert_eq!(
+        opaque, 2,
+        "exactly the `*/*` and `application/*` ranges are opaque octets: {code}"
+    );
+}
+
+#[test]
+fn a_structured_suffix_range_response_generates_json() {
+    // `application/*+json` is a media range over every structured JSON subtype (RFC 9110's
+    // media-range grammar, with RFC 6838 § 4.2.8 structured syntax suffixes). The support matrix
+    // promises it as JSON, and a response offering it alone is decoded as JSON rather than
+    // rejected for its `*`.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            "application/*+json":
+              schema: { type: object, required: [id], properties: { id: { type: integer } } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for report in [&report, &checked] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
+    }
+    assert!(
+        code.contains("pub struct ResponseBody {")
+            && code.contains("pub type ResponseBodyid = i64;"),
+        "a typed JSON body, not bytes or text: {code}"
+    );
+}
+
+#[test]
+fn e009_a_structured_suffix_range_cannot_be_a_request_content_type() {
+    // A request puts its media key on the wire verbatim, and `Content-Type: application/*+json`
+    // names a family rather than a type, exactly like `video/*`. It is rejected as a range.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      operationId: postX
+      requestBody:
+        required: true
+        content:
+          "application/*+json": { schema: { type: object } }
+      responses:
+        "204": { description: No Content }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.code == Code::UnsupportedMediaType
+                    && diagnostic.message.contains("is a media range")),
+            "{report:#?}"
+        );
+    }
+}
+
+/// A request body whose `content` lists `application/*+json` first and then `sibling`.
+fn suffix_range_request_document(sibling: &str, sibling_schema: &str) -> String {
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    post:
+      operationId: postX
+      requestBody:
+        required: true
+        content:
+          "application/*+json": {{ schema: {{ type: object }} }}
+          "{sibling}": {{ schema: {sibling_schema} }}
+      responses:
+        "204": {{ description: No Content }}
+"##
+    )
+}
+
+#[test]
+fn w014_a_structured_suffix_range_yields_to_a_sendable_request_sibling() {
+    // `application/*+json` ranks with the concrete JSON types, so listed first it would win the
+    // tie by source order and then be refused as a range, rejecting a body that offered something
+    // sendable. While a concrete sibling can be sent, the range is not a candidate: the sibling is
+    // generated and the range is reported as the alternative that is not, whatever the sibling's
+    // rank (`text/plain` ranks below every JSON type).
+    for (sibling, schema) in [
+        ("application/json", "{ type: object }"),
+        ("application/merge-patch+json", "{ type: object }"),
+        ("text/plain", "{ type: string }"),
+    ] {
+        let spec = suffix_range_request_document(sibling, schema);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::UnsupportedMediaType),
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+            let expected = format!(
+                "`{sibling}` is generated; the alternative media type(s) `application/*+json` are not"
+            );
+            assert!(
+                report.diagnostics().iter().any(|diagnostic| {
+                    diagnostic.code == Code::AlternativeMediaIgnored
+                        && diagnostic.message == expected
+                }),
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn e009_a_structured_suffix_range_with_no_sendable_request_sibling_is_unsupported() {
+    // With nothing beside it that a request could send, the suffix range is still what the body
+    // offers, and it is still refused as a range. Neither another range nor a streaming media
+    // counts as sendable.
+    for (sibling, schema) in [("video/*", "{}"), ("text/event-stream", "{ type: string }")] {
+        let spec = suffix_range_request_document(sibling, schema);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|diagnostic| {
+                    diagnostic.code == Code::UnsupportedMediaType
+                        && diagnostic
+                            .message
+                            .starts_with("media type `application/*+json` is a media range")
+                }),
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A request body whose `content` lists each `(key, schema)` entry in order.
+fn request_body_document(entries: &[(&str, &str)]) -> String {
+    let content: String = entries
+        .iter()
+        .map(|(key, schema)| format!("          \"{key}\": {{ schema: {schema} }}\n"))
+        .collect();
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    post:
+      operationId: postX
+      requestBody:
+        required: true
+        content:
+{content}      responses:
+        "204": {{ description: No Content }}
+"##
+    )
+}
+
+/// The message of every `code` diagnostic in `report`, in report order.
+fn messages_with_code(report: &Report, code: Code) -> Vec<&str> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == code)
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect()
+}
+
+#[test]
+fn w014_a_suffix_range_listed_after_a_sendable_request_sibling_is_withheld() {
+    // Order does not decide it. A sendable sibling listed before the range is generated and the
+    // range is named as not generated, even for a sibling whose rank the range's rank 0 would
+    // otherwise beat (`text/plain`).
+    for (sibling, schema) in [
+        ("application/json", "{ type: object }"),
+        ("text/plain", "{ type: string }"),
+    ] {
+        let spec = request_body_document(&[
+            (sibling, schema),
+            ("application/*+json", "{ type: object }"),
+        ]);
+        let expected = format!(
+            "`{sibling}` is generated; the alternative media type(s) `application/*+json` are not"
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::UnsupportedMediaType),
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+            assert_eq!(
+                messages_with_code(&report, Code::AlternativeMediaIgnored),
+                [expected.as_str()],
+                "`{sibling}` through {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn w014_every_suffix_range_beside_a_sendable_request_sibling_is_withheld() {
+    // Every structured-suffix range that classifies is withheld, not only the first, and all of
+    // them are named in one report.
+    let spec = request_body_document(&[
+        ("application/*+json", "{ type: object }"),
+        ("application/*+json-seq", "{ type: object }"),
+        ("application/json", "{ type: object }"),
+    ]);
+    for report in [generate(&spec), check(&spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+        assert_eq!(
+            messages_with_code(&report, Code::AlternativeMediaIgnored),
+            [
+                "`application/json` is generated; the alternative media type(s) \
+                 `application/*+json`, `application/*+json-seq` are not"
+            ],
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_a_suffix_range_beside_only_an_unclassified_request_sibling_is_a_media_range() {
+    // A sibling that does not classify is not sendable, so nothing is withheld: the range is still
+    // the only thing the body offers, and it is refused as a range.
+    let spec = request_body_document(&[
+        ("application/*+json", "{ type: object }"),
+        ("application/pdf", "{}"),
+    ]);
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            messages_with_code(&report, Code::UnsupportedMediaType)
+                .iter()
+                .any(|message| message
+                    .starts_with("media type `application/*+json` is a media range")),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_a_sendable_request_sibling_that_fails_its_own_gate_is_reported_for_itself() {
+    // Sendable is decided by classification alone. A `text/plain` sibling carrying an object schema
+    // is still chosen over the range, and then refused by the raw-text gate for its own reason
+    // rather than the range's.
+    let spec = request_body_document(&[
+        ("application/*+json", "{ type: object }"),
+        ("text/plain", "{ type: object }"),
+    ]);
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let unsupported = messages_with_code(&report, Code::UnsupportedMediaType);
+        assert!(
+            unsupported
+                .iter()
+                .all(|message| !message.contains("is a media range")),
+            "{report:#?}"
+        );
+        assert!(
+            unsupported
+                .iter()
+                .any(|message| message.contains("text/plain")),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_a_withheld_suffix_range_beside_two_request_entries_is_reported_separately() {
+    // Pinned as it stands. `choose_media` names the alternatives it passed over, and the withheld
+    // range gets its own W014 right after, so this body carries two: both true, always in this
+    // order.
+    let spec = request_body_document(&[
+        ("application/*+json", "{ type: object }"),
+        ("application/json", "{ type: object }"),
+        ("application/xml", "{ type: object }"),
+    ]);
+    for report in [generate(&spec), check(&spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{report:#?}"
+        );
+        assert_eq!(
+            messages_with_code(&report, Code::AlternativeMediaIgnored),
+            [
+                "`application/json` is generated; the alternative media type(s) \
+                 `application/xml` are not",
+                "`application/json` is generated; the alternative media type(s) \
+                 `application/*+json` are not",
+            ],
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn a_sequential_media_outranks_a_text_range() {
     // `text/*` used to classify as `Text` by accident of the `text/` prefix arm, at the same rank
     // as a concrete textual type and *above* sequential media — so this response was a whole-body
