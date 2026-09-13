@@ -5391,6 +5391,52 @@ paths:
 }
 
 #[test]
+fn a_concrete_binary_key_is_the_sendable_sibling_that_withholds_a_suffix_range() {
+    // A structured-suffix range such as `application/*+json` is withheld from a request's choice
+    // while a sibling can be sent. A concrete `image/png` is such a sibling: it classifies, is no
+    // range, and is not streaming. So the request sends `image/png`, and the withheld range is
+    // reported as the alternative not generated rather than selected and then refused.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /avatar:
+    put:
+      operationId: putAvatar
+      requestBody:
+        required: true
+        content:
+          application/*+json: { schema: { type: object } }
+          image/png: { schema: {} }
+      responses:
+        "204": { description: No Content }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(
+        code.contains("pub type RequestBody = bytes::Bytes;"),
+        "{code}"
+    );
+    assert!(code.contains("\"image/png\""), "{code}");
+    assert!(!code.contains("\"application/*+json\""), "{code}");
+    for report in [report, check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::AlternativeMediaIgnored
+                    && d.message.contains("`image/png` is generated")
+                    && d.message.contains("`application/*+json`")
+            }),
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
 fn e009_a_request_offering_only_ranges_is_rejected_on_the_first() {
     // With no concrete key at all every candidate is a range, so the ladder and then source order
     // decide as before: `video/*` ties `*/*` at the same rank and, listed first, is selected; the
