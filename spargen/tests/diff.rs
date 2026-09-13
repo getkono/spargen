@@ -409,6 +409,120 @@ fn changing_a_documented_error_type_is_major() {
     assert_eq!(report.bump, Impact::Major);
 }
 
+/// `get /pets` with documented `404` and `409` bodies, plus `extra` status entries spliced in at
+/// 8-space indent (a bodyless `'410'`, and so on).
+fn with_errors(e404: &str, e409: &str, extra: &str) -> String {
+    format!(
+        "  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {{ $ref: '#/components/schemas/Pet' }}
+        '404':
+          description: missing
+          content:
+            application/json:
+              schema: {e404}
+        '409':
+          description: conflict
+          content:
+            application/json:
+              schema: {e409}
+{extra}"
+    )
+}
+
+const MESSAGE_REF: &str = "{ $ref: '#/components/schemas/Message' }";
+
+const MESSAGE_SCHEMA: &str = "    Message:
+      type: string
+";
+
+#[test]
+fn an_alias_equal_error_body_keeps_api_error_body_and_is_patch() {
+    // Both statuses `$ref` a string component, then `409` becomes an inline string. The two
+    // schemas have different ids, but both bodies are still `String`: the error type keeps
+    // `body()` and `ApiErrorBody`, so nothing a consumer wrote breaks.
+    let schemas = format!("{PET_SCHEMA}{MESSAGE_SCHEMA}");
+    let old = full(&with_errors(MESSAGE_REF, MESSAGE_REF, ""), &schemas);
+    let new = full(&with_errors(MESSAGE_REF, "{ type: string }", ""), &schemas);
+    let report = diff(&old, &new);
+    assert!(report.changes.is_empty(), "changes: {:?}", report.changes);
+    assert_eq!(report.bump, Impact::Patch);
+}
+
+#[test]
+fn losing_api_error_body_is_major_and_gaining_it_is_minor() {
+    let uniform = full(
+        &with_errors("{ type: string }", "{ type: string }", ""),
+        PET_SCHEMA,
+    );
+    let mixed = full(
+        &with_errors("{ type: string }", "{ type: integer }", ""),
+        PET_SCHEMA,
+    );
+
+    // `body()`, `Error::api_body()`, and every `E: ApiErrorBody` bound stop compiling.
+    let lost = diff(&uniform, &mixed);
+    let lost_kinds = kinds(&lost);
+    assert!(
+        lost_kinds.contains(&ChangeKind::ErrorTypeChanged),
+        "{lost_kinds:?}"
+    );
+    assert!(
+        lost_kinds.contains(&ChangeKind::ApiErrorBodyRemoved),
+        "{lost_kinds:?}"
+    );
+    assert_eq!(lost.bump, Impact::Major);
+
+    // The reverse gains the trait: additive on its own, though the signature change beside it
+    // still makes the pair breaking.
+    let gained = diff(&mixed, &uniform);
+    let added = gained
+        .changes
+        .iter()
+        .find(|change| change.kind == ChangeKind::ApiErrorBodyAdded)
+        .unwrap_or_else(|| panic!("gaining ApiErrorBody is reported: {:?}", gained.changes));
+    assert_eq!(added.impact, Impact::Minor);
+    assert_eq!(gained.bump, Impact::Major);
+}
+
+#[test]
+fn api_error_body_loss_is_reported_where_the_error_signature_cannot_see_it() {
+    // A bodyless `410` and a `410` whose JSON body is exactly `null` both render as `410:()` in
+    // the error signature, so no `ErrorTypeChanged` fires. The `null` body is a third body type
+    // beside two `String`s, though, so the error type stops implementing `ApiErrorBody`.
+    let bodyless = "        '410':
+          description: gone
+";
+    let null_body = "        '410':
+          description: gone
+          content:
+            application/json:
+              schema: { const: null }
+";
+    let old = full(
+        &with_errors("{ type: string }", "{ type: string }", bodyless),
+        PET_SCHEMA,
+    );
+    let new = full(
+        &with_errors("{ type: string }", "{ type: string }", null_body),
+        PET_SCHEMA,
+    );
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::ApiErrorBodyRemoved],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
 #[test]
 fn removing_a_parameter_is_major() {
     let report = diff(&spec(PARAM_OPTIONAL_INT, "id", PET_PROPS, ""), &base());
