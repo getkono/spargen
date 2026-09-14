@@ -2824,6 +2824,67 @@ serde_json.workspace = true
     }
 
     #[test]
+    fn the_nearest_unreadable_ancestor_is_the_one_the_walk_reports() {
+        // The walk remembers the *first* unparseable candidate it meets and never overwrites it,
+        // so the file a reader is sent to open is the one closest to their crate. With two broken
+        // manifests on one path and no `[workspace]` anywhere, only that choice is observable, and
+        // no other fixture puts two of them on a single walk.
+        let directory = tempfile::tempdir().unwrap();
+        let far = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let near_dir = directory.path().join("near");
+        let member_dir = near_dir.join("client");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        let near = Utf8PathBuf::from_path_buf(near_dir.join("Cargo.toml")).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(&far, "[workspace\nbroken = ").unwrap();
+        std::fs::write(&near, "[workspace\nalso broken = ").unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        let message = messages(&diagnostics);
+        assert!(message.contains(near.as_str()), "{message}");
+        assert!(!message.contains(far.as_str()), "{message}");
+    }
+
+    #[test]
+    fn a_self_rooted_manifest_reached_by_a_relative_path_is_recorded_once() {
+        // A self-rooted manifest is the consumer manifest, already read and already recorded, so
+        // resolution must not read it a second time or record it again. Reached by an absolute
+        // path the duplicate is invisible — `manifests` is sorted and deduplicated — so the guard
+        // has to come in through the `generate_api!` `./Cargo.toml` fallback, where the second
+        // spelling is a different string and Cargo would receive two `rerun-if-changed` directives
+        // for one file.
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[workspace]\n\n\
+                 [workspace.dependencies]\n{}\n{CORE_INHERITED}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+
+        let _lock = WORKING_DIRECTORY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreWorkingDirectory(std::env::current_dir().unwrap());
+        std::env::set_current_dir(directory.path()).unwrap();
+
+        let result = audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        assert_eq!(
+            result.manifests,
+            vec![Utf8PathBuf::from("Cargo.toml")],
+            "the consumer manifest must be recorded once, under the spelling it was given"
+        );
+    }
+
+    #[test]
     fn an_unresolvable_inheritance_says_where_the_lookup_went() {
         // One message used to cover two opposite situations: the workspace has no such entry (fix
         // the root), and no workspace was found at all (fix the layout, or spell the version out).
