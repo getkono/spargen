@@ -313,6 +313,17 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
             .any(|d| d.message.contains("get /dynamic")),
         "carved operation reported: {report:#?}"
     );
+    // The cascade this spec is built for: omitting `Bad` leaves `/uses-bad` referencing a component
+    // that is no longer declared, which the next round rejects as `E004` against that operation's
+    // own pointer, so the round after carves the operation too. Without that pointer the rejection
+    // would be un-carvable residual and the whole run would end `Rejected`.
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("get /uses-bad")),
+        "the operation referencing the carved component cascaded: {report:#?}"
+    );
     assert!(
         !report
             .diagnostics()

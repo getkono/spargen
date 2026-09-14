@@ -58,8 +58,10 @@ pub(crate) fn lower(
         depth: 0,
     };
 
+    // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
+    // provenance is never used for a rejection; the document root is the only site there is.
     for name in document.components.schemas.keys() {
-        let _ = ctx.ensure_component(name);
+        let _ = ctx.ensure_component(name, &document.provenance);
     }
 
     let mut operations = Vec::new();
@@ -386,7 +388,15 @@ struct LowerCtx<'a, 'doc> {
 }
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
-    fn ensure_component(&mut self, name: &str) -> Option<Ty> {
+    /// Lower `#/components/schemas/{name}` to its shared type, lowering it on first use and
+    /// returning the cached type on every later one.
+    ///
+    /// `at` is the provenance of the `$ref` site asking for the component, not the component's own:
+    /// when `name` is not declared at all there is no component to point at, so the diagnostic has
+    /// to name the reference that could not be followed. That pointer is also what
+    /// [`crate::compat`]'s auto-carve maps back to an enclosing operation, so a root-level
+    /// provenance here would make the rejection un-carvable.
+    fn ensure_component(&mut self, name: &str, at: &crate::diag::Provenance) -> Option<Ty> {
         if let Some(&(id, nullable)) = self.components.get(name) {
             return Some(Ty {
                 id,
@@ -404,7 +414,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 boxed: true,
             });
         }
-        let component = self.document.components.schemas.get(name)?;
+        // No such component. Report it against the referring site rather than dropping the
+        // construct that named it: a silently-dropped `$ref` takes its request body, response, or
+        // parameter with it, which is exactly the silent degradation the taxonomy forbids. The
+        // wording matches the parameter/request-body/response component arms, which already reject.
+        let Some(component) = self.document.components.schemas.get(name) else {
+            return self.reject_component_alias(
+                at,
+                "schema",
+                &format!("#/components/schemas/{name}"),
+            );
+        };
         let RefOr::Item(schema) = component else {
             let reference = match component {
                 RefOr::Ref(reference) => reference.clone(),
@@ -420,7 +440,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             let ty = if let Some(target) = reference.reference.strip_prefix("#/components/schemas/")
             {
-                self.ensure_component(target)
+                self.ensure_component(target, &reference.provenance)
             } else if is_remote_ref(&reference.reference) {
                 self.ensure_remote(&reference.reference)
             } else {
@@ -593,7 +613,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         if let Some(reference) = &schema.reference {
             let referenced = if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                self.ensure_component(name)?
+                self.ensure_component(name, &schema.provenance)?
                 // Remote refs go through the cycle-safe, deduped remote path (keyed by
                 // `url#fragment`), mirroring `ensure_component`; a bare relative/other ref falls
                 // through to `resolve`, which reports it (E003/E004).
@@ -996,7 +1016,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let SchemaOr::Schema(schema) = member {
             if let Some(reference) = &schema.reference {
                 if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                    let ty = self.ensure_component(name)?;
+                    let ty = self.ensure_component(name, &schema.provenance)?;
                     return Some((ty, Some(name.to_owned())));
                 }
             }
@@ -1552,7 +1572,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          lowered",
                     );
                 }
-                let ty = self.ensure_component(name)?;
+                let ty = self.ensure_component(name, &schema.provenance)?;
                 self.push_ref_member(ty, out);
                 return Some(());
             }
@@ -3723,7 +3743,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             RefOr::Item(schema) => self.lower_schema(schema, hint),
             RefOr::Ref(reference) => {
                 if let Some(name) = reference.reference.strip_prefix("#/components/schemas/") {
-                    self.ensure_component(name)
+                    self.ensure_component(name, &reference.provenance)
                 } else if is_remote_ref(&reference.reference) {
                     self.ensure_remote(&reference.reference)
                 } else {
