@@ -1637,6 +1637,161 @@ components:
     );
 }
 
+/// A recursive schema whose back-edge `$ref` carries **shape siblings**.
+///
+/// In JSON Schema 2020-12 `$ref` is an applicator, not a replacement, so the reference and its
+/// siblings intersect — `lower_schema_inner` says exactly that four lines above the site. When the
+/// reference is a cycle-closing back-edge, the `Ty` it returns points at a *reservation* whose body
+/// has not been lowered yet. Intersecting against it read the reservation's placeholder kind, and an
+/// intersection with an untyped value is the sibling alone, so **the `$ref` applicator was silently
+/// discarded**: `Node`'s own `label` and `child` vanish from the child's type, and the matching
+/// subtree of a conforming payload deserialises into nothing.
+///
+/// The fields are not merely absent from the Rust type — there is no diagnostic, which is the
+/// standing invariant verbatim. `is_in_progress_root`'s own documentation states the rule this site
+/// broke: the only safe thing to do with a reservation is refuse to read it.
+///
+/// All three spellings are pinned because all three reach it. The root-document form is **not** a
+/// control here: it reproduces byte-identically on `2aa5ada`, so this is a pre-existing defect that
+/// the resolved-reference memo widened the reach of rather than one the memo introduced.
+#[test]
+fn a_recursive_ref_with_shape_siblings_is_rejected_rather_than_silently_dropped() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        child:
+          $ref: 'PREFIX#/components/schemas/Node'
+          type: object
+          properties:
+            extra: { type: string }
+"##;
+
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        let (generated, checked, code) = split(
+            "./lib.yaml#/components/schemas/Node",
+            &LIB.replace("PREFIX", prefix),
+        );
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: the `$ref` applicator cannot be intersected against a schema \
+                 whose fields are not yet known, and dropping it silently is the degradation the \
+                 taxonomy forbids: {report:#?}"
+            );
+            assert!(
+                has_code(report, Code::AllOfIrreconcilable),
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+        // The observable damage, asserted directly rather than through the verdict: whatever is
+        // emitted, no type may carry the sibling's field while having silently lost the
+        // reference's.
+        assert!(
+            !code.contains("pub extra:") || code.contains("pub label:"),
+            "{spelling}: the sibling survived and the referenced component's fields did not: \
+             {code}"
+        );
+    }
+
+    // The same shape in the root document. It is pinned for the same reason and not as a control:
+    // it reproduces identically on the merge base, so the fault is older than this branch.
+    let root = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Node' }} }}
+{}"##,
+        LIB.replace("PREFIX", "")
+    );
+    let report = generate(&root);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+}
+
+/// A `oneOf` one of whose members is the union itself.
+///
+/// The member is a cycle-closing back-edge, so its `Ty` points at the union's own reservation. The
+/// emitted `Deserialize` therefore opens with `serde_json::from_value::<Box<Loop>>(value.clone())`
+/// — **the same impl, on the same value, with no base case** — so every decode recurses until the
+/// stack is exhausted. It compiles, and the `e2e` gate compiles generated output rather than
+/// decoding through every type, so nothing could have caught it.
+///
+/// A variant that *is* the whole union constrains nothing and cannot be decoded, so the right answer
+/// is a rejection. Both spellings and the root document are pinned; as with the sibling case above,
+/// the root form reproduces byte-identically on `2aa5ada`.
+#[test]
+fn a_union_variant_that_is_the_union_itself_is_rejected() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Loop:
+      oneOf:
+        - { $ref: 'PREFIX#/components/schemas/Loop' }
+        - { type: string }
+"##;
+
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        let (generated, checked, code) = split(
+            "./lib.yaml#/components/schemas/Loop",
+            &LIB.replace("PREFIX", prefix),
+        );
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: a variant that is the whole union decodes by re-entering its \
+                 own `Deserialize` on the same value: {report:#?}"
+            );
+            assert!(
+                has_code(report, Code::NonDisjointUnion),
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+        // The runtime shape itself: nothing may emit a `Deserialize` arm that calls back into the
+        // same type on the same value. That is what makes this a hang rather than a wrong type.
+        assert!(
+            !code.contains("from_value::<Box<Loop>>"),
+            "{spelling}: the emitted decoder re-enters itself with no base case: {code}"
+        );
+    }
+
+    let root = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Loop' }} }}
+{}"##,
+        LIB.replace("PREFIX", "")
+    );
+    let report = generate(&root);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
