@@ -492,8 +492,13 @@ mod tests {
         assert_eq!(source.to_string(), "no credential for `token`");
     }
 
-    /// The missing-credential cause is the payload itself, so the chain ends at `RequestError`
-    /// and the rendered text is exactly what the message-only error used to say.
+    /// The missing-credential cause is the payload itself, so the chain ends at `RequestError` —
+    /// one level shorter than the message-only error it replaced, which wrapped its text in a
+    /// `RequestCause`. The rendered text is *not* what that error said: master rendered
+    /// `(schemes: key, token)`, sorted and deduplicated across the whole requirement, and this
+    /// renders `(missing: key + token)`, grouped per alternative in declaration order. The break
+    /// is deliberate (the grouping is the payload's whole point) and is what the exact string
+    /// below pins.
     #[test]
     fn a_missing_credential_is_typed_and_ends_the_cause_chain() {
         let error = Error::<ApiBody>::RequestConstruction(RequestError::MissingCredential {
