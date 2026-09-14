@@ -3382,6 +3382,163 @@ fn e013_check_generate_parity() {
     assert!(has_code(&report, Code::AllOfIrreconcilable));
 }
 
+/// In JSON Schema 2020-12 `$ref` is an applicator, so a `$ref`'s shape-bearing siblings are
+/// intersected with the referenced schema rather than discarded. When that intersection is empty no
+/// value can satisfy the schema, which is a document error the author must hear about: before this
+/// was pinned, `spargen check` reported `clean` and the construct simply vanished — a request body
+/// whose method then took no body argument at all. Every construct that reaches the `$ref` arm of
+/// `LowerCtx::lower_schema_inner` must report `E013`, through both `generate` and `check`.
+#[test]
+fn e013_fires_when_a_ref_sibling_contradicts_its_target() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    // `Name` is a string; every site below intersects it with `type: integer`, which is empty.
+    const TAIL: &str = "components:\n  schemas:\n    Name: { type: string }\n";
+
+    // The issue's exact reproduction: the body vanished and `upload` lost its body argument.
+    let request_body = format!(
+        "{HEAD}{}{TAIL}",
+        r##"paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Name', type: integer }
+      responses: { '204': { description: ok } }
+"##
+    );
+    let response_body = format!(
+        "{HEAD}{}{TAIL}",
+        r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Name', type: integer }
+"##
+    );
+    let parameter = format!(
+        "{HEAD}{}{TAIL}",
+        r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      parameters:
+        - name: filter
+          in: query
+          schema: { $ref: '#/components/schemas/Name', type: integer }
+      responses: { '204': { description: ok } }
+"##
+    );
+    // A component property, which reaches the same arm through `object_body`/`ensure_component`.
+    let component_property = format!(
+        "{HEAD}paths: {{}}\n{}",
+        r##"components:
+  schemas:
+    Name: { type: string }
+    Holder:
+      type: object
+      properties:
+        field: { $ref: '#/components/schemas/Name', type: integer }
+      required: [field]
+"##
+    );
+
+    for (site, spec) in [
+        ("request body", &request_body),
+        ("response body", &response_body),
+        ("parameter", &parameter),
+        ("component property", &component_property),
+    ] {
+        let generated = generate(spec);
+        assert_eq!(
+            generated.outcome(),
+            Outcome::Rejected,
+            "`{site}` was not rejected: {generated:#?}"
+        );
+        assert!(
+            has_code(&generated, Code::AllOfIrreconcilable),
+            "`{site}` did not report E013: {generated:#?}"
+        );
+        let checked = check(spec);
+        assert_eq!(
+            checked.outcome(),
+            Outcome::Rejected,
+            "`{site}` was not rejected by check: {checked:#?}"
+        );
+        assert!(
+            has_code(&checked, Code::AllOfIrreconcilable),
+            "`{site}` did not report E013 through check: {checked:#?}"
+        );
+    }
+}
+
+/// A union whose only non-null member cannot satisfy the enclosing schema's own sibling constraints
+/// has no representable variant left. The multi-variant path already rejects that with `E007`
+/// ("every variant impossible"), so the one-member collapse must too — otherwise the diagnostic
+/// would depend on how many variants the author happened to write. It used to be dropped silently.
+#[test]
+fn e007_fires_when_a_single_real_member_union_contradicts_its_sibling() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths: {}
+components:
+  schemas:
+    Collapsed:
+      type: integer
+      oneOf:
+        - { type: string }
+        - { type: 'null' }
+"##;
+    let generated = generate(spec);
+    assert_eq!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    assert!(
+        has_code(&generated, Code::NonDisjointUnion),
+        "{generated:#?}"
+    );
+    let checked = check(spec);
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::NonDisjointUnion), "{checked:#?}");
+}
+
+/// The guard on the two rejections above: only an EMPTY intersection is an error. A sibling that
+/// merely narrows its target still lowers to the narrower type and generates, so the new rejection
+/// cannot creep into the ordinary applicator case.
+#[test]
+fn a_compatible_ref_sibling_still_generates() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Count', type: number }
+components:
+  schemas:
+    Count: { type: integer }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+    assert!(!code.contains("serde_json :: Value"), "{code}");
+}
+
 /// A self-referential component (`Node.next -> Node`) once recursed forever, then was rejected as
 /// E014. It must now generate: the cycle-closing `$ref` is boxed so the recursive type is finite.
 #[test]
