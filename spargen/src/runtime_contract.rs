@@ -3023,13 +3023,23 @@ serde_json.workspace = true
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
     }
 
-    /// One choice in `workspace_root` is left unguarded because nothing can guard it. The walk
-    /// starts at `absolute.parent().and_then(Utf8Path::parent)`, skipping the consumer's own
-    /// directory. Starting at `.parent()` instead would re-read a manifest already known to parse
-    /// — the audit parsed it — and already known to declare no `[workspace]`, since `workspace_root`
-    /// returns early when it does. It therefore falls through the `Ok(_) => {}` arm and climbs on,
-    /// producing identical output for every input. That mutant is **equivalent**, not a coverage
-    /// gap, and recording it is the only thing a test could contribute.
+    /// One choice in `workspace_root` is left unguarded, and the reason has a precondition that an
+    /// earlier version of this comment stated as though it were unconditional. The walk starts at
+    /// `absolute.parent().and_then(Utf8Path::parent)`, skipping the consumer's own directory.
+    /// Starting at `.parent()` instead re-reads the consumer's *directory*, whose `Cargo.toml` is
+    /// already known to parse and already known to declare no `[workspace]` — `workspace_root`
+    /// returns early when it does — so it falls through the `Ok(_) => {}` arm and climbs on.
+    ///
+    /// That holds **only when the audited manifest is itself named `Cargo.toml`**. Point the audit
+    /// at `dir/Other.toml` with a real workspace root beside it at `dir/Cargo.toml` and the two
+    /// differ sharply: the original skips the sibling and reports every inherited dependency
+    /// unresolvable, the mutant adopts it and reports nothing. So the mutant is equivalent **under
+    /// that precondition** and distinguishable without it.
+    ///
+    /// The precondition is not enforced anywhere: `manifest_from_env` returns `CARGO_MANIFEST_PATH`
+    /// verbatim with no filename check. It holds because Cargo sets that variable to a `Cargo.toml`
+    /// and because the `generate_api!` fallback is a literal `./Cargo.toml`, which is why this is a
+    /// comment rather than a fixture — there is no reachable input that distinguishes the two.
     #[test]
     fn the_walk_climbs_past_an_ancestor_that_parses_and_declares_no_workspace() {
         // "A manifest that parses but declares no `[workspace]` is an ordinary member or an
