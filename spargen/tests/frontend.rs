@@ -9732,3 +9732,120 @@ fn a_property_conflict_on_an_optional_property_does_not_empty_the_object() {
         }
     }
 }
+
+/// A null-only union MEMBER and a `"null"` in the enclosing `type` array are not the same fact, and
+/// only one of them can rescue an empty intersection.
+///
+/// A member supplies a branch that `null` validates against. A `"null"` in the enclosing `type`
+/// array only *permits* null — `oneOf` still demands exactly one matching member and `anyOf` at
+/// least one, so with no null member there is nothing for `null` to match and the schema admits
+/// nothing at all. Folding both into one flag made those two cases indistinguishable: an
+/// independent Draft 2020-12 validator says the first row below is satisfied by `null` and the
+/// second by **nothing**, and they produced byte-identical output — the tool could no longer tell
+/// "accepts only null" from "accepts nothing", and typed a body `()` that no real payload decodes
+/// into, with `check` reporting clean.
+#[test]
+fn only_a_null_member_can_rescue_an_empty_union_intersection() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+
+    // (what it exercises, the schema body, whether `null` satisfies it)
+    let cases: &[(&str, &str, bool)] = &[
+        // A null MEMBER: `null` matches it, and the enclosing `type` array permits null, so `null`
+        // satisfies the whole schema.
+        (
+            "a sole-member `oneOf` with a null member beside a nullable type array",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+        // The SAME enclosing type array with NO null member. Nothing satisfies this: `null` matches
+        // no member, and anything matching the `string` member fails the `type` array.
+        (
+            "a sole-member `oneOf` whose nullable type array supplies no null member",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }]",
+            false,
+        ),
+        (
+            "an `anyOf` whose nullable type array supplies no null member",
+            "type: [integer, 'null']\n                anyOf: [{ type: string }]",
+            false,
+        ),
+        // The same distinction on the every-variant-excluded path.
+        (
+            "an every-variant-excluded union with a null member",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }, { type: boolean }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "an every-variant-excluded union whose nullable type array supplies no null member",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }, { type: boolean }]",
+            false,
+        ),
+    ];
+
+    let mut emitted: Vec<(&str, String)> = Vec::new();
+    for (what, body, null_satisfies) in cases {
+        let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            if *null_satisfies {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "`{what}` is satisfied by `null`, so {entry} must not reject it: {report:#?}"
+                );
+            } else {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "`{what}` admits no value at all, so {entry} must reject it rather than type \
+                     the body `()`: {report:#?}"
+                );
+                assert!(
+                    has_code(&report, Code::NonDisjointUnion),
+                    "`{what}` did not report E007 through {entry}: {report:#?}"
+                );
+            }
+        }
+        let (_, code) = generate_with_code(&spec);
+        emitted.push((what, code));
+    }
+
+    // The sharpest form of the defect, and the one a per-case assertion cannot see: the satisfiable
+    // row and the unsatisfiable row emitted the SAME BYTES. Whatever they do, they must differ.
+    let satisfiable = &emitted[0].1;
+    for (what, code) in &emitted[1..3] {
+        assert_ne!(
+            satisfiable, code,
+            "`{what}` admits nothing while the first case admits `null`, yet they generate \
+             identical output — the distinction has been lost again"
+        );
+    }
+
+    // The control the whole repair must not disturb: a non-empty intersection under the same
+    // nullable type array is unaffected either way.
+    let control = format!(
+        "{HEAD}{}",
+        PATH.replace(
+            "BODY",
+            "type: [integer, 'null']\n                oneOf: [{ type: integer }]"
+        )
+    );
+    let (report, code) = generate_with_code(&control);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("= i64;"),
+        "the non-empty intersection must still lower to its narrowed type: {code}"
+    );
+}

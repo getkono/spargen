@@ -921,16 +921,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
         let sibling = self.lower_union_sibling(schema, hint)?;
 
-        // A `"null"` in the enclosing type array, or a null-only member, makes the union nullable.
-        let mut nullable = schema.types.types.contains(&JsonType::Null);
+        // Two DIFFERENT facts, tracked apart because only one of them can rescue an empty
+        // intersection. A null-only MEMBER supplies a branch that `null` validates against. A
+        // `"null"` in the enclosing `type` array only *permits* null: `oneOf` still demands exactly
+        // one matching member and `anyOf` at least one, so with no null member there is nothing for
+        // `null` to match and the schema admits nothing at all. Merging them made
+        // `{type: [integer,'null'], oneOf: [{type: string}]}` — which nothing satisfies —
+        // indistinguishable from the same document with a `{type: 'null'}` member, which only
+        // `null` satisfies.
+        let null_from_type_array = schema.types.types.contains(&JsonType::Null);
+        let mut null_from_member = false;
         let mut real_members: Vec<&SchemaOr> = Vec::new();
         for member in members {
             if member_is_null_only(member) {
-                nullable = true;
+                null_from_member = true;
             } else {
                 real_members.push(member);
             }
         }
+        // The union's overall acceptance needs both; only the rescues below need them apart.
+        let mut nullable = null_from_type_array || null_from_member;
 
         // Only null members remained: the exact JSON null type.
         if real_members.is_empty() {
@@ -945,14 +955,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if real_members.len() == 1 {
             let mut inner = self.lower_schema_or(real_members[0], hint)?;
             if let Some(sibling) = sibling {
-                // The union's own null acceptance — a `"null"` in the enclosing `type` array, or a
-                // null-only member — was folded into `nullable` above, BEFORE this intersection, so
-                // `inner` carries `nullable: false` and `type_accepts_null`, which reads
-                // `Ty::nullable`, cannot see it. Restore it onto `inner` first. Without this the
+                // The null-only MEMBER's branch was stripped out above, BEFORE this intersection,
+                // so `inner` carries `nullable: false` and `type_accepts_null` — which reads
+                // `Ty::nullable` — cannot see it. Restore exactly that branch. Without it the
                 // intersection reports empty for a schema `null` genuinely satisfies, and the
-                // `$ref` spelling of the identical instance set — where the target's nullability
-                // rides on its own `Ty` — generates while this one rejects.
-                inner.nullable = inner.nullable || nullable;
+                // `$ref` spelling of the identical instance set, where the target's nullability
+                // rides on its own `Ty`, generates while this one rejects.
+                //
+                // `null_from_type_array` is deliberately NOT restored here: it supplies no branch,
+                // and it already reaches the intersection on the sibling side, where it belongs —
+                // it can narrow what the result accepts, never create something to accept.
+                inner.nullable = inner.nullable || null_from_member;
                 let Some(constrained) =
                     self.intersect_types(inner, sibling, &format!("{hint}Constrained"))
                 else {
@@ -1034,12 +1047,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         if variants.is_empty() {
             // The same blind spot as the sole-member site above, on the pre-existing path: every
-            // REAL variant is impossible, but the union's own null acceptance was folded into
-            // `nullable` before any of them were intersected, so it is not among the variants that
-            // just vanished. When the sibling admits null too, `null` still satisfies the whole
-            // schema and the exact JSON null type is the answer — the same type the all-null-members
-            // branch above returns for the same reason.
-            if nullable && sibling.is_none_or(|sibling| self.ty_accepts_null(sibling)) {
+            // REAL variant is impossible, but a null-only member's branch was stripped out before
+            // any of them were intersected, so it is not among the variants that just vanished.
+            // When the sibling admits null too, `null` still satisfies the whole schema and the
+            // exact JSON null type is the answer — the same type the all-null-members branch above
+            // returns for the same reason. Again only the MEMBER-derived flag can rescue: a
+            // `"null"` in the enclosing `type` array leaves nothing for `null` to match.
+            if null_from_member && sibling.is_none_or(|sibling| self.ty_accepts_null(sibling)) {
                 return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
             }
             return self.reject_union(
