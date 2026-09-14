@@ -15,8 +15,9 @@ use crate::{AuthError, ResponseValue};
 pub enum Error<E> {
     /// #1 — the request could not be built before it was sent: no registered credential satisfies
     /// the operation's security requirement, a registered token provider failed, the base URL is
-    /// invalid, or a parameter or body did not serialize. [`RequestError`] types the two credential
-    /// causes.
+    /// invalid, a parameter or body did not serialize, or reqwest classified the failure as a
+    /// request error. [`RequestError`] types the two credential causes; every other cause,
+    /// including reqwest's own request-error class, arrives as [`RequestError::Other`].
     RequestConstruction(RequestError),
     /// #2 — DNS failure, connection refused/reset, TLS handshake or certificate error.
     Transport(TransportError),
@@ -276,8 +277,13 @@ pub enum RequestError {
     MissingCredential {
         /// One entry per alternative of the requirement, in declaration order: that alternative's
         /// `securitySchemes` keys that have no registered credential, in declaration order.
-        /// `mutualTLS` keys never appear (the transport satisfies them). Never empty, and no
-        /// inner list is empty.
+        /// `mutualTLS` keys never appear (the transport satisfies them).
+        ///
+        /// The runtime never builds an empty outer list, nor an empty inner one — it only reaches
+        /// this variant with at least one unregistered scheme per alternative. The field is public
+        /// inside the consumer's crate, though, so the invariant is not enforced by the type;
+        /// `Display` therefore omits the `(missing: …)` clause entirely rather than rendering an
+        /// empty one, and skips an empty alternative when listing.
         alternatives: Vec<Vec<&'static str>>,
     },
     /// The selected alternative's token provider returned an error. Raised before anything is
@@ -359,10 +365,20 @@ impl std::fmt::Display for RequestError {
         match self {
             RequestError::MissingCredential { alternatives } => {
                 f.write_str(
-                    "no registered credential satisfies the operation's security requirement \
-                     (missing: ",
+                    "no registered credential satisfies the operation's security requirement",
                 )?;
-                for (index, alternative) in alternatives.iter().enumerate() {
+                // `alternatives` is public inside the consumer's crate, so a hand-built value can
+                // name nothing. The runtime never builds one, so every value it does build renders
+                // exactly as it did before: a non-empty clause, in declaration order.
+                let mut named = alternatives
+                    .iter()
+                    .filter(|alternative| !alternative.is_empty())
+                    .peekable();
+                if named.peek().is_none() {
+                    return Ok(());
+                }
+                f.write_str(" (missing: ")?;
+                for (index, alternative) in named.enumerate() {
                     if index > 0 {
                         f.write_str(" or ")?;
                     }
@@ -504,6 +520,143 @@ mod tests {
         let inner = std::error::Error::source(source).expect("the cause is reachable");
         assert!(inner.downcast_ref::<Cause>().is_some());
         assert!(std::error::Error::source(inner).is_none());
+    }
+
+    /// `RequestCause` overrides `source` to forward to the boxed cause's *own* source rather than
+    /// to the box. Nothing else in the runtime calls it — `RequestError::source` hands out the box
+    /// itself — so without this the override could be deleted and nothing would notice.
+    #[test]
+    fn a_request_cause_forwards_source_to_the_boxed_causes_own_source() {
+        #[derive(Debug)]
+        struct Inner;
+
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("inner")
+            }
+        }
+
+        impl std::error::Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer(Inner);
+
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("outer")
+            }
+        }
+
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let error = Error::<ApiBody>::request_construction(Outer(Inner));
+        let Error::RequestConstruction(RequestError::Other(cause)) = &error else {
+            panic!("expected Other, got {error:?}");
+        };
+        assert_eq!(cause.to_string(), "outer");
+        let forwarded = std::error::Error::source(cause)
+            .expect("the wrapper forwards to the boxed cause's own source");
+        assert_eq!(forwarded.to_string(), "inner");
+        assert!(forwarded.downcast_ref::<Inner>().is_some());
+    }
+
+    /// One value of every `RequestError` variant, mirroring `every_variant` for `Error`: the match
+    /// in each test below is exhaustive over this list by construction, so a variant added to
+    /// `RequestError` — the second taxonomy whose variant set is the generated output's semver
+    /// surface — has to be added here, and then classified.
+    fn every_request_variant() -> Vec<RequestError> {
+        vec![
+            RequestError::MissingCredential {
+                alternatives: vec![vec!["token"], vec!["key", "tenant"]],
+            },
+            RequestError::CredentialProvider {
+                scheme: "token",
+                source: AuthError::new("refresh rejected"),
+            },
+            // The field is private, but these tests live in the defining module.
+            RequestError::Other(super::RequestCause(Box::new(super::MessageError(
+                "bad path segment".to_owned(),
+            )))),
+        ]
+    }
+
+    #[test]
+    fn every_request_variant_displays_exactly_what_names_its_cause() {
+        for error in every_request_variant() {
+            let rendered = error.to_string();
+            assert!(!rendered.is_empty(), "a variant renders as an empty string");
+            let expected = match &error {
+                RequestError::MissingCredential { .. } => {
+                    "no registered credential satisfies the operation's security requirement \
+                     (missing: token or key + tenant)"
+                }
+                RequestError::CredentialProvider { .. } => {
+                    "the token provider registered for security scheme `token` failed"
+                }
+                RequestError::Other(_) => "bad path segment",
+            };
+            assert_eq!(rendered, expected, "a variant does not name its cause");
+        }
+    }
+
+    /// `MissingCredential` *is* the whole cause, so it ends the chain; the other two carry a
+    /// separate cause and must hand it over. A consumer walking the chain must not find a phantom
+    /// source, nor lose a real one.
+    #[test]
+    fn request_source_is_present_exactly_where_the_cause_is_separate() {
+        for error in every_request_variant() {
+            let expected = match &error {
+                RequestError::MissingCredential { .. } => false,
+                RequestError::CredentialProvider { .. } | RequestError::Other(_) => true,
+            };
+            assert_eq!(
+                std::error::Error::source(&error).is_some(),
+                expected,
+                "source() disagrees for {error}"
+            );
+        }
+    }
+
+    /// Whatever the cause, a request was never sent: nothing to retry, no status, no typed body.
+    /// Pinned over every `RequestError` variant so a new one cannot arrive misclassified.
+    #[test]
+    fn no_request_variant_is_transient_or_carries_a_response() {
+        for request_error in every_request_variant() {
+            let error = Error::<ApiBody>::RequestConstruction(request_error);
+            assert!(!error.is_transient(), "{error} classified as transient");
+            assert_eq!(error.status(), None);
+            assert!(error.api_body().is_none());
+        }
+    }
+
+    /// The runtime never builds an alternative list with nothing to name, but the fields are public
+    /// inside the consumer's crate. Rendering stays total rather than trailing an empty clause.
+    #[test]
+    fn a_missing_credential_with_nothing_to_name_renders_without_the_clause() {
+        let empty = RequestError::MissingCredential {
+            alternatives: Vec::new(),
+        };
+        assert_eq!(
+            empty.to_string(),
+            "no registered credential satisfies the operation's security requirement"
+        );
+        let all_empty = RequestError::MissingCredential {
+            alternatives: vec![Vec::new(), Vec::new()],
+        };
+        assert_eq!(all_empty.to_string(), empty.to_string());
+        // A named alternative beside an empty one still renders, without a stray separator.
+        let mixed = RequestError::MissingCredential {
+            alternatives: vec![Vec::new(), vec!["token"], Vec::new()],
+        };
+        assert_eq!(
+            mixed.to_string(),
+            "no registered credential satisfies the operation's security requirement \
+             (missing: token)"
+        );
     }
 
     /// A typed API error body that is itself an `Error`, so `Error::source` can reach it.

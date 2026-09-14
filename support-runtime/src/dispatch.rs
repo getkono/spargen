@@ -622,6 +622,64 @@ mod tests {
         );
     }
 
+    /// A provider yields one secret, usable anywhere a token fits — not just as a bearer. The guard
+    /// that decides whether to ask it keys off the scheme *kind*, so the three `apiKey` kinds are
+    /// the branch a bearer-only reading of it would silently drop: every call would then fail as a
+    /// registration mismatch instead of attaching the refreshed token. One case per kind, since
+    /// each installs the token somewhere different.
+    #[test]
+    fn attaches_provider_token_under_every_api_key_kind() {
+        let refreshed = || {
+            Credential::Provider(Arc::new(|| {
+                Box::pin(async { Ok(SecretString::from("fresh")) }) as TokenFuture
+            }))
+        };
+
+        let mut core = core();
+        core.set_credential("key", refreshed());
+        let header = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "key",
+                kind: AuthKind::ApiKeyHeader("X-Api-Key"),
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(header.headers()["X-Api-Key"], "fresh");
+        // The refreshed token is a secret like any other, so it must not be printable.
+        assert!(header.headers()["X-Api-Key"].is_sensitive());
+
+        let query = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "key",
+                kind: AuthKind::ApiKeyQuery("api_key"),
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(query.url().query(), Some("api_key=fresh"));
+
+        let cookie = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "key",
+                kind: AuthKind::ApiKeyCookie("session"),
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(cookie.headers()[reqwest::header::COOKIE], "session=fresh");
+        assert!(cookie.headers()[reqwest::header::COOKIE].is_sensitive());
+    }
+
     #[test]
     fn attaches_api_key_query_from_first_satisfiable_alternative() {
         let mut core = core();
