@@ -411,6 +411,51 @@ components:
     }
 }
 
+/// The negative control for the rejection above: this change turns a previously-silent success
+/// into a rejection, so what it must NOT do is reject a `$ref` that resolves. A `$ref` carrying
+/// shape siblings is the narrow case — it is the one construct that reaches `ensure_component`
+/// through `lower_schema_inner`, and it is an intersection, so its target contributes fields rather
+/// than replacing it. Both sides must survive into the generated type.
+#[test]
+fn a_ref_with_shape_siblings_that_resolves_is_not_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Ext' } }
+components:
+  schemas:
+    Ext:
+      $ref: '#/components/schemas/Base'
+      type: object
+      properties: { extra: { type: string } }
+    Base:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    // The reference was genuinely followed, not merely tolerated: the sibling's own property and
+    // the referenced component's property are both present.
+    assert!(code.contains("pub extra"), "{code}");
+    assert!(code.contains("pub id"), "{code}");
+
+    // check/generate parity on the clean path too.
+    let checked = check(spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
+}
+
 /// A same-file `#/components/schemas/…` fragment that addresses a *subschema* rather than a
 /// top-level component name. spargen matches these by name only, so this is rejected — but the
 /// component it starts from is declared, and the identical pointer written against a relative file
