@@ -1794,6 +1794,79 @@ paths:
     assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
 }
 
+/// A sub-file schema that reaches a **root document** component twice, by explicit file reference.
+///
+/// `ensure_resolved` routes a resolved target that lands inside the root document's own component
+/// map back through `ensure_component`, so `components` stays that target's single identity. Round 4
+/// filed this branch as "executes but constrains nothing". That reading was wrong: disabling the
+/// branch leaves every suite green and gives **`["RootOne", "RootOne55e60dbe"]`** — two public types
+/// for one declared component, which is the precise defect this change exists to remove, in a shape
+/// it wrote a dedicated branch for.
+///
+/// The reason a second memo is not harmless is that it is a second *identity*: `resolved_components`
+/// would key the same schema by `file#pointer` while `components` keys it by name, and neither would
+/// see the other's entry.
+#[test]
+fn a_root_component_reached_by_file_reference_keeps_the_root_map_as_its_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Holder' } }
+components:
+  schemas:
+    RootOne:
+      type: object
+      required: [id]
+      properties: { id: { type: string } }
+"##,
+    )
+    .unwrap();
+    // Both properties address the root document's `RootOne` from inside the sub-file, spelled as a
+    // file reference — the only spelling that reaches the routing branch.
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Holder:
+      type: object
+      required: [first, second]
+      properties:
+        first: { $ref: './openapi.yaml#/components/schemas/RootOne' }
+        second: { $ref: './openapi.yaml#/components/schemas/RootOne' }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let code = std::fs::read_to_string(&out).unwrap();
+
+    let roots = declared_types(&code, "RootOne", |_| true);
+    assert_eq!(
+        roots.len(),
+        1,
+        "one declared component, one generated type — a resolved reference that lands on a root \
+         component must not take a second identity beside the root map: {roots:?}"
+    );
+    // Both uses reached it, so the count is not met by losing one of them.
+    assert!(code.contains("pub first: RootOne"), "{code}");
+    assert!(code.contains("pub second: RootOne"), "{code}");
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
