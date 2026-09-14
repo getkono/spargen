@@ -2711,6 +2711,66 @@ serde_json.workspace = true
     }
 
     #[test]
+    fn package_workspace_is_consulted_before_the_ancestor_walk() {
+        // The first edge of the documented precedence, and the one no fixture put in a single
+        // layout: a member that names a root with `package.workspace` *and* sits under an ancestor
+        // that is a perfectly good workspace root. Cargo takes the field; so must the audit. If the
+        // walk were consulted first the ancestor would resolve every inherited dependency and the
+        // audit would fall silent about a root the member explicitly named and that does not exist.
+        let directory = tempfile::tempdir().unwrap();
+        let ancestor = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &ancestor,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../elsewhere\"\n\n\
+                 {CORE_INHERITED}"
+            ),
+        )
+        .unwrap();
+
+        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        let message = messages(&diagnostics);
+        assert!(!diagnostics.is_empty(), "the named root does not exist");
+        assert!(message.contains("elsewhere"), "{message}");
+    }
+
+    #[test]
+    fn a_self_declared_workspace_wins_over_package_workspace() {
+        // The other edge: `[workspace]` in the consumer manifest is checked before
+        // `package.workspace`, so a manifest carrying both resolves against its own table. Reversed,
+        // the audit would chase a directory that is not there and report every inherited dependency
+        // as unresolvable, about a table it had already parsed.
+        let directory = tempfile::tempdir().unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../nowhere\"\n\n\
+                 [workspace]\n\n[workspace.dependencies]\n{}\n{CORE_INHERITED}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        assert_eq!(result.manifests, vec![member]);
+    }
+
+    #[test]
     fn a_relative_manifest_path_still_resolves_the_workspace_root() {
         // `generate_api!` falls back to a bare `./Cargo.toml` when Cargo names no manifest in the
         // environment. A one-component path has no ancestors to walk, so the workspace root was
