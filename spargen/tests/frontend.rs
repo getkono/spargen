@@ -1174,6 +1174,112 @@ components:
     }
 }
 
+/// An untyped (`{}`) sub-file component used as an `application/octet-stream` body by one operation
+/// and an `application/json` body by another.
+///
+/// `opaque_octets` retypes an untyped body to `bytes::Bytes`. When the type it is about to retype is
+/// the last definition inserted it rewrites it *in place*, which is right for a use-site type and
+/// catastrophic for a shared one — every other reference to that component silently becomes `Bytes`
+/// too. `is_component_root` exists to stop exactly that, and it consulted the root-component and
+/// remote memos but not the resolved-reference memo the preceding round added, so a sub-file
+/// component was not recognised as a named root.
+///
+/// The result was a JSON operation returning `bytes::Bytes` for a schema that is `serde_json::Value`
+/// — the wrong Rust type on a typed API, with no diagnostic. The root-document control below is the
+/// same shape and has always been correct, so what this pins is the memo the check reads, not the
+/// policy.
+#[test]
+fn an_untyped_sub_file_component_is_not_retyped_in_place_by_an_octet_use() {
+    let split_layout = |prefix: &str| {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /raw:
+    get:
+      operationId: getRaw
+      responses:
+        '200':
+          description: ok
+          content:
+            application/octet-stream: {{ schema: {{ $ref: '{prefix}#/components/schemas/Opaque' }} }}
+  /json:
+    get:
+      operationId: getJson
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '{prefix}#/components/schemas/Opaque' }} }}
+"##
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lib.yaml"),
+            "components:\n  schemas:\n    Opaque: {}\n",
+        )
+        .unwrap();
+        let out = dir.join("client.rs");
+        let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        (report, code)
+    };
+
+    let (report, code) = split_layout("./lib.yaml");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    // The shared component keeps the type its own schema declares. The octet use site gets its own
+    // `Bytes` type; it does not get to rewrite everyone else's.
+    assert!(
+        !code.contains("pub type Opaque = bytes::Bytes;"),
+        "an octet use retyped the shared component for every other reference: {code}"
+    );
+    assert!(
+        code.contains("pub type Opaque = serde_json::Value;"),
+        "{code}"
+    );
+
+    // The root-document control: identical shape, always correct, because `is_component_root`
+    // already consulted the map a root component lives in.
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /raw:
+    get:
+      operationId: getRaw
+      responses:
+        '200':
+          description: ok
+          content:
+            application/octet-stream: { schema: { $ref: '#/components/schemas/Opaque' } }
+  /json:
+    get:
+      operationId: getJson
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Opaque' } }
+components:
+  schemas:
+    Opaque: {}
+"##;
+    let (report, code) = generate_with_code(root);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("pub type Opaque = serde_json::Value;"),
+        "{code}"
+    );
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
