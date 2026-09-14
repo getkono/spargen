@@ -1017,6 +1017,163 @@ fn a_long_sub_file_ref_chain_still_exceeds_the_depth_cap() {
     }
 }
 
+/// An `allOf` member that is a direct `$ref` back to the sub-file schema currently being lowered.
+///
+/// `push_ref_member` decides a member's contribution by reading `graph.get(ty.id).kind`. For a
+/// back-edge against an in-progress reservation that kind is the placeholder `TypeKind::Any` the
+/// reservation was created with — **the id is right, the kind is not, and only the kind is read** —
+/// so the member was classified `Contribution::Scalar` and the whole property collapsed to
+/// `serde_json::Value` with **no diagnostic at all**. `CLAUDE.md` names that exact outcome: generated
+/// code "never silently degrades a typed schema to `serde_json::Value`", and every construct is
+/// "supported, warned, or rejected — no fourth, silent behavior".
+///
+/// The root document has always refused to read an in-progress member and rejected with `E013`, and
+/// so has the remote path. All three spellings must reach that same rejection: the bare sub-file
+/// name, the explicit file reference, and the root-document control.
+#[test]
+fn a_direct_recursive_all_of_member_in_a_sub_file_is_rejected_as_the_root_document_is() {
+    // One shape, two spellings of the same target. `PREFIX` is empty for the sub-file's own
+    // component name and `./lib.yaml` for the explicit file reference; both address `Tree`.
+    const TREE: &str = r##"
+components:
+  schemas:
+    Tree:
+      type: object
+      properties:
+        label: { type: string }
+        child:
+          description: the child node
+          allOf:
+            - { $ref: 'PREFIX#/components/schemas/Tree' }
+"##;
+    let body = |prefix: &str| TREE.replace("PREFIX", prefix);
+
+    for (spelling, lib) in [("bare", body("")), ("explicit", body("./lib.yaml"))] {
+        let (generated, checked, code) = split("./lib.yaml#/components/schemas/Tree", &lib);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: a direct recursive `allOf` member must be rejected, not \
+                 silently retyped: {report:#?}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable
+                        && d.message.contains("direct recursive")),
+                "{spelling}/{entry}: it is a direct recursive member, and must be named as one: \
+                 {report:#?}"
+            );
+        }
+        // The silent degradation itself, asserted directly: nothing may type this property as an
+        // untyped value, whatever the verdict.
+        assert!(
+            !code.contains("pub type Treechild = serde_json::Value;"),
+            "{spelling}: the recursive member was silently retyped: {code}"
+        );
+    }
+
+    // The root-document control: the same shape, always rejected, and the message the sub-file
+    // spellings must now match.
+    let root = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Tree' }} }}
+{}"##,
+        body("")
+    );
+    let report = generate(&root);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::AllOfIrreconcilable && d.message.contains("direct recursive")),
+        "{report:#?}"
+    );
+}
+
+/// The one-member form of the same fault, which has no sibling to disguise it: a sub-file component
+/// whose entire body is `allOf: [$ref to itself]`. The placeholder read made the component itself
+/// `serde_json::Value`, so the operation's whole response body was untyped — `clean`.
+#[test]
+fn a_sub_file_component_that_is_an_all_of_of_itself_is_rejected() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Loop",
+        r##"
+components:
+  schemas:
+    Loop:
+      allOf:
+        - { $ref: '#/components/schemas/Loop' }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
+        );
+    }
+    assert!(!code.contains("= serde_json::Value;"), "{code}");
+}
+
+/// The message a mixed recursive `allOf` carries. Reading the reservation's placeholder made the
+/// recursive member look scalar, so a composition of **two object members** was reported as one that
+/// "mixes object and scalar members" — naming a member class the document does not contain and
+/// sending the reader to remove something that is not there. The root document reports the true
+/// fault, and the sub-file spelling must say the same thing.
+#[test]
+fn a_recursive_all_of_member_beside_an_object_is_not_reported_as_a_scalar_mix() {
+    let lib = r##"
+components:
+  schemas:
+    Tree:
+      type: object
+      properties:
+        label: { type: string }
+        child:
+          allOf:
+            - { $ref: '#/components/schemas/Tree' }
+            - type: object
+              properties: { extra: { type: string } }
+"##;
+    let (generated, checked, _) = split("./lib.yaml#/components/schemas/Tree", lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let all_of: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::AllOfIrreconcilable)
+            .collect();
+        assert!(
+            all_of
+                .iter()
+                .any(|d| d.message.contains("direct recursive")),
+            "{entry}: {report:#?}"
+        );
+        assert!(
+            !all_of
+                .iter()
+                .any(|d| d.message.contains("mixes object and scalar")),
+            "{entry}: both members are objects; naming a scalar member sends the reader to remove \
+             something the document does not contain: {report:#?}"
+        );
+    }
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
