@@ -1280,6 +1280,136 @@ components:
     );
 }
 
+/// One sub-file schema carrying `xml.name`/`xml.attribute`, used as the **XML** body of one
+/// operation and the **JSON** body of another.
+///
+/// A serde `rename` applies to every format, so `gate_xml_field_renames` suppresses XML hints on any
+/// type that is not used exclusively as an XML body. That policy is right and pre-dates this branch.
+/// What changed is what it sees: before the resolved-reference memo, the two operations lowered the
+/// sub-file schema to two types — the XML one dedicated and keeping `#[serde(rename = "@Ident")]`,
+/// the JSON one suppressed — and now they share one type, which is reachable from both and is
+/// therefore suppressed for both. **The XML on the wire moved**, and the `W006` count did not change,
+/// so an upgrading consumer had nothing to compare.
+///
+/// The verdict is not being reversed here: giving an XML use its own type would reintroduce two
+/// types for one target, which is the defect this branch exists to remove. What is being fixed is
+/// that the warning must say which of its two quite different situations it is in, so a consumer can
+/// tell "your hint was inert" from "your XML body's field names just changed".
+#[test]
+fn a_schema_shared_between_an_xml_and_a_non_xml_body_says_so() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /xml:
+    get:
+      operationId: getXml
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml: { schema: { $ref: './lib.yaml#/components/schemas/Item' } }
+  /json:
+    get:
+      operationId: getJson
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Item' } }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          xml: { name: Ident, attribute: true }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap();
+
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    // One target, one type — the repair this branch exists for, unchanged.
+    assert_eq!(code.matches("pub struct Item ").count(), 1, "{code}");
+    // And the warning names the situation it is actually in.
+    let shared: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::XmlHintIgnored)
+        .collect();
+    assert!(!shared.is_empty(), "{report:#?}");
+    assert!(
+        shared.iter().any(|d| d
+            .message
+            .contains("shared between an XML body and a non-XML body")),
+        "the schema IS used as an XML body, so the warning must say the XML body's own field \
+         names are affected rather than that the hint was never reachable: {report:#?}"
+    );
+
+    // The control, and the other half of the same `W006`: a schema carrying XML hints that is never
+    // used as an XML body at all. Its hint is inert, nothing on any wire moved, and it must NOT
+    // borrow the shared wording — otherwise one message covers both and pins neither.
+    let inert = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /json:
+    get:
+      operationId: getJson
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Item' } }
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          xml: { name: Ident, attribute: true }
+"##;
+    let report = generate(inert);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let inert_warnings: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::XmlHintIgnored)
+        .collect();
+    assert!(!inert_warnings.is_empty(), "{report:#?}");
+    assert!(
+        inert_warnings.iter().all(|d| !d
+            .message
+            .contains("shared between an XML body and a non-XML body")),
+        "this schema is never an XML body, so nothing was shared: {report:#?}"
+    );
+    assert!(
+        inert_warnings
+            .iter()
+            .any(|d| d.message.contains("never used as an XML body")),
+        "{report:#?}"
+    );
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
