@@ -219,6 +219,14 @@ pub(crate) enum TypeKind {
     /// `Any`; four sites over three review rounds read one and produced plausible, wrong output with
     /// no diagnostic. Every `match` on [`TypeKind`] must now state what it does with a back edge,
     /// and the compiler will not let a new one omit it.
+    ///
+    /// **Semver.** Making the placeholder unreadable did not by itself change any generated output —
+    /// no snapshot moved when this variant landed. Two of the sites it exposed then chose to refuse
+    /// rather than guess, and those two *are* a breaking change to generated output: a `$ref`
+    /// carrying shape siblings whose target is still being lowered, and a `oneOf` member that is the
+    /// union being lowered, both previously generated (untyped and undecodable respectively) and are
+    /// now `E013` and `E007`. Neither shape contains an `allOf` keyword, so neither is covered by the
+    /// scope stated on the earlier footers; both are named on this commit's.
     Reserved,
 }
 
