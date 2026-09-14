@@ -53,6 +53,25 @@ fn has_code(report: &Report, code: Code) -> bool {
     report.diagnostics().iter().any(|d| d.code == code)
 }
 
+/// The names of `pub struct`s in generated source that begin with `prefix` and whose remainder
+/// satisfies `suffix_ok`, in source order.
+///
+/// Counting `code.matches("pub struct Foo")` is the obvious thing and is wrong twice over: the
+/// generated module embeds the runtime, whose own items can share a prefix (`pub struct L` also
+/// matches `LinkPaginator`), and a count alone cannot say *which* types were emitted when it
+/// disagrees. Returning the names makes a failure legible and makes an off-by-a-constant bound
+/// impossible to mistake for a bound.
+fn declared_types(code: &str, prefix: &str, suffix_ok: impl Fn(&str) -> bool) -> Vec<String> {
+    code.lines()
+        .filter_map(|line| line.trim_start().strip_prefix("pub struct "))
+        .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| name.strip_prefix(prefix).map(|tail| (name, tail)))
+        .filter(|(_, tail)| suffix_ok(tail))
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
 #[test]
 fn e011_official_structure_schema_rejects_missing_info() {
     let spec = "openapi: 3.1.0\npaths: {}\n";
@@ -1407,6 +1426,214 @@ components:
             .iter()
             .any(|d| d.message.contains("never used as an XML body")),
         "{report:#?}"
+    );
+}
+
+/// The fan-out bound, discriminated deeper than one nesting level.
+///
+/// A two-level reuse graph distinguishes 2 types from 1, which any memo that fires *somewhere*
+/// satisfies — a memo that inserted only at depth 1 and skipped deeper insertions passed the
+/// duplicate-type fixture above while restoring 4097 types from a 14-schema description. Depth is
+/// what the bound is about, so depth is what this measures: 12 declared schemas must generate 12
+/// `L*` types and not 4095.
+///
+/// The control below is the same graph written in the root document, which has always been linear,
+/// so the assertion is anchored to a number the repository already produces rather than to one this
+/// fixture invents.
+#[test]
+fn a_deep_sub_file_reuse_graph_generates_one_type_per_declaration() {
+    const DEPTH: usize = 11;
+    let mut lib = String::from("components:\n  schemas:\n");
+    for level in 0..DEPTH {
+        lib.push_str(&format!(
+            "    L{level}:\n      type: object\n      properties:\n        a: {{ $ref: \
+             '#/components/schemas/L{next}' }}\n        b: {{ $ref: \
+             '#/components/schemas/L{next}' }}\n",
+            next = level + 1
+        ));
+    }
+    lib.push_str(&format!(
+        "    L{DEPTH}:\n      type: object\n      properties: {{ id: {{ type: string }} }}\n"
+    ));
+
+    let (generated, checked, code) = split("./lib.yaml#/components/schemas/L0", &lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    // One declaration, one type — at every level, not merely at the first. Without the bound this
+    // is 2^(DEPTH+1) - 1. Counted on `L<digits>` exactly: a bare `pub struct L` prefix also matches
+    // the embedded runtime's own `LinkPaginator`, and a bound that is off by a constant is not one.
+    // Every `L`-prefixed type whose name continues with a digit: `L1` and any disambiguated
+    // duplicate of it (`L1a1b2c3`) alike, so a suffixed copy is counted rather than filtered out.
+    // Excluding non-digit tails drops the embedded runtime's `LinkPaginator` and nothing else.
+    let declared = declared_types(&code, "L", |tail| {
+        tail.starts_with(|character: char| character.is_ascii_digit())
+    });
+    assert_eq!(
+        declared.len(),
+        DEPTH + 1,
+        "{} declared schemas generated {} types: {declared:?}",
+        DEPTH + 1,
+        declared.len()
+    );
+    // And every level is present by name, so the count cannot be met by collapsing distinct schemas.
+    for level in 0..=DEPTH {
+        assert!(
+            code.contains(&format!("pub struct L{level} ")),
+            "L{level} is missing: {code}"
+        );
+    }
+}
+
+/// The explicit file spelling of a shared sub-file component — the row the key's design exists for,
+/// and the one with no fixture of its own.
+///
+/// The identity is the resolved target's `file#pointer`, not the `$ref` spelling, precisely so that
+/// `./lib.yaml#/components/schemas/Inner` and the sub-file's own `#/components/schemas/Inner` are
+/// one target. Keying on `(FileId, name)` would close only the bare spelling and leave this one
+/// duplicating per reference site, which is the state the preceding round measured at 43 MB.
+#[test]
+fn the_explicit_file_spelling_of_one_component_also_generates_one_type() {
+    let lib = r##"
+components:
+  schemas:
+    Node:
+      type: object
+      required: [first, second]
+      properties:
+        first: { $ref: './lib.yaml#/components/schemas/Inner' }
+        second: { $ref: './lib.yaml#/components/schemas/Inner' }
+    Inner:
+      type: object
+      required: [id]
+      properties: { id: { type: string } }
+"##;
+    let (generated, checked, code) = split("./lib.yaml#/components/schemas/Node", lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_eq!(code.matches("pub struct Inner").count(), 1, "{code}");
+    assert!(code.contains("pub first: Inner"), "{code}");
+    assert!(code.contains("pub second: Inner"), "{code}");
+
+    // Mixing the two spellings of one target in one document must still give one type: that is the
+    // whole claim the resolved-pointer key makes, and neither spelling alone can test it.
+    let mixed = lib.replace(
+        "second: { $ref: './lib.yaml#/components/schemas/Inner' }",
+        "second: { $ref: '#/components/schemas/Inner' }",
+    );
+    let (_, _, code) = split("./lib.yaml#/components/schemas/Node", &mixed);
+    assert_eq!(
+        code.matches("pub struct Inner").count(),
+        1,
+        "the two spellings of one target must share one type: {code}"
+    );
+}
+
+/// The *file* half of the identity key. Two different files each declaring a schema by the same name
+/// must stay two types: the key is `file#pointer`, and dropping the file component would collapse
+/// them onto one — which is a wrongly *shared* type, the failure `ensure_resolved`'s own fallback
+/// comment calls worse than a duplicated one.
+///
+/// Nothing pinned this but an incidental corpus snapshot, which would report the collapse as a type
+/// count and not as a wrong type.
+#[test]
+fn two_files_declaring_the_same_component_name_stay_two_types() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './a.yaml#/components/schemas/Shape' } }
+  /b:
+    get:
+      operationId: getB
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './b.yaml#/components/schemas/Shape' } }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("a.yaml"),
+        "components:\n  schemas:\n    Shape:\n      type: object\n      required: [alpha]\n      \
+         properties: { alpha: { type: string } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.yaml"),
+        "components:\n  schemas:\n    Shape:\n      type: object\n      required: [beta]\n      \
+         properties: { beta: { type: integer } }\n",
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let code = std::fs::read_to_string(&out).unwrap();
+
+    // Two declarations in two files: two types, and each keeps its own field. A collapse would take
+    // one of these fields with it.
+    let shapes = declared_types(&code, "Shape", |_| true);
+    assert_eq!(
+        shapes.len(),
+        2,
+        "two files declare `Shape`; they are different schemas and must stay two types: {shapes:?}"
+    );
+    // Each kept its own field. A collapse onto one key would have taken one of these with it, which
+    // is the wrongly-*shared* type `ensure_resolved`'s fallback comment calls worse than a
+    // duplicated one.
+    assert!(code.contains("pub alpha:"), "{code}");
+    assert!(code.contains("pub beta:"), "{code}");
+}
+
+/// The nullability half of the memo entry. A shared sub-file component whose own schema admits
+/// `null` must reach every use site as `Option<T>`; the memo stores nullability beside the id
+/// precisely so a cache hit and a first use agree on it.
+///
+/// Forcing it false emits `pub maybe: Maybe` where `Option<Maybe>` is correct — a field that rejects
+/// a payload the schema declares as valid — and nothing else in the suite is red.
+#[test]
+fn a_nullable_sub_file_component_reaches_every_use_as_an_option() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Holder",
+        r##"
+components:
+  schemas:
+    Holder:
+      type: object
+      required: [first, second]
+      properties:
+        first: { $ref: '#/components/schemas/Maybe' }
+        second: { $ref: '#/components/schemas/Maybe' }
+    Maybe:
+      type: [string, 'null']
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    // `required` on both, so the `Option` can only come from the component's own nullability — and
+    // it must come through on the second use (a memo hit) exactly as on the first.
+    assert!(
+        code.contains("pub first: Option<Maybe>"),
+        "the first use must carry the component's nullability: {code}"
+    );
+    assert!(
+        code.contains("pub second: Option<Maybe>"),
+        "and so must the memo hit: {code}"
     );
 }
 

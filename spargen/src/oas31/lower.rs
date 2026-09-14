@@ -50,14 +50,25 @@ fn resolved_identity(provenance: &Provenance) -> Option<String> {
 /// The name hint a resolved target should carry: its own final pointer token, so the generated type
 /// is named for the schema it came from rather than for whichever use site happened to reach it
 /// first. Empty for a whole-file reference, which has no final token; the caller's hint stands then.
-fn resolved_hint<'p>(provenance: &'p Provenance, fallback: &'p str) -> &'p str {
+///
+/// The token is unescaped (RFC 6901 `~1` → `/`, `~0` → `~`) before it becomes a hint. Component
+/// *keys* are constrained by the official schema to `^[a-zA-Z0-9._-]+$` and could never carry an
+/// escape, but this function exists partly to serve pointers that are not component keys — a
+/// property name, a path template — and those are unconstrained. `name` sanitises and disambiguates
+/// whatever it is given, so the consequence of leaving it escaped is cosmetic, but the result is a
+/// public type name in the generated API and `~1` in one is a spelling nobody chose.
+fn resolved_hint(provenance: &Provenance, fallback: &str) -> String {
     provenance
         .pointer
         .as_str()
         .rsplit('/')
         .next()
         .filter(|token| !token.is_empty())
-        .unwrap_or(fallback)
+        .map_or_else(
+            || fallback.to_owned(),
+            // Order matters: `~1` first, then `~0`, or a literal `~01` would decode as `/`.
+            |token| token.replace("~1", "/").replace("~0", "~"),
+        )
 }
 
 /// Lower a typed OpenAPI 3.1 or 3.2 [`Document`] into the version-agnostic [`Api`] IR.
@@ -745,7 +756,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // once one type serves every site, a per-site hint would make the generated name depend on
         // lowering order. A whole-file reference has no final pointer token, so the caller's hint
         // stands there.
-        let hint = resolved_hint(&schema.provenance, hint).to_owned();
+        let hint = resolved_hint(&schema.provenance, hint);
 
         // A target that is itself a bare `$ref` is an alias with no body to reserve a root for.
         // Chain to its target under a cycle guard rather than through the reserve/pop machinery,
