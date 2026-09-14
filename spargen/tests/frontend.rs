@@ -1357,7 +1357,7 @@ components:
     assert!(
         shared.iter().any(|d| d
             .message
-            .contains("shared between an XML body and a non-XML body")),
+            .contains("shared between an XML body and a non-XML")),
         "the schema IS used as an XML body, so the warning must say the XML body's own field \
          names are affected rather than that the hint was never reachable: {report:#?}"
     );
@@ -1399,7 +1399,7 @@ components:
     assert!(
         inert_warnings.iter().all(|d| !d
             .message
-            .contains("shared between an XML body and a non-XML body")),
+            .contains("shared between an XML body and a non-XML")),
         "this schema is never an XML body, so nothing was shared: {report:#?}"
     );
     assert!(

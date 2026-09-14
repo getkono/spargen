@@ -4791,7 +4791,14 @@ fn gate_xml_field_renames(
         }
     }
 
-    let to_suppress: Vec<TypeId> = graph
+    // Two quite different situations reach the same suppression, and a consumer needs to tell them
+    // apart. A type that is never reached from an XML body carries an inert hint: nothing on any
+    // wire moves. A type reached from an XML body *and* a non-XML one is genuinely shared, and
+    // suppressing its hint changes what the XML body puts on the wire. The second became reachable
+    // for a sub-file schema only once one target started generating one type; before that the two
+    // uses were two types and the XML one kept its rename. Same code, same count — so the message
+    // has to carry the distinction or there is nothing to compare across an upgrade.
+    let to_suppress: Vec<(TypeId, bool)> = graph
         .iter()
         .filter_map(|(id, def)| {
             let TypeKind::Struct(object) = &def.kind else {
@@ -4801,12 +4808,13 @@ fn gate_xml_field_renames(
                 .fields
                 .iter()
                 .any(|field| field.xml.name.is_some() || field.xml.attribute);
-            let dedicated = xml_reachable.contains(&id) && !non_xml_reachable.contains(&id);
-            (has_apply_hint && !dedicated).then_some(id)
+            let reached_from_xml = xml_reachable.contains(&id);
+            let dedicated = reached_from_xml && !non_xml_reachable.contains(&id);
+            (has_apply_hint && !dedicated).then_some((id, reached_from_xml))
         })
         .collect();
 
-    for id in to_suppress {
+    for (id, shared_with_xml) in to_suppress {
         let Some(def) = graph.get_mut(id) else {
             continue;
         };
@@ -4816,16 +4824,27 @@ fn gate_xml_field_renames(
                 field.xml = XmlField::default();
             }
         }
+        let (message, remedy) = if shared_with_xml {
+            (
+                "`xml.name`/`xml.attribute` not applied: this schema is shared between an XML body \
+                 and a non-XML (e.g. JSON) body, and a serde rename applies to every format, so \
+                 honoring the hint would rewrite the JSON wire name too. The field keeps its \
+                 normal wire name — including in the XML body, whose element/attribute name is the \
+                 property name rather than the hint",
+                "declare a separate schema for the XML body if the rename is required, so the two \
+                 bodies stop sharing one generated type, or accept the property's normal wire name",
+            )
+        } else {
+            (
+                "`xml.name`/`xml.attribute` not applied: this schema is never used as an XML body, \
+                 so the hint cannot affect any wire format; the field keeps its normal wire name",
+                "remove the `xml` hint, or use this schema as an XML body if the rename is \
+                 required",
+            )
+        };
         Diagnostic::warning(Code::XmlHintIgnored, provenance)
-            .message(
-                "`xml.name`/`xml.attribute` not applied: this schema is used as a non-XML (e.g. \
-                 JSON) body — or is not used as an XML body — where the format-agnostic serde rename \
-                 would corrupt the wire format; the field keeps its normal wire name",
-            )
-            .remedy(
-                "use a schema dedicated to the XML body if the rename is required, or accept the \
-                 property's normal wire name",
-            )
+            .message(message)
+            .remedy(remedy)
             .emit(diags);
     }
 }
