@@ -2463,7 +2463,7 @@ serde_json.workspace = true
     /// it in the test.** It does not make the body true. A clause that is false today stays false
     /// with both guards green — the three-outcome promise below is exactly that — and a maintainer
     /// who re-types a change into the expected file has made this test agree with it, not verified
-    /// it. Holding the prose to the code is a wider question than this one code, tracked separately.
+    /// it. Holding the prose to the code is a wider question than this one code, and is **#137**.
     #[test]
     fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
         let explain = Code::RuntimeDependencyContract.explain();
@@ -2569,19 +2569,27 @@ serde_json.workspace = true
         // The three outcomes `WorkspaceOrigin` distinguishes, and the promise that the diagnostic
         // tells them apart instead of reporting the crate as missing.
         //
-        // **This clause is not true of the resolver**, and the fixtures below are cited as the ones
-        // that exercise the branches rather than as ones that make the promise good. When no root
-        // is found at all and any ancestor failed to read, the walk reports that read failure
-        // instead — naming a file it never established was a workspace manifest. See
-        // `the_nearest_unreadable_ancestor_is_the_one_the_walk_reports`, which is that case and
-        // asserts the read-failure wording. The explain text is outside this crate module's scope
-        // to correct; `docs/support-matrix.md` row 23 no longer repeats it.
+        // **This clause is not true of the resolver — that is #171** — and the fixtures below are
+        // cited as the ones exercising the branches, not as ones making the promise good. When no
+        // root is found at all and any ancestor failed to read, the walk reports that read failure
+        // instead, naming a file it never established was a workspace manifest.
+        //
+        // The two fixtures that pin the wrong wording are the last two in this list, and both say
+        // so at their own definitions:
+        // `a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found`
+        // requires "could not be read", the path and "TOML parse error", and explicitly requires
+        // the message *not* to say "no workspace manifest was found above" — which is the answer
+        // #171 says it should give — and
+        // `the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found` chooses
+        // between two such files. **Fixing #171 reds both.** The clause itself lives in
+        // `spargen/src/diag/code.rs`; `docs/support-matrix.md` row 23 no longer repeats it.
         let unresolved_outcomes: &[&str] = &[
             "an_unresolvable_inheritance_says_where_the_lookup_went",
             "a_workspace_root_that_cannot_be_read_is_not_reported_as_missing",
             "a_package_workspace_naming_a_directory_without_a_manifest_is_a_workspace_read_failure",
             "a_self_rooted_manifest_names_an_absolute_path_when_an_entry_is_missing",
-            "the_nearest_unreadable_ancestor_is_the_one_the_walk_reports",
+            "a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found",
+            "the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found",
         ];
         promises(
             "when the root cannot be found, cannot be read, or declares no such entry",
@@ -2945,11 +2953,24 @@ serde_json.workspace = true
     }
 
     #[test]
-    fn a_corrupt_root_reached_by_the_ancestor_walk_is_not_reported_as_missing() {
+    fn a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found() {
         // The commonest layout reaches its root through the walk rather than through
         // `package.workspace`, and the walk used to skip any candidate it could not parse and keep
         // climbing — collapsing the three-way distinction back to "nothing found" for exactly the
         // case where a file the reader can open is the problem.
+        //
+        // **This fixture pins behaviour that is known to be wrong, deliberately**, in the same way
+        // as `an_identity_package_key_in_the_workspace_root_is_rejected_although_cargo_accepts_it`
+        // twelve fixtures below. The `E023` explain text promises that a root which cannot be
+        // *found* is reported differently from one that cannot be *read*. It is not: when no
+        // workspace root exists anywhere on the walk and any ancestor failed to parse, that
+        // ancestor is reported as "its workspace manifest", though nothing established it was one
+        // and it may be an unrelated crate outside the project. That is **#171**.
+        //
+        // When #171 is fixed this test **must** change — it is one of the two that will red, and
+        // both of them argued the behaviour was correct until round 6 said so here. The assertion
+        // then becomes that the diagnostic says no workspace manifest was found, while still
+        // naming the unreadable candidate as a hint rather than as the root.
         let directory = tempfile::tempdir().unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -3249,11 +3270,24 @@ serde_json.workspace = true
     }
 
     #[test]
-    fn the_nearest_unreadable_ancestor_is_the_one_the_walk_reports() {
+    fn the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found() {
         // The walk remembers the *first* unparseable candidate it meets and never overwrites it,
-        // so the file a reader is sent to open is the one closest to their crate. With two broken
-        // manifests on one path and no `[workspace]` anywhere, only that choice is observable, and
-        // no other fixture puts two of them on a single walk.
+        // so of the files a reader might be sent to open, it is the one closest to their crate.
+        // With two broken manifests on one path and no `[workspace]` anywhere, only that choice is
+        // observable, and no other fixture puts two of them on a single walk.
+        //
+        // **This fixture pins behaviour that is known to be wrong, deliberately**, in the same way
+        // as `an_identity_package_key_in_the_workspace_root_is_rejected_although_cargo_accepts_it`
+        // twelve fixtures below. The `E023` explain text promises that a root which cannot be
+        // *found* is reported differently from one that cannot be *read*. It is not: when no
+        // workspace root exists anywhere on the walk and any ancestor failed to parse, that
+        // ancestor is reported as "its workspace manifest", though nothing established it was one
+        // and it may be an unrelated crate outside the project. That is **#171**.
+        //
+        // When #171 is fixed this test **must** change — it is one of the two that will red, and
+        // both of them argued the behaviour was correct until round 6 said so here. The assertion
+        // then becomes that the diagnostic says no workspace manifest was found, while still
+        // naming the unreadable candidate as a hint rather than as the root.
         let directory = tempfile::tempdir().unwrap();
         let far = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let near_dir = directory.path().join("near");
