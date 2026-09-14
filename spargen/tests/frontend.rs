@@ -10393,3 +10393,104 @@ fn the_nullability_gate_asks_the_sibling_not_the_enclosing_schema() {
          dropped body and not `Option<()>`: {code}"
     );
 }
+
+/// The cycle predicate must count only the edges lowering actually follows.
+///
+/// `collect_schema_refs` chained `schema.defs` and `schema.validation_children`, so `$defs`, `not`,
+/// `if`/`then`/`else`, `contains`, `propertyNames`, `unevaluated*` and `dependentSchemas` were all
+/// treated as cycle edges. **Lowering never descends into any of them** — `.defs` and
+/// `validation_children` appear exactly once each in the whole of `lower.rs`, inside that walk — so
+/// a `$ref` reachable only that way can never put a component mid-flight and can never yield a
+/// placeholder. The guard rejected anyway, asserting a dependence that does not exist.
+///
+/// The consequence is sharp: adding **unreferenced `$defs`** to a document, which contributes zero
+/// emitted bytes and does not change the instance set by a single value, turned `Generated` into a
+/// hard `E013`. Both oracles agree the two documents below admit exactly the same instances.
+#[test]
+fn the_cycle_predicate_counts_only_edges_lowering_follows() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths: {}\n";
+    // `Holder.l` intersects `Leaf` with shape-bearing siblings. `Leaf` reaches back to `Holder`
+    // ONLY through the keyword under test, so the cycle is invisible to lowering.
+    const HOLDER: &str = r##"    Holder:
+      type: object
+      properties:
+        l:
+          $ref: '#/components/schemas/Leaf'
+          type: object
+          properties: { x: { type: string } }
+"##;
+
+    let baseline = format!(
+        "{HEAD}components:\n  schemas:\n    Leaf:\n      type: object\n      properties: {{ y: {{ type: integer }} }}\n{HOLDER}"
+    );
+    let (base_report, base_code) = generate_with_code(&baseline);
+    assert_ne!(base_report.outcome(), Outcome::Rejected, "{base_report:#?}");
+    let base_types = base_code
+        .find("pub mod types {")
+        .map(|i| base_code[i..].to_owned())
+        .unwrap_or_default();
+
+    // Each of these adds a back-edge through a keyword lowering does not traverse. None changes the
+    // instance set, and none can produce a placeholder.
+    let inert: &[(&str, &str)] = &[
+        (
+            "an unreferenced `$defs` entry",
+            "      $defs:\n        Back: { $ref: '#/components/schemas/Holder' }\n",
+        ),
+        (
+            "an `if` with no `then`/`else`",
+            "      if: { $ref: '#/components/schemas/Holder' }\n",
+        ),
+        (
+            "a `not`",
+            "      not: { $ref: '#/components/schemas/Holder' }\n",
+        ),
+        (
+            "a `propertyNames`",
+            "      propertyNames: { $ref: '#/components/schemas/Holder' }\n",
+        ),
+    ];
+    for (what, extra) in inert {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Leaf:\n      type: object\n      properties: {{ y: {{ type: integer }} }}\n{extra}{HOLDER}"
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` is not an edge lowering follows, so it cannot make the `$ref` a \
+                 cycle-closing one and must not flip {entry} into a rejection: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "`{what}` reported E013 through {entry}: {report:#?}"
+            );
+        }
+        // Stronger than "still generates": the emitted types are the ones the baseline emits, so
+        // the keyword is confirmed inert rather than merely tolerated.
+        let (_, code) = generate_with_code(&spec);
+        let types = code
+            .find("pub mod types {")
+            .map(|i| code[i..].to_owned())
+            .unwrap_or_default();
+        assert_eq!(
+            types, base_types,
+            "`{what}` changed the emitted types, so it is not inert after all"
+        );
+    }
+
+    // The control, and the reason the predicate exists: a back-edge through a `properties` value —
+    // an edge lowering DOES follow — still closes the cycle and still rejects.
+    let real_cycle = format!(
+        "{HEAD}components:\n  schemas:\n    Leaf:\n      type: object\n      properties:\n        back: {{ $ref: '#/components/schemas/Holder' }}\n{HOLDER}"
+    );
+    let report = generate(&real_cycle);
+    assert_eq!(
+        report.outcome(),
+        Outcome::Rejected,
+        "a cycle through `properties` is an edge lowering follows and must still reject: \
+         {report:#?}"
+    );
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+}

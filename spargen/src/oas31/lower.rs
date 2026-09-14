@@ -4223,6 +4223,14 @@ fn enclosing_component(at: &crate::diag::Provenance) -> Option<String> {
 ///
 /// Only the local component form matters: the cycle predicate asks about `components.schemas`
 /// reachability, and a remote or relative-file target is not a member of that map.
+///
+/// The keywords walked here are exactly the ones `lower_schema_inner` descends into. `$defs` and
+/// the validation-only applicators — `not`, `if`/`then`/`else`, `contains`, `propertyNames`,
+/// `unevaluated*`, `dependentSchemas` — are deliberately NOT walked: lowering never enters them, so
+/// a `$ref` reachable only that way can never put a component mid-flight and can never yield the
+/// placeholder this predicate exists to detect. Counting them made an unreferenced `$defs` entry —
+/// zero emitted bytes, not one instance added or removed — flip a document into a hard rejection
+/// whose message asserted a dependence that does not exist.
 fn collect_component_refs(schema: &RefOr<Schema>, out: &mut Vec<String>) {
     match schema {
         RefOr::Ref(reference) => {
@@ -4260,9 +4268,7 @@ fn collect_schema_refs(schema: &Schema, out: &mut Vec<String>) {
         .chain(schema.prefix_items.iter())
         .chain(schema.all_of.iter())
         .chain(schema.one_of.iter())
-        .chain(schema.any_of.iter())
-        .chain(schema.defs.values())
-        .chain(schema.validation_children.iter().map(|(_, child)| child));
+        .chain(schema.any_of.iter());
     for child in nested {
         collect_schema_or_refs(child, out);
     }
