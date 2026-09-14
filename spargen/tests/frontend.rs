@@ -513,6 +513,52 @@ components:
         );
     }
 
+    // A deep pointer whose ROOT SEGMENT is not declared is a different fault and must not borrow
+    // this message. `Envelop` is a typo for `Envelope`; the document declares nothing by that name,
+    // so "addresses a subschema" would assert by implication that it is there, and the remedy
+    // "declare the subschema as its own entry" would send the reader to promote a subschema of a
+    // component that does not exist. The `/` in the fragment is not what is wrong with it.
+    let typo = spec.replace(
+        "#/components/schemas/Envelope/properties/payload",
+        "#/components/schemas/Envelop/properties/payload",
+    );
+    for (entry, report) in [("generate", generate(&typo)), ("check", check(&typo))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let e004: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .collect();
+        assert!(
+            e004.iter()
+                .any(|d| d.message.contains("unresolved schema reference")),
+            "{entry}: an undeclared root segment is an unresolved reference, not a fragment-shape \
+             problem: {report:#?}"
+        );
+        assert!(
+            !e004
+                .iter()
+                .any(|d| d.message.contains("addresses a subschema")),
+            "{entry}: `Envelop` is not declared, so nothing was addressed inside it: {report:#?}"
+        );
+    }
+
+    // A trailing slash is a real subschema fragment: `Foo` IS declared and the pointer's final
+    // empty reference token addresses its `""`-keyed member, so this keeps the subschema wording.
+    let trailing = spec.replace(
+        "#/components/schemas/Envelope/properties/payload",
+        "#/components/schemas/Envelope/",
+    );
+    let report = generate(&trailing);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef && d.message.contains("addresses a subschema")),
+        "{report:#?}"
+    );
+
     // Control: the plain undeclared-name case keeps the "unresolved" wording, so the branch above
     // is a genuine split rather than a blanket rewording.
     let plain = spec.replace(
