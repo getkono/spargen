@@ -2852,6 +2852,143 @@ serde_json.workspace = true
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
     }
 
+    /// One choice in `workspace_root` is left unguarded because nothing can guard it. The walk
+    /// starts at `absolute.parent().and_then(Utf8Path::parent)`, skipping the consumer's own
+    /// directory. Starting at `.parent()` instead would re-read a manifest already known to parse
+    /// — the audit parsed it — and already known to declare no `[workspace]`, since `workspace_root`
+    /// returns early when it does. It therefore falls through the `Ok(_) => {}` arm and climbs on,
+    /// producing identical output for every input. That mutant is **equivalent**, not a coverage
+    /// gap, and recording it is the only thing a test could contribute.
+    #[test]
+    fn the_walk_climbs_past_an_ancestor_that_parses_and_declares_no_workspace() {
+        // "A manifest that parses but declares no `[workspace]` is an ordinary member or an
+        // unrelated crate: keep climbing." Nested workspaces and vendored crates make that layout
+        // ordinary, and treating the first *parseable* ancestor as the root silently resolves every
+        // inherited dependency against a table that is not there. The existing walk fixtures all
+        // put an ancestor that fails to *parse* in the way, which is a different arm.
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let middle_dir = directory.path().join("middle");
+        let member_dir = middle_dir.join("client");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        let middle = Utf8PathBuf::from_path_buf(middle_dir.join("Cargo.toml")).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = []\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        // Parses, and declares no `[workspace]`: the walk must step over it, not stop on it.
+        std::fs::write(
+            &middle,
+            "[package]\nname = \"middle\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        assert!(result.manifests.contains(&root), "{:#?}", result.manifests);
+        assert!(
+            !result.manifests.contains(&middle),
+            "{:#?}",
+            result.manifests
+        );
+    }
+
+    #[test]
+    fn a_runtime_crate_renamed_in_the_workspace_root_is_reported() {
+        // "A renamed runtime crate" is an advertised `E023` trigger, and the check reads `package`
+        // from the member *and* the root — generated code names the canonical crate either way.
+        // Every other rename fixture renames in the member's own table, so the root half of that
+        // pair was reached by nothing.
+        let core_bytes = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with("bytes = "))
+            .expect("CORE_MANIFEST declares bytes under that key");
+        let floor = core_bytes
+            .split('"')
+            .nth(1)
+            .expect("the bytes entry pins a quoted version");
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies().replace(
+                    core_bytes,
+                    &format!("bytes = {{ package = \"bytes\", version = \"{floor}\" }}")
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert!(
+            diagnostics[0].message.contains("`bytes` cannot be renamed"),
+            "{diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn a_workspace_root_that_failed_to_parse_explains_itself_once() {
+        // `WorkspaceOrigin::Unreadable::reason` is `None` for a root named by `package.workspace`,
+        // and its doc argues why: that root *is* audited, so `read_toml` already reported the parse
+        // failure on its own line and "repeating it here would print it twice". Threading the real
+        // reason through would do exactly that, and nothing noticed.
+        let directory = tempfile::tempdir().unwrap();
+        let root_dir = directory.path().join("root");
+        let member_dir = directory.path().join("outside");
+        std::fs::create_dir(&root_dir).unwrap();
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(root_dir.join("Cargo.toml"), "[workspace\nbroken = ").unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../root\"\n\n\
+                 {CORE_INHERITED}"
+            ),
+        )
+        .unwrap();
+
+        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        let message = messages(&diagnostics);
+        // Reported once, by the audit of the root itself.
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic
+                    .message
+                    .contains("failed to parse workspace manifest"))
+                .count(),
+            1,
+            "{message}"
+        );
+        // And not a second time on every inheritance that could not resolve: those say the file
+        // could not be read, without restating why.
+        assert!(message.contains("could not be read"), "{message}");
+        assert!(!message.contains("could not be read: "), "{message}");
+    }
+
     #[test]
     fn the_nearest_unreadable_ancestor_is_the_one_the_walk_reports() {
         // The walk remembers the *first* unparseable candidate it meets and never overwrites it,
