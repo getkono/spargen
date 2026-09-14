@@ -13,11 +13,19 @@ use crate::{AuthError, ResponseValue};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error<E> {
-    /// #1 — the request could not be built before it was sent: no registered credential satisfies
-    /// the operation's security requirement, a registered token provider failed, the base URL is
-    /// invalid, a parameter or body did not serialize, or reqwest classified the failure as a
-    /// request error. [`RequestError`] types the two credential causes; every other cause,
-    /// including reqwest's own request-error class, arrives as [`RequestError::Other`].
+    /// #1 — the call failed before any response was produced. **Not every cause here is
+    /// pre-send**, so do not read this class as proof that nothing reached the server.
+    ///
+    /// Pre-send, raised while the request is still being assembled — nothing was transmitted:
+    /// no registered credential satisfies the operation's security requirement, a registered token
+    /// provider failed, the base URL is invalid, or a parameter or body did not serialize.
+    ///
+    /// Not pre-send: an error reqwest classifies as a request error. reqwest raises that class
+    /// from inside the send itself, so the request may already have been transmitted and the
+    /// server may already have acted on it. Retrying it is not safe for a non-idempotent call.
+    ///
+    /// [`RequestError`] types the two credential causes; every other cause, including reqwest's
+    /// own request-error class, arrives as [`RequestError::Other`].
     RequestConstruction(RequestError),
     /// #2 — DNS failure, connection refused/reset, TLS handshake or certificate error.
     Transport(TransportError),
@@ -262,8 +270,9 @@ impl std::error::Error for MessageError {}
 /// The two credential causes are the ones a consumer routes on — they mean "unauthenticated", not
 /// "malformed request" — so each is a variant of its own: [`RequestError::MissingCredential`] when
 /// no registered credential satisfies the requirement, and [`RequestError::CredentialProvider`]
-/// when a registered token provider fails. Every other cause arrives as [`RequestError::Other`]
-/// with its source attached.
+/// when a registered token provider fails. Both are raised before anything is sent. Every other
+/// cause arrives as [`RequestError::Other`] with its source attached — and [`RequestError::Other`]
+/// is **not** uniformly pre-send; see its own documentation before retrying on it.
 ///
 /// This runtime is embedded in the consumer's own crate, where `#[non_exhaustive]` does not affect
 /// match exhaustiveness, so a new variant here is a breaking change of the generated output; the
@@ -294,9 +303,15 @@ pub enum RequestError {
         /// What the provider reported.
         source: AuthError,
     },
-    /// Any other request-construction failure — an unparseable base URL, a parameter or body that
-    /// did not serialize, a credential registered under the wrong kind for its scheme, or an error
-    /// reqwest classifies as a request error — with the cause reachable through `source()`.
+    /// Any other request-construction failure, with the cause reachable through `source()`.
+    ///
+    /// Pre-send: an unparseable base URL, a parameter or body that did not serialize, or a
+    /// credential registered under the wrong kind for its scheme.
+    ///
+    /// Not pre-send: an error reqwest classifies as a request error. reqwest raises that class
+    /// from inside the send, so the request may already have been transmitted. This variant is
+    /// therefore the one place in taxonomy #1 where "the request was never sent" does not hold,
+    /// and a caller that retries on it must treat the call as possibly-already-applied.
     Other(RequestCause),
 }
 
