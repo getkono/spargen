@@ -10262,3 +10262,134 @@ fn a_cycle_closing_union_member_is_rejected_not_discarded() {
         "an acyclic union member with a shape-bearing sibling must still intersect: {report:#?}"
     );
 }
+
+/// The question is "does the SIBLING make a statement about `null`?", and the gate asked the
+/// ENCLOSING schema's `type`. The two differ in two ways, and each produces a wrong answer in the
+/// opposite direction.
+///
+/// `lower_union_sibling` deletes the enclosing `type` array whenever it holds more than one non-null
+/// type, because no single lowered type represents it. That deletion also throws away the array's
+/// `"null"`, so the lowered sibling reads as null-rejecting even where the array admitted null —
+/// **an under-accept that is a regression against master**, whose compiled client fails on a
+/// spec-legal `null` with `invalid type: null, expected struct …`. In the other direction, a sibling
+/// that speaks about null through `enum` or `const` rather than `type` was treated as silent, so the
+/// union's acceptance survived a sibling that denied it.
+///
+/// Both oracles — Python `jsonschema` 4.26 and the Rust crate 0.49.3 — agree on every row.
+#[test]
+fn the_nullability_gate_asks_the_sibling_not_the_enclosing_schema() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+
+    // (what it exercises, the schema body, whether `null` satisfies it)
+    let cases: &[(&str, &str, bool)] = &[
+        // The sibling carries a WIDE type array that admits null. Lowering deletes the array, so
+        // before this the sibling read as null-rejecting and the response went non-optional.
+        (
+            "a `properties`-only sibling under a wide nullable type array",
+            "type: [object, array, 'null']\n                properties: { a: { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a `patternProperties`-only sibling under a wide nullable type array",
+            "type: [object, array, 'null']\n                patternProperties: { '^a': { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a `required`-only sibling under a wide nullable type array",
+            "type: [object, array, 'null']\n                required: [a]\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        // The narrow spelling of the first row: one non-null type, so the array survives lowering.
+        // It was already right, and the wide spelling must now agree with it.
+        (
+            "the same sibling under a narrow nullable type array",
+            "type: [object, 'null']\n                properties: { a: { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        // The sibling speaks about null through `enum`/`const`, not `type`. It denies null, and the
+        // gate must let it.
+        (
+            "an `enum` sibling that excludes null",
+            "enum: ['a', 'b']\n                oneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "a `const` sibling",
+            "const: 'a'\n                oneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "an `allOf` sibling that excludes null",
+            "allOf: [{ type: object }]\n                oneOf: [{ type: object }, { type: 'null' }]",
+            false,
+        ),
+        // An `enum` that lists null admits it.
+        (
+            "an `enum` sibling that includes null",
+            "enum: ['a', null]\n                oneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+    ];
+
+    for (what, body, null_satisfies) in cases {
+        let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "`{what}`: {report:#?}");
+        assert_eq!(
+            code.contains("ResponseValue<Option<types::"),
+            *null_satisfies,
+            "`{what}` must {} an optional response body — `null` is {} under this schema: {code}",
+            if *null_satisfies { "have" } else { "not have" },
+            if *null_satisfies { "valid" } else { "invalid" }
+        );
+    }
+
+    // The third symptom of the same root, and the sharpest: a document whose ONLY valid instance is
+    // `null` was REJECTED, with a message asserting an empty intersection when the intersection is
+    // `{null}`. The one-non-null-type spelling of the same instance set already generated `()`.
+    let only_null = format!(
+        "{HEAD}{}",
+        PATH.replace(
+            "BODY",
+            "type: [integer, boolean, 'null']\n                properties: { a: { type: string } }\n                oneOf: [{ type: string }, { type: 'null' }]"
+        )
+    );
+    for (entry, report) in [
+        ("generate", generate(&only_null)),
+        ("check", check(&only_null)),
+    ] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "a schema whose only valid instance is `null` must not be rejected as having no \
+             variant by {entry}: {report:#?}"
+        );
+        assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    }
+    let (_, code) = generate_with_code(&only_null);
+    let body = code
+        .split("ResponseValue<types::")
+        .nth(1)
+        .and_then(|rest| rest.split('>').next())
+        .unwrap_or_else(|| panic!("no typed response: {code}"))
+        .trim()
+        .to_owned();
+    assert!(
+        code.contains(&format!("pub type {body} = ();")),
+        "the intersection is `{{null}}`, so the exact JSON null type is the answer, not a \
+         dropped body and not `Option<()>`: {code}"
+    );
+}

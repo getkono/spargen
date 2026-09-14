@@ -352,6 +352,21 @@ fn append_response_docs(target: &mut Option<String>, status: &str, response: &Re
     }
 }
 
+/// A union's shape-bearing sibling: the lowered type, plus whether the sibling's own keywords say
+/// anything about `null`.
+///
+/// The second field exists because the lowered [`Ty`] cannot answer it. A `properties`-only sibling
+/// and a `type: object` + `properties` sibling both lower to a non-nullable `Struct`, yet only the
+/// second denies `null` — the first is an object applicator, vacuously satisfied by every
+/// non-object. The question has to be asked of the schema, and asked of the SIBLING rather than of
+/// the schema that encloses it: those differ whenever a multi-type array is deleted for lowering,
+/// and whenever the sibling speaks through `enum`/`const` instead of `type`.
+#[derive(Clone, Copy)]
+struct UnionSibling {
+    ty: Ty,
+    speaks_about_null: bool,
+}
+
 struct LowerCtx<'a, 'doc> {
     document: &'doc Document,
     resolver: &'a Resolver<'doc>,
@@ -996,7 +1011,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // it can narrow what the result accepts, never create something to accept.
                 inner.nullable = inner.nullable || null_from_member;
                 let Some(constrained) =
-                    self.intersect_types(inner, sibling, &format!("{hint}Constrained"))
+                    self.intersect_types(inner, sibling.ty, &format!("{hint}Constrained"))
                 else {
                     // Neither side admits null and the non-null shapes do not meet, so nothing is
                     // left to collapse to. The terminal code matches the multi-variant path below,
@@ -1016,16 +1031,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     );
                 };
                 // The intersection owns the answer for nullability too — but ONLY where the sibling
-                // is entitled to give one. A sibling carrying no `type` lowers to a non-nullable
-                // `Struct` and reads as null-rejecting, yet `properties` and `patternProperties`
-                // are object applicators in 2020-12: vacuously satisfied by every non-object,
-                // `null` included. They deny nothing, so they must not be allowed to remove the
-                // union's own acceptance. A `type` — whether it admits null or excludes it — is a
-                // statement about null, and that one the intersection may act on.
-                nullable = if schema.types.types.is_empty() {
-                    member_nullable || null_from_member
-                } else {
+                // is entitled to give one, which is a question about the SIBLING. Reading the
+                // enclosing schema's `type` instead answered it wrongly in both directions: the two
+                // disagree whenever a multi-type array is deleted for lowering, and whenever the
+                // sibling speaks through `enum`/`const` rather than `type`. An object applicator
+                // denies nothing and must not remove the union's own acceptance.
+                nullable = if sibling.speaks_about_null {
                     constrained.nullable
+                } else {
+                    member_nullable || null_from_member
                 };
                 inner = constrained;
             }
@@ -1045,9 +1059,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
             if let Some(sibling) = sibling {
-                let Some(intersection) =
-                    self.intersect_types(ty, sibling, &format!("{hint}Variant{index}Constrained"))
-                else {
+                let Some(intersection) = self.intersect_types(
+                    ty,
+                    sibling.ty,
+                    &format!("{hint}Variant{index}Constrained"),
+                ) else {
                     // The sibling constraints make this branch impossible; JSON Schema simply
                     // removes it from the union's accepted set. Acknowledge it, because a variant
                     // vanishing from the generated enum is otherwise invisible.
@@ -1090,7 +1106,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // exact JSON null type is the answer — the same type the all-null-members branch above
             // returns for the same reason. Again only the MEMBER-derived flag can rescue: a
             // `"null"` in the enclosing `type` array leaves nothing for `null` to match.
-            if null_from_member && sibling.is_none_or(|sibling| self.ty_accepts_null(sibling)) {
+            if null_from_member && sibling.is_none_or(|sibling| self.ty_accepts_null(sibling.ty)) {
                 return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
             }
             return self.reject_union(
@@ -1142,25 +1158,51 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` so every branch is intersected with
     /// them. A multi-non-null `type` array is already expressed by the union members and is removed
     /// here (its `null` member is handled by the union's outer nullability).
-    fn lower_union_sibling(&mut self, schema: &Schema, hint: &str) -> Option<Option<Ty>> {
+    fn lower_union_sibling(&mut self, schema: &Schema, hint: &str) -> Option<Option<UnionSibling>> {
         let mut sibling = schema.clone();
         sibling.one_of.clear();
         sibling.any_of.clear();
         sibling.discriminator = None;
+
+        // Asked of the sibling's OWN keywords, and asked BEFORE the type array is deleted below.
+        // `type`, `enum`, `const`, `$ref` and `allOf` each state something about `null` — an `enum`
+        // either lists it or does not, a `$ref`'s target carries its own nullability. The object and
+        // array applicators (`properties`, `patternProperties`, `required`, `additionalProperties`,
+        // `items`, `prefixItems`) state nothing: in 2020-12 they are vacuously satisfied by every
+        // instance of another category, `null` included.
+        let speaks_about_null = !sibling.types.types.is_empty()
+            || sibling.enum_values.is_some()
+            || sibling.const_value.is_some()
+            || sibling.reference.is_some()
+            || !sibling.all_of.is_empty();
+        let declared_types_admit_null = sibling.types.types.contains(&JsonType::Null);
+
         let non_null_types = sibling
             .types
             .types
             .iter()
             .filter(|kind| **kind != JsonType::Null)
             .count();
-        if non_null_types > 1 {
+        // More than one non-null type has no single lowered representation, so the array is dropped
+        // for lowering. That is a lowering convenience, not a statement about the document.
+        let types_deleted = non_null_types > 1;
+        if types_deleted {
             sibling.types.types.clear();
         }
         if !schema_has_shape_constraint(&sibling) {
             return Some(None);
         }
-        self.lower_schema(&sibling, &format!("{hint}Constraint"))
-            .map(Some)
+        let mut ty = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
+        if types_deleted {
+            // Restore the one piece of the deleted array that still has a faithful representation.
+            // Without this the lowered sibling reads as null-rejecting for an array that admitted
+            // null, and the union's acceptance is removed by a deletion the author never wrote.
+            ty.nullable = declared_types_admit_null;
+        }
+        Some(Some(UnionSibling {
+            ty,
+            speaks_about_null,
+        }))
     }
 
     /// Lower one union member, returning its type and — when the member is a `$ref` to a component —
