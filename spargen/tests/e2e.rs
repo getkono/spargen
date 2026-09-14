@@ -1639,6 +1639,47 @@ fn a_missing_credential_is_a_typed_request_construction_error() {
     }
 }
 
+// The other credential state an application routes on: a credential *is* registered, but the
+// provider behind it could not refresh it. That is still "unauthenticated", and it is still raised
+// before anything is sent — so the same poll-once shape reaches it, with no server and no runtime.
+#[test]
+fn a_failed_token_provider_is_a_typed_request_construction_error() {
+    use std::future::Future;
+    let client = basic_client::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_credential(
+            "bearer",
+            basic_client::Credential::Provider(std::sync::Arc::new(|| {
+                Box::pin(async { Err(basic_client::AuthError::new("refresh rejected")) })
+                    as basic_client::TokenFuture
+            })),
+        );
+    let mut call = std::pin::pin!(client.get_user("1", None));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("a failed token provider must fail before anything is sent");
+    };
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a failed token provider cannot produce a response"),
+    };
+    match &error {
+        basic_client::Error::RequestConstruction(
+            basic_client::RequestError::CredentialProvider { scheme, source },
+        ) => {
+            assert_eq!(*scheme, "bearer");
+            assert_eq!(source.to_string(), "refresh rejected");
+        }
+        other => panic!("expected CredentialProvider, got {other:?}"),
+    }
+    // Nothing was sent, so there is nothing to retry — and the provider's own error stays reachable
+    // through the chain, which is how an application reports *why* the refresh failed.
+    assert!(!error.is_transient());
+    let cause = std::error::Error::source(&error).unwrap();
+    let provider = std::error::Error::source(cause).unwrap();
+    assert!(provider.downcast_ref::<basic_client::AuthError>().is_some());
+}
+
 #[test]
 fn the_single_error_body_stays_one_deref_away() {
     let wrapped = basic_client::GetTextErrorError("nope".to_owned());
