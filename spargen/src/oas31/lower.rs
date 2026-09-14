@@ -952,6 +952,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
         }
 
+        // The third spelling of the conjunction the `$ref`-sibling and `allOf` arms already guard.
+        // A union member that closes a reference cycle resolves to the target's RESERVED id, whose
+        // def is the `TypeKind::Any` placeholder, and `intersect_non_null`'s `(Any, _)` arm returns
+        // the sibling — so intersecting a variant against it silently discards the recursive
+        // target. Only reachable when there IS a sibling to intersect with: without one, an
+        // ordinary recursive union boxes its back-edge and generates, which is what makes a
+        // recursive `oneOf` usable at all.
+        if sibling.is_some() {
+            for member in &real_members {
+                if self.member_closes_a_cycle(member, &schema.provenance) {
+                    return self.reject_ref_sibling_intersection(
+                        schema,
+                        "this union member's `$ref` closes a reference cycle back to the component \
+                         that encloses it, so the enclosing schema's own sibling keywords would \
+                         have to be intersected with a target whose definition depends on the \
+                         result",
+                    );
+                }
+            }
+        }
+
         // A single real member (the rest were null): `Option<ThatType>`, no enum needed. Re-emit the
         // member's kind as this position's own def so it is the final graph insert — mirroring the
         // allOf single-member collapse — which keeps the `ensure_component` last-insert invariant
@@ -1991,6 +2012,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
         false
+    }
+
+    /// Whether a union member is a `$ref` that closes a reference cycle back through the component
+    /// enclosing the union. Only a member that IS a reference counts: a member with recursive
+    /// *fields* lowers fine, exactly as it does on the `allOf` path.
+    fn member_closes_a_cycle(&self, member: &SchemaOr, at: &crate::diag::Provenance) -> bool {
+        let SchemaOr::Schema(member) = member else {
+            return false;
+        };
+        member
+            .reference
+            .as_deref()
+            .and_then(|reference| reference.strip_prefix("#/components/schemas/"))
+            .is_some_and(|name| self.ref_closes_a_cycle(name, at))
     }
 
     /// Whether an already-lowered type admits JSON `null`, resolving its kind out of the graph.

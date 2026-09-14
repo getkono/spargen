@@ -10039,3 +10039,113 @@ fn the_recursive_ref_guard_does_not_key_on_component_declaration_order() {
         "an acyclic `$ref` with shape-bearing siblings must still intersect: {report:#?}"
     );
 }
+
+/// The third spelling of the same conjunction. The `$ref`-sibling arm and the `allOf` arm both
+/// guard a cycle-closing reference; the `oneOf`/`anyOf` sibling path — which is this pull
+/// request's own subject — did not, so it went on reading the `TypeKind::Any` placeholder.
+/// `lower_union_variant` receives the target's RESERVED id, `intersect_non_null`'s `(Any, _)` arm
+/// returns the sibling unchanged, and the recursive target is silently discarded:
+/// `Node.next: {type: object, properties: {x}, oneOf: [{$ref: Node}]}` generated cleanly with
+/// `Node`'s own `next` field gone from the emitted struct.
+///
+/// An independent Draft 2020-12 validator accepts arbitrarily deep `next` chains under that schema,
+/// so the emitted type described a strictly smaller language than the document. Three spellings of
+/// one conjunction were `Rejected` / `Rejected` / silently wrong.
+#[test]
+fn a_cycle_closing_union_member_is_rejected_not_discarded() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths: {}\n";
+
+    // (what it exercises, the `next` subschema)
+    let rejected: &[(&str, &str)] = &[
+        (
+            "a sole-member `oneOf` back-edge under a shape-bearing sibling",
+            "type: object\n          properties: { x: { type: string } }\n          oneOf: [{ $ref: '#/components/schemas/Node' }]",
+        ),
+        (
+            "a sole-member `anyOf` back-edge under a shape-bearing sibling",
+            "type: object\n          properties: { x: { type: string } }\n          anyOf: [{ $ref: '#/components/schemas/Node' }]",
+        ),
+        (
+            "a multi-variant union whose back-edge variant meets a shape-bearing sibling",
+            "type: object\n          properties: { x: { type: string } }\n          oneOf: [{ $ref: '#/components/schemas/Node' }, { type: object, properties: { y: { type: integer } } }]",
+        ),
+        (
+            "a back-edge beside a null member, under a shape-bearing sibling",
+            "type: object\n          properties: { x: { type: string } }\n          oneOf: [{ $ref: '#/components/schemas/Node' }, { type: 'null' }]",
+        ),
+    ];
+    for (what, next) in rejected {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          {next}\n"
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` was not rejected by {entry}, so the recursive target is still being \
+                 silently discarded on the union path: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::AllOfIrreconcilable),
+                "`{what}` did not report E013 through {entry}: {report:#?}"
+            );
+        }
+        let report = generate(&spec);
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("closes a reference cycle")),
+            "`{what}` must name the cycle rather than the generic empty-intersection wording: \
+             {messages:?}"
+        );
+    }
+
+    // The controls, and the reason the guard is reached only when there IS a sibling: without one
+    // there is nothing to intersect, so an ordinary recursive union must go on generating.
+    //
+    // What it generates is a separate, PRE-EXISTING defect this fixture deliberately does not
+    // assert away: the sole-member collapse reads the reserved id's `TypeKind::Any` placeholder for
+    // its own kind, so `Node.next: {oneOf: [{$ref: Node}, {type: 'null'}]}` emits
+    // `Option<Box<Nodenext>>` with `pub type Nodenext = serde_json::Value;` — the recursion lost and
+    // the type degraded, which the standing invariant forbids. Measured byte-identical at `a45d95c`
+    // and unchanged by this pull request. Pinning it here would pin a defect; the assertion is
+    // therefore only that the guard does not creep.
+    let permitted: &[(&str, &str)] = &[
+        (
+            "a recursive union with no shape-bearing sibling",
+            "oneOf: [{ $ref: '#/components/schemas/Node' }, { type: 'null' }]",
+        ),
+        (
+            "a recursive union whose only sibling is validation-only",
+            "description: plain\n          oneOf: [{ $ref: '#/components/schemas/Node' }, { type: 'null' }]",
+        ),
+        (
+            "a sole-member recursive union with no sibling",
+            "oneOf: [{ $ref: '#/components/schemas/Node' }]",
+        ),
+    ];
+    for (what, next) in permitted {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          {next}\n"
+        );
+        let report = generate(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "the union guard crept into `{what}`: {report:#?}"
+        );
+    }
+
+    // And a union member that is an ACYCLIC `$ref` must still intersect with the sibling.
+    let acyclic = format!(
+        "{HEAD}components:\n  schemas:\n    Leaf: {{ type: object, properties: {{ y: {{ type: integer }} }} }}\n    Holder:\n      type: object\n      properties:\n        l:\n          type: object\n          properties: {{ x: {{ type: string }} }}\n          oneOf: [{{ $ref: '#/components/schemas/Leaf' }}]\n"
+    );
+    let report = generate(&acyclic);
+    assert_ne!(
+        report.outcome(),
+        Outcome::Rejected,
+        "an acyclic union member with a shape-bearing sibling must still intersect: {report:#?}"
+    );
+}
