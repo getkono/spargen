@@ -678,6 +678,332 @@ components:
     assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
 }
 
+/// Build a two-file description in a throwaway tempdir and run it through both entry points.
+///
+/// The root document is fixed — one operation whose `200` body `$ref`s `target` — and `lib` is
+/// written beside it as `lib.yaml`. Every shape below differs only in that sub-file, so what a
+/// fixture pins is the sub-file's own reference behaviour and nothing else. The tempdir is dropped
+/// on return; the report owns its data and the emitted source is read out first.
+fn split(target: &str, lib: &str) -> (Report, Report, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /u:\n    \
+             get:\n      \
+             operationId: getU\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json:\n              \
+             schema: {{ $ref: '{target}' }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("lib.yaml"), lib).unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    (generated, checked, code)
+}
+
+/// A sub-file sibling reference that names nothing. The root document's component map is consulted
+/// first and misses, and the sub-file's own map misses too — so the reference is unresolvable and
+/// must be reported, not dropped. This is the sub-file spelling of the very bug issue #107 exists
+/// to remove: before the reference reached the resolver at all it was silently discarded, taking
+/// the property with it.
+#[test]
+fn a_sub_file_ref_to_a_component_its_own_file_does_not_declare_is_rejected() {
+    let (generated, checked, _) = split(
+        "./lib.yaml#/components/schemas/Wrapper",
+        r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      properties:
+        inner: { $ref: '#/components/schemas/Missing' }
+      required: [inner]
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let e004: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .collect();
+        assert!(!e004.is_empty(), "{entry}: {report:#?}");
+        // The message must name the reference that could not be followed: a pointer says where the
+        // `$ref` sits, not what it asked for, and `Missing` is the only thing wrong here.
+        assert!(
+            e004.iter()
+                .any(|d| d.message.contains("#/components/schemas/Missing")),
+            "{entry}: the rejection must name the reference: {report:#?}"
+        );
+    }
+}
+
+/// A self-recursive schema declared in a sub-file and referencing itself by plain component name.
+///
+/// `docs/support-matrix.md` lists recursive `$ref` cycles as supported and boxes the cycle-closing
+/// reference; the root document has always done that. The sub-file spelling must reach the same
+/// place. It did not: without an in-progress reservation keyed on the resolved target, every
+/// re-entry re-resolved and re-lowered the schema afresh, so a 9-line document walked to
+/// `MAX_SCHEMA_DEPTH` and rejected with `E014` — a cap whose own text says no real description
+/// reaches it, on a `$ref` chain of length one. Neither remedy it offered applied: a recursive type
+/// cannot be flattened, and the omit route ends in `E019` (pinned in `carve.rs`).
+#[test]
+fn a_self_recursive_sub_file_schema_is_boxed_rather_than_rejected() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Node",
+        r##"
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        next: { $ref: '#/components/schemas/Node' }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: a self-reference is a cycle to box, not a chain to reject: {report:#?}"
+        );
+        assert!(
+            !has_code(report, Code::UnresolvedRef),
+            "{entry}: {report:#?}"
+        );
+    }
+    // Boxed, and boxed against the type itself — not against a second copy of it under another
+    // name, which is what an unmemoized re-entry would have produced had it terminated.
+    assert!(code.contains("Option<Box<Node>>"), "{code}");
+    assert_eq!(
+        code.matches("pub struct Node").count(),
+        1,
+        "one declared schema, one generated type: {code}"
+    );
+
+    // The identical shape written in the ROOT document is the control: it has always generated, so
+    // what this fixture pins is the file the schema sits in, not the shape.
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        next: { $ref: '#/components/schemas/Node' }
+"##;
+    let (report, root_code) = generate_with_code(root);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(root_code.contains("Option<Box<Node>>"), "{root_code}");
+}
+
+/// Mutual recursion across two sub-file components, `A -> B -> A`, both referencing by plain
+/// component name. One of the two edges is boxed, exactly as the root document's `Category`/`Item`
+/// pair is. Separate from the self-reference above because it closes the cycle through a *second*
+/// reservation rather than re-entering the one already on the stack.
+#[test]
+fn a_mutually_recursive_sub_file_pair_is_boxed_rather_than_rejected() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/A",
+        r##"
+components:
+  schemas:
+    A:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        b: { $ref: '#/components/schemas/B' }
+    B:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        a: { $ref: '#/components/schemas/A' }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: {report:#?}"
+        );
+    }
+    assert_eq!(code.matches("pub struct A ").count(), 1, "{code}");
+    assert_eq!(code.matches("pub struct B ").count(), 1, "{code}");
+    // Exactly one of the two edges carries the indirection; both would be redundant and neither
+    // would compile.
+    let boxed =
+        usize::from(code.contains("Option<Box<A>>")) + usize::from(code.contains("Option<Box<B>>"));
+    assert_eq!(boxed, 1, "exactly one edge in the cycle is boxed: {code}");
+}
+
+/// A cycle of sub-file component *aliases* — each component is a bare `$ref` to the next, so there
+/// is no schema body to reserve a root against and the reserve/box machinery never engages. This is
+/// the shape `remote_alias_stack` exists for on the remote path; the sub-file path needs its own
+/// guard or the cycle only stops at the depth cap.
+///
+/// It is a genuine document error either way, so what this pins is *which* error: an alias cycle
+/// named as one, not `E014`, whose message would blame chain length and offer a flattening remedy
+/// for a document that has no chain to flatten.
+#[test]
+fn a_sub_file_component_alias_cycle_is_reported_as_a_cycle_not_as_excessive_depth() {
+    let (generated, checked, _) = split(
+        "./lib.yaml#/components/schemas/A",
+        r##"
+components:
+  schemas:
+    A: { $ref: '#/components/schemas/B' }
+    B: { $ref: '#/components/schemas/A' }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::UnresolvedRef && d.message.contains("cycle")),
+            "{entry}: the rejection must name the cycle: {report:#?}"
+        );
+        assert!(
+            !has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: a two-component loop is a cycle, not a deep chain: {report:#?}"
+        );
+    }
+}
+
+/// A sub-file component that is not an object. Deduplicating sub-file components lifts the lowered
+/// root into a reserved id and asserts the root was the last definition its own body inserted — an
+/// invariant a scalar (one insert, no children) and a union (a wrapper over boxed members) exercise
+/// differently from the object every other fixture here uses.
+#[test]
+fn a_non_object_sub_file_component_lowers_to_its_own_shared_type() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Wrapper",
+        r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      required: [name, either]
+      properties:
+        name: { $ref: '#/components/schemas/Name' }
+        either: { $ref: '#/components/schemas/Either' }
+    Name: { type: string }
+    Either:
+      oneOf:
+        - type: string
+        - type: integer
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::UnresolvedRef),
+            "{entry}: {report:#?}"
+        );
+    }
+    // Each reached the field as its own named type — not as an untyped value, and not dropped.
+    assert!(code.contains("pub type Name = String;"), "{code}");
+    assert!(code.contains("pub name: Name"), "{code}");
+    assert!(code.contains("pub enum Either"), "{code}");
+    assert!(code.contains("pub either: Either"), "{code}");
+}
+
+/// One sub-file component, referenced twice. This is the shape nothing could have caught: it is
+/// `Generated` and `Clean` whichever way it behaves, so a fixture that pins only rejections is
+/// blind to it.
+///
+/// Re-resolving per reference site produced one fresh type per *use* rather than per *declaration*
+/// — `Inner` and `InnerD5129632` for a single declared schema — which is not one bug but three:
+/// the two are not interchangeable in Rust, each is a separate item in the `spargen diff` semver
+/// surface, and the duplication compounds multiplicatively down a reuse graph (a 17-schema,
+/// 40-line description reached 2^16 lowerings and produced no output at all).
+#[test]
+fn a_sub_file_component_used_twice_generates_one_type() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Node",
+        r##"
+components:
+  schemas:
+    Node:
+      type: object
+      required: [first, second]
+      properties:
+        first: { $ref: '#/components/schemas/Inner' }
+        second: { $ref: '#/components/schemas/Inner' }
+    Inner:
+      type: object
+      required: [id]
+      properties: { id: { type: string } }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    // One declaration, one type. `pub struct Inner` is a prefix of every hash-suffixed duplicate
+    // (`pub struct InnerD5129632`), so this count catches them too.
+    assert_eq!(
+        code.matches("pub struct Inner").count(),
+        1,
+        "one declared schema must generate one type: {code}"
+    );
+    // And both uses reached that one type, rather than one of them reaching a copy.
+    assert!(code.contains("pub first: Inner"), "{code}");
+    assert!(code.contains("pub second: Inner"), "{code}");
+}
+
+/// The control for the three fixtures above: sharing one type per sub-file component must not
+/// disarm the depth cap. A genuinely long chain — each sub-file component `$ref`ing the next, no
+/// reuse and no cycle, so nothing is ever a repeat visit — still exceeds `MAX_SCHEMA_DEPTH` and
+/// still rejects with `E014`. Without this, removing the cap entirely would leave the suite green.
+#[test]
+fn a_long_sub_file_ref_chain_still_exceeds_the_depth_cap() {
+    let depth = 200;
+    let mut lib = String::from("components:\n  schemas:\n");
+    for level in 0..depth {
+        lib.push_str(&format!(
+            "    L{level}:\n      type: object\n      required: [next]\n      properties:\n        next: {{ $ref: '#/components/schemas/L{}' }}\n",
+            level + 1
+        ));
+    }
+    lib.push_str(&format!(
+        "    L{depth}:\n      type: object\n      properties: {{ id: {{ type: string }} }}\n"
+    ));
+    let (generated, checked, _) = split("./lib.yaml#/components/schemas/L0", &lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
