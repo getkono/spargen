@@ -204,12 +204,16 @@ pub(crate) struct Responses {
 }
 
 impl Responses {
-    /// The success shape of the operation. A single documented success body yields plain `T`
-    /// (any bodyless success sibling, e.g. `204`, is not modeled — the common `T`-plus-`204`
-    /// shape stays `Plain`). Two or more documented success bodies yield a per-operation success
-    /// enum whose entries are sorted into decode precedence (exact code ascending, then range
-    /// ascending, then `default` last) and which also carries any documented bodyless success
-    /// status as a payload-free unit variant, so no documented status is silently dropped.
+    /// The success shape of the operation, built from its documented *success* statuses. A single
+    /// documented success body yields plain `T` (any bodyless success sibling, e.g. `204`, is not
+    /// modeled — the common `T`-plus-`204` shape stays `Plain`). Two or more documented success
+    /// bodies yield a per-operation success enum whose entries are sorted into decode precedence
+    /// (exact code ascending, then range ascending) and which also carries any documented bodyless
+    /// success status as a payload-free unit variant, so no documented success status is silently
+    /// dropped. `default` is a success source only when no explicit status is declared at all;
+    /// otherwise it contributes to the error shape as the `Range(0)` sentinel (see
+    /// [`Self::error`]), and an undocumented 2xx yields `Error::UnexpectedStatus` even when a
+    /// `default` is declared.
     pub(crate) fn success(&self) -> SuccessShape {
         // A default with no explicit status entries is the operation's single success body.
         if self.by_status.is_empty() {
