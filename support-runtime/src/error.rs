@@ -639,12 +639,26 @@ mod tests {
     ///   `REQUEST_VARIANTS` alone: **not caught**. Nothing ever evaluates this function on a value
     ///   of the new variant, because no such value is ever constructed.
     ///
-    /// That last case cannot be closed from inside stable Rust: no construct yields a variant
-    /// count, so no assertion can know the list is short. Closing it needs the enum declared
-    /// through a macro that emits the count alongside it, which would ship a `macro_rules!`
-    /// definition of a public type into every generated client. So raising `REQUEST_VARIANTS` is a
-    /// convention the enum's own doc states, and the two mechanical guards above catch every way
-    /// of getting it wrong once it is raised.
+    /// That last case is not closed here, but it is closable, and an earlier version of this
+    /// paragraph was wrong to say otherwise. No *language* construct yields a variant count on
+    /// stable — `std::mem::variant_count` is nightly, and a `const` assertion over an exhaustive
+    /// match cannot help, because constructing one value of each variant *is* the list the guard
+    /// is trying to force. Two routes reach a count anyway, both run at the declared MSRV floor
+    /// and both leaving generated output untouched: a `support-runtime/build.rs` emitting the
+    /// counts as consts into `OUT_DIR`, `include!`d inside this test module; and an assertion in
+    /// `spargen/tests/`, in the idiom `layering.rs` already uses to read `support-runtime/src/*`
+    /// textually. Issue #144 tracks landing one of them.
+    ///
+    /// What stays rejected is declaring the enum through a macro that emits the count alongside
+    /// it: that ships a `macro_rules!` definition of a public type into every generated client.
+    /// Two more that look like routes and are not: `strum::EnumCount`'s attribute would sit above
+    /// the test-module marker the embed splits on, so it would ship; and
+    /// `#[cfg_attr(test, derive(..))]` ships too, and activates when the *consumer* runs
+    /// `cargo test`.
+    ///
+    /// So until that guard lands, raising `REQUEST_VARIANTS` is a convention the enum's own doc
+    /// states, and the two mechanical guards above catch every way of getting it wrong once it is
+    /// raised.
     fn request_variant_index(error: &RequestError) -> usize {
         match error {
             RequestError::MissingCredential { .. } => 0,
