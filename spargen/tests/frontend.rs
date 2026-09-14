@@ -65,6 +65,18 @@ fn messages_for(report: &Report, code: Code) -> Vec<&str> {
         .collect()
 }
 
+/// The generated `types` module, with the provenance header stripped.
+///
+/// Two generations of the *same* spec already differ as whole files: the header carries the output
+/// path and a per-run `input-sha256`/`content-sha256`. So a whole-file comparison between two
+/// generated clients is unconditionally true and proves nothing. Comparing from `pub mod types {`
+/// onward compares what the two documents actually lowered to.
+fn types_module(code: &str) -> String {
+    code.find("pub mod types {")
+        .map(|start| code[start..].to_owned())
+        .unwrap_or_default()
+}
+
 /// The name of the `pub struct` that declares the first field line starting with `field`.
 ///
 /// A type count plus "both fields exist somewhere" is satisfied by either assignment of two names to
@@ -11724,16 +11736,42 @@ fn only_a_null_member_can_rescue_an_empty_union_intersection() {
         emitted.push((what, code));
     }
 
-    // The sharpest form of the defect, and the one a per-case assertion cannot see: the satisfiable
-    // row and the unsatisfiable row emitted the SAME BYTES. Whatever they do, they must differ.
-    let satisfiable = &emitted[0].1;
-    for (what, code) in &emitted[1..3] {
-        assert_ne!(
-            satisfiable, code,
-            "`{what}` admits nothing while the first case admits `null`, yet they generate \
-             identical output — the distinction has been lost again"
-        );
-    }
+    // The original defect was that two documents with DIFFERENT instance sets lowered to the same
+    // bytes, so a per-case assertion could not see it. The rows above no longer make that
+    // comparison possible — the unsatisfiable ones now reject, and a rejected run emits nothing —
+    // so the comparison is made between two rows that both GENERATE and whose instance sets differ:
+    // the one only `null` satisfies, and the one only `1` does.
+    //
+    // It compares `types_module`, not whole files. Two runs of the same spec already differ as
+    // whole files, because the provenance header carries the output path and per-run hashes, so a
+    // whole-file `assert_ne!` is true unconditionally and guards nothing. An earlier revision of
+    // this fixture made both mistakes at once, and its comment claimed it was the strongest
+    // assertion here.
+    let null_only = types_module(&emitted[0].1);
+    assert!(
+        !null_only.is_empty(),
+        "the null-only row generated nothing: {:?}",
+        emitted[0].0
+    );
+    let narrowing = format!(
+        "{HEAD}{}",
+        PATH.replace(
+            "BODY",
+            "type: [integer, 'null']\n                oneOf: [{ type: integer }]"
+        )
+    );
+    let (narrowing_report, narrowing_code) = generate_with_code(&narrowing);
+    assert_ne!(
+        narrowing_report.outcome(),
+        Outcome::Rejected,
+        "{narrowing_report:#?}"
+    );
+    assert_ne!(
+        null_only,
+        types_module(&narrowing_code),
+        "a schema only `null` satisfies and one only `1` satisfies lowered to the same types \
+         module — the distinction the merged flag destroyed has been lost again"
+    );
 
     // The control the whole repair must not disturb: a non-empty intersection under the same
     // nullable type array is unaffected either way.
