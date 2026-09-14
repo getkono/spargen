@@ -2527,6 +2527,25 @@ serde_json.workspace = true
         promises("Inheriting a required crate therefore satisfies the audit");
     }
 
+    #[test]
+    fn an_inherited_member_cannot_make_an_unconditional_crate_optional() {
+        // The mirror of `an_inherited_optional_dependency_in_a_target_table_resolves`: `optional`
+        // is read from the member, so a member that adds `optional = true` to a crate generated
+        // code names unconditionally must be rejected — the inheritance resolving is not the same
+        // thing as the declaration being acceptable. Every other test that reaches this rule
+        // declares its crate directly, so nothing held it on the inheritance path, which is the
+        // path this branch is about.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            RootDefaults::Off,
+            "reqwest = { workspace = true, optional = true }",
+        );
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("`reqwest` must not be optional"),
+            "{messages:#?}"
+        );
+    }
+
     /// The five core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
     /// the floors in these fixtures cannot drift from the ones every other test audits against.
     fn core_workspace_dependencies() -> &'static str {
