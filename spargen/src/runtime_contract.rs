@@ -2426,16 +2426,21 @@ serde_json.workspace = true
     }
 
     /// `spargen explain E023` prints `Code::RuntimeDependencyContract`'s explain body verbatim, and
-    /// that body no longer describes the audit in a paragraph: it states the `default-features`
-    /// rule this module implements and promises that an inheritance which does not resolve names
-    /// which of three things happened. Nothing holds that text to anything —
+    /// that body no longer describes the audit in a paragraph: it specifies workspace-dependency
+    /// inheritance as an algorithm — where the root is searched for and in what order, what is
+    /// taken from it, what stays with the member, that inheriting satisfies the audit, and what a
+    /// failure to resolve reports. Nothing else holds that text to anything —
     /// `every_code_has_title_and_explain_text` asserts only that it is non-empty, and
     /// `docs/errors.md` carries titles — so any clause could be deleted, negated, or made factually
     /// wrong with the whole suite green.
     ///
-    /// Each promise below is pinned against the fixture in this module that makes it true. Whether
-    /// every code's explain body should be held this way is a repository-wide question tracked
-    /// separately; this pins the one whose text specifies what `check_declaration` does.
+    /// Every clause that promises behaviour is pinned below against the fixture in this module that
+    /// makes it true, named in the comment beside it. The clauses deliberately left unpinned are
+    /// the ones that promise nothing checkable here: the opening statement that the generated module
+    /// is freestanding, the advice to use the tested floors, and the closing note that Cargo
+    /// resolves and rustc verifies. Whether every code's explain body should be held this way is a
+    /// repository-wide question tracked separately; this pins the one whose text specifies what
+    /// `workspace_root` and `check_declaration` do.
     #[test]
     fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
         let explain = Code::RuntimeDependencyContract.explain();
@@ -2476,6 +2481,50 @@ serde_json.workspace = true
         promises(
             "the diagnostic says which of those happened rather than reporting the crate as missing",
         );
+
+        // The three-way root search, each branch pinned by the fixture that exercises it.
+        let root_search = [
+            // `a_root_package_inherits_its_own_workspace_dependencies`.
+            "the consumer manifest itself when it declares `[workspace]`",
+            // `package_workspace_names_the_workspace_root_directory`, whose root is deliberately
+            // not an ancestor of the member, and `a_relative_manifest_path_still_resolves_the_workspace_root`.
+            "otherwise the root `package.workspace` names",
+            // `a_broken_manifest_below_the_real_root_does_not_stop_the_walk` and
+            // `an_unparseable_ancestor_manifest_is_not_an_error_on_its_own`.
+            "otherwise the nearest ancestor manifest that parses and declares `[workspace]`",
+        ];
+        for clause in root_search {
+            promises(clause);
+        }
+        // Precedence is a claim the three checks above do not make: all three would still pass with
+        // the order reversed, and `workspace_root` tries them in exactly this order.
+        let found = root_search.map(|clause| explain.find(clause));
+        assert!(
+            found[0] < found[1] && found[1] < found[2],
+            "`spargen explain E023` states the root search out of the order `workspace_root` \
+             performs it:\n{explain}"
+        );
+
+        // What is taken from the root once it is found. Pinned by
+        // `workspace_inheritance_uses_the_workspace_version_and_features`, where the root carries
+        // every version and `serde`'s `derive` while the member declares a bare `workspace = true`;
+        // the member's half of the union is pinned by
+        // `the_manifests_reported_in_issue_71_pass_as_written`, which adds `features = ["stream"]`
+        // to the member's inherited `reqwest`.
+        promises("taking the version from there");
+        promises("the union of both feature lists");
+
+        // The one field that stays with the member, pinned by
+        // `an_inherited_optional_dependency_in_a_target_table_resolves` and
+        // `workspace_inherited_tokio_under_an_alternative_spelling_resolves`.
+        promises("while `optional` is read from the member");
+
+        // The clause that is the answer to #71 itself: an inherited declaration is accepted rather
+        // than reported as missing. Pinned by
+        // `workspace_inheritance_uses_the_workspace_version_and_features` and
+        // `the_manifests_reported_in_issue_71_pass_as_written`, both of which assert the audit
+        // emits nothing at all for five crates the member only inherits.
+        promises("Inheriting a required crate therefore satisfies the audit");
     }
 
     /// The five core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
