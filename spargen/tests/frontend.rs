@@ -577,6 +577,78 @@ components:
     );
 }
 
+/// A `$ref` inside a referenced sub-file spells that file's own components the ordinary way —
+/// `#/components/schemas/<name>` — and it must resolve against the file it is written in. This is
+/// the standard layout for a split description: the root references `./lib.yaml#/components/schemas/
+/// Wrapper`, and `Wrapper`'s own properties reference its siblings by plain component name.
+///
+/// `Resolver::resolve` already implements exactly this, keying on the provenance's file and
+/// shortcutting to the parsed component map only for the root document. `ensure_component` bypassed
+/// the resolver for anything carrying the `#/components/schemas/` prefix and looked every such name
+/// up in the ROOT document's map whatever file it sat in, so the sibling reference missed. Before
+/// E004 fired that miss was a silent drop — the property simply vanished — which is the same bug
+/// this branch is about, just reached from a sub-file.
+///
+/// `corpus-smoke` cannot see this: the one multi-file corpus case uses whole-file `$ref`s, and the
+/// other relative-file fixture here uses a non-component fragment (`#/Pet`), which never enters
+/// `ensure_component`. This fixture is the only evidence.
+#[test]
+fn a_sub_file_resolves_its_own_component_refs_rather_than_the_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: './lib.yaml#/components/schemas/Wrapper' }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      properties:
+        inner: { $ref: '#/components/schemas/Inner' }
+      required: [inner]
+    Inner:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##,
+    )
+    .unwrap();
+
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    let code = std::fs::read_to_string(&out).unwrap();
+    // The sibling was genuinely followed: `Inner`'s own field reached the generated type, so the
+    // property is typed rather than dropped.
+    assert!(code.contains("pub inner"), "{code}");
+    assert!(code.contains("pub id"), "{code}");
+
+    // `check` must agree — it runs the same lowering.
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
