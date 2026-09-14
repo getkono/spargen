@@ -3888,6 +3888,86 @@ fn every_sibling_keyword_the_explain_names_is_actually_intersected() {
              than establish one\" clause is no longer true: {report:#?}"
         );
     }
+
+    // And the third clause, which says WHICH establishing keyword each refiner needs. Neither tier
+    // above can check it: tier one pairs every refiner with a `type` against a target of a
+    // different category, where the `type` alone already rejects, so the keyword beside it is never
+    // load-bearing. This tier is a differential instead — the same document with and without the
+    // refining keyword, against a target the paired `type` AGREES with, so the only thing that can
+    // move the lowering is the keyword itself.
+    //
+    // (keyword, the establishing keywords beside it, the target it agrees with, must it participate)
+    let refiners: &[(&str, &str, &str, &str)] = &[
+        (
+            "additionalProperties",
+            "type: object",
+            "additionalProperties: false",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        (
+            "items",
+            "type: array",
+            "items: { type: integer }",
+            "{ type: array, items: { type: string } }",
+        ),
+        (
+            "prefixItems",
+            "type: array",
+            "prefixItems: [{ type: integer }]",
+            "{ type: array, items: { type: string } }",
+        ),
+        // `required` beside `properties` participates: `object_body` consumes it per declared
+        // property, and the property is declared.
+        (
+            "required",
+            "properties: { a: { type: string } }",
+            "required: [a]",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+    ];
+    // The comparison is the emitted `types` module, not the whole file: the provenance header
+    // carries a hash of the spec bytes, which differ by construction here.
+    let lowering = |establishing: &str, refiner: &str, target: &str| {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Target: {target}\n    Sibling:\n      \
+             $ref: '#/components/schemas/Target'\n      {establishing}\n{refiner}"
+        );
+        let (report, code) = generate_with_code(&spec);
+        let types = code
+            .find("pub mod types {")
+            .map(|start| code[start..].to_owned())
+            .unwrap_or_default();
+        (report.outcome(), types)
+    };
+    for (keyword, establishing, refiner, target) in refiners {
+        assert_ne!(
+            lowering(establishing, &format!("      {refiner}\n"), target),
+            lowering(establishing, "", target),
+            "`{keyword}` beside `{establishing}` changed nothing about the lowering, so the \
+             explain's claim that it then takes part is not true"
+        );
+    }
+
+    // The clause that round 1 got wrong in the other direction: `required` does NOT take part
+    // beside a bare `type: object`. `object_body` materialises fields only from `properties` and
+    // consumes `required` as a per-field flag, so a sibling that declares no property has no field
+    // to mark and the requirement is dropped — the generated type accepts and can emit `{}`, which
+    // the description forbids. That is #140's territory to repair; the published text must not
+    // claim it is already handled.
+    assert_eq!(
+        lowering(
+            "type: object",
+            "      required: [a]\n",
+            "{ type: object, properties: { a: { type: string } } }"
+        ),
+        lowering(
+            "type: object",
+            "",
+            "{ type: object, properties: { a: { type: string } } }"
+        ),
+        "`required` beside a bare `type: object` now changes the lowering, so the explain's \
+         \"only beside the sibling's own `properties`\" clause has become wrong and must move"
+    );
 }
 
 /// Site B widened `E007`'s emission set, so its message has to describe the construct that actually
