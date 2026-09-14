@@ -4637,11 +4637,24 @@ paths:
                 $ref: "#/paths/~1pets~1%7BpetId%7D/get/responses/200/content/application~1json/schema"
 "##;
     let report = generate(spec);
-    // The self-reference is a cycle, so it is rejected for being recursive — never for being
-    // unresolvable, which is what the missing percent-decoding used to report.
+    // The schema at that pointer *is* this `$ref`, so it names only itself: a cycle, and rejected
+    // for being one. What must never happen is the report the missing percent-decoding used to
+    // produce — that the target could not be found — so this asserts the wording, not merely the
+    // code. (`E004` covers both, since an alias cycle resolves to nothing; asserting its absence
+    // would now fail for the right reason rather than pass for the wrong one.)
+    let e004: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::UnresolvedRef)
+        .collect();
     assert!(
-        !has_code(&report, Code::UnresolvedRef),
+        e004.iter().all(|d| !d.message.contains("was not found")
+            && !d.message.contains("unsupported or unresolved")),
         "the percent-encoded pointer must resolve: {report:#?}"
+    );
+    assert!(
+        e004.iter().any(|d| d.message.contains("alias cycle")),
+        "a schema that references itself is a cycle, and is named as one: {report:#?}"
     );
 }
 

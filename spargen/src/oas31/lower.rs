@@ -31,6 +31,35 @@ use super::{
 /// facade) so lowering this many levels deep is comfortably safe.
 const MAX_SCHEMA_DEPTH: u32 = 128;
 
+/// The root document's id in every input bundle. The root is the first file loaded, so it is always
+/// zero; `InputBundle::root_id` is the authority and is not reachable from here.
+const ROOT_FILE: crate::diag::FileId = crate::diag::FileId(0);
+
+/// The identity of a schema the bundle resolver produced: the `file#pointer` it was parsed from,
+/// read off the parsed schema's own provenance rather than off the `$ref` spelling that reached it.
+///
+/// This is what lets one target have one type however it is addressed — a sub-file's bare
+/// `#/components/schemas/Inner` and the root's `./lib.yaml#/components/schemas/Inner` resolve to the
+/// same file and the same pointer and therefore to the same key. `None` only when the target
+/// carries no span, which no parser output does; callers treat that as "no identity" and fall back.
+fn resolved_identity(provenance: &Provenance) -> Option<String> {
+    let file = provenance.span?.file;
+    Some(format!("{}#{}", file.0, provenance.pointer.as_str()))
+}
+
+/// The name hint a resolved target should carry: its own final pointer token, so the generated type
+/// is named for the schema it came from rather than for whichever use site happened to reach it
+/// first. Empty for a whole-file reference, which has no final token; the caller's hint stands then.
+fn resolved_hint<'p>(provenance: &'p Provenance, fallback: &'p str) -> &'p str {
+    provenance
+        .pointer
+        .as_str()
+        .rsplit('/')
+        .next()
+        .filter(|token| !token.is_empty())
+        .unwrap_or(fallback)
+}
+
 /// Lower a typed OpenAPI 3.1 or 3.2 [`Document`] into the version-agnostic [`Api`] IR.
 pub(crate) fn lower(
     document: &Document,
@@ -55,6 +84,9 @@ pub(crate) fn lower(
         remote_components: HashMap::new(),
         remote_in_progress: HashMap::new(),
         remote_alias_stack: HashSet::new(),
+        resolved_components: HashMap::new(),
+        resolved_in_progress: HashMap::new(),
+        resolved_alias_stack: HashSet::new(),
         depth: 0,
     };
 
@@ -381,6 +413,21 @@ struct LowerCtx<'a, 'doc> {
     /// Guards a chain of bare-`$ref` (alias) remote documents so an alias cycle terminates instead
     /// of recursing forever; a real (object/enum/…) remote schema uses the reserve/box machinery.
     remote_alias_stack: HashSet<String>,
+    /// The bundle-`$ref` analogue of [`Self::components`], keyed by the resolved target's own
+    /// `file#pointer` (see [`resolved_identity`]). `Resolver::resolve` parses a fresh owned schema
+    /// on every call, so — exactly as for a remote ref — a relative-file reference and a sub-file's
+    /// own `#/components/schemas/<name>` have no `document`-level identity of their own. This map
+    /// gives them one, so repeated uses of one target share one generated type instead of producing
+    /// a fresh type per reference site.
+    resolved_components: HashMap<String, (TypeId, bool)>,
+    /// Bundle refs currently being lowered (same role as [`Self::in_progress`]): a re-entered
+    /// `file#pointer` is a cycle-closing back-edge and is boxed against its reserved id, so a
+    /// recursive sub-file schema terminates and generates rather than walking to
+    /// [`MAX_SCHEMA_DEPTH`] and rejecting.
+    resolved_in_progress: HashMap<String, (TypeId, bool)>,
+    /// Guards a chain of bare-`$ref` (alias) bundle targets, which have no body to reserve a root
+    /// against; the counterpart of [`Self::remote_alias_stack`].
+    resolved_alias_stack: HashSet<String>,
     /// Current schema-lowering recursion depth, incremented on entry to [`Self::lower_schema`] and
     /// decremented on exit. A `$ref`/allOf/array/object chain that pushes this past
     /// [`MAX_SCHEMA_DEPTH`] is rejected (`E014`) rather than allowed to overflow the stack.
@@ -402,6 +449,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// sub-file still yields a rule read against the root document, which matches nothing and ends
     /// the run with `E019`. That is pre-existing and not specific to this diagnostic, but this
     /// diagnostic can reach it.
+    ///
+    /// A name the root document does not declare is handed to [`Self::ensure_resolved`], because a
+    /// `$ref` written inside a sub-file spells that file's own components the same way. That is a
+    /// re-entry into the resolver from a function the resolver's own component path can call back
+    /// into, so it owes a cycle-safety argument, and here it is: `ensure_resolved` reserves the
+    /// target's id under its resolved `file#pointer` *before* lowering its body, so a re-entry on
+    /// the same target — self-recursion, mutual recursion, an alias loop, or a diamond — finds the
+    /// reservation and returns a boxed back-edge rather than descending again. Every cycle closes in
+    /// one step, every target is lowered once, and only genuinely new targets consume depth. The two
+    /// memos do not compete for one target: a resolved reference that lands on a root component
+    /// comes straight back here by name, so `components` stays the single identity for those.
     fn ensure_component(&mut self, name: &str, at: &crate::diag::Provenance) -> Option<Ty> {
         if let Some(&(id, nullable)) = self.components.get(name) {
             return Some(Ty {
@@ -438,10 +496,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // declare reaches the sub-file reading. Which namespace *should* win when both declare
             // the name is a separate question; this deliberately does not change the answer.
             let from = at.span.map(|span| span.file);
-            if from.is_some_and(|file| file != crate::diag::FileId(0)) {
-                // The resolver reports its own failure, so a miss here is already diagnosed.
-                let resolved = self.resolver.resolve(&reference, at, self.diags).ok()?;
-                return self.lower_schema(&resolved.schema, name);
+            if from.is_some_and(|file| file != ROOT_FILE) {
+                // The resolver reports its own failure, so a miss here is already diagnosed. Going
+                // through `ensure_resolved` rather than straight to `resolve`/`lower_schema` is what
+                // makes this re-entry safe *and* finite: see that method and the note above.
+                return self.ensure_resolved(&reference, at, name);
             }
             // A raw `/` here is always a further pointer segment, never part of a component name: a
             // literal slash in a key is spelled `~1`. So the fragment addresses a *subschema* — but
@@ -491,10 +550,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             } else if is_remote_ref(&reference.reference) {
                 self.ensure_remote(&reference.reference)
             } else {
-                self.resolver
-                    .resolve(&reference.reference, &reference.provenance, self.diags)
-                    .ok()
-                    .and_then(|resolved| self.lower_schema(&resolved.schema, name))
+                self.ensure_resolved(&reference.reference, &reference.provenance, name)
             };
             self.component_alias_stack.remove(name);
             if let Some(ty) = ty {
@@ -612,6 +668,131 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(ty)
     }
 
+    /// Lower a `$ref` the bundle resolver has to follow — a relative-file reference, a whole-file
+    /// reference, a non-component fragment, or a sub-file's own `#/components/schemas/<name>` — to a
+    /// shared, cycle-safe type. The bundle analogue of [`Self::ensure_component`] and
+    /// [`Self::ensure_remote`], and it exists for the reason `ensure_remote` states: `resolve` parses
+    /// a *fresh owned schema* on every call, so a bundle reference has no `document`-level identity
+    /// the way a root component does.
+    ///
+    /// Without one, each reference site re-resolved and re-lowered its target from scratch. That is
+    /// three faults at once, not one: a shared component became one generated type per *use* instead
+    /// of per *declaration* (two public Rust types for one schema, two items in the `surface` semver
+    /// surface); a reuse graph cost 2^N lowerings rather than N, so a 40-line two-file description
+    /// produced no output and no diagnostic; and a recursive schema had nothing to terminate
+    /// against but [`MAX_SCHEMA_DEPTH`], rejecting with `E014` a document `docs/support-matrix.md`
+    /// promises is supported.
+    ///
+    /// The identity is the resolved target's own `file#pointer` ([`resolved_identity`]), read from
+    /// the parsed schema's provenance rather than from the `$ref` spelling, so every way of writing
+    /// one target lands on one key: a sub-file's bare `#/components/schemas/Inner` and the root's
+    /// `./lib.yaml#/components/schemas/Inner` resolve to the same file and pointer and share one
+    /// type. Keying on the spelling — or on `(file, name)` — would give one target two identities,
+    /// which is how these two paths came to behave differently in the first place. A target inside
+    /// the root document's own component map is routed back to [`Self::ensure_component`] for the
+    /// same reason: that map is already its identity, and a second one beside it would re-create the
+    /// divergence in a new place.
+    ///
+    /// **Cycle safety.** The reservation is inserted *before* the body is lowered, so any re-entry
+    /// on the same key — self-recursion, mutual recursion, or a diamond — finds it and returns a
+    /// boxed back-edge instead of descending again. Every cycle therefore closes in one step. A
+    /// chain of bare-`$ref` aliases has no body to reserve against and is guarded separately by
+    /// [`Self::resolved_alias_stack`], exactly as `remote_alias_stack` guards the remote one. Only
+    /// genuinely new targets descend, so the depth counter still bounds a real chain (`E014`) and
+    /// nothing repeated can accumulate against it.
+    fn ensure_resolved(&mut self, reference: &str, at: &Provenance, hint: &str) -> Option<Ty> {
+        let resolved = self.resolver.resolve(reference, at, self.diags).ok()?;
+        let schema = resolved.schema.into_owned();
+        let Some(key) = resolved_identity(&schema.provenance) else {
+            // No span, so no identity to key on. Lower it un-deduplicated rather than share a type
+            // under a key that does not identify it: a duplicated type is wrong, a wrongly shared
+            // one is worse. Every schema the parser produces carries a span, so this is defensive.
+            return self.lower_schema(&schema, hint);
+        };
+        // A resolved target that is a root component already has an identity — its name.
+        if schema
+            .provenance
+            .span
+            .is_some_and(|span| span.file == ROOT_FILE)
+        {
+            if let Some(name) = schema
+                .provenance
+                .pointer
+                .as_str()
+                .strip_prefix("/components/schemas/")
+                .filter(|name| !name.is_empty() && !name.contains('/'))
+            {
+                if self.document.components.schemas.contains_key(name) {
+                    return self.ensure_component(name, at);
+                }
+            }
+        }
+        if let Some(&(id, nullable)) = self.resolved_components.get(&key) {
+            return Some(Ty {
+                id,
+                nullable,
+                boxed: false,
+            });
+        }
+        if let Some(&(id, nullable)) = self.resolved_in_progress.get(&key) {
+            return Some(Ty {
+                id,
+                nullable,
+                boxed: true,
+            });
+        }
+        // Name the type for the schema it came from, not for whichever use site reached it first:
+        // once one type serves every site, a per-site hint would make the generated name depend on
+        // lowering order. A whole-file reference has no final pointer token, so the caller's hint
+        // stands there.
+        let hint = resolved_hint(&schema.provenance, hint).to_owned();
+
+        // A target that is itself a bare `$ref` is an alias with no body to reserve a root for.
+        // Chain to its target under a cycle guard rather than through the reserve/pop machinery,
+        // which assumes the body inserts a fresh root.
+        if schema.reference.is_some() {
+            if !self.resolved_alias_stack.insert(key.clone()) {
+                Diagnostic::error(Code::UnresolvedRef, at.clone())
+                    .message(format!(
+                        "schema reference `{reference}` forms an alias cycle"
+                    ))
+                    .remedy(
+                        "give one component in the cycle a schema body, or break the cycle at one \
+                         of its references",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+            let ty = self.lower_schema(&schema, &hint);
+            self.resolved_alias_stack.remove(&key);
+            return ty;
+        }
+
+        let nullable = schema_is_nullable(&schema);
+        let root_id = self.graph.reserve();
+        self.resolved_in_progress
+            .insert(key.clone(), (root_id, nullable));
+        let lowered = self.lower_schema(&schema, &hint);
+        self.resolved_in_progress.remove(&key);
+        let mut ty = lowered?;
+        let (popped_id, mut def) = self.graph.pop_last().expect("resolved root def");
+        // Same last-insert invariant as `ensure_component` and `ensure_remote`: the target's root is
+        // the final graph insert during its own body lowering (children insert first).
+        assert_eq!(
+            popped_id, ty.id,
+            "resolved root was not the last inserted def"
+        );
+        if let Some(raw) = &schema.default {
+            let note = format!("Default: `{}`.", default_display_for(raw, Some(&def.kind)));
+            append_doc_note(&mut def.docs, note);
+        }
+        self.graph.fill(root_id, def);
+        ty.id = root_id;
+        ty.nullable = nullable;
+        self.resolved_components.insert(key, (root_id, nullable));
+        Some(ty)
+    }
+
     fn lower_schema_or(&mut self, schema: &SchemaOr, hint: &str) -> Option<Ty> {
         match schema {
             SchemaOr::Bool(true) => {
@@ -667,11 +848,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             } else if is_remote_ref(reference) {
                 self.ensure_remote(reference)?
             } else {
-                let resolved = self
-                    .resolver
-                    .resolve(reference, &schema.provenance, self.diags)
-                    .ok()?;
-                self.lower_schema(&resolved.schema, hint)?
+                // Bundle refs go through the cycle-safe, deduped path too, keyed by the resolved
+                // `file#pointer`. That key is why the ordinary spelling and the explicit
+                // `./lib.yaml#/…` spelling of one target now share one type rather than two.
+                self.ensure_resolved(reference, &schema.provenance, hint)?
             };
 
             // In JSON Schema 2020-12 `$ref` is an applicator, not a replacement for the containing
@@ -3794,11 +3974,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 } else if is_remote_ref(&reference.reference) {
                     self.ensure_remote(&reference.reference)
                 } else {
-                    let resolved = self
-                        .resolver
-                        .resolve(&reference.reference, &reference.provenance, self.diags)
-                        .ok()?;
-                    self.lower_schema(&resolved.schema, hint)
+                    self.ensure_resolved(&reference.reference, &reference.provenance, hint)
                 }
             }
         }
