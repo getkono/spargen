@@ -1055,9 +1055,24 @@ fn carve_removes_a_recursive_ref_whose_siblings_bear_a_shape() {
             .any(|d| d.code == Code::AllOfIrreconcilable),
         "no residual E013 leaks, so the pointer resolved to an omittable construct: {report:#?}"
     );
+    // The assertion the sibling fixture thirty lines up already carries, and without which this one
+    // executes its subject without constraining it: deleting the rejection outright leaves the
+    // document generating cleanly, carve doing nothing, and every assertion above still true.
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("get /uses-node")),
+        "the operation reaching the recursive composition must have been carved, not merely left \
+         alone by a rejection that no longer fires: {report:#?}"
+    );
     let generated = std::fs::read_to_string(&out).unwrap();
     assert!(
         generated.contains("fn get_good"),
         "the healthy op is generated: {generated}"
+    );
+    assert!(
+        !generated.contains("fn get_uses_node"),
+        "the carved op is absent: {generated}"
     );
 }
