@@ -2476,9 +2476,26 @@ serde_json.workspace = true
         let expected = include_str!("runtime_contract_e023_explain.txt").trim_end_matches('\n');
 
         // This module's own source, so the fixture each clause names as its pin can be checked to
-        // resolve. Those citations are the whole argument that a clause assertion means anything,
-        // and nothing checked them: deleting a cited fixture left the suite green.
+        // resolve.
+        //
+        // Be precise about what that is worth. The check catches a **rename or a typo** and nothing
+        // else: it verifies the name belongs to a `#[test]` in this module, not that the test has
+        // anything to do with the clause citing it. Repointing the version clause at
+        // `the_time_requirement_never_asks_for_serde`, which asserts nothing about versions, passes.
+        // Before round 6 it did not even require a test — `fn messages(`, `fn linux(` and any other
+        // helper satisfied it. Turning a citation into *evidence* means deriving the text from the
+        // behaviour, which is #137's subject and not this test's.
         const SOURCE: &str = include_str!("runtime_contract.rs");
+
+        // A cited name must be a `#[test]` in this module: the attribute immediately precedes it,
+        // with only whitespace between.
+        let is_test_fn = |name: &str| {
+            SOURCE.match_indices(&format!("fn {name}(")).any(|(at, _)| {
+                SOURCE[..at]
+                    .rsplit_once("#[test]")
+                    .is_some_and(|(_, between)| between.trim().is_empty())
+            })
+        };
 
         let promises = |clause: &str, pinned_by: &[&str]| {
             // Exactly once, not merely present: an assertion whose text also occurs earlier or
@@ -2497,9 +2514,9 @@ serde_json.workspace = true
             assert!(!pinned_by.is_empty(), "no fixture cited for {clause:?}");
             for fixture in pinned_by {
                 assert!(
-                    SOURCE.contains(&format!("fn {fixture}(")),
+                    is_test_fn(fixture),
                     "the clause {clause:?} names `{fixture}` as the fixture that makes it true, \
-                     and no such test exists in this module"
+                     and no `#[test]` of that name exists in this module"
                 );
             }
         };
