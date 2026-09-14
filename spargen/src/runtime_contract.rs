@@ -2297,10 +2297,25 @@ serde_json.workspace = true
         assert_eq!(result.manifests, vec![root, member]);
     }
 
+    /// Whether the fixture's `[workspace.dependencies]` entry for `reqwest` leaves default features
+    /// on. That bit is the only thing these fixtures vary about the root, so it is the only thing
+    /// they state; the version floor comes from `CORE_MANIFEST` either way.
+    enum RootDefaults {
+        On,
+        Off,
+    }
+
     /// Audits a root/member pair that differ from the core fixtures only in how `reqwest` is
     /// declared, and returns every diagnostic message the audit produced.
+    ///
+    /// The root entry is derived from `core_workspace_dependencies()` rather than written out at
+    /// the call sites. Passing the whole declaration in re-stated the `reqwest` floor three times
+    /// over, and a bump to that floor in `CORE_MANIFEST` would then stop the substitution matching
+    /// — the root would silently keep `default-features = false`, and the fixture that needs them
+    /// on would fail for a reason unrelated to what it names. Locating the entry by its key and
+    /// asserting it was found makes a rename of it fail loudly instead of quietly.
     fn inherited_reqwest_default_feature_diagnostics(
-        root_reqwest: &str,
+        root_defaults: RootDefaults,
         member_reqwest: &str,
     ) -> Vec<String> {
         let directory = tempfile::tempdir().unwrap();
@@ -2308,14 +2323,27 @@ serde_json.workspace = true
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
         let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        let core_reqwest = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with("reqwest = "))
+            .expect("CORE_MANIFEST declares reqwest under that key");
+        let root_dependencies = match root_defaults {
+            // `CORE_MANIFEST` already disables them, so this is the core body unchanged.
+            RootDefaults::Off => core_workspace_dependencies().to_owned(),
+            RootDefaults::On => {
+                let floor = core_reqwest
+                    .split('"')
+                    .nth(1)
+                    .expect("the reqwest entry pins a quoted version");
+                core_workspace_dependencies()
+                    .replace(core_reqwest, &format!("reqwest = \"{floor}\""))
+            }
+        };
         std::fs::write(
             &root,
             format!(
-                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
-                core_workspace_dependencies().replace(
-                    "reqwest = { version = \"0.12.28\", default-features = false }",
-                    root_reqwest
-                )
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n\
+                 {root_dependencies}"
             ),
         )
         .unwrap();
@@ -2349,7 +2377,7 @@ serde_json.workspace = true
         // Cargo's rule for inheritance: the workspace entry decides, and a member's `false` is
         // ignored when that entry leaves defaults on. The fix belongs in the root.
         let messages = inherited_reqwest_default_feature_diagnostics(
-            "reqwest = \"0.12.28\"",
+            RootDefaults::On,
             "reqwest = { workspace = true, default-features = false }",
         );
         assert_eq!(messages.len(), 1, "{messages:#?}");
@@ -2364,7 +2392,7 @@ serde_json.workspace = true
         // The other direction: a member may re-enable defaults, so a root that already disables
         // them does not satisfy the audit on its own.
         let messages = inherited_reqwest_default_feature_diagnostics(
-            "reqwest = { version = \"0.12.28\", default-features = false }",
+            RootDefaults::Off,
             "reqwest = { workspace = true, default-features = true }",
         );
         assert_eq!(messages.len(), 1, "{messages:#?}");
@@ -2379,7 +2407,7 @@ serde_json.workspace = true
         // No diagnostic at all, not merely no default-features one: a root that failed to resolve
         // reports the inheritance instead, and must not pass this test.
         let messages = inherited_reqwest_default_feature_diagnostics(
-            "reqwest = { version = \"0.12.28\", default-features = false }",
+            RootDefaults::Off,
             "reqwest = { workspace = true }",
         );
         assert!(messages.is_empty(), "{messages:#?}");
@@ -2391,7 +2419,7 @@ serde_json.workspace = true
         // repeating `false`. Only a member `true` re-enables them, so any explicit member flag must
         // not count as one.
         let messages = inherited_reqwest_default_feature_diagnostics(
-            "reqwest = { version = \"0.12.28\", default-features = false }",
+            RootDefaults::Off,
             "reqwest = { workspace = true, default-features = false }",
         );
         assert!(messages.is_empty(), "{messages:#?}");
