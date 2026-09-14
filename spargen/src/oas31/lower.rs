@@ -493,17 +493,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             return ty;
         };
-        // Nullability is a pure function of the component's own schema — the same inputs
-        // `lower_schema`/`lower_enum` use — so computing it once at reserve time lets every `$ref`
-        // consumer (cache hit, back-edge, or fresh) agree on it without waiting for the body to
-        // finish. No graph insert happens here, so the last-insert invariant below is preserved.
-        let nullable = schema_is_nullable(schema);
+        // A PROVISIONAL answer, needed before the body finishes so a back-edge encountered mid-body
+        // has something to carry. It is not the final one: `schema_is_nullable` is three disjuncts
+        // over `types`, `enum_values` and `const_value` and never looks at `oneOf`/`anyOf`/`$ref`/
+        // `allOf`, so for any composed body it is a guess. Writing it back over the lowered result
+        // discarded every decision `lower_union` makes about null the moment a union was spelled as
+        // a named component — the dominant spelling in real descriptions.
+        let provisional_nullable = schema_is_nullable(schema);
         // Reserve the root id before lowering the body so any back-edge encountered mid-body can
         // box a reference to it. The root's def is inserted last (children first) and then lifted
         // into this reserved slot, which keeps ids dense and stable.
         let root_id = self.graph.reserve();
         self.in_progress
-            .insert(name.to_owned(), (root_id, nullable));
+            .insert(name.to_owned(), (root_id, provisional_nullable));
         let lowered = self.lower_schema(schema, name);
         self.in_progress.remove(name);
         let mut ty = lowered?;
@@ -527,9 +529,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.graph.fill(root_id, def);
         ty.id = root_id;
-        // Use the reserve-time nullability consistently, so a direct return and a later cache hit
-        // yield an identical `Ty` (it matches what the body lowering computed).
-        ty.nullable = nullable;
+        // The BODY's answer, not the provisional one: a composed body knows things
+        // `schema_is_nullable` cannot see, and naming a schema must not change what it means. Cached
+        // under the same value, so a direct return and a later cache hit still yield an identical
+        // `Ty`.
+        let nullable = ty.nullable;
         self.components.insert(name.to_owned(), (root_id, nullable));
         Some(ty)
     }

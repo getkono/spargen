@@ -10494,3 +10494,127 @@ fn the_cycle_predicate_counts_only_edges_lowering_follows() {
     );
     assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
+
+/// A schema must lower to the same nullability whether it is written inline or named as a
+/// component. `ensure_component` computed `schema_is_nullable(schema)` *before* the body was
+/// lowered and wrote it back over whatever the body computed — and `schema_is_nullable` is three
+/// disjuncts over `types`, `enum_values` and `const_value` that never look at `oneOf`, `anyOf`,
+/// `$ref` or `allOf`. So **every decision `lower_union` makes about null was discarded at a
+/// `components.schemas` boundary**, which is the dominant spelling in real descriptions.
+///
+/// The comment there claimed nullability was "a pure function of the component's own schema — the
+/// same inputs `lower_schema`/`lower_enum` use". That is true for a plain type/enum/const body and
+/// false for every composed one.
+///
+/// Both oracles agree on each row, and each row is asserted in BOTH spellings, so neither can drift
+/// from the other again.
+#[test]
+fn a_component_and_an_inline_schema_agree_about_null() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+
+    fn inline_spec(body: &str) -> String {
+        format!(
+            "{HEAD}paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                {body}\ncomponents:\n  schemas:\n    Ignore: {{ type: string }}\n",
+            body = body.replace('\n', "\n                ")
+        )
+    }
+    fn named_spec(body: &str) -> String {
+        format!(
+            "{HEAD}paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema: {{ $ref: '#/components/schemas/Body' }}\ncomponents:\n  schemas:\n    Body:\n      {body}\n",
+            body = body.replace('\n', "\n      ")
+        )
+    }
+
+    // (what it exercises, the schema body, whether `null` satisfies it)
+    let cases: &[(&str, &str, bool)] = &[
+        // `schema_is_nullable` sees the `"null"` in the type array and says nullable. The union says
+        // otherwise, and the union is right: with no null MEMBER there is no branch for `null` to
+        // match, so `oneOf` fails.
+        (
+            "a union whose type array admits null but whose members supply no null branch",
+            "type: [string, 'null']\noneOf: [{ type: string }]",
+            false,
+        ),
+        // The mirror: the type array is silent about null, the members are not.
+        (
+            "a union whose null branch comes from a member, under no type array",
+            "properties: { a: { type: string } }\noneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a union under a wide nullable type array",
+            "type: [object, array, 'null']\nproperties: { a: { type: string } }\noneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        // The sibling denies null through `enum`, which `schema_is_nullable` also reads — but it
+        // reads the ENUM, not the intersection, so it must still agree.
+        (
+            "a union whose `enum` sibling excludes null",
+            "enum: ['a', 'b']\noneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "a union whose `enum` sibling includes null",
+            "enum: ['a', null]\noneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+        // A plain body, where the reserve-time answer and the body's agree. This is the case the
+        // old comment described, and it must not move.
+        (
+            "a plain nullable type array with no composition",
+            "type: [string, 'null']",
+            true,
+        ),
+        (
+            "a plain non-nullable type",
+            "type: string",
+            false,
+        ),
+    ];
+
+    for (what, body, null_satisfies) in cases {
+        let mut seen = Vec::new();
+        for (spelling, spec) in [
+            ("inline", inline_spec(body)),
+            ("named component", named_spec(body)),
+        ] {
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` ({spelling}): {report:#?}"
+            );
+            let optional = code.contains("ResponseValue<Option<types::");
+            assert_eq!(
+                optional,
+                *null_satisfies,
+                "`{what}` as {spelling} must {} an optional response body — `null` is {} under \
+                 this schema: {code}",
+                if *null_satisfies { "have" } else { "not have" },
+                if *null_satisfies { "valid" } else { "invalid" }
+            );
+            seen.push((spelling, optional));
+        }
+        assert_eq!(
+            seen[0].1, seen[1].1,
+            "`{what}` lowers to different nullability inline and as a component: {seen:?}"
+        );
+    }
+
+    // A component whose union admits ONLY `null` must be the exact null type in both spellings too
+    // — the component boundary previously wrapped it back into an `Option`.
+    let only_null = "type: [integer, 'null']\noneOf: [{ type: string }, { type: 'null' }]";
+    for (spelling, spec) in [
+        ("inline", inline_spec(only_null)),
+        ("named component", named_spec(only_null)),
+    ] {
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !code.contains("ResponseValue<Option<types::"),
+            "`{spelling}`: the intersection is `{{null}}`, so the type already has exactly one \
+             inhabitant and must not be wrapped in `Option`: {code}"
+        );
+    }
+}
