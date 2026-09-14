@@ -109,6 +109,20 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                     );
                 }
             }
+            // A reservation is not a type: it is an id handed out before its body was lowered, and
+            // `fill` replaces it as soon as the body finishes. One surviving into a *successful*
+            // lowering means some path reserved an id and never filled it, and everything
+            // downstream — emit, surface, the runtime contract — would be reading a shape that was
+            // never computed. This is the proof that no consumer of a finished graph sees one.
+            TypeKind::Reserved => {
+                Diagnostic::error(Code::InvalidInput, def.provenance.clone())
+                    .message(format!(
+                        "IR invariant failed: type `{}` is still a reservation, so its body was \
+                         never lowered",
+                        def.name_hint
+                    ))
+                    .emit(diags);
+            }
             TypeKind::Primitive(_)
             | TypeKind::Enum(_)
             | TypeKind::Bytes

@@ -882,6 +882,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if !schema_has_shape_constraint(&sibling) {
                 return Some(referenced);
             }
+            // The reference is a cycle-closing back-edge: the target's fields are not known yet, so
+            // there is nothing to intersect the siblings *against*. Refusing is the only honest
+            // answer — intersecting anyway used to read the reservation's placeholder, and an
+            // intersection with an untyped value is the sibling alone, so the `$ref` applicator was
+            // discarded in silence and the referenced schema's own fields vanished from the result.
+            if self.is_in_progress_root(referenced.id) {
+                self.reject_all_of_unit(
+                    schema.provenance.clone(),
+                    "a `$ref` with shape siblings is a direct recursive reference to the schema \
+                     being lowered, whose fields are not yet known, so the reference and its \
+                     siblings cannot be intersected",
+                );
+                return None;
+            }
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
             let intersection =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))?;
@@ -1145,6 +1159,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
+            // A variant that is a back-edge to the union currently being lowered *is* the whole
+            // union, so it constrains nothing and cannot be decoded: the emitted `Deserialize`
+            // would open by re-entering itself on the same value, with no base case, and recurse
+            // until the stack is exhausted. It compiles, so nothing downstream can catch it —
+            // refusing here is the only place it can be caught.
+            if self.is_in_progress_root(ty.id) {
+                return self.reject_union(
+                    schema,
+                    "a union member is a direct recursive `$ref` to the union being lowered, so \
+                     the member is the union itself and decoding it would never terminate",
+                );
+            }
             if let Some(sibling) = sibling {
                 let Some(intersection) =
                     self.intersect_types(ty, sibling, &format!("{hint}Variant{index}Constrained"))
@@ -1420,6 +1446,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .map(|variant| self.type_specificity(variant.ty, visiting))
                 .min()
                 .unwrap_or(0),
+            // A reservation has no shape to rank, and a union that contains one is rejected before
+            // ranking is reached (`reject_union_back_edge`). Ranked alongside `Any` so a future
+            // caller that arrives here without that rejection degrades to "least specific" rather
+            // than to a confident wrong order.
+            Some(TypeKind::Reserved) => 0,
             Some(TypeKind::Any) | None => 0,
         };
         visiting.remove(&ty.id);
@@ -1442,7 +1473,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ScalarRepr::Int => JsonCategory::Number,
                 ScalarRepr::Bool => JsonCategory::Boolean,
             },
-            TypeKind::Bytes
+            // A reservation cannot be categorised — its body has not been lowered, so nothing is
+            // known about the JSON it serialises as. Uncategorisable, exactly like the others here.
+            TypeKind::Reserved
+            | TypeKind::Bytes
             | TypeKind::Null
             | TypeKind::Never
             | TypeKind::Any
@@ -4223,7 +4257,11 @@ fn parameter_shape_supported_inner(
         TypeKind::Union(union) => union.variants.iter().all(|variant| {
             parameter_shape_supported_inner(graph, variant.ty, scalar_only, visiting)
         }),
-        TypeKind::Struct(_)
+        // A reservation's shape is unknown, so it cannot be *proved* serialisable as a parameter.
+        // This function answers "is this supported", and an unknown must answer no: saying yes
+        // would let a recursive schema through as a parameter on the strength of nothing.
+        TypeKind::Reserved
+        | TypeKind::Struct(_)
         | TypeKind::Array(_)
         | TypeKind::Tuple(_)
         | TypeKind::Never
@@ -4897,7 +4935,11 @@ fn reachable_types(graph: &TypeGraph, roots: &[TypeId]) -> HashSet<TypeId> {
             TypeKind::Union(union) => {
                 stack.extend(union.variants.iter().map(|variant| variant.ty.id))
             }
-            TypeKind::Primitive(_)
+            // A reservation has no structural edges yet. It is reached only while its own body is
+            // still being lowered, and this walk runs after lowering, so following it would be
+            // following nothing.
+            TypeKind::Reserved
+            | TypeKind::Primitive(_)
             | TypeKind::Enum(_)
             | TypeKind::Bytes
             | TypeKind::Null

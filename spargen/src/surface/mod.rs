@@ -798,6 +798,12 @@ fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
         Some(TypeKind::Bytes) => "Bytes".to_owned(),
         Some(TypeKind::Null) => "()".to_owned(),
         Some(TypeKind::Never) => nominal_name(ty, names),
+        // A reservation has no structure to canonicalise. `spargen diff` compares two finished
+        // surfaces, and `check_invariants` rejects a graph that still holds one, so this is
+        // unreachable in a generated surface — but it renders distinguishably rather than as
+        // `Value`, so a reservation that ever did reach here would show up as a change rather than
+        // compare equal to every untyped schema in the document.
+        Some(TypeKind::Reserved) => "!reserved".to_owned(),
         Some(TypeKind::Any) | None => "Value".to_owned(),
     };
     if ty.nullable {
