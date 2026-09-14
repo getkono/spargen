@@ -3788,18 +3788,45 @@ components:
     assert!(has_code(&checked, Code::NonDisjointUnion), "{checked:#?}");
 }
 
+/// The shape-bearing sibling keywords `E013`'s explain names, READ OUT of the published text
+/// rather than copied into the fixture beside it. Two independent lists cannot pin each other: a
+/// keyword deleted from the prose simply disappears, and a hard-coded copy goes on passing.
+fn shape_bearing_keywords_the_explain_names() -> Vec<String> {
+    const LEAD: &str = "A sibling bears a shape of its own through ";
+    let explain = Code::AllOfIrreconcilable.explain();
+    let start = explain.find(LEAD).unwrap_or_else(|| {
+        panic!("E013's explain no longer enumerates its shape-bearing sibling keywords: {explain}")
+    }) + LEAD.len();
+    let sentence = &explain[start..];
+    let sentence = &sentence[..sentence
+        .find(". ")
+        .unwrap_or_else(|| panic!("E013's shape-bearing sentence never ends: {sentence}"))];
+    // The keywords are the backticked spans of that one sentence.
+    sentence
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
 /// `E013`'s explain names the sibling keywords intersected with a `$ref`'s target rather than
 /// discarded. That is a published promise, and nothing but this fixture ties it to the code:
 /// `schema_has_shape_constraint` is the private gate deciding whether the intersection happens, and
 /// a sibling that clears the gate but lowers to `TypeKind::Any` intersects as identity and is
-/// discarded anyway. Both halves of the published rule are exercised against a target the sibling
-/// cannot be reconciled with — if the intersection really happens, the document rejects.
+/// discarded anyway.
 ///
-/// Writing this found the explain over-promising: `required`, `additionalProperties`, `items` and
-/// `prefixItems` clear the gate but lower to `Any` on their own, because `lower_schema_inner`
-/// reaches its array/object arms through `type`. They constrain only alongside the `type` or
-/// `properties` that gives them a shape, which is what the text now says and what the second tier
-/// below pins.
+/// The list under test is DERIVED from `explain()`, not repeated here, so deleting a keyword from
+/// the prose fails this fixture rather than quietly shrinking what it checks. And each row is a
+/// DIFFERENTIAL — the same document with and without the keyword — so the keyword is what flips the
+/// outcome. An earlier revision paired several keywords with a `type` against a target of another
+/// category, where the `type` alone already rejected and the keyword beside it was never
+/// load-bearing; three rows proved nothing at all.
+///
+/// The `$ref` sits at a response body rather than a component root. A component root whose value is
+/// a `$ref` with only non-shape-bearing siblings trips a release-level `assert_eq!` inside
+/// `ensure_component` (filed as #148, pre-existing on master), which would turn every "without"
+/// control here into an opaque panic instead of this fixture's own message.
 ///
 /// Each target is chosen so the intersection is *genuinely empty*, never merely unrepresentable:
 /// the `contentEncoding`/`format: binary` rows sit against an integer, not a string, so they do not
@@ -3807,63 +3834,89 @@ components:
 #[test]
 fn every_sibling_keyword_the_explain_names_is_actually_intersected() {
     const HEAD: &str =
-        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths: {}\n";
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const BODY: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+SIBLING
+"##;
 
-    // (keyword named in the explain, target type, the sibling that contradicts it)
+    // (keyword, the target it must contradict, the sibling spelling of that keyword)
     let cases: &[(&str, &str, &str)] = &[
-        ("type", "string", "type: integer"),
+        ("type", "{ type: string }", "type: integer"),
+        // `properties` alone, with no `type` beside it to account for the rejection. The target
+        // REQUIRES `a`, so the conflicting property genuinely empties the composition — without
+        // that, an optional conflicting property is representable and correctly generates.
         (
             "properties",
-            "string",
-            "type: object\n      properties: { a: { type: string } }",
-        ),
-        (
-            "required",
-            "string",
-            "properties: { a: { type: string } }\n      required: [a]",
+            "{ type: object, required: [a], properties: { a: { type: string } } }",
+            "properties: { a: { type: integer } }",
         ),
         (
             "patternProperties",
-            "string",
+            "{ type: string }",
             "patternProperties: { '^a': { type: string } }",
         ),
+        ("enum", "{ type: integer }", "enum: ['a']"),
+        ("const", "{ type: integer }", "const: 'a'"),
         (
-            "additionalProperties",
-            "string",
-            "type: object\n      additionalProperties: false",
+            "contentEncoding",
+            "{ type: integer }",
+            "contentEncoding: base64",
         ),
-        (
-            "items",
-            "string",
-            "type: array\n      items: { type: integer }",
-        ),
-        (
-            "prefixItems",
-            "string",
-            "type: array\n      prefixItems: [{ type: integer }]",
-        ),
-        ("enum", "integer", "enum: ['a']"),
-        ("const", "integer", "const: 'a'"),
-        ("contentEncoding", "integer", "contentEncoding: base64"),
-        ("format: binary", "integer", "format: binary"),
-        ("allOf", "string", "allOf: [{ type: integer }]"),
+        ("format: binary", "{ type: integer }", "format: binary"),
+        ("allOf", "{ type: string }", "allOf: [{ type: integer }]"),
     ];
 
+    // The fixture's table and the published text must name the same keywords, in the same order.
+    let named = shape_bearing_keywords_the_explain_names();
+    let covered: Vec<String> = cases
+        .iter()
+        .map(|(keyword, ..)| (*keyword).to_owned())
+        .collect();
+    assert_eq!(
+        named, covered,
+        "`E013`'s explain and this fixture disagree about which sibling keywords bear a shape; \
+         whichever moved, the other must move with it"
+    );
+
     let mut unconstrained = Vec::new();
+    let mut spurious = Vec::new();
     for (keyword, target, sibling) in cases {
-        let spec = format!(
-            "{HEAD}components:\n  schemas:\n    Target: {{ type: {target} }}\n    Sibling:\n      \
-             $ref: '#/components/schemas/Target'\n      {sibling}\n"
-        );
-        let report = generate(&spec);
-        if report.outcome() != Outcome::Rejected || !has_code(&report, Code::AllOfIrreconcilable) {
+        let spec = |sibling: &str| {
+            format!(
+                "{HEAD}{}components:\n  schemas:\n    Target: {target}\n",
+                BODY.replace("SIBLING", sibling)
+            )
+        };
+        let with = generate(&spec(&format!("                {sibling}")));
+        if with.outcome() != Outcome::Rejected || !has_code(&with, Code::AllOfIrreconcilable) {
             unconstrained.push(*keyword);
+        }
+        // The control: the identical document without the keyword must generate, so the rejection
+        // above is attributable to the keyword and to nothing else in the row.
+        let without = generate(&spec(""));
+        if without.outcome() == Outcome::Rejected {
+            spurious.push(*keyword);
         }
     }
     assert!(
         unconstrained.is_empty(),
         "the explain names these sibling keywords as intersected, but a `$ref` carrying one against \
          an irreconcilable target still generates: {unconstrained:?}"
+    );
+    assert!(
+        spurious.is_empty(),
+        "these rows reject even without their keyword, so they pin the rest of the row rather than \
+         the keyword the explain names: {spurious:?}"
     );
 
     // The other half of the published rule: the four refining keywords do NOT constrain alone,
@@ -4004,6 +4057,79 @@ components:
     // The causes `E007`'s explain already named must not be borrowed for this one.
     assert!(!messages[0].contains("discriminator"), "{:?}", messages[0]);
     assert!(!messages[0].contains("`anyOf`"), "{:?}", messages[0]);
+
+    // And the abstinence Site B spends five lines of comment justifying: the multi-variant path
+    // emits a per-variant `W011` before its `E007` and this one deliberately does not, because
+    // `W011` means "declared construct has no effect" and describes something dropped from output
+    // that still exists — when the SOLE member is excluded no enum is generated at all, so there is
+    // no surviving construct for the warning to describe. Filtering to `NonDisjointUnion` above
+    // cannot see a second code, so adding exactly that `W011` survived the whole suite. One cause,
+    // one diagnostic.
+    assert!(
+        !has_code(&report, Code::DeclarationHasNoEffect),
+        "the sole-member collapse emitted `W011` beside its `E007`: two diagnostics for one cause, \
+         and the `W011` would assert a generated enum that does not exist: {report:#?}"
+    );
+    assert_eq!(
+        report.diagnostics().len(),
+        1,
+        "the sole-member collapse must report exactly its own cause: {report:#?}"
+    );
+}
+
+/// `E013`'s explain is what `spargen explain E013` prints, and this change REWROTE it: the code was
+/// repurposed from "irreconcilable allOf composition" to a composition-generic one, and the text
+/// moved with it. Nothing held the new text to the code. Measured before this fixture existed:
+/// reverting the explain to its `allOf`-only wording, and replacing it with text flatly
+/// contradicting the code ("a `$ref` replaces the containing schema: its sibling keywords are
+/// discarded, never intersected"), BOTH survived the entire suite.
+///
+/// The assertions are claims, not typography — a string-equality snapshot would pin the wording and
+/// go stale on every edit without ever catching a false clause. Each one below is a promise some
+/// other fixture in this file enforces against the code, so the two cannot drift apart silently.
+#[test]
+fn the_composition_explain_covers_every_cause_that_reports_it() {
+    let explain = Code::AllOfIrreconcilable.explain();
+
+    // Both constructs that report it, and that `$ref` siblings are INTERSECTED rather than
+    // discarded — the sentence the whole change exists to make true.
+    assert!(explain.contains("`allOf`"), "{explain}");
+    assert!(
+        explain.contains("`$ref` is an applicator"),
+        "the explain must say why a `$ref`'s siblings are not discarded: {explain}"
+    );
+    assert!(
+        explain.contains("instead of being discarded"),
+        "the explain must say the siblings are intersected rather than discarded: {explain}"
+    );
+
+    // The two-tier sibling-keyword rule, pinned against the code by
+    // `every_sibling_keyword_the_explain_names_is_actually_intersected`.
+    assert!(
+        explain.contains("A sibling bears a shape of its own through"),
+        "{explain}"
+    );
+    assert!(
+        explain.contains("refine a shape rather than establish one"),
+        "{explain}"
+    );
+
+    // The array-arm doctrine. `intersect_structs` now mirrors it for an optional conflicting
+    // property, so withdrawing this sentence would leave that behaviour unexplained.
+    assert!(
+        explain.contains("uninhabited item type"),
+        "the explain must keep the doctrine that an empty item intersection stays representable: \
+         {explain}"
+    );
+
+    // The hedge the round-1 repair put on every message that reports this code: `intersect_types`
+    // returns `None` for an empty intersection AND for an inhabited one with no single Rust type,
+    // and the text must not claim the first when it may be the second.
+    assert!(explain.contains("empty or unrepresentable"), "{explain}");
+
+    // The rejection causes, including the recursive one both spellings now share.
+    assert!(explain.contains("direct recursive `$ref`"), "{explain}");
+    assert!(explain.contains("cycle-closing `$ref`"), "{explain}");
 }
 
 /// `E007`'s published explain is what `spargen explain E007` prints, and Site B added a cause it did
@@ -4136,6 +4262,13 @@ fn the_ref_sibling_rejection_does_not_creep_into_the_shapes_that_still_generate(
 /// so the missing component is reported and the sibling never gets a second, confusing diagnostic
 /// about a target that does not exist. The two sites are twenty lines apart in the same block, which
 /// is why this is pinned rather than assumed.
+///
+/// The absence of `E013` is only a SYMPTOM of that ordering, and a weak one: letting the miss fall
+/// through to a `TypeKind::Any` placeholder and reach the intersection looks identical from
+/// outside, because an `Any` sibling identity-intersects and emits nothing. So the ordering itself
+/// is measured, with a sibling whose own LOWERING would report — `patternProperties` whose value
+/// schemas disagree is `E005`. If the sibling is never lowered, `E005` cannot fire; the control
+/// proves it fires the moment the same sibling is lowered against a target that does exist.
 #[test]
 fn an_unresolvable_ref_reports_only_e004_even_when_its_sibling_contradicts() {
     let spec = r##"
@@ -4162,6 +4295,49 @@ paths:
              there is no target to intersect with: {report:#?}"
         );
     }
+
+    // The mechanism. `SIBLING` is shape-bearing, so it clears `schema_has_shape_constraint` and
+    // would be lowered if the `$ref` arm ever got that far.
+    const TRACED: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TARGET'
+              type: object
+              patternProperties: { '^a': { type: string }, '^b': { type: integer } }
+      responses: { '204': { description: ok } }
+components:
+  schemas:
+    Present: { type: object }
+"##;
+    for report in [
+        generate(&TRACED.replace("TARGET", "Nope")),
+        check(&TRACED.replace("TARGET", "Nope")),
+    ] {
+        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+        assert!(
+            !has_code(&report, Code::PatternPropertiesRejected),
+            "the sibling of an unresolvable `$ref` was lowered, so `ensure_component` no longer \
+             returns `None` before the intersection is reached and the ordering this fixture \
+             names is gone: {report:#?}"
+        );
+    }
+    // The control: the identical sibling against a target that resolves IS lowered, and reports.
+    let present = generate(&TRACED.replace("TARGET", "Present"));
+    assert!(
+        has_code(&present, Code::PatternPropertiesRejected),
+        "the marker sibling no longer reports when it is lowered, so its absence above proves \
+         nothing: {present:#?}"
+    );
 }
 
 /// A self-referential component (`Node.next -> Node`) once recursed forever, then was rejected as
