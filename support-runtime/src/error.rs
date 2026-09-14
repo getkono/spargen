@@ -2,7 +2,7 @@ use bytes::Bytes;
 use reqwest::header::HeaderMap;
 use reqwest::StatusCode;
 
-use crate::ResponseValue;
+use crate::{AuthError, ResponseValue};
 
 /// The closed error taxonomy shared by every spargen-generated client. `E` is the
 /// operation's typed error body (an enum when several error statuses are documented).
@@ -10,11 +10,41 @@ use crate::ResponseValue;
 /// Nine variants are constructed; taxonomy class #10 (cancellation) is a documented drop-safety
 /// guarantee, not a variant (see the crate docs). Every variant implements [`std::error::Error`]
 /// with full source chains, and `Debug` never leaks secrets.
+///
+/// Adding a variant, in spargen's own sources: raise `ERROR_VARIANTS` and list a value of the new
+/// variant in `every_variant`, both in the test module of `support-runtime/src/error.rs`, for the
+/// reasons `request_variant_index` there sets out. That test module is stripped when this file is
+/// embedded into a generated client, so none of those three names exist in the copy a consumer
+/// reads.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error<E> {
-    /// #1 — invalid base URL, or parameter/body serialization failure (near-impossible by
-    /// construction).
+    /// #1 — a request could not be built, or failed inside the send before that request produced
+    /// a response. Read it as a statement about *one* request, not about the operation: it is
+    /// neither proof that nothing reached the server, nor proof that no response was already
+    /// produced and delivered to the caller.
+    ///
+    /// Pre-send, raised while the request is still being assembled — nothing was transmitted:
+    /// no registered credential satisfies the operation's security requirement, a registered token
+    /// provider failed, the base URL is invalid, or a parameter or body did not serialize.
+    ///
+    /// Not pre-send: an error reqwest classifies as a request error. reqwest raises that class
+    /// from inside the send itself, so the request may already have been transmitted and the
+    /// server may already have acted on it. Retrying it is not safe for a non-idempotent call.
+    ///
+    /// After a response was accepted: when the API has streaming (sequential) responses, the
+    /// generated client also embeds `EventStream`, which raises this class when the stored request
+    /// cannot be cloned for an automatic reconnect — from `with_reconnect`, and from `poll_next`
+    /// once the reconnect wait has elapsed, which is mid-stream, after frames have already been
+    /// yielded to the caller. `StreamError`, that module's alias for this same enum, documents
+    /// itself as the failure yielded by a streaming response *after its initial HTTP response was
+    /// accepted*; the two sentences describe one case. Re-driving such an operation from the start
+    /// is not a safe recovery — it re-delivers events the caller has already consumed and acted
+    /// on.
+    ///
+    /// [`RequestError`] types the two credential causes; every other cause — reqwest's own
+    /// request-error class and both reconnect-clone failures included — arrives as
+    /// [`RequestError::Other`].
     RequestConstruction(RequestError),
     /// #2 — DNS failure, connection refused/reset, TLS handshake or certificate error.
     Transport(TransportError),
@@ -65,16 +95,14 @@ pub enum Error<E> {
 impl<E> Error<E> {
     /// Build a request-construction error from any owned error value.
     pub fn request_construction(source: impl std::error::Error + Send + Sync + 'static) -> Self {
-        Self::RequestConstruction(RequestError {
-            source: Some(Box::new(source)),
-        })
+        Self::RequestConstruction(RequestError::Other(RequestCause(Box::new(source))))
     }
 
     /// Build a request-construction error from a static message.
     pub fn request_message(message: impl Into<String>) -> Self {
-        Self::RequestConstruction(RequestError {
-            source: Some(Box::new(MessageError(message.into()))),
-        })
+        Self::RequestConstruction(RequestError::Other(RequestCause(Box::new(MessageError(
+            message.into(),
+        )))))
     }
 
     /// Classify a reqwest error into the closest runtime taxonomy class.
@@ -86,9 +114,7 @@ impl<E> Error<E> {
         } else if error.is_decode() {
             Error::Protocol(ProtocolError { source: error })
         } else if error.is_request() {
-            Error::RequestConstruction(RequestError {
-                source: Some(Box::new(error)),
-            })
+            Error::RequestConstruction(RequestError::Other(RequestCause(Box::new(error))))
         } else {
             Error::Transport(TransportError { source: error })
         }
@@ -259,9 +285,84 @@ impl std::fmt::Display for MessageError {
 impl std::error::Error for MessageError {}
 
 /// Request-construction failure (taxonomy #1).
+///
+/// The two credential causes are the ones a consumer routes on — they mean "unauthenticated", not
+/// "malformed request" — so each is a variant of its own: [`RequestError::MissingCredential`] when
+/// no registered credential satisfies the requirement, and [`RequestError::CredentialProvider`]
+/// when a registered token provider fails. Both are raised before anything is sent. Every other
+/// cause arrives as [`RequestError::Other`] with its source attached — and [`RequestError::Other`]
+/// is **not** uniformly pre-send; see its own documentation before retrying on it.
+///
+/// This runtime is embedded in the consumer's own crate, where `#[non_exhaustive]` does not affect
+/// match exhaustiveness, so a new variant here is a breaking change of the generated output; the
+/// attribute is kept for a consumer that re-exports the generated module across a crate boundary.
+///
+/// Adding a variant, in spargen's own sources: raise `REQUEST_VARIANTS` and list a value of the new
+/// variant in `every_request_variant`, both in the test module of `support-runtime/src/error.rs`.
+/// The compiler will demand the classification arms on its own, but it cannot demand the value —
+/// `request_variant_index` there documents precisely why, and which ways of getting this wrong are
+/// caught. That test module is stripped when this file is embedded into a generated client, so
+/// none of those three names exist in the copy a consumer reads.
 #[derive(Debug)]
-pub struct RequestError {
-    source: Option<Box<dyn std::error::Error + Send + Sync>>,
+#[non_exhaustive]
+pub enum RequestError {
+    /// The operation carries a security requirement and no registered credential satisfies any of
+    /// its alternatives. Raised before anything is sent. The payload is the whole cause, so
+    /// `source()` is `None`.
+    MissingCredential {
+        /// One entry per alternative of the requirement, in declaration order: that alternative's
+        /// `securitySchemes` keys that have no registered credential, in declaration order.
+        /// `mutualTLS` keys never appear (the transport satisfies them).
+        ///
+        /// The runtime never builds an empty outer list, nor an empty inner one — it only reaches
+        /// this variant with at least one unregistered scheme per alternative. The field is public
+        /// inside the consumer's crate, though, so the invariant is not enforced by the type;
+        /// `Display` therefore omits the `(missing: …)` clause entirely rather than rendering an
+        /// empty one, and skips an empty alternative when listing.
+        alternatives: Vec<Vec<&'static str>>,
+    },
+    /// The selected alternative's token provider returned an error. Raised before anything is
+    /// sent; `source()` is the provider's [`AuthError`].
+    CredentialProvider {
+        /// The `securitySchemes` key the provider is registered under.
+        scheme: &'static str,
+        /// What the provider reported.
+        source: AuthError,
+    },
+    /// Any other request-construction failure, with the cause reachable through `source()`.
+    ///
+    /// Pre-send: an unparseable base URL, a parameter or body that did not serialize, or a
+    /// credential registered under the wrong kind for its scheme.
+    ///
+    /// Not pre-send: an error reqwest classifies as a request error. reqwest raises that class
+    /// from inside the send, so the request may already have been transmitted. This variant is
+    /// therefore the one place in taxonomy #1 where "the request was never sent" does not hold,
+    /// and a caller that retries on it must treat the call as possibly-already-applied.
+    ///
+    /// After a response was accepted: when the API has streaming responses, the embedded
+    /// `EventStream`'s two reconnect-clone failures land here as well. Nothing was transmitted for
+    /// the reconnect itself, but the stream's initial response was accepted and frames may already
+    /// have been yielded, so the possibly-already-applied reading above is not the one that
+    /// describes them — re-driving the operation from the start re-delivers consumed events
+    /// instead. See [`Error::RequestConstruction`] for the class.
+    Other(RequestCause),
+}
+
+/// The opaque cause of [`RequestError::Other`]. It displays as the underlying failure; reach the
+/// failure itself (and downcast it) through [`std::error::Error::source`] on the [`RequestError`].
+#[derive(Debug)]
+pub struct RequestCause(Box<dyn std::error::Error + Send + Sync>);
+
+impl std::fmt::Display for RequestCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for RequestCause {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
 }
 
 /// Transport-layer failure (taxonomy #2 / #9).
@@ -309,18 +410,50 @@ pub struct RedirectError {
 
 impl std::fmt::Display for RequestError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.source {
-            Some(source) => write!(f, "{source}"),
-            None => f.write_str("request construction failed"),
+        match self {
+            RequestError::MissingCredential { alternatives } => {
+                f.write_str(
+                    "no registered credential satisfies the operation's security requirement",
+                )?;
+                // `alternatives` is public inside the consumer's crate, so a hand-built value can
+                // name nothing. The runtime never builds one, so every value it does build renders
+                // exactly as it did before: a non-empty clause, in declaration order.
+                let mut named = alternatives
+                    .iter()
+                    .filter(|alternative| !alternative.is_empty())
+                    .peekable();
+                if named.peek().is_none() {
+                    return Ok(());
+                }
+                f.write_str(" (missing: ")?;
+                for (index, alternative) in named.enumerate() {
+                    if index > 0 {
+                        f.write_str(" or ")?;
+                    }
+                    f.write_str(&alternative.join(" + "))?;
+                }
+                f.write_str(")")
+            }
+            RequestError::CredentialProvider { scheme, .. } => write!(
+                f,
+                "the token provider registered for security scheme `{scheme}` failed"
+            ),
+            RequestError::Other(cause) => write!(f, "{cause}"),
         }
     }
 }
 
 impl std::error::Error for RequestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_ref()
-            .map(|source| source.as_ref() as &(dyn std::error::Error + 'static))
+        match self {
+            RequestError::MissingCredential { .. } => None,
+            RequestError::CredentialProvider { source, .. } => Some(source),
+            // The boxed cause itself, not its wrapper, so the chain and `downcast_ref` stay exactly
+            // as they were when the box was a private field.
+            RequestError::Other(cause) => {
+                Some(cause.0.as_ref() as &(dyn std::error::Error + 'static))
+            }
+        }
     }
 }
 
@@ -350,9 +483,9 @@ mod tests {
     use reqwest::header::HeaderMap;
     use reqwest::StatusCode;
 
-    use crate::{ResponseValue, TransportError};
+    use crate::{AuthError, ResponseValue, TransportError};
 
-    use super::{Error, TimeoutKind};
+    use super::{Error, RequestError, TimeoutKind};
 
     #[test]
     fn retry_classifier_includes_timeouts_and_5xx() {
@@ -392,6 +525,268 @@ mod tests {
         assert_eq!(source.to_string(), "no credential for `token`");
     }
 
+    /// The missing-credential cause is the payload itself, so the chain ends at `RequestError` —
+    /// one level shorter than the message-only error it replaced, which wrapped its text in a
+    /// `RequestCause`. The rendered text is *not* what that error said: master rendered
+    /// `(schemes: key, token)`, sorted and deduplicated across the whole requirement, and this
+    /// renders `(missing: key + token)`, grouped per alternative in declaration order. The break
+    /// is deliberate (the grouping is the payload's whole point) and is what the exact string
+    /// below pins.
+    #[test]
+    fn a_missing_credential_is_typed_and_ends_the_cause_chain() {
+        let error = Error::<ApiBody>::RequestConstruction(RequestError::MissingCredential {
+            alternatives: vec![vec!["key", "token"]],
+        });
+        assert!(!error.is_transient());
+        assert_eq!(error.to_string(), "request construction failed");
+        let source = std::error::Error::source(&error).expect("the typed cause is the source");
+        assert_eq!(
+            source.to_string(),
+            "no registered credential satisfies the operation's security requirement \
+             (missing: key + token)"
+        );
+        assert!(std::error::Error::source(source).is_none());
+    }
+
+    /// Any other cause is opaque: it cannot be moved out of `Other`, but it renders as itself and
+    /// `source()` reaches the cause (not its wrapper) at the same depth, so it still downcasts.
+    #[test]
+    fn an_other_cause_is_opaque_and_reachable_through_source() {
+        #[derive(Debug)]
+        struct Cause;
+
+        impl std::fmt::Display for Cause {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("cause")
+            }
+        }
+
+        impl std::error::Error for Cause {}
+
+        let error = Error::<ApiBody>::request_construction(Cause);
+        let Error::RequestConstruction(RequestError::Other(cause)) = &error else {
+            panic!("expected Other, got {error:?}");
+        };
+        assert_eq!(cause.to_string(), "cause");
+        let source = std::error::Error::source(&error).expect("the request error is the source");
+        assert_eq!(source.to_string(), "cause");
+        let inner = std::error::Error::source(source).expect("the cause is reachable");
+        assert!(inner.downcast_ref::<Cause>().is_some());
+        assert!(std::error::Error::source(inner).is_none());
+    }
+
+    /// `RequestCause` overrides `source` to forward to the boxed cause's *own* source rather than
+    /// to the box. Nothing else in the runtime calls it — `RequestError::source` hands out the box
+    /// itself — so without this the override could be deleted and nothing would notice.
+    #[test]
+    fn a_request_cause_forwards_source_to_the_boxed_causes_own_source() {
+        #[derive(Debug)]
+        struct Inner;
+
+        impl std::fmt::Display for Inner {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("inner")
+            }
+        }
+
+        impl std::error::Error for Inner {}
+
+        #[derive(Debug)]
+        struct Outer(Inner);
+
+        impl std::fmt::Display for Outer {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("outer")
+            }
+        }
+
+        impl std::error::Error for Outer {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                Some(&self.0)
+            }
+        }
+
+        let error = Error::<ApiBody>::request_construction(Outer(Inner));
+        let Error::RequestConstruction(RequestError::Other(cause)) = &error else {
+            panic!("expected Other, got {error:?}");
+        };
+        assert_eq!(cause.to_string(), "outer");
+        let forwarded = std::error::Error::source(cause)
+            .expect("the wrapper forwards to the boxed cause's own source");
+        assert_eq!(forwarded.to_string(), "inner");
+        assert!(forwarded.downcast_ref::<Inner>().is_some());
+    }
+
+    /// How many variants `RequestError` has. `every_request_variant` returns an array of exactly
+    /// this length, so raising it will not compile until a value of the new variant is listed.
+    const REQUEST_VARIANTS: usize = 3;
+
+    /// Each variant's position in `every_request_variant`. Indices are dense and unique, which is
+    /// what `every_request_variant_lists_each_variant_exactly_once` checks.
+    ///
+    /// **What this actually enforces, and what it does not.** The match being exhaustive means a
+    /// variant added to `RequestError` cannot compile without being *classified* here and in every
+    /// other match over the enum. Whether it is *listed* in `every_request_variant` — and so
+    /// whether anything it claims is ever compared against anything — is enforced only in part.
+    /// Each of these was run:
+    ///
+    /// - Adding a variant, classifying it everywhere, giving it the next free index, and raising
+    ///   `REQUEST_VARIANTS` to match: **caught**, at compile time — the array is then one element
+    ///   short of its own declared length.
+    /// - Padding that array with a duplicate of some other variant to make it compile: **caught**,
+    ///   by the bijection test — two entries take one index, and another index is unoccupied.
+    /// - Adding a variant, classifying it, giving it the next free index, and leaving
+    ///   `REQUEST_VARIANTS` alone: **not caught**. Nothing ever evaluates this function on a value
+    ///   of the new variant, because no such value is ever constructed.
+    ///
+    /// That last case is not closed here, but it is closable, and an earlier version of this
+    /// paragraph was wrong to say otherwise. No *language* construct yields a variant count on
+    /// stable — `std::mem::variant_count` is nightly, and a `const` assertion over an exhaustive
+    /// match cannot help, because constructing one value of each variant *is* the list the guard
+    /// is trying to force. Two routes reach a count anyway, both run at the declared MSRV floor
+    /// and both leaving generated output untouched: a `support-runtime/build.rs` emitting the
+    /// counts as consts into `OUT_DIR`, `include!`d inside this test module; and an assertion in
+    /// `spargen/tests/`, in the idiom `layering.rs` already uses to read `support-runtime/src/*`
+    /// textually. Issue #144 tracks landing one of them.
+    ///
+    /// What stays rejected is declaring the enum through a macro that emits the count alongside
+    /// it: that ships a `macro_rules!` definition of a public type into every generated client.
+    /// Two more that look like routes and are not: `strum::EnumCount`'s attribute would sit above
+    /// the test-module marker the embed splits on, so it would ship; and
+    /// `#[cfg_attr(test, derive(..))]` ships too, and activates when the *consumer* runs
+    /// `cargo test`.
+    ///
+    /// So until that guard lands, raising `REQUEST_VARIANTS` is a convention the enum's own doc
+    /// states, and the two mechanical guards above catch every way of getting it wrong once it is
+    /// raised.
+    fn request_variant_index(error: &RequestError) -> usize {
+        match error {
+            RequestError::MissingCredential { .. } => 0,
+            RequestError::CredentialProvider { .. } => 1,
+            RequestError::Other(_) => 2,
+        }
+    }
+
+    /// One value of every `RequestError` variant, mirroring `every_variant` for `Error`. Listing a
+    /// variant here is what makes its display, source, transience and response accessors actually
+    /// get asserted; an exhaustive match alone only forces it to be *classified*. See
+    /// `request_variant_index` for exactly how much of that listing is mechanically enforced.
+    fn every_request_variant() -> [RequestError; REQUEST_VARIANTS] {
+        [
+            RequestError::MissingCredential {
+                alternatives: vec![vec!["token"], vec!["key", "tenant"]],
+            },
+            RequestError::CredentialProvider {
+                scheme: "token",
+                source: AuthError::new("refresh rejected"),
+            },
+            // The field is private, but these tests live in the defining module.
+            RequestError::Other(super::RequestCause(Box::new(super::MessageError(
+                "bad path segment".to_owned(),
+            )))),
+        ]
+    }
+
+    /// The enumeration is a bijection onto the variant set: every entry takes a distinct index
+    /// inside the declared count, and every index is occupied. Without this, a variant could be
+    /// added, classified in each exhaustive match, and never constructed — so nothing it claims
+    /// would ever be compared against anything.
+    #[test]
+    fn every_request_variant_lists_each_variant_exactly_once() {
+        let mut seen = [false; REQUEST_VARIANTS];
+        for error in every_request_variant() {
+            let index = request_variant_index(&error);
+            assert!(
+                index < REQUEST_VARIANTS,
+                "`{error}` takes index {index}, outside the declared count of \
+                 {REQUEST_VARIANTS}: raise `REQUEST_VARIANTS` and list a value of the new variant \
+                 in `every_request_variant`"
+            );
+            assert!(!seen[index], "two entries share index {index}");
+            seen[index] = true;
+        }
+        assert!(
+            seen.iter().all(|occupied| *occupied),
+            "an index in 0..{REQUEST_VARIANTS} is unoccupied: `every_request_variant` is missing \
+             a variant"
+        );
+    }
+
+    #[test]
+    fn every_request_variant_displays_exactly_what_names_its_cause() {
+        for error in every_request_variant() {
+            let rendered = error.to_string();
+            assert!(!rendered.is_empty(), "a variant renders as an empty string");
+            let expected = match &error {
+                RequestError::MissingCredential { .. } => {
+                    "no registered credential satisfies the operation's security requirement \
+                     (missing: token or key + tenant)"
+                }
+                RequestError::CredentialProvider { .. } => {
+                    "the token provider registered for security scheme `token` failed"
+                }
+                RequestError::Other(_) => "bad path segment",
+            };
+            assert_eq!(rendered, expected, "a variant does not name its cause");
+        }
+    }
+
+    /// `MissingCredential` *is* the whole cause, so it ends the chain; the other two carry a
+    /// separate cause and must hand it over. A consumer walking the chain must not find a phantom
+    /// source, nor lose a real one.
+    #[test]
+    fn request_source_is_present_exactly_where_the_cause_is_separate() {
+        for error in every_request_variant() {
+            let expected = match &error {
+                RequestError::MissingCredential { .. } => false,
+                RequestError::CredentialProvider { .. } | RequestError::Other(_) => true,
+            };
+            assert_eq!(
+                std::error::Error::source(&error).is_some(),
+                expected,
+                "source() disagrees for {error}"
+            );
+        }
+    }
+
+    /// Whatever the cause, a request was never sent: nothing to retry, no status, no typed body.
+    /// Pinned over every `RequestError` variant so a new one cannot arrive misclassified.
+    #[test]
+    fn no_request_variant_is_transient_or_carries_a_response() {
+        for request_error in every_request_variant() {
+            let error = Error::<ApiBody>::RequestConstruction(request_error);
+            assert!(!error.is_transient(), "{error} classified as transient");
+            assert_eq!(error.status(), None);
+            assert!(error.api_body().is_none());
+        }
+    }
+
+    /// The runtime never builds an alternative list with nothing to name, but the fields are public
+    /// inside the consumer's crate. Rendering stays total rather than trailing an empty clause.
+    #[test]
+    fn a_missing_credential_with_nothing_to_name_renders_without_the_clause() {
+        let empty = RequestError::MissingCredential {
+            alternatives: Vec::new(),
+        };
+        assert_eq!(
+            empty.to_string(),
+            "no registered credential satisfies the operation's security requirement"
+        );
+        let all_empty = RequestError::MissingCredential {
+            alternatives: vec![Vec::new(), Vec::new()],
+        };
+        assert_eq!(all_empty.to_string(), empty.to_string());
+        // A named alternative beside an empty one still renders, without a stray separator.
+        let mixed = RequestError::MissingCredential {
+            alternatives: vec![Vec::new(), vec!["token"], Vec::new()],
+        };
+        assert_eq!(
+            mixed.to_string(),
+            "no registered credential satisfies the operation's security requirement \
+             (missing: token)"
+        );
+    }
+
     /// A typed API error body that is itself an `Error`, so `Error::source` can reach it.
     #[derive(Debug)]
     struct ApiBody(&'static str);
@@ -413,10 +808,54 @@ mod tests {
             .expect_err("an unparseable URL fails to build")
     }
 
-    /// One value of every variant. The match in each test below is exhaustive over this list by
-    /// construction, so a variant added to `Error` has to be added here — and then classified.
-    fn every_variant() -> Vec<Error<ApiBody>> {
-        vec![
+    /// How many variants `Error` has. `every_variant` returns an array of exactly this length, so
+    /// raising it will not compile until a value of the new variant is listed.
+    const ERROR_VARIANTS: usize = 9;
+
+    /// Each variant's position in `every_variant`. Indices are dense and unique. This is the same
+    /// guard `request_variant_index` carries, applied to the other taxonomy that is a semver
+    /// surface — and it enforces exactly as much, and as little, as that function documents.
+    fn error_variant_index(error: &Error<ApiBody>) -> usize {
+        match error {
+            Error::RequestConstruction(_) => 0,
+            Error::Transport(_) => 1,
+            Error::Timeout(_) => 2,
+            Error::Protocol(_) => 3,
+            Error::Redirect(_) => 4,
+            Error::Api(_) => 5,
+            Error::UnexpectedStatus { .. } => 6,
+            Error::Decode { .. } => 7,
+            Error::InterruptedBody(_) => 8,
+        }
+    }
+
+    /// The enumeration is a bijection onto the variant set. See
+    /// `every_request_variant_lists_each_variant_exactly_once` for why an exhaustive match alone
+    /// is not enough.
+    #[test]
+    fn every_variant_lists_each_variant_exactly_once() {
+        let mut seen = [false; ERROR_VARIANTS];
+        for error in every_variant() {
+            let index = error_variant_index(&error);
+            assert!(
+                index < ERROR_VARIANTS,
+                "`{error}` takes index {index}, outside the declared count of {ERROR_VARIANTS}: \
+                 raise `ERROR_VARIANTS` and list a value of the new variant in `every_variant`"
+            );
+            assert!(!seen[index], "two entries share index {index}");
+            seen[index] = true;
+        }
+        assert!(
+            seen.iter().all(|occupied| *occupied),
+            "an index in 0..{ERROR_VARIANTS} is unoccupied: `every_variant` is missing a variant"
+        );
+    }
+
+    /// One value of every variant. The match in each test below is exhaustive over this array by
+    /// construction, so a variant added to `Error` is classified by the compiler;
+    /// `error_variant_index` is what additionally forces it to be *listed*.
+    fn every_variant() -> [Error<ApiBody>; ERROR_VARIANTS] {
+        [
             Error::request_message("bad path segment"),
             Error::Transport(TransportError::new(reqwest_error())),
             Error::Timeout(TimeoutKind::Total),
@@ -635,6 +1074,13 @@ mod tests {
     fn widen_preserves_every_reachable_variant() {
         let narrow: Vec<Error<std::convert::Infallible>> = vec![
             Error::request_message("bad path segment"),
+            Error::RequestConstruction(RequestError::MissingCredential {
+                alternatives: vec![vec!["token"]],
+            }),
+            Error::RequestConstruction(RequestError::CredentialProvider {
+                scheme: "token",
+                source: AuthError::new("x"),
+            }),
             Error::Transport(TransportError::new(reqwest_error())),
             Error::Timeout(TimeoutKind::Connect),
             Error::Protocol(super::ProtocolError {
@@ -686,6 +1132,19 @@ mod tests {
         assert_eq!(path, "a.b");
         assert_eq!(body, Bytes::from_static(b"raw"));
         assert!(truncated);
+
+        // The typed request-construction cause keeps its payload too.
+        let widened: Error<ApiBody> = Error::<std::convert::Infallible>::RequestConstruction(
+            RequestError::MissingCredential {
+                alternatives: vec![vec!["a"], vec!["b"]],
+            },
+        )
+        .widen();
+        let Error::RequestConstruction(RequestError::MissingCredential { alternatives }) = widened
+        else {
+            panic!("widen changed the variant");
+        };
+        assert_eq!(alternatives, [vec!["a"], vec!["b"]]);
     }
 
     impl super::ApiErrorBody for ApiBody {
