@@ -31,6 +31,46 @@ use super::{
 /// facade) so lowering this many levels deep is comfortably safe.
 const MAX_SCHEMA_DEPTH: u32 = 128;
 
+/// The root document's id in every input bundle. The root is the first file loaded, so it is always
+/// zero; `InputBundle::root_id` is the authority and is not reachable from here.
+const ROOT_FILE: crate::diag::FileId = crate::diag::FileId(0);
+
+/// The identity of a schema the bundle resolver produced: the `file#pointer` it was parsed from,
+/// read off the parsed schema's own provenance rather than off the `$ref` spelling that reached it.
+///
+/// This is what lets one target have one type however it is addressed — a sub-file's bare
+/// `#/components/schemas/Inner` and the root's `./lib.yaml#/components/schemas/Inner` resolve to the
+/// same file and the same pointer and therefore to the same key. `None` only when the target
+/// carries no span, which no parser output does; callers treat that as "no identity" and fall back.
+fn resolved_identity(provenance: &Provenance) -> Option<String> {
+    let file = provenance.span?.file;
+    Some(format!("{}#{}", file.0, provenance.pointer.as_str()))
+}
+
+/// The name hint a resolved target should carry: its own final pointer token, so the generated type
+/// is named for the schema it came from rather than for whichever use site happened to reach it
+/// first. Empty for a whole-file reference, which has no final token; the caller's hint stands then.
+///
+/// The token is unescaped (RFC 6901 `~1` → `/`, `~0` → `~`) before it becomes a hint. Component
+/// *keys* are constrained by the official schema to `^[a-zA-Z0-9._-]+$` and could never carry an
+/// escape, but this function exists partly to serve pointers that are not component keys — a
+/// property name, a path template — and those are unconstrained. `name` sanitises and disambiguates
+/// whatever it is given, so the consequence of leaving it escaped is cosmetic, but the result is a
+/// public type name in the generated API and `~1` in one is a spelling nobody chose.
+fn resolved_hint(provenance: &Provenance, fallback: &str) -> String {
+    provenance
+        .pointer
+        .as_str()
+        .rsplit('/')
+        .next()
+        .filter(|token| !token.is_empty())
+        .map_or_else(
+            || fallback.to_owned(),
+            // Order matters: `~1` first, then `~0`, or a literal `~01` would decode as `/`.
+            |token| token.replace("~1", "/").replace("~0", "~"),
+        )
+}
+
 /// Lower a typed OpenAPI 3.1 or 3.2 [`Document`] into the version-agnostic [`Api`] IR.
 pub(crate) fn lower(
     document: &Document,
@@ -55,6 +95,9 @@ pub(crate) fn lower(
         remote_components: HashMap::new(),
         remote_in_progress: HashMap::new(),
         remote_alias_stack: HashSet::new(),
+        resolved_components: HashMap::new(),
+        resolved_in_progress: HashMap::new(),
+        resolved_alias_stack: HashSet::new(),
         depth: 0,
     };
 
@@ -396,6 +439,21 @@ struct LowerCtx<'a, 'doc> {
     /// Guards a chain of bare-`$ref` (alias) remote documents so an alias cycle terminates instead
     /// of recursing forever; a real (object/enum/…) remote schema uses the reserve/box machinery.
     remote_alias_stack: HashSet<String>,
+    /// The bundle-`$ref` analogue of [`Self::components`], keyed by the resolved target's own
+    /// `file#pointer` (see [`resolved_identity`]). `Resolver::resolve` parses a fresh owned schema
+    /// on every call, so — exactly as for a remote ref — a relative-file reference and a sub-file's
+    /// own `#/components/schemas/<name>` have no `document`-level identity of their own. This map
+    /// gives them one, so repeated uses of one target share one generated type instead of producing
+    /// a fresh type per reference site.
+    resolved_components: HashMap<String, (TypeId, bool)>,
+    /// Bundle refs currently being lowered (same role as [`Self::in_progress`]): a re-entered
+    /// `file#pointer` is a cycle-closing back-edge and is boxed against its reserved id, so a
+    /// recursive sub-file schema terminates and generates rather than walking to
+    /// [`MAX_SCHEMA_DEPTH`] and rejecting.
+    resolved_in_progress: HashMap<String, (TypeId, bool)>,
+    /// Guards a chain of bare-`$ref` (alias) bundle targets, which have no body to reserve a root
+    /// against; the counterpart of [`Self::remote_alias_stack`].
+    resolved_alias_stack: HashSet<String>,
     /// Current schema-lowering recursion depth, incremented on entry to [`Self::lower_schema`] and
     /// decremented on exit. A `$ref`/allOf/array/object chain that pushes this past
     /// [`MAX_SCHEMA_DEPTH`] is rejected (`E014`) rather than allowed to overflow the stack.
@@ -417,6 +475,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// sub-file still yields a rule read against the root document, which matches nothing and ends
     /// the run with `E019`. That is pre-existing and not specific to this diagnostic, but this
     /// diagnostic can reach it.
+    ///
+    /// A name the root document does not declare is handed to [`Self::ensure_resolved`], because a
+    /// `$ref` written inside a sub-file spells that file's own components the same way. That is a
+    /// re-entry into the resolver from a function the resolver's own component path can call back
+    /// into, so it owes a cycle-safety argument, and here it is: `ensure_resolved` reserves the
+    /// target's id under its resolved `file#pointer` *before* lowering its body, so a re-entry on
+    /// the same target — self-recursion, mutual recursion, an alias loop, or a diamond — finds the
+    /// reservation and returns a boxed back-edge rather than descending again. Every cycle closes in
+    /// one step, every target is lowered once, and only genuinely new targets consume depth. The two
+    /// memos do not compete for one target: a resolved reference that lands on a root component
+    /// comes straight back here by name, so `components` stays the single identity for those.
     fn ensure_component(&mut self, name: &str, at: &crate::diag::Provenance) -> Option<Ty> {
         if let Some(&(id, nullable)) = self.components.get(name) {
             return Some(Ty {
@@ -440,16 +509,42 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // parameter with it, which is exactly the silent degradation the taxonomy forbids.
         let Some(component) = self.document.components.schemas.get(name) else {
             let reference = format!("#/components/schemas/{name}");
+            // The name missed the ROOT document's component map — but a `$ref` written inside a
+            // referenced sub-file spells that file's own components exactly the same way, and a
+            // JSON Pointer fragment addresses the document it appears in. `Resolver::resolve`
+            // already implements that: it keys on the provenance's file and shortcuts to the parsed
+            // component map only for the root. `ensure_component` is reached by callers that strip
+            // the `#/components/schemas/` prefix before any file is considered, so a sub-file's
+            // sibling reference never got there. Hand it back to the resolver.
+            //
+            // Root first, file second: the root map was already consulted above, so a document that
+            // resolves today keeps selecting the same component and only a name the root does not
+            // declare reaches the sub-file reading. Which namespace *should* win when both declare
+            // the name is a separate question; this deliberately does not change the answer.
+            let from = at.span.map(|span| span.file);
+            if from.is_some_and(|file| file != ROOT_FILE) {
+                // The resolver reports its own failure, so a miss here is already diagnosed. Going
+                // through `ensure_resolved` rather than straight to `resolve`/`lower_schema` is what
+                // makes this re-entry safe *and* finite: see that method and the note above.
+                return self.ensure_resolved(&reference, at, name);
+            }
             // A raw `/` here is always a further pointer segment, never part of a component name: a
-            // literal slash in a key is spelled `~1`. So this fragment addresses a *subschema* and
-            // the component it starts from may well be declared — saying "unresolved" would be
-            // false. spargen matches a same-file component reference by name only; the same pointer
-            // written against a relative file goes through the resolver, which does walk it.
-            if name.contains('/') {
+            // literal slash in a key is spelled `~1`. So the fragment addresses a *subschema* — but
+            // only say so when the segment it starts from is actually declared. Otherwise the fault
+            // is the missing component, not the fragment's shape, and claiming otherwise would
+            // assert by implication that the root exists and send the reader to promote a subschema
+            // of something that does not. spargen matches a same-file component reference by name
+            // only; the same pointer written against a relative file goes through the resolver,
+            // which does walk it.
+            let subschema_of = name
+                .split_once('/')
+                .map(|(root, _)| root)
+                .filter(|root| self.document.components.schemas.contains_key(*root));
+            if let Some(root) = subschema_of {
                 Diagnostic::error(Code::UnresolvedRef, at.clone())
                     .message(format!(
-                        "schema reference `{reference}` addresses a subschema rather than a \
-                         top-level component name"
+                        "schema reference `{reference}` addresses a subschema of component \
+                         `{root}` rather than a top-level component name"
                     ))
                     .remedy(
                         "declare the subschema as its own entry under `components/schemas` and \
@@ -481,10 +576,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             } else if is_remote_ref(&reference.reference) {
                 self.ensure_remote(&reference.reference)
             } else {
-                self.resolver
-                    .resolve(&reference.reference, &reference.provenance, self.diags)
-                    .ok()
-                    .and_then(|resolved| self.lower_schema(&resolved.schema, name))
+                self.ensure_resolved(&reference.reference, &reference.provenance, name)
             };
             self.component_alias_stack.remove(name);
             if let Some(ty) = ty {
@@ -606,6 +698,141 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(ty)
     }
 
+    /// Lower a `$ref` the bundle resolver has to follow — a relative-file reference, a whole-file
+    /// reference, a non-component fragment, or a sub-file's own `#/components/schemas/<name>` — to a
+    /// shared, cycle-safe type. The bundle analogue of [`Self::ensure_component`] and
+    /// [`Self::ensure_remote`], and it exists for the reason `ensure_remote` states: `resolve` parses
+    /// a *fresh owned schema* on every call, so a bundle reference has no `document`-level identity
+    /// the way a root component does.
+    ///
+    /// Without one, each reference site re-resolved and re-lowered its target from scratch. That is
+    /// three faults at once, not one: a shared component became one generated type per *use* instead
+    /// of per *declaration* (two public Rust types for one schema, two items in the `surface` semver
+    /// surface); a reuse graph cost 2^N lowerings rather than N, so a 40-line two-file description
+    /// produced no output and no diagnostic; and a recursive schema had nothing to terminate
+    /// against but [`MAX_SCHEMA_DEPTH`], rejecting with `E014` a document `docs/support-matrix.md`
+    /// promises is supported.
+    ///
+    /// The identity is the resolved target's own `file#pointer` ([`resolved_identity`]), read from
+    /// the parsed schema's provenance rather than from the `$ref` spelling, so every way of writing
+    /// one target lands on one key: a sub-file's bare `#/components/schemas/Inner` and the root's
+    /// `./lib.yaml#/components/schemas/Inner` resolve to the same file and pointer and share one
+    /// type. Keying on the spelling — or on `(file, name)` — would give one target two identities,
+    /// which is how these two paths came to behave differently in the first place. A target inside
+    /// the root document's own component map is routed back to [`Self::ensure_component`] for the
+    /// same reason: that map is already its identity, and a second one beside it would re-create the
+    /// divergence in a new place.
+    ///
+    /// **Cycle safety.** The reservation is inserted *before* the body is lowered, so any re-entry
+    /// on the same key — self-recursion, mutual recursion, or a diamond — finds it and returns a
+    /// boxed back-edge instead of descending again. Every cycle therefore closes in one step. A
+    /// chain of bare-`$ref` aliases has no body to reserve against and is guarded separately by
+    /// [`Self::resolved_alias_stack`], exactly as `remote_alias_stack` guards the remote one. Only
+    /// genuinely new targets descend, so the depth counter still bounds a real chain (`E014`) and
+    /// nothing repeated can accumulate against it.
+    ///
+    /// **Semver.** spargen's semver surface is the public API of *generated output*, and this
+    /// changes it for any description that reaches a target through more than one reference. Types
+    /// that existed only because one schema was lowered once per use site are gone, and a type is
+    /// now named for the schema it resolves from rather than for whichever site reached it first.
+    /// `surface`'s own classifier calls a removed public item `ChangeKind::TypeRemoved`, which its
+    /// impact policy grades **Major**, so regenerating against an unchanged description can stop
+    /// compiling a consumer that named one of the removed types. That is the correct outcome — the
+    /// removed types were artefacts of lowering the same schema repeatedly — but it is a breaking
+    /// change to the generated API and is released as one.
+    fn ensure_resolved(&mut self, reference: &str, at: &Provenance, hint: &str) -> Option<Ty> {
+        let resolved = self.resolver.resolve(reference, at, self.diags).ok()?;
+        let schema = resolved.schema.into_owned();
+        let Some(key) = resolved_identity(&schema.provenance) else {
+            // No span, so no identity to key on. Lower it un-deduplicated rather than share a type
+            // under a key that does not identify it: a duplicated type is wrong, a wrongly shared
+            // one is worse. Every schema the parser produces carries a span, so this is defensive.
+            return self.lower_schema(&schema, hint);
+        };
+        // A resolved target that is a root component already has an identity — its name.
+        if schema
+            .provenance
+            .span
+            .is_some_and(|span| span.file == ROOT_FILE)
+        {
+            if let Some(name) = schema
+                .provenance
+                .pointer
+                .as_str()
+                .strip_prefix("/components/schemas/")
+                .filter(|name| !name.is_empty() && !name.contains('/'))
+            {
+                if self.document.components.schemas.contains_key(name) {
+                    return self.ensure_component(name, at);
+                }
+            }
+        }
+        if let Some(&(id, nullable)) = self.resolved_components.get(&key) {
+            return Some(Ty {
+                id,
+                nullable,
+                boxed: false,
+            });
+        }
+        if let Some(&(id, nullable)) = self.resolved_in_progress.get(&key) {
+            return Some(Ty {
+                id,
+                nullable,
+                boxed: true,
+            });
+        }
+        // Name the type for the schema it came from, not for whichever use site reached it first:
+        // once one type serves every site, a per-site hint would make the generated name depend on
+        // lowering order. A whole-file reference has no final pointer token, so the caller's hint
+        // stands there.
+        let hint = resolved_hint(&schema.provenance, hint);
+
+        // A target that is itself a bare `$ref` is an alias with no body to reserve a root for.
+        // Chain to its target under a cycle guard rather than through the reserve/pop machinery,
+        // which assumes the body inserts a fresh root.
+        if schema.reference.is_some() {
+            if !self.resolved_alias_stack.insert(key.clone()) {
+                Diagnostic::error(Code::UnresolvedRef, at.clone())
+                    .message(format!(
+                        "schema reference `{reference}` forms an alias cycle"
+                    ))
+                    .remedy(
+                        "give one component in the cycle a schema body, or break the cycle at one \
+                         of its references",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+            let ty = self.lower_schema(&schema, &hint);
+            self.resolved_alias_stack.remove(&key);
+            return ty;
+        }
+
+        let nullable = schema_is_nullable(&schema);
+        let root_id = self.graph.reserve();
+        self.resolved_in_progress
+            .insert(key.clone(), (root_id, nullable));
+        let lowered = self.lower_schema(&schema, &hint);
+        self.resolved_in_progress.remove(&key);
+        let mut ty = lowered?;
+        let (popped_id, mut def) = self.graph.pop_last().expect("resolved root def");
+        // Same last-insert invariant as `ensure_component` and `ensure_remote`: the target's root is
+        // the final graph insert during its own body lowering (children insert first).
+        assert_eq!(
+            popped_id, ty.id,
+            "resolved root was not the last inserted def"
+        );
+        if let Some(raw) = &schema.default {
+            let note = format!("Default: `{}`.", default_display_for(raw, Some(&def.kind)));
+            append_doc_note(&mut def.docs, note);
+        }
+        self.graph.fill(root_id, def);
+        ty.id = root_id;
+        ty.nullable = nullable;
+        self.resolved_components.insert(key, (root_id, nullable));
+        Some(ty)
+    }
+
     fn lower_schema_or(&mut self, schema: &SchemaOr, hint: &str) -> Option<Ty> {
         match schema {
             SchemaOr::Bool(true) => {
@@ -675,11 +902,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             } else if is_remote_ref(reference) {
                 self.ensure_remote(reference)?
             } else {
-                let resolved = self
-                    .resolver
-                    .resolve(reference, &schema.provenance, self.diags)
-                    .ok()?;
-                self.lower_schema(&resolved.schema, hint)?
+                // Bundle refs go through the cycle-safe, deduped path too, keyed by the resolved
+                // `file#pointer`. That key is why the ordinary spelling and the explicit
+                // `./lib.yaml#/…` spelling of one target now share one type rather than two.
+                self.ensure_resolved(reference, &schema.provenance, hint)?
             };
 
             // In JSON Schema 2020-12 `$ref` is an applicator, not a replacement for the containing
@@ -691,6 +917,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // schema: it boxes and generates. Only the intersection below needs a real target.
                 return Some(referenced);
             }
+            // Both lanes wrote this guard independently. The parent keyed it on
+            // `is_in_progress_root(referenced.id)` — a lowering-order test, which decision 23
+            // established gives two byte-identical documents opposite verdicts when only the order
+            // of two `components.schemas` entries differs. `back_edge` above asks the document
+            // instead, so the parent's condition is superseded rather than merged beside it; its
+            // reservation work (`TypeKind::Reserved`) is what the placeholder now is, and is kept.
             if back_edge {
                 // The siblings have nothing yet to intersect with. The `allOf` spelling of the same
                 // conjunction has always rejected this rather than composing against a placeholder,
@@ -1062,6 +1294,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
+            // A variant that is a back-edge to *this* union — the member's type is the very
+            // reservation this schema will occupy — is the whole union, so it constrains nothing and
+            // cannot be decoded: the emitted `Deserialize` opens by re-entering itself on the same
+            // value, with no base case, and recurses until the stack is exhausted. It compiles, so
+            // nothing downstream can catch it; refusing here is the only place it can be caught.
+            //
+            // The test is against *this* schema's own reservation, not against any open one. Asking
+            // `is_in_progress_root(ty.id)` answers the strictly weaker "is the member any open
+            // reservation", which is true of every ordinary recursive schema whose union sits in a
+            // property: `Node.child: {oneOf: [{$ref: Node}, …]}` has a member pointing at `Node`'s
+            // reservation while the union being built is `Nodechild`. That decodes perfectly well —
+            // the member is a *different* type — and rejecting it refuses the most common recursive
+            // construct there is, which `docs/support-matrix.md` lists as supported.
+            if self.reservation_at(&schema.provenance) == Some(ty.id) {
+                return self.reject_union(
+                    schema,
+                    "a union member is a direct recursive `$ref` to the union being lowered, so \
+                     the member is the union itself and decoding it would never terminate",
+                );
+            }
             if let Some(sibling) = sibling {
                 let Some(intersection) = self.intersect_types(
                     ty,
@@ -1375,6 +1627,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .map(|variant| self.type_specificity(variant.ty, visiting))
                 .min()
                 .unwrap_or(0),
+            // A reservation has no body yet, so there is nothing to rank: least specific, alongside
+            // `Any` and a missing definition.
+            //
+            // This arm is **live**, not defensive. An earlier comment here claimed a union holding a
+            // reservation was rejected before ranking, and named a function that has never existed.
+            // Neither half was true: `lower_union`'s guard tests the *direct* member's id, while this
+            // function recurses through `Array` and `Union`, so an array-wrapped back edge —
+            // `anyOf: [{type: array, items: {$ref: self}}, …]` — reaches here on a document that
+            // generates cleanly, and the value returned is emitted into the client as the trial-match
+            // order of an `anyOf`. Ranking it least specific is the answer that matches what is known
+            // about it, which is nothing; it is pinned by
+            // `an_array_wrapped_union_back_edge_ranks_least_specific`.
+            Some(TypeKind::Reserved) => 0,
             Some(TypeKind::Any) | None => 0,
         };
         visiting.remove(&ty.id);
@@ -1397,7 +1662,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ScalarRepr::Int => JsonCategory::Number,
                 ScalarRepr::Bool => JsonCategory::Boolean,
             },
-            TypeKind::Bytes
+            // A reservation cannot be categorised — its body has not been lowered, so nothing is
+            // known about the JSON it serialises as. Uncategorisable, exactly like the others here.
+            TypeKind::Reserved
+            | TypeKind::Bytes
             | TypeKind::Null
             | TypeKind::Never
             | TypeKind::Any
@@ -1776,6 +2044,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     );
                 }
                 let ty = self.ensure_component(name, &schema.provenance)?;
+                // The pre-check above sees root components only. A name the root does not declare
+                // is a *sub-file* component, and it reaches its own reservation through
+                // `ensure_resolved`, so a direct recursive member there arrives here as a back-edge
+                // rather than being caught above. Refuse to read it for the same reason: see
+                // `is_in_progress_root`.
+                if self.is_in_progress_root(ty.id) {
+                    return self.reject_all_of_unit(
+                        schema.provenance.clone(),
+                        "an `allOf` member is a direct recursive `$ref` to the component being \
+                         lowered",
+                    );
+                }
                 self.push_ref_member(ty, out);
                 return Some(());
             }
@@ -1791,6 +2071,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     );
                 }
                 let ty = self.ensure_remote(reference)?;
+                if self.is_in_progress_root(ty.id) {
+                    return self.reject_all_of_unit(
+                        schema.provenance.clone(),
+                        "an `allOf` member is a direct recursive remote `$ref` to the schema being \
+                         lowered",
+                    );
+                }
                 self.push_ref_member(ty, out);
                 return Some(());
             }
@@ -1801,6 +2088,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .resolve(reference, &schema.provenance, self.diags)
                 .ok()?;
             let target = resolved.schema.into_owned();
+            // This arm inlines rather than referencing a shared type, so there is no `Ty` to test —
+            // test the target instead. Without this, a member that is the very schema being lowered
+            // descends into its own body again and stops only at `MAX_SCHEMA_DEPTH`, reporting a
+            // chain length for what is a cycle of length one. The component and remote arms above
+            // refuse to read an in-progress member; this one now does too.
+            if self.resolved_target_in_progress(&target.provenance) {
+                return self.reject_all_of_unit(
+                    schema.provenance.clone(),
+                    "an `allOf` member is a direct recursive `$ref` to the schema being lowered",
+                );
+            }
             return self.gather_inline(&target, hint, out);
         }
 
@@ -4035,11 +4333,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 } else if is_remote_ref(&reference.reference) {
                     self.ensure_remote(&reference.reference)
                 } else {
-                    let resolved = self
-                        .resolver
-                        .resolve(&reference.reference, &reference.provenance, self.diags)
-                        .ok()?;
-                    self.lower_schema(&resolved.schema, hint)
+                    self.ensure_resolved(&reference.reference, &reference.provenance, hint)
                 }
             }
         }
@@ -4053,7 +4347,68 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .chain(self.in_progress.values())
             .chain(self.remote_components.values())
             .chain(self.remote_in_progress.values())
+            .chain(self.resolved_components.values())
+            .chain(self.resolved_in_progress.values())
             .any(|&(root, _)| root == id)
+    }
+
+    /// Whether `id` is a reservation whose body is still being lowered, so its definition is the
+    /// placeholder [`TypeGraph::reserve`] inserted rather than the schema's own shape.
+    ///
+    /// This matters because [`Self::push_ref_member`] classifies an `allOf` member by reading
+    /// `graph.get(id).kind`. That kind is now [`TypeKind::Reserved`] — it was `TypeKind::Any` until
+    /// the dedicated variant landed, which is why reading one answered "scalar" for a type that is
+    /// not a scalar and the member silently became `serde_json::Value`. `push_ref_member` is still
+    /// shaped that way: its `_` arm absorbs `Reserved` without a compile error, so the guard lives
+    /// here in its callers. The three in-progress maps are exactly the set of such ids, and the only
+    /// safe thing to do with one is refuse to read it.
+    ///
+    /// This asks "is `id` **any** open reservation". A caller that needs "is `id` the reservation
+    /// belonging to the schema at *this* provenance" wants [`Self::reservation_at`] instead; the two
+    /// coincide only when the construct being lowered is the component's whole body, and confusing
+    /// them rejects every recursive schema whose reference sits inside a property.
+    fn is_in_progress_root(&self, id: TypeId) -> bool {
+        self.in_progress
+            .values()
+            .chain(self.remote_in_progress.values())
+            .chain(self.resolved_in_progress.values())
+            .any(|&(root, _)| root == id)
+    }
+
+    /// Whether a schema the bundle resolver just produced is the very schema whose body is being
+    /// lowered. The inlining arm of [`Self::gather_member`] has no shared `Ty` to test against
+    /// [`Self::is_in_progress_root`], so it tests the resolved target's identity instead.
+    fn resolved_target_in_progress(&self, provenance: &Provenance) -> bool {
+        self.reservation_at(provenance).is_some()
+    }
+
+    /// The reserved id of the schema *at* `provenance`, when that schema is one whose body is
+    /// currently being lowered.
+    ///
+    /// This answers a strictly narrower question than [`Self::is_in_progress_root`], and the
+    /// difference matters. `is_in_progress_root` answers "is this id **any** open reservation";
+    /// this answers "is the schema written **here** the one that reservation belongs to". They
+    /// coincide only when the construct being lowered *is* the component's whole body, which is why
+    /// a guard that needs the second and asks the first over-rejects every case where a recursive
+    /// reference is nested inside a property rather than being the component itself.
+    fn reservation_at(&self, provenance: &Provenance) -> Option<TypeId> {
+        if let Some(key) = resolved_identity(provenance) {
+            if let Some(&(id, _)) = self.resolved_in_progress.get(&key) {
+                return Some(id);
+            }
+        }
+        // A target inside the root document's component map has its identity there instead —
+        // `ensure_resolved` routes such a reference back to `ensure_component` — so consult that
+        // map too, or a root component addressed by file reference escapes the check.
+        if !provenance.span.is_some_and(|span| span.file == ROOT_FILE) {
+            return None;
+        }
+        provenance
+            .pointer
+            .as_str()
+            .strip_prefix("/components/schemas/")
+            .and_then(|name| self.in_progress.get(name))
+            .map(|&(id, _)| id)
     }
 
     /// Read an untyped body on a binary media type as raw octets.
@@ -4198,7 +4553,11 @@ fn parameter_shape_supported_inner(
         TypeKind::Union(union) => union.variants.iter().all(|variant| {
             parameter_shape_supported_inner(graph, variant.ty, scalar_only, visiting)
         }),
-        TypeKind::Struct(_)
+        // A reservation's shape is unknown, so it cannot be *proved* serialisable as a parameter.
+        // This function answers "is this supported", and an unknown must answer no: saying yes
+        // would let a recursive schema through as a parameter on the strength of nothing.
+        TypeKind::Reserved
+        | TypeKind::Struct(_)
         | TypeKind::Array(_)
         | TypeKind::Tuple(_)
         | TypeKind::Never
@@ -4867,7 +5226,14 @@ fn gate_xml_field_renames(
         }
     }
 
-    let to_suppress: Vec<TypeId> = graph
+    // Two quite different situations reach the same suppression, and a consumer needs to tell them
+    // apart. A type that is never reached from an XML body carries an inert hint: nothing on any
+    // wire moves. A type reached from an XML body *and* a non-XML one is genuinely shared, and
+    // suppressing its hint changes what the XML body puts on the wire. The second became reachable
+    // for a sub-file schema only once one target started generating one type; before that the two
+    // uses were two types and the XML one kept its rename. Same code, same count — so the message
+    // has to carry the distinction or there is nothing to compare across an upgrade.
+    let to_suppress: Vec<(TypeId, bool)> = graph
         .iter()
         .filter_map(|(id, def)| {
             let TypeKind::Struct(object) = &def.kind else {
@@ -4877,12 +5243,13 @@ fn gate_xml_field_renames(
                 .fields
                 .iter()
                 .any(|field| field.xml.name.is_some() || field.xml.attribute);
-            let dedicated = xml_reachable.contains(&id) && !non_xml_reachable.contains(&id);
-            (has_apply_hint && !dedicated).then_some(id)
+            let reached_from_xml = xml_reachable.contains(&id);
+            let dedicated = reached_from_xml && !non_xml_reachable.contains(&id);
+            (has_apply_hint && !dedicated).then_some((id, reached_from_xml))
         })
         .collect();
 
-    for id in to_suppress {
+    for (id, shared_with_xml) in to_suppress {
         let Some(def) = graph.get_mut(id) else {
             continue;
         };
@@ -4892,16 +5259,27 @@ fn gate_xml_field_renames(
                 field.xml = XmlField::default();
             }
         }
+        let (message, remedy) = if shared_with_xml {
+            (
+                "`xml.name`/`xml.attribute` not applied: this schema is shared between an XML body \
+                 and a non-XML (e.g. JSON) body, and a serde rename applies to every format, so \
+                 honoring the hint would rewrite the JSON wire name too. The field keeps its \
+                 normal wire name — including in the XML body, whose element/attribute name is the \
+                 property name rather than the hint",
+                "declare a separate schema for the XML body if the rename is required, so the two \
+                 bodies stop sharing one generated type, or accept the property's normal wire name",
+            )
+        } else {
+            (
+                "`xml.name`/`xml.attribute` not applied: this schema is never used as an XML body, \
+                 so the hint cannot affect any wire format; the field keeps its normal wire name",
+                "remove the `xml` hint, or use this schema as an XML body if the rename is \
+                 required",
+            )
+        };
         Diagnostic::warning(Code::XmlHintIgnored, provenance)
-            .message(
-                "`xml.name`/`xml.attribute` not applied: this schema is used as a non-XML (e.g. \
-                 JSON) body — or is not used as an XML body — where the format-agnostic serde rename \
-                 would corrupt the wire format; the field keeps its normal wire name",
-            )
-            .remedy(
-                "use a schema dedicated to the XML body if the rename is required, or accept the \
-                 property's normal wire name",
-            )
+            .message(message)
+            .remedy(remedy)
             .emit(diags);
     }
 }
@@ -4933,7 +5311,11 @@ fn reachable_types(graph: &TypeGraph, roots: &[TypeId]) -> HashSet<TypeId> {
             TypeKind::Union(union) => {
                 stack.extend(union.variants.iter().map(|variant| variant.ty.id))
             }
-            TypeKind::Primitive(_)
+            // A reservation has no structural edges yet. It is reached only while its own body is
+            // still being lowered, and this walk runs after lowering, so following it would be
+            // following nothing.
+            TypeKind::Reserved
+            | TypeKind::Primitive(_)
             | TypeKind::Enum(_)
             | TypeKind::Bytes
             | TypeKind::Null

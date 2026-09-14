@@ -3098,6 +3098,15 @@ fn type_kind_tokens(
         TypeKind::Bytes => quote! { bytes::Bytes },
         TypeKind::Null => quote! { () },
         TypeKind::Any => quote! { serde_json::Value },
+        // Codegen runs only on an `Api` that passed `check_invariants`, which rejects a surviving
+        // reservation, so reaching here means a reserved id was never filled. Emitting anything at
+        // all would put a shape on the wire that was never computed — which is how this variant's
+        // predecessor produced `serde_json::Value` for a typed schema, silently, four times over.
+        TypeKind::Reserved => {
+            unreachable!(
+                "a reservation reached codegen; `check_invariants` should have rejected it"
+            )
+        }
         TypeKind::Struct(_) | TypeKind::Enum(_) | TypeKind::Never | TypeKind::Union(_) => {
             unreachable!("named definitions emitted separately")
         }
