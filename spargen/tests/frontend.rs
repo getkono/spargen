@@ -309,29 +309,70 @@ components:
 "##
     );
 
+    // Each case pairs its spec with the RFC 6901 pointer the diagnostic must carry. The pointer is
+    // the assertion that matters: the code alone would still pass if `ensure_component` emitted
+    // against the document root, and a root pointer is what makes the rejection un-carvable (see
+    // the cascade in `carve.rs`). Pointing at the `$ref` site is the contract, so it is pinned per
+    // site rather than left to one coarse outcome elsewhere.
     let cases = [
-        ("request body (application/json)", &request_body_json),
+        (
+            "request body (application/json)",
+            &request_body_json,
+            "/paths/~1u/post/requestBody/content/application~1json/schema",
+        ),
         (
             "request body (application/octet-stream)",
             &request_body_octets,
+            "/paths/~1u/post/requestBody/content/application~1octet-stream/schema",
         ),
-        ("response body", &response_body),
-        ("parameter schema", &parameter),
-        ("oneOf member", &union_variant),
-        ("allOf member", &all_of_member),
-        ("component alias", &component_alias),
+        (
+            "response body",
+            &response_body,
+            "/paths/~1u/get/responses/200/content/application~1json/schema",
+        ),
+        (
+            "parameter schema",
+            &parameter,
+            "/paths/~1u/get/parameters/0/schema",
+        ),
+        (
+            "oneOf member",
+            &union_variant,
+            "/components/schemas/Union/oneOf/1",
+        ),
+        (
+            "allOf member",
+            &all_of_member,
+            "/components/schemas/Merged/allOf/1",
+        ),
+        (
+            "component alias",
+            &component_alias,
+            "/components/schemas/Alias",
+        ),
     ];
 
-    for (what, spec) in cases {
+    for (what, spec, pointer) in cases {
         for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
             assert_eq!(
                 report.outcome(),
                 Outcome::Rejected,
                 "{what} via {entry}: a `$ref` to an undeclared component must reject\n{report:#?}"
             );
+            let e004: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::UnresolvedRef)
+                .collect();
             assert!(
-                has_code(&report, Code::UnresolvedRef),
+                !e004.is_empty(),
                 "{what} via {entry}: the rejection must carry E004\n{report:#?}"
+            );
+            assert!(
+                e004.iter().any(|d| d.pointer.as_str() == pointer),
+                "{what} via {entry}: E004 must point at the `$ref` site `{pointer}`, not at \
+                 {:?}\n{report:#?}",
+                e004.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
             );
         }
     }
