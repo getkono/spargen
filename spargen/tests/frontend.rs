@@ -4127,9 +4127,39 @@ fn the_composition_explain_covers_every_cause_that_reports_it() {
     // and the text must not claim the first when it may be the second.
     assert!(explain.contains("empty or unrepresentable"), "{explain}");
 
-    // The rejection causes, including the recursive one both spellings now share.
-    assert!(explain.contains("direct recursive `$ref`"), "{explain}");
-    assert!(explain.contains("cycle-closing `$ref`"), "{explain}");
+    // The rejection causes, including the recursive one all three spellings now share — stated as a
+    // property of the document rather than of lowering order, which is what makes the verdict
+    // reproducible when `components.schemas` is reordered.
+    assert!(explain.contains("closes a reference cycle"), "{explain}");
+    assert!(
+        !explain.contains("not yet known") && !explain.contains("still being lowered"),
+        "the explain still describes the recursive cause as a lowering-order fact, which the \
+         guard no longer is: {explain}"
+    );
+
+    // Presence assertions cannot see a contradiction ADDED after them. Appending a paragraph
+    // saying sibling keywords are "discarded and never intersected, so none of the above applies"
+    // left every assertion above true and eleven suites green. The remedy is the last thing the
+    // explain says, so anything appended moves it — which is a structural rule, not typography.
+    assert!(
+        explain
+            .trim_end()
+            .ends_with("omit this API segment with `spargen::omit!`."),
+        "`E013`'s explain must end with its remedy; text after it can contradict everything \
+         above and no presence assertion would notice: {explain}"
+    );
+    // And the in-place forms of the same contradiction.
+    for denial in [
+        "never intersected",
+        "none of the above",
+        "always exactly its target",
+        "siblings are discarded",
+    ] {
+        assert!(
+            !explain.contains(denial),
+            "`E013`'s explain contradicts the code it documents (`{denial}`): {explain}"
+        );
+    }
 }
 
 /// `E007`'s published explain is what `spargen explain E007` prints, and Site B added a cause it did
@@ -4142,6 +4172,30 @@ fn the_union_explain_covers_every_cause_that_reports_it() {
     assert!(explain.contains("defaultMapping"), "{explain}");
     assert!(explain.contains("no branch at all"), "{explain}");
     assert!(explain.contains("single non-null member"), "{explain}");
+
+    // The `W011` clause had no reader while its three neighbours did, and it is the clause Site B's
+    // abstinence rests on: a branch the adjacent constraints exclude is dropped with `W011` *while
+    // the rest of the enum stands*, which is exactly what does not happen when the excluded branch
+    // is the only one. `the_single_member_union_rejection_names_its_own_cause` asserts the
+    // behaviour; without this the published reason for it could be deleted silently.
+    assert!(
+        explain.contains("`W011`"),
+        "the explain must say what happens to a branch the adjacent constraints exclude: {explain}"
+    );
+    assert!(
+        explain.contains("while the rest of the enum stands"),
+        "the explain must keep the clause that distinguishes an excluded branch from an excluded \
+         sole member, which is why one warns and the other does not: {explain}"
+    );
+
+    // The same anti-append guard as `E013`'s: presence assertions cannot see a contradiction added
+    // after them, and the remedy is the last thing the explain says.
+    assert!(
+        explain
+            .trim_end()
+            .ends_with("omit this API segment with `spargen::omit!`."),
+        "`E007`'s explain must end with its remedy: {explain}"
+    );
 }
 
 /// The guard on the two rejections above: only an EMPTY intersection is an error. A sibling that
