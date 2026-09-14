@@ -122,6 +122,14 @@ pub fn build_url_with_query_string_on(
 /// security optional and always satisfies. If no alternative is satisfiable the request fails
 /// before it is sent — [`RequestError::MissingCredential`], never a silent 401 — and a registered
 /// token provider that fails does too, as [`RequestError::CredentialProvider`].
+///
+/// **Selection is on registration, not on success, and there is no fall-through.** Once an
+/// alternative is chosen, a failure while attaching it — a token provider that errors, or a
+/// credential registered under a kind its scheme cannot use — fails the call, even when a later
+/// alternative is fully registered and would have succeeded. Falling through would send
+/// credentials the caller's registration did not select, silently, on a call they had expressed a
+/// different intent for; an error they can see is the better failure. A caller that wants the
+/// other alternative registers for it and unregisters the one it does not want.
 pub async fn attach_auth(
     core: &ClientCore,
     request: RequestBuilder,
@@ -847,6 +855,74 @@ mod tests {
         let source = std::error::Error::source(&error).unwrap();
         assert!(source.to_string().contains("http basic"), "{source}");
         assert!(!called.load(Ordering::SeqCst), "the provider was called");
+    }
+
+    /// Selection is on registration, not on success, and there is no fall-through: once an
+    /// alternative is chosen, a failure while attaching it fails the call even though a later
+    /// alternative is fully registered and would have succeeded. Both ways of failing after
+    /// selection are pinned, because falling through is a silent behaviour — the caller would get
+    /// a 200 carrying credentials their registration did not select, with nothing to observe.
+    #[test]
+    fn a_failure_after_selection_does_not_fall_through_to_a_later_alternative() {
+        const FIRST_THEN_FALLBACK: &[&[AuthScheme]] = &[
+            &[AuthScheme {
+                name: "primary",
+                kind: AuthKind::Bearer,
+            }],
+            &[AuthScheme {
+                name: "fallback",
+                kind: AuthKind::ApiKeyQuery("api_key"),
+            }],
+        ];
+
+        // A registered fallback that would satisfy the second alternative outright.
+        let register_fallback = |core: &mut ClientCore| {
+            core.set_credential("fallback", Credential::ApiKey(SecretString::from("k3y")));
+        };
+
+        // (a) the selected alternative's token provider fails.
+        let mut failing_provider = core();
+        failing_provider.set_credential(
+            "primary",
+            Credential::Provider(Arc::new(|| {
+                Box::pin(async { Err(AuthError::new("refresh rejected")) }) as TokenFuture
+            })),
+        );
+        register_fallback(&mut failing_provider);
+        let error = poll_ready(attach_auth(
+            &failing_provider,
+            get(&failing_provider),
+            FIRST_THEN_FALLBACK,
+        ))
+        .unwrap_err();
+        let Error::RequestConstruction(RequestError::CredentialProvider { scheme, .. }) = &error
+        else {
+            panic!("expected the selected alternative's failure, got {error:?}");
+        };
+        assert_eq!(*scheme, "primary");
+
+        // (b) the selected alternative's credential is registered under a kind it cannot satisfy.
+        let mut wrong_kind = core();
+        wrong_kind.set_credential(
+            "primary",
+            Credential::Basic {
+                username: "u".to_owned(),
+                password: SecretString::from("p"),
+            },
+        );
+        register_fallback(&mut wrong_kind);
+        let error = poll_ready(attach_auth(
+            &wrong_kind,
+            get(&wrong_kind),
+            FIRST_THEN_FALLBACK,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+            "expected the selected alternative's mismatch, got {error:?}"
+        );
+        let source = std::error::Error::source(&error).unwrap();
+        assert!(source.to_string().contains("`primary`"), "{source}");
     }
 
     #[test]
