@@ -396,6 +396,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// to name the reference that could not be followed. That pointer is also what
     /// [`crate::compat`]'s auto-carve maps back to an enclosing operation, so a root-level
     /// provenance here would make the rejection un-carvable.
+    ///
+    /// Carvability holds for a `$ref` site in the root document. `omittable_enclosing` keys on the
+    /// pointer alone and not on the file, so a rejection whose provenance lies in a referenced
+    /// sub-file still yields a rule read against the root document, which matches nothing and ends
+    /// the run with `E019`. That is pre-existing and not specific to this diagnostic, but this
+    /// diagnostic can reach it.
     fn ensure_component(&mut self, name: &str, at: &crate::diag::Provenance) -> Option<Ty> {
         if let Some(&(id, nullable)) = self.components.get(name) {
             return Some(Ty {
