@@ -396,6 +396,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// to name the reference that could not be followed. That pointer is also what
     /// [`crate::compat`]'s auto-carve maps back to an enclosing operation, so a root-level
     /// provenance here would make the rejection un-carvable.
+    ///
+    /// Carvability holds for a `$ref` site in the root document. `omittable_enclosing` keys on the
+    /// pointer alone and not on the file, so a rejection whose provenance lies in a referenced
+    /// sub-file still yields a rule read against the root document, which matches nothing and ends
+    /// the run with `E019`. That is pre-existing and not specific to this diagnostic, but this
+    /// diagnostic can reach it.
     fn ensure_component(&mut self, name: &str, at: &crate::diag::Provenance) -> Option<Ty> {
         if let Some(&(id, nullable)) = self.components.get(name) {
             return Some(Ty {
@@ -416,14 +422,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // No such component. Report it against the referring site rather than dropping the
         // construct that named it: a silently-dropped `$ref` takes its request body, response, or
-        // parameter with it, which is exactly the silent degradation the taxonomy forbids. The
-        // wording matches the parameter/request-body/response component arms, which already reject.
+        // parameter with it, which is exactly the silent degradation the taxonomy forbids.
         let Some(component) = self.document.components.schemas.get(name) else {
-            return self.reject_component_alias(
-                at,
-                "schema",
-                &format!("#/components/schemas/{name}"),
-            );
+            let reference = format!("#/components/schemas/{name}");
+            // A raw `/` here is always a further pointer segment, never part of a component name: a
+            // literal slash in a key is spelled `~1`. So this fragment addresses a *subschema* and
+            // the component it starts from may well be declared — saying "unresolved" would be
+            // false. spargen matches a same-file component reference by name only; the same pointer
+            // written against a relative file goes through the resolver, which does walk it.
+            if name.contains('/') {
+                Diagnostic::error(Code::UnresolvedRef, at.clone())
+                    .message(format!(
+                        "schema reference `{reference}` addresses a subschema rather than a \
+                         top-level component name"
+                    ))
+                    .remedy(
+                        "declare the subschema as its own entry under `components/schemas` and \
+                         reference it by name",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+            // The wording matches the parameter/request-body/response component arms, which
+            // already reject.
+            return self.reject_component_alias(at, "schema", &reference);
         };
         let RefOr::Item(schema) = component else {
             let reference = match component {

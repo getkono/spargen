@@ -203,18 +203,24 @@ components:
 }
 
 /// A `$ref` to a component schema that was never declared is an error, not a construct to drop
-/// quietly. Every path that reaches `LowerCtx::ensure_component` must report `E004`: before this
-/// was pinned, an `application/octet-stream` request body whose schema `$ref`ed a missing component
-/// reported `clean` and generated an `upload` method with no body argument at all — a silent
-/// degradation with no diagnostic, which the taxonomy forbids. `check` and `generate` must agree on
-/// every one of these.
+/// quietly. Every construct that reaches `LowerCtx::ensure_component` must report `E004`: before
+/// this was pinned, an `application/octet-stream` request body whose schema `$ref`ed a missing
+/// component reported `clean` and generated an `upload` method with no body argument at all — a
+/// silent degradation with no diagnostic, which the taxonomy forbids. `check` and `generate` must
+/// agree on every one of these, and each must point at its own `$ref` site.
 #[test]
 fn e004_fires_for_a_ref_to_a_component_schema_that_is_not_declared() {
     const HEAD: &str =
         "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
 
-    // One spec per distinct path that reaches `ensure_component`, so a regression names the path it
-    // reopened rather than an aggregate.
+    // One spec per construct that reaches `ensure_component`. These are NOT one per call site: the
+    // four operation-level cases (both request bodies, the response and the parameter) all arrive
+    // through `lower_schema_ref`, and the two request bodies are the same path under two media
+    // types — the octet-stream one is kept because it is the issue's own reproduction. The cases
+    // that do reach distinct sites are the `oneOf` member, the `allOf` member, the component alias,
+    // and the `$ref`-with-shape-siblings case, which is the only one that reaches
+    // `lower_schema_inner`. The pointers below are what keep the four same-site cases from
+    // collapsing into one another.
     let request_body_json = format!(
         "{HEAD}{}",
         r##"paths:
@@ -310,6 +316,28 @@ components:
       required: [id]
 "##
     );
+    // A `$ref` carrying shape siblings is an intersection, not an alias, so it is lowered by
+    // `lower_schema_inner` rather than by the `RefOr::Ref` arm every other case above takes. It is
+    // the only one of these that reaches that site.
+    let ref_with_siblings = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Ext' } }
+components:
+  schemas:
+    Ext:
+      $ref: '#/components/schemas/Missing'
+      type: object
+      properties: { extra: { type: string } }
+"##
+    );
     // A declared component that is itself a bare `$ref` to a missing one: reached from the
     // component-alias arm rather than from any operation.
     let component_alias = format!(
@@ -321,32 +349,198 @@ components:
 "##
     );
 
+    // Each case pairs its spec with the RFC 6901 pointer the diagnostic must carry. The pointer is
+    // the assertion that matters: the code alone would still pass if `ensure_component` emitted
+    // against the document root, and a root pointer is what makes the rejection un-carvable (see
+    // the cascade in `carve.rs`). Pointing at the `$ref` site is the contract, so it is pinned per
+    // site rather than left to one coarse outcome elsewhere.
     let cases = [
-        ("request body (application/json)", &request_body_json),
+        (
+            "request body (application/json)",
+            &request_body_json,
+            "/paths/~1u/post/requestBody/content/application~1json/schema",
+        ),
         (
             "request body (application/octet-stream)",
             &request_body_octets,
+            "/paths/~1u/post/requestBody/content/application~1octet-stream/schema",
         ),
-        ("response body", &response_body),
-        ("parameter schema", &parameter),
-        ("oneOf member", &union_variant),
-        ("allOf member", &all_of_member),
-        ("component alias", &component_alias),
+        (
+            "response body",
+            &response_body,
+            "/paths/~1u/get/responses/200/content/application~1json/schema",
+        ),
+        (
+            "parameter schema",
+            &parameter,
+            "/paths/~1u/get/parameters/0/schema",
+        ),
+        (
+            "oneOf member",
+            &union_variant,
+            "/components/schemas/Union/oneOf/1",
+        ),
+        (
+            "allOf member",
+            &all_of_member,
+            "/components/schemas/Merged/allOf/1",
+        ),
+        (
+            "component alias",
+            &component_alias,
+            "/components/schemas/Alias",
+        ),
+        (
+            "$ref with shape siblings",
+            &ref_with_siblings,
+            "/components/schemas/Ext",
+        ),
     ];
 
-    for (what, spec) in cases {
+    for (what, spec, pointer) in cases {
         for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
             assert_eq!(
                 report.outcome(),
                 Outcome::Rejected,
                 "{what} via {entry}: a `$ref` to an undeclared component must reject\n{report:#?}"
             );
+            let e004: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::UnresolvedRef)
+                .collect();
             assert!(
-                has_code(&report, Code::UnresolvedRef),
+                !e004.is_empty(),
                 "{what} via {entry}: the rejection must carry E004\n{report:#?}"
+            );
+            assert!(
+                e004.iter().any(|d| d.pointer.as_str() == pointer),
+                "{what} via {entry}: E004 must point at the `$ref` site `{pointer}`, not at \
+                 {:?}\n{report:#?}",
+                e004.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
             );
         }
     }
+}
+
+/// The negative control for the rejection above: this change turns a previously-silent success
+/// into a rejection, so what it must NOT do is reject a `$ref` that resolves. A `$ref` carrying
+/// shape siblings is the narrow case — it is the one construct that reaches `ensure_component`
+/// through `lower_schema_inner`, and it is an intersection, so its target contributes fields rather
+/// than replacing it. Both sides must survive into the generated type.
+#[test]
+fn a_ref_with_shape_siblings_that_resolves_is_not_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Ext' } }
+components:
+  schemas:
+    Ext:
+      $ref: '#/components/schemas/Base'
+      type: object
+      properties: { extra: { type: string } }
+    Base:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    // The reference was genuinely followed, not merely tolerated: the sibling's own property and
+    // the referenced component's property are both present.
+    assert!(code.contains("pub extra"), "{code}");
+    assert!(code.contains("pub id"), "{code}");
+
+    // check/generate parity on the clean path too.
+    let checked = check(spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
+}
+
+/// A same-file `#/components/schemas/…` fragment that addresses a *subschema* rather than a
+/// top-level component name. spargen matches these by name only, so this is rejected — but the
+/// component it starts from is declared, and the identical pointer written against a relative file
+/// resolves through the resolver, so the message must not claim the target does not exist.
+///
+/// This pins a deliberate decision that nothing else constrains: the whole test tree contains no
+/// other `$ref` with a `/` inside the component name, so routing these to the resolver instead
+/// would flip a user-visible verdict with no test noticing.
+#[test]
+fn a_same_file_ref_into_a_component_subschema_is_rejected_as_not_a_component_name() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope/properties/payload' }
+components:
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        payload:
+          type: object
+          properties: { id: { type: string } }
+          required: [id]
+"##;
+    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let subschema: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .collect();
+        assert!(!subschema.is_empty(), "{entry}: {report:#?}");
+        // `Envelope` IS declared, so the diagnostic must say the fragment is not a component name
+        // rather than that the target could not be found.
+        assert!(
+            subschema
+                .iter()
+                .any(|d| d.message.contains("addresses a subschema")),
+            "{entry}: the message must not claim the target is missing — `Envelope` is declared: \
+             {report:#?}"
+        );
+        assert!(
+            !subschema.iter().any(|d| d.message.contains("unresolved")),
+            "{entry}: {report:#?}"
+        );
+    }
+
+    // Control: the plain undeclared-name case keeps the "unresolved" wording, so the branch above
+    // is a genuine split rather than a blanket rewording.
+    let plain = spec.replace(
+        "#/components/schemas/Envelope/properties/payload",
+        "#/components/schemas/Missing",
+    );
+    let report = generate(&plain);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef
+                && d.message.contains("unresolved schema reference")),
+        "{report:#?}"
+    );
 }
 
 #[test]
@@ -8859,6 +9053,23 @@ fn assert_parity(name: &str, spec: &str) {
         codes(&generated),
         "`{name}`: check and generate report different diagnostics"
     );
+
+    // A fixture whose name begins with a code must actually report it. Without this the parity
+    // suite is satisfied by both entry points being equally wrong: the `E004 unresolvable ref`
+    // fixture reported `clean` for as long as the bug it was named for existed, and passed, because
+    // parity compares the two reports to each other and the span test only *counts* verdicts.
+    let labelled = name.split_whitespace().next().filter(|token| {
+        token.len() == 4
+            && matches!(token.as_bytes()[0], b'E' | b'W')
+            && token[1..].bytes().all(|byte| byte.is_ascii_digit())
+    });
+    if let Some(labelled) = labelled {
+        assert!(
+            codes(&checked).contains(&labelled),
+            "`{name}`: the fixture is named for {labelled} but reports {:?}",
+            codes(&checked)
+        );
+    }
 }
 
 /// One spec per diagnostic family the frontend can reach, plus a clean one. Rejections and warnings
