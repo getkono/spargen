@@ -212,8 +212,13 @@ impl Responses {
     /// success status as a payload-free unit variant, so no documented success status is silently
     /// dropped. `default` is a success source only when no explicit status is declared at all;
     /// otherwise it contributes to the error shape as the `Range(0)` sentinel (see
-    /// [`Self::error`]), and an undocumented 2xx yields `Error::UnexpectedStatus` even when a
-    /// `default` is declared.
+    /// [`Self::error`]).
+    ///
+    /// An undocumented 2xx is *not* uniformly rejected: generated code enters the success branch on
+    /// the raw transport status alone, so the outcome is per shape. `Enum` dispatches on its
+    /// documented entries and rejects any other 2xx as `Error::UnexpectedStatus`; `Plain` decodes
+    /// *any* 2xx as `T`; `Unit` accepts any 2xx as `()`, discarding any body. Declaring a `default`
+    /// changes none of that — it is not a success fallback for an unlisted 2xx.
     pub(crate) fn success(&self) -> SuccessShape {
         // A default with no explicit status entries is the operation's single success body.
         if self.by_status.is_empty() {
