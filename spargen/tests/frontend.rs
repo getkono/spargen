@@ -511,6 +511,32 @@ components:
             !subschema.iter().any(|d| d.message.contains("unresolved")),
             "{entry}: {report:#?}"
         );
+        // This arm threads the `$ref` site's provenance exactly as the plain-name arm does, and for
+        // the same reason: a root pointer is one `omittable_enclosing` maps to `None`, which turns
+        // `--carve` on this document from clean into an un-carvable rejection.
+        assert!(
+            subschema.iter().any(|d| d.pointer.as_str()
+                == "/paths/~1u/get/responses/200/content/application~1json/schema"),
+            "{entry}: the subschema rejection must point at the `$ref` site, not at {:?}: \
+             {report:#?}",
+            subschema
+                .iter()
+                .map(|d| d.pointer.as_str())
+                .collect::<Vec<_>>()
+        );
+        // The message must name the component it did find, not merely describe the shape.
+        assert!(
+            subschema.iter().any(|d| d.message.contains("Envelope")),
+            "{entry}: the message must name the component: {report:#?}"
+        );
+        // And carry the remedy, as the other rejections in this file do.
+        assert!(
+            subschema.iter().any(|d| d
+                .remedy
+                .as_deref()
+                .is_some_and(|remedy| remedy.contains("declare the subschema"))),
+            "{entry}: the rejection must carry its remedy: {report:#?}"
+        );
     }
 
     // A deep pointer whose ROOT SEGMENT is not declared is a different fault and must not borrow
@@ -567,12 +593,15 @@ components:
     );
     let report = generate(&plain);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    // The whole reference, so the message identifies WHICH component is missing — a pointer says
+    // where the `$ref` is, not what it named.
     assert!(
         report
             .diagnostics()
             .iter()
             .any(|d| d.code == Code::UnresolvedRef
-                && d.message.contains("unresolved schema reference")),
+                && d.message
+                    .contains("unresolved schema reference `#/components/schemas/Missing`")),
         "{report:#?}"
     );
 }
@@ -8668,18 +8697,25 @@ fn assert_parity(name: &str, spec: &str) {
     // suite is satisfied by both entry points being equally wrong: the `E004 unresolvable ref`
     // fixture reported `clean` for as long as the bug it was named for existed, and passed, because
     // parity compares the two reports to each other and the span test only *counts* verdicts.
-    let labelled = name.split_whitespace().next().filter(|token| {
-        token.len() == 4
-            && matches!(token.as_bytes()[0], b'E' | b'W')
-            && token[1..].bytes().all(|byte| byte.is_ascii_digit())
-    });
-    if let Some(labelled) = labelled {
+    if let Some(labelled) = parity_label(name) {
         assert!(
             codes(&checked).contains(&labelled),
             "`{name}`: the fixture is named for {labelled} but reports {:?}",
             codes(&checked)
         );
     }
+}
+
+/// The `E###`/`W###` code a [`PARITY_FIXTURES`] name is labelled with, if it is labelled at all.
+/// Shared by [`assert_parity`], which holds a labelled fixture to its label, and by
+/// [`every_parity_fixture_that_reports_is_labelled`], which stops the label convention from
+/// quietly becoming optional.
+fn parity_label(name: &str) -> Option<&str> {
+    name.split_whitespace().next().filter(|token| {
+        token.len() == 4
+            && matches!(token.as_bytes()[0], b'E' | b'W')
+            && token[1..].bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 /// One spec per diagnostic family the frontend can reach, plus a clean one. Rejections and warnings
@@ -8743,4 +8779,34 @@ fn the_parity_fixtures_span_both_verdicts() {
     assert!(rejected >= 4, "only {rejected} fixtures reject");
     assert!(warned >= 3, "only {warned} fixtures warn");
     assert!(succeeded >= 2, "only {succeeded} fixtures succeed");
+}
+
+/// The label check in [`assert_parity`] is opt-in by naming convention, so on its own it can be
+/// disarmed rather than satisfied: renaming `"E004 unresolvable ref"` to `"unresolvable ref"`, or
+/// widening [`parity_label`] until it matches nothing, makes the whole suite pass again — the same
+/// silent escape the label check was added to close.
+///
+/// This requires the convention instead of hoping for it: a fixture that reports any diagnostic at
+/// all must be named for one. Only the deliberately clean fixture reports nothing, and it is the
+/// only one allowed to go unlabelled.
+#[test]
+fn every_parity_fixture_that_reports_is_labelled() {
+    let mut labelled = 0;
+    for (name, spec) in PARITY_FIXTURES {
+        let report = check(spec);
+        match parity_label(name) {
+            Some(_) => labelled += 1,
+            None => assert!(
+                report.diagnostics().is_empty(),
+                "`{name}` reports {:?} but is not named for a code",
+                codes(&report)
+            ),
+        }
+    }
+    // Belt and braces: if `parity_label` itself stopped matching, every fixture would fall into the
+    // arm above and this floor is what notices.
+    assert!(
+        labelled >= 7,
+        "only {labelled} parity fixtures are labelled; the convention has been disarmed"
+    );
 }
