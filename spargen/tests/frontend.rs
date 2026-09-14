@@ -9849,3 +9849,99 @@ fn only_a_null_member_can_rescue_an_empty_union_intersection() {
         "the non-empty intersection must still lower to its narrowed type: {code}"
     );
 }
+
+/// A union sibling gets a say in the union's nullability only where it makes a statement about
+/// null, and a sibling that carries no `type` makes none.
+///
+/// `properties` and `patternProperties` are OBJECT APPLICATORS in 2020-12: they constrain an
+/// object and are vacuously satisfied by every non-object, `null` included. They nonetheless lower
+/// to a non-nullable `Struct`, so reading `Ty::nullable` off one and letting it decide removed an
+/// acceptance the sibling never denied. An independent Draft 2020-12 validator says `null` is valid
+/// for all three rows below; they went non-optional, so a `200` of literal `null` that used to
+/// decode began failing at runtime with nothing reported at generate time.
+///
+/// The controls matter as much as the rows: a sibling that DOES carry a `type` is entitled to
+/// remove the acceptance, and must keep doing so.
+#[test]
+fn a_union_sibling_without_a_type_does_not_decide_nullability() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+
+    // (what it exercises, the schema body, whether the response must be optional)
+    let cases: &[(&str, &str, bool)] = &[
+        // No `type` on the sibling: it says nothing about null, so the union's own acceptance wins.
+        (
+            "a `properties`-only sibling beside a null member",
+            "properties: { a: { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a `patternProperties`-only sibling beside a null member",
+            "patternProperties: { '^a': { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a `properties`-only sibling beside a nullable sole member",
+            "properties: { a: { type: string } }\n                oneOf: [{ type: [object, 'null'] }]",
+            true,
+        ),
+        (
+            "a `required`-only sibling beside a null member",
+            "required: [a]\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "an `additionalProperties`-only sibling beside a null member",
+            "additionalProperties: false\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        // The sibling carries a `type` that excludes null, so it IS entitled to remove the
+        // acceptance — this is the case the round-2 change correctly fixed and must keep fixing.
+        (
+            "a sibling whose `type` excludes null, beside a null member",
+            "type: object\n                properties: { a: { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "a sibling whose `type` array excludes null, beside a null member",
+            "type: [string]\n                oneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "a sibling whose `type` excludes null, beside a nullable sole member",
+            "type: [string]\n                oneOf: [{ type: [string, 'null'] }]",
+            false,
+        ),
+        // And a `type` that ADMITS null must not remove it either.
+        (
+            "a sibling whose `type` array admits null, beside a null member",
+            "type: [string, 'null']\n                oneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+    ];
+
+    for (what, body, optional) in cases {
+        let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "`{what}`: {report:#?}");
+        assert_eq!(
+            code.contains("ResponseValue<Option<types::"),
+            *optional,
+            "`{what}` must {} an optional response body — `null` is {} under this schema: {code}",
+            if *optional { "have" } else { "not have" },
+            if *optional { "valid" } else { "invalid" }
+        );
+    }
+}

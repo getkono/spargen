@@ -954,6 +954,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // id and leave the popped root mismatched).
         if real_members.len() == 1 {
             let mut inner = self.lower_schema_or(real_members[0], hint)?;
+            // The member's OWN nullability, before the intersection overwrites `inner`. Needed
+            // below when the sibling is not entitled to decide.
+            let member_nullable = inner.nullable;
             if let Some(sibling) = sibling {
                 // The null-only MEMBER's branch was stripped out above, BEFORE this intersection,
                 // so `inner` carries `nullable: false` and `type_accepts_null` — which reads
@@ -986,10 +989,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          variant",
                     );
                 };
-                // The intersection now owns the answer for nullability too: it intersected the
-                // union's acceptance with the sibling's rather than being handed a member stripped
-                // of it, so `constrained.nullable` supersedes the local.
-                nullable = constrained.nullable;
+                // The intersection owns the answer for nullability too — but ONLY where the sibling
+                // is entitled to give one. A sibling carrying no `type` lowers to a non-nullable
+                // `Struct` and reads as null-rejecting, yet `properties` and `patternProperties`
+                // are object applicators in 2020-12: vacuously satisfied by every non-object,
+                // `null` included. They deny nothing, so they must not be allowed to remove the
+                // union's own acceptance. A `type` — whether it admits null or excludes it — is a
+                // statement about null, and that one the intersection may act on.
+                nullable = if schema.types.types.is_empty() {
+                    member_nullable || null_from_member
+                } else {
+                    constrained.nullable
+                };
                 inner = constrained;
             }
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
