@@ -2425,6 +2425,59 @@ serde_json.workspace = true
         assert!(messages.is_empty(), "{messages:#?}");
     }
 
+    /// `spargen explain E023` prints `Code::RuntimeDependencyContract`'s explain body verbatim, and
+    /// that body no longer describes the audit in a paragraph: it states the `default-features`
+    /// rule this module implements and promises that an inheritance which does not resolve names
+    /// which of three things happened. Nothing holds that text to anything —
+    /// `every_code_has_title_and_explain_text` asserts only that it is non-empty, and
+    /// `docs/errors.md` carries titles — so any clause could be deleted, negated, or made factually
+    /// wrong with the whole suite green.
+    ///
+    /// Each promise below is pinned against the fixture in this module that makes it true. Whether
+    /// every code's explain body should be held this way is a repository-wide question tracked
+    /// separately; this pins the one whose text specifies what `check_declaration` does.
+    #[test]
+    fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
+        let explain = Code::RuntimeDependencyContract.explain();
+        let promises = |clause: &str| {
+            assert!(
+                explain.contains(clause),
+                "`spargen explain E023` no longer says {clause:?}:\n{explain}"
+            );
+        };
+
+        // Which side decides default features, in both directions. Asserting the rule rather than
+        // the bare words `default-features` is what makes a negation of it fail here. Pinned by
+        // `a_member_default_features_false_cannot_turn_off_defaults_the_root_leaves_on` and
+        // `a_member_default_features_true_turns_on_defaults_the_root_turned_off`.
+        promises(
+            "default features on when the root leaves them on or the member sets \
+             `default-features = true`",
+        );
+        promises(
+            "a member's `default-features = false` cannot turn off defaults the root leaves on",
+        );
+        // The layout that rule leaves a consumer, pinned by
+        // `a_member_default_features_false_keeps_the_defaults_the_root_turned_off` and
+        // `a_silent_member_keeps_the_defaults_the_root_turned_off`.
+        promises(
+            "disable them in `[workspace.dependencies]` and leave the member's `default-features` \
+             unset or `false`",
+        );
+
+        // The three outcomes `WorkspaceOrigin` distinguishes, and the promise that the diagnostic
+        // tells them apart instead of reporting the crate as missing. Pinned respectively by
+        // `an_unresolvable_inheritance_says_where_the_lookup_went` (not found, and declares no such
+        // entry), `a_workspace_root_that_cannot_be_read_is_not_reported_as_missing` and
+        // `a_package_workspace_naming_a_directory_without_a_manifest_is_a_workspace_read_failure`
+        // (cannot be read), and
+        // `a_self_rooted_manifest_names_an_absolute_path_when_an_entry_is_missing`.
+        promises("when the root cannot be found, cannot be read, or declares no such entry");
+        promises(
+            "the diagnostic says which of those happened rather than reporting the crate as missing",
+        );
+    }
+
     /// The five core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
     /// the floors in these fixtures cannot drift from the ones every other test audits against.
     fn core_workspace_dependencies() -> &'static str {
