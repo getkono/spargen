@@ -204,33 +204,24 @@ pub(crate) struct Responses {
 }
 
 impl Responses {
-    /// The success shape of the operation, built from its documented *success* statuses. A single
-    /// documented success body yields plain `T` (any bodyless success sibling, e.g. `204`, is not
-    /// modeled — the common `T`-plus-`204` shape stays `Plain`). Two or more documented success
-    /// bodies yield a per-operation success enum whose entries are sorted into decode precedence
-    /// (exact code ascending, then range ascending) and which also carries any documented bodyless
-    /// success status as a payload-free unit variant, so no documented success status is silently
-    /// dropped. `default` never joins those entries. It is *offered* to the error shape
-    /// unconditionally as the `Range(0)` sentinel, but shapes count bodied entries, so a bodyless
-    /// `default` only survives where two or more bodied error entries make an enum for it to be the
-    /// catch-all unit variant of; with fewer it is dropped and contributes nothing (see
-    /// [`Self::error`]). It is *additionally* the success source when no explicit status is
-    /// declared at all, and there too only if it carries a body: a lone bodied `default` types both
-    /// sides with that one body, while a lone bodyless `default` yields `Unit` here and `None`
-    /// there, typing neither.
+    /// The success shape of the operation, built from its documented *success* statuses. Shapes
+    /// count entries that carry a *body*, not statuses: one bodied success yields plain `T` — the
+    /// common `T`-plus-`204` shape stays `Plain`, its bodyless sibling unmodeled — and two or more
+    /// yield a per-operation success enum, sorted into decode precedence (exact code ascending,
+    /// then range ascending), that also carries each documented bodyless success status as a
+    /// payload-free unit variant.
     ///
-    /// An undocumented 2xx is *not* uniformly rejected, and the shape returned here is not the
-    /// emitter's first discriminator. Generated code enters the success branch on the raw transport
-    /// status alone, then branches on [`Self::stream_success`] before it consults this shape at
-    /// all: a streaming success replaces the decode wholesale, so any 2xx is framed and no body is
-    /// read eagerly — even though such an operation's shape is `Plain`. Failing that, `Enum`
-    /// dispatches on its documented entries and rejects any other 2xx as
-    /// `Error::UnexpectedStatus`; `Plain` is status-blind but not body-blind — it runs its codec
-    /// over whatever bytes arrive, so an undocumented 2xx decodes as `T` or fails as
-    /// `Error::Decode`, and an empty body fails the same way under every codec but the `Bytes` one,
-    /// *including* on the documented `204` that the `T`-plus-`204` shape above keeps `Plain`;
-    /// `Unit` accepts any 2xx as `()`, discarding any body. Declaring a `default` changes none of
-    /// that — it is not a success fallback for an unlisted 2xx.
+    /// `default` never joins those entries. It is the success source only when no explicit status
+    /// is declared at all, and it is offered to the error shape as the `Range(0)` sentinel whenever
+    /// it is declared — subject there to the same body count (see [`Self::error`]).
+    ///
+    /// The shape does not bound what the generated client accepts: codegen enters the success
+    /// branch on the raw transport status alone, so an undocumented 2xx is not uniformly rejected,
+    /// and a streaming success overrides the shape entirely (see [`Self::stream_success`]). One
+    /// consequence is worth naming here, because the shape above invites it: a `Plain` operation
+    /// decodes a documented bodyless `204` as `T` like any other 2xx, which is `Error::Decode`
+    /// under the JSON and XML codecs but a silent empty value under the bytes codec and for a
+    /// `text/plain` `String`.
     pub(crate) fn success(&self) -> SuccessShape {
         // A default with no explicit status entries is the operation's single success body.
         if self.by_status.is_empty() {
