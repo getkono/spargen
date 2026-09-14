@@ -638,14 +638,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let Some(intersection) =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
             else {
-                // `$ref` is an applicator: the value must satisfy the target AND these siblings. An
-                // empty intersection means no value can, which is a document error — dropping the
-                // construct here would silently delete a body, parameter or property from the
-                // generated client.
-                return self.reject_empty_intersection(
+                // `$ref` is an applicator: the value must satisfy the target AND these siblings.
+                // `intersect_types` returns `None` for two distinct conditions — the intersection is
+                // empty, so no value satisfies both, or it is inhabited but has no single Rust type
+                // — and the message must not claim the first when it may be the second. Either way
+                // it is reported rather than dropped: dropping would silently delete a body,
+                // parameter or property from the generated client.
+                return self.reject_ref_sibling_intersection(
                     schema,
-                    "the `$ref` target and this schema's own sibling keywords have an empty \
-                     intersection, so no value can satisfy both",
+                    "the `$ref` target and this schema's own sibling keywords have an empty or \
+                     unrepresentable intersection",
                 );
             };
             let kind = self.graph.get(intersection.id)?.kind.clone();
@@ -894,13 +896,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 let Some(constrained) =
                     self.intersect_types(inner, sibling, &format!("{hint}Constrained"))
                 else {
-                    // The only real member cannot satisfy the enclosing schema's own constraints, so
-                    // nothing is left to collapse to. The multi-variant path below reports exactly
-                    // this with `E007`; the count of variants the author wrote must not change which
-                    // diagnostic they get.
+                    // Nothing is left to collapse to. The terminal code matches the multi-variant
+                    // path below, which rejects with `E007` once every variant has been excluded —
+                    // but only the terminal code: that path also emits a per-variant `W011`, and
+                    // this one deliberately does not, because `W011` describes a construct dropped
+                    // from output that still exists, and here no enum is generated at all. The
+                    // nullable case reaches neither site: when both sides accept null,
+                    // `intersect_types` returns the exact JSON null type rather than `None`, which
+                    // is correct — `null` is then the only satisfying value.
+                    //
+                    // The message says "empty or unrepresentable" for the same reason Site A's
+                    // does: `None` covers both, and the sole member is named because there is
+                    // exactly one, so the author needs no index to find it.
                     return self.reject_union(
                         schema,
-                        "union sibling constraints make every variant impossible",
+                        "the union's sole member and the enclosing schema's own sibling keywords \
+                         have an empty or unrepresentable intersection, leaving the union with no \
+                         variant",
                     );
                 };
                 inner = constrained;
@@ -1713,16 +1725,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
-    /// Report an empty typed intersection between a `$ref` target and its own sibling keywords.
-    /// `$ref` is a 2020-12 applicator, so this is the same class of unsatisfiable composition
+    /// Report that a `$ref` target and its own sibling keywords have no single typed intersection.
+    /// `$ref` is a 2020-12 applicator, so this is the same class of irreconcilable composition
     /// [`Self::reject_all_of`] reports — `E013` covers both spellings — but the remedy names the
-    /// construct the author actually wrote.
-    fn reject_empty_intersection(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
+    /// construct the author actually wrote. The name says *which site* rather than *why*: the
+    /// underlying `None` covers an empty intersection and an inhabited but unrepresentable one, and
+    /// the caller's message must distinguish no further than that.
+    fn reject_ref_sibling_intersection(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
         Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
             .message(message.to_owned())
             .remedy(
-                "restructure the schema so the `$ref` target and its sibling keywords agree, or \
-                 omit this API segment with spargen::omit!",
+                "restructure the schema so the `$ref` target and its sibling keywords describe one \
+                 representable type, or omit this API segment with spargen::omit!",
             )
             .emit(self.diags);
         None

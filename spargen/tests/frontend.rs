@@ -53,6 +53,18 @@ fn has_code(report: &Report, code: Code) -> bool {
     report.diagnostics().iter().any(|d| d.code == code)
 }
 
+/// Every message a report carries for one code. A code being right is not the same as its message
+/// being true — a diagnostic that fires on the correct construct while asserting something false
+/// about it is still a defect — so the fixtures that pin wording assert on this, not on the code.
+fn messages_for(report: &Report, code: Code) -> Vec<&str> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == code)
+        .map(|d| d.message.as_str())
+        .collect()
+}
+
 #[test]
 fn e011_official_structure_schema_rejects_missing_info() {
     let spec = "openapi: 3.1.0\npaths: {}\n";
@@ -3451,39 +3463,111 @@ fn e013_fires_when_a_ref_sibling_contradicts_its_target() {
 "##
     );
 
-    for (site, spec) in [
-        ("request body", &request_body),
-        ("response body", &response_body),
-        ("parameter", &parameter),
-        ("component property", &component_property),
+    // The pointer is not decoration: `compat::carve_rules` maps it to the smallest omittable
+    // construct, so a diagnostic carrying the document root instead of the offending node yields no
+    // carve rule and turns a carvable rejection into an un-carvable residual. Each site therefore
+    // pins the exact pointer it must produce, and `carve.rs` proves the consequence end to end.
+    for (site, spec, pointer) in [
+        (
+            "request body",
+            &request_body,
+            "/paths/~1u/post/requestBody/content/application~1json/schema",
+        ),
+        (
+            "response body",
+            &response_body,
+            "/paths/~1u/get/responses/200/content/application~1json/schema",
+        ),
+        (
+            "parameter",
+            &parameter,
+            "/paths/~1u/get/parameters/0/schema",
+        ),
+        (
+            "component property",
+            &component_property,
+            "/components/schemas/Holder/properties/field",
+        ),
     ] {
-        let generated = generate(spec);
-        assert_eq!(
-            generated.outcome(),
-            Outcome::Rejected,
-            "`{site}` was not rejected: {generated:#?}"
-        );
-        assert!(
-            has_code(&generated, Code::AllOfIrreconcilable),
-            "`{site}` did not report E013: {generated:#?}"
-        );
-        let checked = check(spec);
-        assert_eq!(
-            checked.outcome(),
-            Outcome::Rejected,
-            "`{site}` was not rejected by check: {checked:#?}"
-        );
-        assert!(
-            has_code(&checked, Code::AllOfIrreconcilable),
-            "`{site}` did not report E013 through check: {checked:#?}"
-        );
+        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{site}` was not rejected by {entry}: {report:#?}"
+            );
+            let pointers: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::AllOfIrreconcilable)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            assert_eq!(
+                pointers,
+                vec![pointer],
+                "`{site}` through {entry} must report E013 once, at the offending schema: \
+                 {report:#?}"
+            );
+        }
     }
 }
 
-/// A union whose only non-null member cannot satisfy the enclosing schema's own sibling constraints
-/// has no representable variant left. The multi-variant path already rejects that with `E007`
-/// ("every variant impossible"), so the one-member collapse must too — otherwise the diagnostic
-/// would depend on how many variants the author happened to write. It used to be dropped silently.
+/// `intersect_types` returns `None` for TWO conditions: the intersection is empty, so no value
+/// satisfies both sides, and the intersection is inhabited but has no single Rust type (the catch-all
+/// in `intersect_non_null` — `Bytes` against a primitive, an array against a tuple). The emitted
+/// message must not claim the first when it may be the second: `{$ref: Data, format: binary}` over a
+/// string `Data` is satisfied by any string, and the `E013` explain and the `allOf` scalar site both
+/// already say "empty or unrepresentable". This pins the site to the same honest wording. It asserts
+/// what the message may NOT say as well as what it must, because the defect this replaced was a
+/// message that named the wrong one of the two.
+#[test]
+fn the_ref_sibling_rejection_does_not_claim_more_than_it_knows() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths: {}
+components:
+  schemas:
+    Name: { type: string }
+    Holder:
+      type: object
+      properties:
+        field: { $ref: '#/components/schemas/Name', type: integer }
+      required: [field]
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::AllOfIrreconcilable);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("empty or unrepresentable intersection"),
+        "the site must use the same wording as the `allOf` scalar site and the E013 explain: {:?}",
+        messages[0]
+    );
+    // `None` is not proof of emptiness, so the message may not assert unsatisfiability.
+    assert!(
+        !messages[0].contains("no value can satisfy"),
+        "the message asserts unsatisfiability, which `intersect_types` returning `None` does not \
+         establish: {:?}",
+        messages[0]
+    );
+    // The remedy is the author's only route out of a rejection, so it is pinned too: it must name
+    // the construct and offer the omit escape the taxonomy promises.
+    let remedy = report
+        .diagnostics()
+        .iter()
+        .find(|d| d.code == Code::AllOfIrreconcilable)
+        .and_then(|d| d.remedy.clone())
+        .unwrap_or_default();
+    assert!(remedy.contains("`$ref` target"), "{remedy:?}");
+    assert!(remedy.contains("spargen::omit!"), "{remedy:?}");
+}
+
+/// A union whose only non-null member has no typed intersection with the enclosing schema's own
+/// sibling constraints has no representable variant left. The multi-variant path already rejects
+/// that with `E007` once every variant is excluded, so the one-member collapse reports the same
+/// terminal code — otherwise the code would depend on how many variants the author happened to
+/// write. It used to be dropped silently.
 #[test]
 fn e007_fires_when_a_single_real_member_union_contradicts_its_sibling() {
     let spec = r##"
@@ -3508,6 +3592,156 @@ components:
     let checked = check(spec);
     assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(has_code(&checked, Code::NonDisjointUnion), "{checked:#?}");
+}
+
+/// `E013`'s explain names the sibling keywords intersected with a `$ref`'s target rather than
+/// discarded. That is a published promise, and nothing but this fixture ties it to the code:
+/// `schema_has_shape_constraint` is the private gate deciding whether the intersection happens, and
+/// a sibling that clears the gate but lowers to `TypeKind::Any` intersects as identity and is
+/// discarded anyway. Both halves of the published rule are exercised against a target the sibling
+/// cannot be reconciled with — if the intersection really happens, the document rejects.
+///
+/// Writing this found the explain over-promising: `required`, `additionalProperties`, `items` and
+/// `prefixItems` clear the gate but lower to `Any` on their own, because `lower_schema_inner`
+/// reaches its array/object arms through `type`. They constrain only alongside the `type` or
+/// `properties` that gives them a shape, which is what the text now says and what the second tier
+/// below pins.
+///
+/// Each target is chosen so the intersection is *genuinely empty*, never merely unrepresentable:
+/// the `contentEncoding`/`format: binary` rows sit against an integer, not a string, so they do not
+/// pin the `(Bytes, Primitive(Str))` case that has a representation spargen has not learned yet.
+#[test]
+fn every_sibling_keyword_the_explain_names_is_actually_intersected() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths: {}\n";
+
+    // (keyword named in the explain, target type, the sibling that contradicts it)
+    let cases: &[(&str, &str, &str)] = &[
+        ("type", "string", "type: integer"),
+        (
+            "properties",
+            "string",
+            "type: object\n      properties: { a: { type: string } }",
+        ),
+        (
+            "required",
+            "string",
+            "properties: { a: { type: string } }\n      required: [a]",
+        ),
+        (
+            "patternProperties",
+            "string",
+            "patternProperties: { '^a': { type: string } }",
+        ),
+        (
+            "additionalProperties",
+            "string",
+            "type: object\n      additionalProperties: false",
+        ),
+        (
+            "items",
+            "string",
+            "type: array\n      items: { type: integer }",
+        ),
+        (
+            "prefixItems",
+            "string",
+            "type: array\n      prefixItems: [{ type: integer }]",
+        ),
+        ("enum", "integer", "enum: ['a']"),
+        ("const", "integer", "const: 'a'"),
+        ("contentEncoding", "integer", "contentEncoding: base64"),
+        ("format: binary", "integer", "format: binary"),
+        ("allOf", "string", "allOf: [{ type: integer }]"),
+    ];
+
+    let mut unconstrained = Vec::new();
+    for (keyword, target, sibling) in cases {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Target: {{ type: {target} }}\n    Sibling:\n      \
+             $ref: '#/components/schemas/Target'\n      {sibling}\n"
+        );
+        let report = generate(&spec);
+        if report.outcome() != Outcome::Rejected || !has_code(&report, Code::AllOfIrreconcilable) {
+            unconstrained.push(*keyword);
+        }
+    }
+    assert!(
+        unconstrained.is_empty(),
+        "the explain names these sibling keywords as intersected, but a `$ref` carrying one against \
+         an irreconcilable target still generates: {unconstrained:?}"
+    );
+
+    // The other half of the published rule: the four refining keywords do NOT constrain alone,
+    // because each lowers to `TypeKind::Any` without a `type`/`properties` to give it a shape. If
+    // one of these ever starts rejecting, the explain's second clause has become wrong in the
+    // opposite direction and must move with it.
+    for (keyword, sibling) in [
+        ("required", "required: [a]"),
+        ("additionalProperties", "additionalProperties: false"),
+        ("items", "items: { type: integer }"),
+        ("prefixItems", "prefixItems: [{ type: integer }]"),
+    ] {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Target: {{ type: string }}\n    Sibling:\n      \
+             $ref: '#/components/schemas/Target'\n      {sibling}\n"
+        );
+        let report = generate(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "a bare `{keyword}` sibling now constrains, so the explain's \"refine a shape rather \
+             than establish one\" clause is no longer true: {report:#?}"
+        );
+    }
+}
+
+/// Site B widened `E007`'s emission set, so its message has to describe the construct that actually
+/// reached it. A right code under a wrong message is still a wrong diagnostic: reusing the
+/// multi-variant path's wording verbatim would say "every variant impossible" of a union with one
+/// variant, and would inherit the same unsatisfiability claim `intersect_types` cannot support.
+/// This pins the sole-member wording, the empty-or-unrepresentable hedge, and that the message does
+/// not name some other cause entirely.
+#[test]
+fn the_single_member_union_rejection_names_its_own_cause() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths: {}
+components:
+  schemas:
+    Collapsed:
+      type: integer
+      oneOf:
+        - { type: string }
+        - { type: 'null' }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::NonDisjointUnion);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(messages[0].contains("sole member"), "{:?}", messages[0]);
+    assert!(
+        messages[0].contains("empty or unrepresentable"),
+        "{:?}",
+        messages[0]
+    );
+    // The causes `E007`'s explain already named must not be borrowed for this one.
+    assert!(!messages[0].contains("discriminator"), "{:?}", messages[0]);
+    assert!(!messages[0].contains("`anyOf`"), "{:?}", messages[0]);
+}
+
+/// `E007`'s published explain is what `spargen explain E007` prints, and Site B added a cause it did
+/// not describe. The `oneOf`-plus-`anyOf` and `defaultMapping` causes must survive, and the new one
+/// must be there beside them — the same standard this change applied to `E013`'s text.
+#[test]
+fn the_union_explain_covers_every_cause_that_reports_it() {
+    let explain = Code::NonDisjointUnion.explain();
+    assert!(explain.contains("`oneOf` and `anyOf`"), "{explain}");
+    assert!(explain.contains("defaultMapping"), "{explain}");
+    assert!(explain.contains("no branch at all"), "{explain}");
+    assert!(explain.contains("single non-null member"), "{explain}");
 }
 
 /// The guard on the two rejections above: only an EMPTY intersection is an error. A sibling that
@@ -3537,6 +3771,123 @@ components:
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
     assert!(!code.contains("serde_json :: Value"), "{code}");
+}
+
+/// Over-rejection is the whole risk of reporting where the code used to drop, and the fixture above
+/// pins one shape only — primitive narrowing. These are the other shapes that reach the `$ref` arm
+/// and must keep generating. Each is a direction the rejection could creep in, and each lands on a
+/// different mechanism: the early exit before any intersection, an intersection that succeeds
+/// unchanged, and `intersect_types`' both-sides-nullable rescue, which returns the exact JSON null
+/// type rather than `None` and so never reaches the new rejection at all.
+#[test]
+fn the_ref_sibling_rejection_does_not_creep_into_the_shapes_that_still_generate() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Name', SIBLING }
+"##;
+
+    // (what it exercises, the sibling keywords, the target, what must appear in the output)
+    let cases: &[(&str, &str, &str, &str)] = &[
+        // Validation-only siblings bear no shape, so the `$ref` arm exits before intersecting. They
+        // are reported as ignored (`W001`), never as irreconcilable.
+        (
+            "validation-only siblings",
+            "maxLength: 5, pattern: '^a'",
+            "{ type: string }",
+            "String",
+        ),
+        // The sibling agrees with its target: the intersection succeeds and is the target's type.
+        (
+            "an agreeing type",
+            "type: string",
+            "{ type: string }",
+            "String",
+        ),
+        // Both sides accept null and nothing else is shared. `intersect_types` returns the exact
+        // JSON null type — `null` genuinely is the only satisfying value — so this must NOT reject.
+        // The decision record lists "collapse to Null when nullable" as rejected; the code does it,
+        // and this fixture is why the record now says the code is right.
+        (
+            "a nullable-only intersection",
+            "type: [integer, 'null']",
+            "{ type: [string, 'null'] }",
+            "()",
+        ),
+    ];
+
+    for (what, sibling, target, expected) in cases {
+        let spec = format!(
+            "{HEAD}{}components:\n  schemas:\n    Name: {target}\n",
+            PATH.replace("SIBLING", sibling)
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` was rejected, so the new rejection has crept: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "`{what}` reported E013: {report:#?}"
+        );
+        assert!(
+            code.contains(expected),
+            "`{what}` did not emit `{expected}`: {code}"
+        );
+    }
+
+    // The validation-only case is also the one that must still be *acknowledged*: bearing no shape
+    // is not the same as being silently dropped.
+    let validation_only = format!(
+        "{HEAD}{}components:\n  schemas:\n    Name: {{ type: string }}\n",
+        PATH.replace("SIBLING", "maxLength: 5, pattern: '^a'")
+    );
+    assert!(
+        has_code(&generate(&validation_only), Code::ValidationKeywordIgnored),
+        "a validation-only sibling must still be acknowledged"
+    );
+}
+
+/// When a `$ref` is BOTH unresolvable and carries a contradictory sibling, exactly one code must
+/// win and it must be `E004`: `ensure_component` returns `None` before the intersection is reached,
+/// so the missing component is reported and the sibling never gets a second, confusing diagnostic
+/// about a target that does not exist. The two sites are twenty lines apart in the same block, which
+/// is why this is pinned rather than assumed.
+#[test]
+fn an_unresolvable_ref_reports_only_e004_even_when_its_sibling_contradicts() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Nope', type: integer }
+      responses: { '204': { description: ok } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "a missing component must not also be reported as an irreconcilable intersection — \
+             there is no target to intersect with: {report:#?}"
+        );
+    }
 }
 
 /// A self-referential component (`Node.next -> Node`) once recursed forever, then was rejected as

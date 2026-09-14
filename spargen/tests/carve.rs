@@ -350,6 +350,84 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
     );
 }
 
+// --- (c2) The `$ref`-sibling flavour of E013 carves like the allOf one ---------------------------
+
+/// `E013` has two spellings. The `allOf` one is carved by `MIXED_REJECTIONS` above; this is the
+/// other — a `$ref` whose own sibling keywords have no typed intersection with its target. Carve
+/// only works on a rejection whose pointer names a construct it can omit, so this pins the whole
+/// chain the pointer is load-bearing for: the component is carved, the operation that referenced it
+/// cascades, the healthy operation survives, and no residual `E013` leaks to end the run
+/// `Rejected`. A root pointer on the new diagnostic would break every one of those.
+const REF_SIBLING_REJECTION: &str = r##"
+openapi: 3.1.0
+info: { title: RefSibling, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string } } }
+  /uses-bad:
+    get:
+      operationId: getUsesBad
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Bad" }
+components:
+  schemas:
+    Name: { type: string }
+    Bad:
+      $ref: "#/components/schemas/Name"
+      type: integer
+"##;
+
+#[test]
+fn carve_removes_a_ref_whose_siblings_cannot_be_intersected() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", REF_SIBLING_REJECTION);
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("component schemas Bad")),
+        "the contradictory component is carved and reported: {report:#?}"
+    );
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("get /uses-bad")),
+        "the operation referencing the carved component cascaded: {report:#?}"
+    );
+    assert!(
+        !report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::AllOfIrreconcilable),
+        "no residual E013 leaks: {report:#?}"
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        generated.contains("fn get_good"),
+        "the healthy op is generated: {generated}"
+    );
+    assert!(
+        !generated.contains("fn get_uses_bad"),
+        "the carved op is absent: {generated}"
+    );
+}
+
 // --- (d) Carve is a no-op on a clean spec -------------------------------------------------------
 
 const CLEAN_SPEC: &str = r#"
