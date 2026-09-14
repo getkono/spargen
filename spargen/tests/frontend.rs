@@ -190,6 +190,153 @@ components:
     assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
 }
 
+/// A `$ref` to a component schema that was never declared is an error, not a construct to drop
+/// quietly. Every path that reaches `LowerCtx::ensure_component` must report `E004`: before this
+/// was pinned, an `application/octet-stream` request body whose schema `$ref`ed a missing component
+/// reported `clean` and generated an `upload` method with no body argument at all — a silent
+/// degradation with no diagnostic, which the taxonomy forbids. `check` and `generate` must agree on
+/// every one of these.
+#[test]
+fn e004_fires_for_a_ref_to_a_component_schema_that_is_not_declared() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+
+    // One spec per distinct path that reaches `ensure_component`, so a regression names the path it
+    // reopened rather than an aggregate.
+    let request_body_json = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/Missing' } }
+      responses: { '204': { description: ok } }
+"##
+    );
+    // The issue's exact reproduction: this binary request body vanished entirely.
+    let request_body_octets = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          application/octet-stream: { schema: { $ref: '#/components/schemas/Missing' } }
+      responses: { '204': { description: ok } }
+"##
+    );
+    let response_body = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Missing' } }
+"##
+    );
+    let parameter = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      parameters:
+        - { name: q, in: query, schema: { $ref: '#/components/schemas/Missing' } }
+      responses: { '204': { description: ok } }
+"##
+    );
+    let union_variant = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Union' } }
+components:
+  schemas:
+    Union:
+      oneOf:
+        - { $ref: '#/components/schemas/Present' }
+        - { $ref: '#/components/schemas/Missing' }
+    Present:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##
+    );
+    let all_of_member = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Merged' } }
+components:
+  schemas:
+    Merged:
+      allOf:
+        - { $ref: '#/components/schemas/Present' }
+        - { $ref: '#/components/schemas/Missing' }
+    Present:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##
+    );
+    // A declared component that is itself a bare `$ref` to a missing one: reached from the
+    // component-alias arm rather than from any operation.
+    let component_alias = format!(
+        "{HEAD}{}",
+        r##"paths: {}
+components:
+  schemas:
+    Alias: { $ref: '#/components/schemas/Missing' }
+"##
+    );
+
+    let cases = [
+        ("request body (application/json)", &request_body_json),
+        (
+            "request body (application/octet-stream)",
+            &request_body_octets,
+        ),
+        ("response body", &response_body),
+        ("parameter schema", &parameter),
+        ("oneOf member", &union_variant),
+        ("allOf member", &all_of_member),
+        ("component alias", &component_alias),
+    ];
+
+    for (what, spec) in cases {
+        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: a `$ref` to an undeclared component must reject\n{report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::UnresolvedRef),
+                "{what} via {entry}: the rejection must carry E004\n{report:#?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
