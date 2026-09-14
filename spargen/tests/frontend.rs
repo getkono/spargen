@@ -862,6 +862,65 @@ mod remote {
         assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     }
 
+    /// The cycle guard's two message arms, pinned SEPARATELY.
+    ///
+    /// Both said "direct recursive", and that was the only thing asserted, so swapping the local
+    /// and remote strings was green — which left the LOCAL arm's wording unpinned too: the local
+    /// case could have told the reader its reference was remote and nothing would have noticed.
+    /// Each arm now asserts the noun it must use and the noun it must not.
+    #[test]
+    fn the_cycle_guard_names_the_right_kind_of_reference_in_each_arm() {
+        const NODE_URL: &str = "https://api.example.com/schemas/recursive.yaml";
+        // A remote document whose own schema references itself with shape-bearing siblings.
+        const NODE_YAML: &str = "type: object\nproperties:\n  next:\n    $ref: \"https://api.example.com/schemas/recursive.yaml\"\n    type: object\n    properties:\n      x:\n        type: string\n";
+        const NODE_SHA: &str = "1c720abdd7ea1b336ad3d49b6a0c5a80430c55d28746fd7540d37e4ae0f091d3";
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \"api.example.com/schemas/recursive.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/recursive.yaml", NODE_YAML)];
+
+        let (report, _t, _o) = run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let remote_messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(remote_messages.len(), 1, "{report:#?}");
+        assert!(
+            remote_messages[0].contains("remote `$ref`"),
+            "the remote arm must say the reference is remote: {:?}",
+            remote_messages[0]
+        );
+        assert!(
+            remote_messages[0].contains("closes a reference cycle"),
+            "{:?}",
+            remote_messages[0]
+        );
+
+        // The local arm, against the same guard. Asserting what it must NOT say is what closes the
+        // swap: with the two strings exchanged, this message would call a local component's
+        // reference remote.
+        let local = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          $ref: '#/components/schemas/Node'\n          type: object\n          properties: { x: { type: string } }\n";
+        let report = generate(local);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let local_messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(local_messages.len(), 1, "{report:#?}");
+        assert!(
+            !local_messages[0].contains("remote"),
+            "a local component reference must not be described as remote: {:?}",
+            local_messages[0]
+        );
+        assert!(
+            local_messages[0].contains("component that encloses it"),
+            "the local arm must name the enclosing component: {:?}",
+            local_messages[0]
+        );
+
+        // And the two arms must not be the same string: a single shared message would satisfy every
+        // assertion above only by accident of wording, and this states the requirement directly.
+        assert_ne!(
+            local_messages[0], remote_messages[0],
+            "the two arms report the same message, so neither is pinned to its own case"
+        );
+    }
+
     #[test]
     fn mutually_recursive_remote_docs_generate_boxed() {
         // a.yaml ↔ b.yaml reference each other across two vendored documents; the cross-doc cycle
