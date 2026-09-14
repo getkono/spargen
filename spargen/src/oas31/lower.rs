@@ -915,17 +915,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if real_members.len() == 1 {
             let mut inner = self.lower_schema_or(real_members[0], hint)?;
             if let Some(sibling) = sibling {
+                // The union's own null acceptance — a `"null"` in the enclosing `type` array, or a
+                // null-only member — was folded into `nullable` above, BEFORE this intersection, so
+                // `inner` carries `nullable: false` and `type_accepts_null`, which reads
+                // `Ty::nullable`, cannot see it. Restore it onto `inner` first. Without this the
+                // intersection reports empty for a schema `null` genuinely satisfies, and the
+                // `$ref` spelling of the identical instance set — where the target's nullability
+                // rides on its own `Ty` — generates while this one rejects.
+                inner.nullable = inner.nullable || nullable;
                 let Some(constrained) =
                     self.intersect_types(inner, sibling, &format!("{hint}Constrained"))
                 else {
-                    // Nothing is left to collapse to. The terminal code matches the multi-variant
-                    // path below, which rejects with `E007` once every variant has been excluded —
-                    // but only the terminal code: that path also emits a per-variant `W011`, and
-                    // this one deliberately does not, because `W011` describes a construct dropped
-                    // from output that still exists, and here no enum is generated at all. The
-                    // nullable case reaches neither site: when both sides accept null,
-                    // `intersect_types` returns the exact JSON null type rather than `None`, which
-                    // is correct — `null` is then the only satisfying value.
+                    // Neither side admits null and the non-null shapes do not meet, so nothing is
+                    // left to collapse to. The terminal code matches the multi-variant path below,
+                    // which rejects with `E007` once every variant has been excluded — but only the
+                    // terminal code: that path also emits a per-variant `W011`, and this one
+                    // deliberately does not, because `W011` describes a construct dropped from
+                    // output that still exists, and here no enum is generated at all.
                     //
                     // The message says "empty or unrepresentable" for the same reason Site A's
                     // does: `None` covers both, and the sole member is named because there is
@@ -937,6 +943,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          variant",
                     );
                 };
+                // The intersection now owns the answer for nullability too: it intersected the
+                // union's acceptance with the sibling's rather than being handed a member stripped
+                // of it, so `constrained.nullable` supersedes the local.
+                nullable = constrained.nullable;
                 inner = constrained;
             }
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
@@ -993,6 +1003,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         if variants.is_empty() {
+            // The same blind spot as the sole-member site above, on the pre-existing path: every
+            // REAL variant is impossible, but the union's own null acceptance was folded into
+            // `nullable` before any of them were intersected, so it is not among the variants that
+            // just vanished. When the sibling admits null too, `null` still satisfies the whole
+            // schema and the exact JSON null type is the answer — the same type the all-null-members
+            // branch above returns for the same reason.
+            if nullable && sibling.is_none_or(|sibling| self.ty_accepts_null(sibling)) {
+                return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
+            }
             return self.reject_union(
                 schema,
                 "union sibling constraints make every variant impossible",
@@ -1881,6 +1900,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             None => None,
         }
+    }
+
+    /// Whether an already-lowered type admits JSON `null`, resolving its kind out of the graph.
+    /// [`type_accepts_null`] needs the kind beside the [`Ty`]; callers outside the intersection
+    /// machinery hold only the [`Ty`].
+    fn ty_accepts_null(&self, ty: Ty) -> bool {
+        self.graph
+            .get(ty.id)
+            .is_some_and(|def| type_accepts_null(ty, &def.kind))
     }
 
     fn intersect_non_null(

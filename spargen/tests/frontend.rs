@@ -9134,3 +9134,113 @@ fn the_parity_fixtures_span_both_verdicts() {
     assert!(warned >= 3, "only {warned} fixtures warn");
     assert!(succeeded >= 2, "only {succeeded} fixtures succeed");
 }
+
+/// A union whose own null acceptance came from a stripped `{type: "null"}` member or a `"null"` in
+/// the enclosing `type` array is still satisfied by `null`, and must not be rejected as having no
+/// variant. `lower_union` folds that acceptance into a local *before* it intersects, so the member
+/// it hands `intersect_types` carries `nullable: false` and `type_accepts_null` — which reads
+/// `Ty::nullable` — cannot see it. Both collapse paths had the blind spot: the sole-real-member
+/// site, and the pre-existing every-variant-excluded site below it.
+///
+/// The `$ref` spelling of the identical instance set already emits `()`
+/// (`the_ref_sibling_rejection_does_not_creep_into_the_shapes_that_still_generate` pins it), so two
+/// spellings of one schema disagreed. An independent Draft 2020-12 validator says `null` is the one
+/// value each of the rescued documents admits, and that each control admits nothing at all.
+#[test]
+fn a_union_that_null_still_satisfies_is_not_rejected_as_having_no_variant() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+
+    // (what it exercises, the schema body, whether `null` satisfies it)
+    let cases: &[(&str, &str, bool)] = &[
+        // Sole real member: `null` satisfies the enclosing `type` array AND the null-only member,
+        // so `null` is the only value satisfying the whole schema.
+        (
+            "a sole-member `oneOf` whose enclosing type array admits null",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a sole-member `anyOf` whose enclosing type array admits null",
+            "type: [integer, 'null']\n                anyOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+        // Every real variant excluded: the same blind spot on the multi-variant path.
+        (
+            "an every-variant-excluded `oneOf` whose enclosing type array admits null",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }, { type: boolean }, { type: 'null' }]",
+            true,
+        ),
+        // The controls that must keep rejecting: the union admits null but the sibling refuses it,
+        // so nothing satisfies both and the rejection is right.
+        (
+            "a sole-member union whose sibling refuses null",
+            "type: integer\n                oneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "an every-variant-excluded union whose sibling refuses null",
+            "type: integer\n                oneOf: [{ type: string }, { type: boolean }, { type: 'null' }]",
+            false,
+        ),
+    ];
+
+    for (what, body, null_satisfies) in cases {
+        let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            if *null_satisfies {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "`{what}` is satisfied by `null`, so {entry} must not reject it: {report:#?}"
+                );
+                assert!(
+                    !has_code(&report, Code::NonDisjointUnion),
+                    "`{what}` reported E007 through {entry}: {report:#?}"
+                );
+            } else {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "`{what}` admits no value at all, so {entry} must still reject it: {report:#?}"
+                );
+                assert!(
+                    has_code(&report, Code::NonDisjointUnion),
+                    "`{what}` did not report E007 through {entry}: {report:#?}"
+                );
+            }
+        }
+        if *null_satisfies {
+            // The exact JSON null type, not a silently dropped body and not `Option<()>`: `null` is
+            // the only satisfying value, so the response type has exactly one inhabitant. Followed
+            // through the operation's own signature rather than by guessing an alias name — the
+            // sole-member path lowers its member under the same hint, so the union's own def gets a
+            // disambiguating suffix.
+            let (_, code) = generate_with_code(&spec);
+            let body = code
+                .split("ResponseValue<types::")
+                .nth(1)
+                .and_then(|rest| rest.split('>').next())
+                .unwrap_or_else(|| panic!("`{what}` emitted no typed response: {code}"))
+                .trim()
+                .to_owned();
+            assert!(
+                code.contains(&format!("pub type {body} = ();")),
+                "`{what}` must lower its response body to the exact JSON null type, but \
+                 `{body}` is not `()`: {code}"
+            );
+        }
+    }
+}
