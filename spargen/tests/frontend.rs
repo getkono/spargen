@@ -9421,3 +9421,101 @@ fn a_cycle_closing_ref_whose_siblings_bear_a_shape_is_rejected_not_discarded() {
         "the recursion must survive as a boxed back-edge: {code}"
     );
 }
+
+/// A property whose two sides cannot be intersected does not make the composition empty unless
+/// some instance is obliged to carry it. When the property is optional on BOTH sides, `{}` and
+/// `{"zz": 1}` still satisfy the whole schema — an independent Draft 2020-12 validator confirms
+/// both — so rejecting the document deletes a body that has valid instances.
+///
+/// This is `E013`'s own published doctrine, which the array arm of `intersect_non_null` already
+/// implements: "an empty array-item intersection becomes an uninhabited item type so the valid
+/// empty array remains representable". `intersect_structs` propagated the failure instead. It now
+/// mirrors the array arm: the field takes an uninhabited type, so the instances that remain are
+/// exactly the ones that omit it.
+///
+/// Requiring the property on either side is the real empty composition, and both controls must
+/// keep rejecting — the validator says nothing satisfies them.
+#[test]
+fn a_property_conflict_on_an_optional_property_does_not_empty_the_object() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+
+    // Both sites that reach `intersect_structs` with a `$ref`-sibling composition: the `$ref` arm
+    // of `lower_schema_inner`, and the sole-real-member union collapse.
+    let inhabited: &[(&str, &str, &str)] = &[
+        (
+            "a `$ref` sibling conflicting on a property neither side requires",
+            "$ref: '#/components/schemas/Obj'\n                type: object\n                properties: { a: { type: integer } }",
+            "components:\n  schemas:\n    Obj: { type: object, properties: { a: { type: string } } }\n",
+        ),
+        (
+            "a sole-member union conflicting on a property neither side requires",
+            "type: object\n                properties: { a: { type: integer } }\n                oneOf: [{ type: object, properties: { a: { type: string } } }]",
+            "components:\n  schemas:\n    Unused: { type: string }\n",
+        ),
+    ];
+    for (what, body, components) in inhabited {
+        let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` still admits `{{}}`, so {entry} must not reject it: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable)
+                    && !has_code(&report, Code::NonDisjointUnion),
+                "`{what}` reported an irreconcilable composition through {entry}: {report:#?}"
+            );
+        }
+        // Not silently widened to something that accepts `{"a": 1}`: the field itself is
+        // uninhabited, so only instances omitting the property can be built or decoded.
+        let (_, code) = generate_with_code(&spec);
+        assert!(
+            code.contains("no JSON value can inhabit schema"),
+            "`{what}` must give the conflicting property an uninhabited type: {code}"
+        );
+        assert!(!code.contains("serde_json :: Value"), "{code}");
+    }
+
+    // The controls. Requiring the property on either side obliges every instance to carry a value
+    // no type admits, so the composition really is empty and the rejection is right.
+    let empty: &[(&str, &str, &str)] = &[
+        (
+            "the sibling requires the conflicting property",
+            "$ref: '#/components/schemas/Obj'\n                type: object\n                required: [a]\n                properties: { a: { type: integer } }",
+            "components:\n  schemas:\n    Obj: { type: object, properties: { a: { type: string } } }\n",
+        ),
+        (
+            "the target requires the conflicting property",
+            "$ref: '#/components/schemas/Obj'\n                type: object\n                properties: { a: { type: integer } }",
+            "components:\n  schemas:\n    Obj: { type: object, required: [a], properties: { a: { type: string } } }\n",
+        ),
+    ];
+    for (what, body, components) in empty {
+        let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` admits no value at all, so {entry} must still reject it: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::AllOfIrreconcilable),
+                "`{what}` did not report E013 through {entry}: {report:#?}"
+            );
+        }
+    }
+}

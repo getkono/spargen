@@ -2060,12 +2060,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for field in &right.fields {
             match fields.get_mut(&field.name.wire) {
                 Some(existing) => {
-                    existing.ty = self.intersect_types(
-                        existing.ty,
-                        field.ty,
-                        &format!("{hint}{}", field.name.wire),
-                    )?;
-                    existing.required = existing.required || field.required;
+                    let field_hint = format!("{hint}{}", field.name.wire);
+                    let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
+                    let required = existing.required || field.required;
+                    existing.ty = match intersection {
+                        Some(ty) => ty,
+                        // Mirrors the array arm above, and for the same reason `E013`'s explain
+                        // gives for it: a property NEITHER side requires does not empty the
+                        // object when its two types cannot meet, because every instance that
+                        // omits it still satisfies both sides. The field takes an uninhabited
+                        // type, so the instances that remain representable are exactly the valid
+                        // ones. Propagating the failure would reject a document that `{}`
+                        // satisfies.
+                        None if !required => {
+                            self.insert_type(&field_hint, TypeKind::Never, Docs::default(), None)
+                        }
+                        // Required on one side or the other: every instance must carry a value no
+                        // type admits, so the composition really is empty.
+                        None => return None,
+                    };
+                    existing.required = required;
                     if existing.required {
                         if let Some(default) = &mut existing.default {
                             default.applied = None;
