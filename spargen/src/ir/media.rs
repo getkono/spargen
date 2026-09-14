@@ -1,4 +1,4 @@
-use super::{ParamStyle, Ty};
+use super::{ParamStyle, Ty, TypeGraph};
 
 /// The wire codec selected for a supported request/response media type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,7 +66,10 @@ pub(crate) struct RequestBody {
     pub(crate) media: MediaType,
     /// The selected content type essence, preserved for the emitted `Content-Type` header.
     pub(crate) content_type: String,
-    /// The body's type, or `None` for an untyped/byte body.
+    /// The body's type, or `None` for a non-octet-stream body declared without a schema, or for
+    /// any body whose declared schema failed to lower. Not every such failure is reported today
+    /// (see #107 and #109). An octet-stream body without a schema lowers to `bytes::Bytes`; the
+    /// reference may still be nullable, which the emitter does not handle yet (#104).
     pub(crate) ty: Option<Ty>,
     /// Whether the body is `required`. A required body is a plain argument; an optional one is
     /// passed as `Option<&T>` and omitted from the request when absent.
@@ -414,10 +417,51 @@ pub(crate) enum ErrorShape {
     Enum(Vec<(StatusSpec, Option<Ty>)>),
 }
 
+/// How an operation's generated error type implements the runtime's `ApiErrorBody`. Decided here
+/// once, so codegen (which emits the impl) and `surface` (which reports gaining or losing it)
+/// cannot disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ApiErrorBodyImpl {
+    /// The uninhabited `Infallible` shape: `Body = Infallible`, and a body is never present.
+    Uninhabited,
+    /// `Body` is this type, unboxed and non-nullable: the `&T` the accessor hands back.
+    Body(Ty),
+}
+
+impl ErrorShape {
+    /// How the generated error type implements `ApiErrorBody`, or `None` when it does not: an enum
+    /// whose bodied statuses carry different generated types has no single body to hand back.
+    /// Multi-status payloads are uniformly boxed at emission and a variant's nullability is
+    /// absorbed by the accessor, so each body is compared bare; `Body` is the first bodied status's
+    /// type in classification precedence, which names the same Rust type as every other.
+    pub(crate) fn api_error_body(&self, types: &TypeGraph) -> Option<ApiErrorBodyImpl> {
+        let bare = |ty: Ty| Ty {
+            nullable: false,
+            boxed: false,
+            ..ty
+        };
+        match self {
+            ErrorShape::None => Some(ApiErrorBodyImpl::Uninhabited),
+            ErrorShape::Single(ty) => Some(ApiErrorBodyImpl::Body(bare(*ty))),
+            ErrorShape::Enum(entries) => {
+                let mut bodies = entries.iter().filter_map(|(_, body)| body.map(bare));
+                let first = bodies.next()?;
+                bodies
+                    .all(|body| types.same_generated_type(first, body))
+                    .then_some(ApiErrorBodyImpl::Body(first))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ErrorShape, Response, Responses, StatusSpec, SuccessShape, Ty};
-    use crate::ir::TypeId;
+    use super::{ApiErrorBodyImpl, ErrorShape, Response, Responses, StatusSpec, SuccessShape, Ty};
+    use crate::diag::{JsonPointer, Provenance};
+    use crate::ir::{
+        AdditionalProps, Docs, Prim, ScalarEnum, ScalarRepr, ScalarValue, Struct, TypeDef,
+        TypeGraph, TypeId, TypeKind,
+    };
 
     fn ty(id: u32) -> Ty {
         Ty {
@@ -505,5 +549,163 @@ mod tests {
             default: None,
         };
         assert!(matches!(responses.success(), SuccessShape::Plain(_)));
+    }
+
+    /// A graph whose ids are the positions of `kinds`.
+    fn graph(kinds: Vec<TypeKind>) -> TypeGraph {
+        let mut graph = TypeGraph::default();
+        for kind in kinds {
+            graph.insert(TypeDef {
+                name_hint: String::new(),
+                kind,
+                docs: Docs::default(),
+                provenance: Provenance::new(JsonPointer::root(), None),
+            });
+        }
+        graph
+    }
+
+    /// A multi-status error shape over exact statuses, in the order given.
+    fn error_enum(entries: Vec<(u16, Option<Ty>)>) -> ErrorShape {
+        ErrorShape::Enum(
+            entries
+                .into_iter()
+                .map(|(code, body)| (StatusSpec::Exact(code), body))
+                .collect(),
+        )
+    }
+
+    fn object() -> TypeKind {
+        TypeKind::Struct(Struct {
+            fields: Vec::new(),
+            additional: AdditionalProps::Allow,
+        })
+    }
+
+    fn int_enum() -> TypeKind {
+        TypeKind::Enum(ScalarEnum {
+            repr: ScalarRepr::Int,
+            variants: vec![ScalarValue::Int(1)],
+        })
+    }
+
+    fn two_bodies(graph: &TypeGraph, a: Ty, b: Ty) -> Option<ApiErrorBodyImpl> {
+        error_enum(vec![(404, Some(a)), (409, Some(b))]).api_error_body(graph)
+    }
+
+    #[test]
+    fn bodies_referencing_one_definition_share_it() {
+        let graph = graph(vec![object()]);
+        assert_eq!(
+            two_bodies(&graph, ty(0), ty(0)),
+            Some(ApiErrorBodyImpl::Body(ty(0)))
+        );
+    }
+
+    #[test]
+    fn distinct_definitions_generating_one_rust_type_share_it() {
+        // Two string schemas (a `$ref` component and an inline one) are both `String`.
+        let strings = graph(vec![
+            TypeKind::Primitive(Prim::String),
+            TypeKind::Primitive(Prim::String),
+        ]);
+        assert_eq!(
+            two_bodies(&strings, ty(0), ty(1)),
+            Some(ApiErrorBodyImpl::Body(ty(0)))
+        );
+        // An integer enum is a `pub type X = i64` alias, so it is an `i64` body, either way round.
+        let ints = graph(vec![int_enum(), TypeKind::Primitive(Prim::I64)]);
+        assert!(two_bodies(&ints, ty(0), ty(1)).is_some());
+        assert!(two_bodies(&ints, ty(1), ty(0)).is_some());
+        // Containers compare their items, and a `$ref` cycle between arrays still terminates.
+        let arrays = graph(vec![
+            TypeKind::Primitive(Prim::String),
+            TypeKind::Primitive(Prim::String),
+            TypeKind::Array(Box::new(ty(0))),
+            TypeKind::Array(Box::new(ty(1))),
+            TypeKind::Array(Box::new(ty(5))),
+            TypeKind::Array(Box::new(ty(4))),
+        ]);
+        assert!(two_bodies(&arrays, ty(2), ty(3)).is_some());
+        assert!(two_bodies(&arrays, ty(4), ty(5)).is_some());
+    }
+
+    #[test]
+    fn different_rust_types_share_nothing() {
+        let scalars = graph(vec![
+            TypeKind::Primitive(Prim::I32),
+            TypeKind::Primitive(Prim::I64),
+        ]);
+        assert_eq!(two_bodies(&scalars, ty(0), ty(1)), None);
+        // Each struct (or `Never`) definition is its own nominal item, however alike.
+        let nominal = graph(vec![object(), object(), TypeKind::Never, TypeKind::Never]);
+        assert_eq!(two_bodies(&nominal, ty(0), ty(1)), None);
+        assert_eq!(two_bodies(&nominal, ty(2), ty(3)), None);
+        // Tuple items keep their `Box`, so an item boxed on one side is a different Rust type.
+        let boxed_item = Ty {
+            boxed: true,
+            ..ty(0)
+        };
+        let tuples = graph(vec![
+            TypeKind::Primitive(Prim::String),
+            TypeKind::Tuple(vec![ty(0)]),
+            TypeKind::Tuple(vec![boxed_item]),
+            TypeKind::Tuple(vec![ty(0)]),
+        ]);
+        assert_eq!(two_bodies(&tuples, ty(1), ty(2)), None);
+        assert!(two_bodies(&tuples, ty(1), ty(3)).is_some());
+    }
+
+    #[test]
+    fn per_status_nullability_and_bodyless_statuses_do_not_split_the_body() {
+        let graph = graph(vec![object()]);
+        let nullable = Ty {
+            nullable: true,
+            ..ty(0)
+        };
+        let shape = error_enum(vec![(401, None), (404, Some(nullable)), (409, Some(ty(0)))]);
+        // `Body` is the bare definition: the per-variant `Option` is absorbed by the accessor.
+        assert_eq!(
+            shape.api_error_body(&graph),
+            Some(ApiErrorBodyImpl::Body(ty(0)))
+        );
+    }
+
+    #[test]
+    fn the_single_and_uninhabited_shapes_always_implement_it() {
+        let graph = graph(vec![object()]);
+        assert_eq!(
+            ErrorShape::None.api_error_body(&graph),
+            Some(ApiErrorBodyImpl::Uninhabited)
+        );
+        let nullable = Ty {
+            nullable: true,
+            ..ty(0)
+        };
+        assert_eq!(
+            ErrorShape::Single(nullable).api_error_body(&graph),
+            Some(ApiErrorBodyImpl::Body(ty(0)))
+        );
+    }
+
+    /// `api_error_body` bares its inputs before comparing, so it never reaches the nullability
+    /// check itself; call `same_generated_type` directly. `T` and `Option<T>` over one definition
+    /// are different Rust types, at the top level and as an array item.
+    #[test]
+    fn nullability_distinguishes_otherwise_identical_types() {
+        let nullable = Ty {
+            nullable: true,
+            ..ty(0)
+        };
+        let graph = graph(vec![
+            TypeKind::Primitive(Prim::String),
+            TypeKind::Array(Box::new(ty(0))),
+            TypeKind::Array(Box::new(nullable)),
+        ]);
+        assert!(!graph.same_generated_type(ty(0), nullable));
+        assert!(!graph.same_generated_type(nullable, ty(0)));
+        assert!(graph.same_generated_type(nullable, nullable));
+        // `Vec<T>` against `Vec<Option<T>>`.
+        assert!(!graph.same_generated_type(ty(1), ty(2)));
     }
 }

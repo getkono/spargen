@@ -136,10 +136,11 @@ jobs:
           lfs: true
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json > /tmp/spargen-github-30.json || test $? -eq 1
-      - run: grep -q E001 /tmp/spargen-github-30.json
+      - run: mkdir -p target/corpus-smoke
+      - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json > target/corpus-smoke/github-30.json || test $? -eq 1
+      - run: grep -q E001 target/corpus-smoke/github-30.json
       # The current exact GitHub 3.1 pin must clear the strict frontend without carve/omits.
-      - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml > /tmp/spargen-github-31.json
+      - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml > target/corpus-smoke/github-31.json
       # ollama now generates (union lowering, #9): check must succeed with no rejection.
       - run: cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json
       - run: cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json
@@ -147,19 +148,19 @@ jobs:
       # `application/sdp` as its only 201 content entry, and there is no codec for it. The cap is
       # raised for the same reason as GitHub 3.1: the warning volume would otherwise truncate the
       # batch before the terminal E009.
-      - run: cargo run -q -p spargen --features cli -- check corpus/openai-openapi/openapi.yaml --format json --batch-cap 100000 > /tmp/spargen-openai.json || test $? -eq 1
-      - run: grep -q E009 /tmp/spargen-openai.json
+      - run: cargo run -q -p spargen --features cli -- check corpus/openai-openapi/openapi.yaml --format json --batch-cap 100000 > target/corpus-smoke/openai.json || test $? -eq 1
+      - run: grep -q E009 target/corpus-smoke/openai.json
       # Stripe (3.0.0), Twilio (3.0.1), Kubernetes API-group (3.0.0): rejected at the version gate.
-      - run: cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json > /tmp/spargen-stripe.json || test $? -eq 1
-      - run: grep -q E001 /tmp/spargen-stripe.json
-      - run: cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json > /tmp/spargen-twilio.json || test $? -eq 1
-      - run: grep -q E001 /tmp/spargen-twilio.json
-      - run: cargo run -q -p spargen --features cli -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json > /tmp/spargen-k8s.json || test $? -eq 1
-      - run: grep -q E001 /tmp/spargen-k8s.json
+      - run: cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json > target/corpus-smoke/stripe.json || test $? -eq 1
+      - run: grep -q E001 target/corpus-smoke/stripe.json
+      - run: cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json > target/corpus-smoke/twilio.json || test $? -eq 1
+      - run: grep -q E001 target/corpus-smoke/twilio.json
+      - run: cargo run -q -p spargen --features cli -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json > target/corpus-smoke/k8s.json || test $? -eq 1
+      - run: grep -q E001 target/corpus-smoke/k8s.json
       # meilisearch is 3.1.0 and clears the version gate, but its null externalDocs descriptions
       # fail the official 3.1 document schema before lowering.
-      - run: cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json > /tmp/spargen-meili.json || test $? -eq 1
-      - run: grep -q E011 /tmp/spargen-meili.json
+      - run: cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json > target/corpus-smoke/meili.json || test $? -eq 1
+      - run: grep -q E011 target/corpus-smoke/meili.json
 
   github-api:
     name: GitHub API generated client

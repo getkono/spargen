@@ -84,7 +84,13 @@ the version it emits, and the idioms spargen handles.
   preserved), decode failure (serde path + body, capped except on the two paths the emitted
   `ClientConfig::max_error_body` doc names), interrupted body. Every generated error
   type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
-  `thiserror`. `Error::is_transient()` classifies retry-worthy failures.
+  `thiserror`. `Error::is_transient()` classifies retry-worthy failures. An error enum whose
+  bodied statuses carry the same body type (one schema, or schemas that generate the same Rust
+  type) gets `body()`, and it, the single-body newtype,
+  and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()` hands that body back
+  whichever status carried it (`Error::status()` reports that status, the same value as
+  `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by variant
+  instead.
 - Beyond the request/response path, the embedded runtime carries a swappable transport seam
   (`HttpBackend`) with composable retry and middleware adapters, `Link:`-header pagination, typed
   SSE/NDJSON/JSON-sequence streams, an opt-in `blocking` client, and `wasm32-unknown-unknown`

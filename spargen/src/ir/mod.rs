@@ -19,8 +19,8 @@ pub(crate) use auth::{
 };
 pub(crate) use invariant::check_invariants;
 pub(crate) use media::{
-    BodyEncoding, EncodingMode, ErrorShape, Framing, HeaderShape, MediaType, PropertyEncoding,
-    RequestBody, Response, ResponseHeader, Responses, StatusSpec, SuccessShape,
+    ApiErrorBodyImpl, BodyEncoding, EncodingMode, ErrorShape, Framing, HeaderShape, MediaType,
+    PropertyEncoding, RequestBody, Response, ResponseHeader, Responses, StatusSpec, SuccessShape,
 };
 pub(crate) use operation::{
     Delimiter, Method, Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment,
