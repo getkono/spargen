@@ -191,18 +191,24 @@ components:
 }
 
 /// A `$ref` to a component schema that was never declared is an error, not a construct to drop
-/// quietly. Every path that reaches `LowerCtx::ensure_component` must report `E004`: before this
-/// was pinned, an `application/octet-stream` request body whose schema `$ref`ed a missing component
-/// reported `clean` and generated an `upload` method with no body argument at all — a silent
-/// degradation with no diagnostic, which the taxonomy forbids. `check` and `generate` must agree on
-/// every one of these.
+/// quietly. Every construct that reaches `LowerCtx::ensure_component` must report `E004`: before
+/// this was pinned, an `application/octet-stream` request body whose schema `$ref`ed a missing
+/// component reported `clean` and generated an `upload` method with no body argument at all — a
+/// silent degradation with no diagnostic, which the taxonomy forbids. `check` and `generate` must
+/// agree on every one of these, and each must point at its own `$ref` site.
 #[test]
 fn e004_fires_for_a_ref_to_a_component_schema_that_is_not_declared() {
     const HEAD: &str =
         "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
 
-    // One spec per distinct path that reaches `ensure_component`, so a regression names the path it
-    // reopened rather than an aggregate.
+    // One spec per construct that reaches `ensure_component`. These are NOT one per call site: the
+    // four operation-level cases (both request bodies, the response and the parameter) all arrive
+    // through `lower_schema_ref`, and the two request bodies are the same path under two media
+    // types — the octet-stream one is kept because it is the issue's own reproduction. The cases
+    // that do reach distinct sites are the `oneOf` member, the `allOf` member, the component alias,
+    // and the `$ref`-with-shape-siblings case, which is the only one that reaches
+    // `lower_schema_inner`. The pointers below are what keep the four same-site cases from
+    // collapsing into one another.
     let request_body_json = format!(
         "{HEAD}{}",
         r##"paths:
@@ -298,6 +304,28 @@ components:
       required: [id]
 "##
     );
+    // A `$ref` carrying shape siblings is an intersection, not an alias, so it is lowered by
+    // `lower_schema_inner` rather than by the `RefOr::Ref` arm every other case above takes. It is
+    // the only one of these that reaches that site.
+    let ref_with_siblings = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Ext' } }
+components:
+  schemas:
+    Ext:
+      $ref: '#/components/schemas/Missing'
+      type: object
+      properties: { extra: { type: string } }
+"##
+    );
     // A declared component that is itself a bare `$ref` to a missing one: reached from the
     // component-alias arm rather than from any operation.
     let component_alias = format!(
@@ -349,6 +377,11 @@ components:
             "component alias",
             &component_alias,
             "/components/schemas/Alias",
+        ),
+        (
+            "$ref with shape siblings",
+            &ref_with_siblings,
+            "/components/schemas/Ext",
         ),
     ];
 
