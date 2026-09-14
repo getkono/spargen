@@ -9499,6 +9499,43 @@ fn a_union_that_null_still_satisfies_is_not_rejected_as_having_no_variant() {
             );
         }
     }
+
+    // The other half of restoring the union's null acceptance ONTO the member: nullability now
+    // flows THROUGH the intersection instead of around it, so the sibling gets a say in it. It
+    // previously did not, and the union's acceptance was OR-ed back on afterwards regardless —
+    // `{type: [string], oneOf: [{type: string}, {type: 'null'}]}` emitted `Option<String>` for a
+    // schema the enclosing `type` array forbids `null` in. An independent Draft 2020-12 validator
+    // rejects `null` for the first two rows and accepts it for the third.
+    //
+    // (what it exercises, the schema body, whether the generated response is optional)
+    let nullability: &[(&str, &str, bool)] = &[
+        (
+            "a null member under a sibling `type` array that excludes null",
+            "type: [string]\n                oneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "a nullable sole member under a sibling that excludes null",
+            "type: [string]\n                oneOf: [{ type: [string, 'null'] }]",
+            false,
+        ),
+        (
+            "a null member under a sibling `type` array that admits null",
+            "type: [string, 'null']\n                oneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+    ];
+    for (what, body, optional) in nullability {
+        let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            code.contains("ResponseValue<Option<types::"),
+            *optional,
+            "`{what}` must {} an optional response body: {code}",
+            if *optional { "have" } else { "not have" }
+        );
+    }
 }
 
 /// A `$ref` that closes a cycle resolves to a *reserved* id whose def is still the
