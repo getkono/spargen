@@ -1046,9 +1046,11 @@ fn a_long_sub_file_ref_chain_still_exceeds_the_depth_cap() {
 /// code "never silently degrades a typed schema to `serde_json::Value`", and every construct is
 /// "supported, warned, or rejected — no fourth, silent behavior".
 ///
-/// The root document has always refused to read an in-progress member and rejected with `E013`, and
-/// so has the remote path. All three spellings must reach that same rejection: the bare sub-file
-/// name, the explicit file reference, and the root-document control.
+/// The root document has always refused to read an in-progress member and rejected with `E013`.
+/// The remote path had the same pre-check but not the same coverage, and its id-keyed guard is this
+/// branch's own addition — see `remote::a_direct_recursive_all_of_member_in_a_vendored_document_is_rejected`,
+/// which is the fixture that guard did not have. All three spellings here must reach that same
+/// rejection: the bare sub-file name, the explicit file reference, and the root-document control.
 #[test]
 fn a_direct_recursive_all_of_member_in_a_sub_file_is_rejected_as_the_root_document_is() {
     // One shape, two spellings of the same target. `PREFIX` is empty for the sub-file's own
@@ -2064,6 +2066,77 @@ mod remote {
             spargen::generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
         };
         (report, temp, out)
+    }
+
+    /// The remote counterpart of the direct-recursive `allOf` member, reached through an **alias**,
+    /// which is the shape that needs the id-keyed guard rather than the spelling-keyed one.
+    ///
+    /// `gather_member`'s remote arm has two checks. The pre-existing one keys on the reference
+    /// *string* — `remote_in_progress.contains_key(reference)` — and this branch added a second
+    /// keyed on the returned `Ty`'s id. Only the second can see this case: `node.yaml` composes
+    /// `allOf: [alias.yaml]`, `alias.yaml` is a bare `$ref` back to `node.yaml`, so the member's own
+    /// spelling is never the in-progress key, and `ensure_remote` chains through the alias and hands
+    /// back a back-edge against `node.yaml`'s reservation.
+    ///
+    /// **Removing the id-keyed check leaves every other test in the workspace green.** Without it
+    /// this document generates, with zero diagnostics, and emits
+    /// `pub type …child = serde_json::Value;` — the same silent degradation the component path was
+    /// repaired for in this branch, on a path nothing exercised. The guard was added here; the
+    /// fixture was not.
+    #[test]
+    fn a_direct_recursive_remote_all_of_member_reached_through_an_alias_is_rejected() {
+        const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
+        const ALIAS_URL: &str = "https://api.example.com/schemas/alias.yaml";
+        const NODE_YAML: &str = "type: object\nrequired: [label]\nproperties:\n  label: { type: string }\n  child:\n    allOf:\n      - { $ref: \"alias.yaml\" }\n";
+        const ALIAS_YAML: &str = "$ref: \"node.yaml\"\n";
+        const NODE_SHA: &str = "09216246cfa803064f874532df513b6458892853137616dd83c386ee3c4a49bd";
+        const ALIAS_SHA: &str = "394e78d465e607843bb3b04078679cd2015aea58c67b79b9da1129591d8831a0";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \
+             \"api.example.com/schemas/node.yaml\"\n\n[[remote]]\nurl = \"{ALIAS_URL}\"\nsha256 = \
+             \"{ALIAS_SHA}\"\npath = \"api.example.com/schemas/alias.yaml\"\n"
+        );
+        let vendor = [
+            ("api.example.com/schemas/node.yaml", NODE_YAML),
+            ("api.example.com/schemas/alias.yaml", ALIAS_YAML),
+        ];
+
+        let (generated, _temp, out) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            // The pins are live, so the document really reaches lowering rather than being
+            // rejected for drift or for being unpinned.
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::AbsoluteRefUnsupported),
+                "{entry}: {report:#?}"
+            );
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{entry}: the member resolves to the schema being lowered, whose fields are not \
+                 yet known: {report:#?}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable
+                        && d.message.contains("direct recursive")),
+                "{entry}: {report:#?}"
+            );
+        }
+        // The degradation itself, so the guard's removal fails on the emitted output and not only
+        // on the verdict.
+        assert!(!code.contains("= serde_json::Value;"), "{code}");
     }
 
     fn responds_with(url: &str) -> String {
