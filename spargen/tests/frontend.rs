@@ -9324,3 +9324,100 @@ fn a_union_that_null_still_satisfies_is_not_rejected_as_having_no_variant() {
         }
     }
 }
+
+/// A `$ref` that closes a cycle resolves to a *reserved* id whose def is still the
+/// `TypeKind::Any` placeholder `TypeGraph::reserve` put there — the component's real shape is not
+/// known until its own body finishes. `intersect_non_null`'s `(Any, _)` arm returns the sibling
+/// unchanged, so intersecting against that placeholder is a no-op and **the target is silently
+/// discarded**: `Node.next: {$ref: Node, type: object, properties: {x}}` generated a standalone
+/// `Nodenext` with the recursion gone, and `{$ref: Node, type: string}` generated `String` for a
+/// schema nothing satisfies. Both were `Generated` and `check`-clean, which is the silent
+/// degradation the taxonomy forbids.
+///
+/// The `allOf` spelling of the identical conjunction has always rejected this, so the two
+/// spellings now agree. A cycle-closing `$ref` with NO shape-bearing sibling still boxes and
+/// generates — that is the ordinary recursive schema, and the third case pins it.
+#[test]
+fn a_cycle_closing_ref_whose_siblings_bear_a_shape_is_rejected_not_discarded() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths: {}\n";
+
+    // (what it exercises, the `next` subschema, the pointer E013 must carry)
+    let rejected: &[(&str, &str, &str)] = &[
+        (
+            "an object sibling on a self-recursive back-edge",
+            "$ref: '#/components/schemas/Node'\n          type: object\n          properties: { x: { type: string } }",
+            "/components/schemas/Node/properties/next",
+        ),
+        (
+            "a scalar sibling on a self-recursive back-edge",
+            "$ref: '#/components/schemas/Node'\n          type: string",
+            "/components/schemas/Node/properties/next",
+        ),
+    ];
+    for (what, next, pointer) in rejected {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          {next}\n"
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` was not rejected by {entry}, so the recursive target is still being \
+                 silently discarded: {report:#?}"
+            );
+            let pointers: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::AllOfIrreconcilable)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            assert_eq!(
+                pointers,
+                vec![*pointer],
+                "`{what}` through {entry} must report E013 once, at the offending `$ref`: \
+                 {report:#?}"
+            );
+        }
+        // The message must name the cause the reader can act on — a recursive reference — not the
+        // generic empty-intersection wording, which would send them looking for a contradiction
+        // that is not there.
+        let report = generate(&spec);
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].contains("direct recursive"),
+            "`{what}` must say the reference is recursive: {:?}",
+            messages[0]
+        );
+    }
+
+    // Mutual recursion reaches the same placeholder one component further out.
+    let mutual = format!(
+        "{HEAD}components:\n  schemas:\n    A:\n      type: object\n      properties:\n        b: {{ $ref: '#/components/schemas/B' }}\n    B:\n      type: object\n      properties:\n        a:\n          $ref: '#/components/schemas/A'\n          type: object\n          properties: {{ x: {{ type: string }} }}\n"
+    );
+    for (entry, report) in [("generate", generate(&mutual)), ("check", check(&mutual))] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "a mutually recursive back-edge was not rejected by {entry}: {report:#?}"
+        );
+        assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+    }
+
+    // The control, and the reason the guard is gated on the sibling bearing a shape at all: an
+    // ordinary recursive schema still boxes its back-edge and generates, keeping the recursion.
+    let plain = format!(
+        "{HEAD}components:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          $ref: '#/components/schemas/Node'\n          description: an ordinary recursive reference\n"
+    );
+    let (report, code) = generate_with_code(&plain);
+    assert_ne!(
+        report.outcome(),
+        Outcome::Rejected,
+        "the new rejection crept into an ordinary recursive schema: {report:#?}"
+    );
+    assert!(
+        code.contains("Option<Box<Node>>"),
+        "the recursion must survive as a boxed back-edge: {code}"
+    );
+}

@@ -634,6 +634,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         if let Some(reference) = &schema.reference {
+            // Whether this `$ref` closes a cycle. A target still being lowered resolves to its
+            // RESERVED id, whose def is the `TypeKind::Any` placeholder `TypeGraph::reserve` put
+            // there — its real shape is not known until its own body finishes. That matters below:
+            // `intersect_non_null`'s `(Any, _)` arm returns the sibling unchanged, so intersecting
+            // against the placeholder silently discards the target rather than composing with it.
+            let back_edge = match reference.strip_prefix("#/components/schemas/") {
+                Some(name) => self.in_progress.contains_key(name),
+                None => self.remote_in_progress.contains_key(reference),
+            };
             let referenced = if let Some(name) = reference.strip_prefix("#/components/schemas/") {
                 self.ensure_component(name, &schema.provenance)?
                 // Remote refs go through the cycle-safe, deduped remote path (keyed by
@@ -654,7 +663,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let mut sibling = schema.clone();
             sibling.reference = None;
             if !schema_has_shape_constraint(&sibling) {
+                // No shape to compose, so a cycle-closing reference here is the ordinary recursive
+                // schema: it boxes and generates. Only the intersection below needs a real target.
                 return Some(referenced);
+            }
+            if back_edge {
+                // The siblings have nothing yet to intersect with. The `allOf` spelling of the same
+                // conjunction has always rejected this rather than composing against a placeholder,
+                // and the alternative here is not "compose anyway" but "discard the target", which
+                // produces a type accepting documents the description forbids — a recursive `Node`
+                // flattened to a one-off struct, or to the sibling's own scalar.
+                return self.reject_ref_sibling_intersection(
+                    schema,
+                    if reference.starts_with("#/components/schemas/") {
+                        "this `$ref` is a direct recursive reference to the component being \
+                         lowered, whose fields are not yet known, so its shape-bearing siblings \
+                         have nothing to intersect with"
+                    } else {
+                        "this `$ref` is a direct recursive remote reference to the schema being \
+                         lowered, whose fields are not yet known, so its shape-bearing siblings \
+                         have nothing to intersect with"
+                    },
+                );
             }
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
             let Some(intersection) =
