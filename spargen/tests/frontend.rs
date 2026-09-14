@@ -1925,6 +1925,73 @@ components:
     assert!(code.contains("pub second: RootOne"), "{code}");
 }
 
+/// A **root-only** document — no sub-files, no remote refs — whose `allOf` member reaches the
+/// component being lowered through a component **alias**.
+///
+/// This is the shape the breaking-change footer's scope statement missed. `gather_member`'s
+/// pre-existing guard keys on the member's own *name*: `Alias` is not in `in_progress`, so it never
+/// fired. `ensure_component("Alias")` then chains to `Node`, which **is** in progress, and hands
+/// back a back-edge against `Node`'s reservation, whose placeholder `push_ref_member` read as a
+/// scalar.
+///
+/// So this document is `clean` on `2aa5ada` and rejected here, verified by building the merge base
+/// and running it. The rejection is right — base emitted `serde_json::Value` for a typed schema with
+/// no diagnostic — but "regenerating from an unchanged description is otherwise unaffected" was not,
+/// and this is a description that uses none of the multi-file machinery the change is about.
+#[test]
+fn a_recursive_all_of_member_reached_through_a_root_alias_is_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        child:
+          allOf:
+            - { $ref: '#/components/schemas/Alias' }
+    Alias:
+      $ref: '#/components/schemas/Node'
+"##;
+    let (generated, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::AllOfIrreconcilable
+                    && d.message.contains("direct recursive")),
+            "{entry}: {report:#?}"
+        );
+        // Not an alias *cycle*: `Alias` is entered once. Reporting one would blame the alias for a
+        // loop it does not form and send the reader to break a chain of length one.
+        assert!(
+            !report
+                .diagnostics()
+                .iter()
+                .any(|d| d.message.contains("alias cycle")
+                    || d.message.contains("forms a reference cycle")),
+            "{entry}: {report:#?}"
+        );
+    }
+    assert!(!code.contains("= serde_json::Value;"), "{code}");
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
