@@ -128,8 +128,15 @@ pub fn build_url_with_query_string_on(
 /// credential registered under a kind its scheme cannot use — fails the call, even when a later
 /// alternative is fully registered and would have succeeded. Falling through would send
 /// credentials the caller's registration did not select, silently, on a call they had expressed a
-/// different intent for; an error they can see is the better failure. A caller that wants the
-/// other alternative registers for it and unregisters the one it does not want.
+/// different intent for; an error they can see is the better failure.
+///
+/// A caller who wants the *other* alternative cannot get there by adjusting registrations on a
+/// built client. Registration is insert-only: [`ClientCore::set_credential`] is the only writer,
+/// there is no remove, clear, or replace-with-nothing operation at any layer, and [`Credential`]
+/// has no variant meaning "none" — so a credential cannot be withdrawn once registered. Nor does
+/// registering the fallback as well help, because selection stops at the first satisfiable
+/// alternative and the first one stays satisfied. The way to reach a later alternative is to
+/// build a client that is not registered for the earlier one.
 pub async fn attach_auth(
     core: &ClientCore,
     request: RequestBuilder,
