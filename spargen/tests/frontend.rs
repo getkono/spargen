@@ -8545,6 +8545,23 @@ fn assert_parity(name: &str, spec: &str) {
         codes(&generated),
         "`{name}`: check and generate report different diagnostics"
     );
+
+    // A fixture whose name begins with a code must actually report it. Without this the parity
+    // suite is satisfied by both entry points being equally wrong: the `E004 unresolvable ref`
+    // fixture reported `clean` for as long as the bug it was named for existed, and passed, because
+    // parity compares the two reports to each other and the span test only *counts* verdicts.
+    let labelled = name.split_whitespace().next().filter(|token| {
+        token.len() == 4
+            && matches!(token.as_bytes()[0], b'E' | b'W')
+            && token[1..].bytes().all(|byte| byte.is_ascii_digit())
+    });
+    if let Some(labelled) = labelled {
+        assert!(
+            codes(&checked).contains(&labelled),
+            "`{name}`: the fixture is named for {labelled} but reports {:?}",
+            codes(&checked)
+        );
+    }
 }
 
 /// One spec per diagnostic family the frontend can reach, plus a clean one. Rejections and warnings
