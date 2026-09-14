@@ -3310,6 +3310,94 @@ serde_json.workspace = true
     }
 
     #[test]
+    fn the_nearest_workspace_root_wins_when_two_are_on_the_walk() {
+        // "The **nearest** ancestor manifest that parses and declares `[workspace]`" — the clause
+        // the explain text states and this module's explain test pins as *text*. Nothing pinned it
+        // as behaviour: every other walk fixture has at most one valid root on the path, the
+        // obstacles being unparseable or workspace-less, never a second workspace root. Nested
+        // workspaces are ordinary — a vendored tree, or a crate inside someone else's checkout —
+        // and returning the farthest root instead resolves inherited dependencies against a table
+        // belonging to an unrelated project.
+        let directory = tempfile::tempdir().unwrap();
+        let far = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let near_dir = directory.path().join("near");
+        let member_dir = near_dir.join("client");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        let near = Utf8PathBuf::from_path_buf(near_dir.join("Cargo.toml")).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        // The far root declares the core crates; the near one declares none, so whichever is
+        // chosen is visible in the diagnostics rather than only in `manifests`.
+        std::fs::write(
+            &far,
+            format!(
+                "[workspace]\nmembers = []\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        std::fs::write(&near, "[workspace]\nmembers = [\"client\"]\n").unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        let message = messages(&result.diagnostics);
+        assert!(
+            message.contains(near.as_str()) && message.contains("declares no `bytes` there"),
+            "the walk must stop at the nearest workspace root: {message}"
+        );
+        assert!(!message.contains(far.as_str()), "{message}");
+        assert!(result.manifests.contains(&near), "{:#?}", result.manifests);
+        assert!(!result.manifests.contains(&far), "{:#?}", result.manifests);
+    }
+
+    #[test]
+    fn a_root_declaring_optional_does_not_make_an_inherited_crate_optional() {
+        // The `package` rule reads both the member's and the root's declaration, and this branch
+        // added the root half deliberately. The `optional` rule reads the member only, and nothing
+        // held it there: making it read the root as well leaves every other test green.
+        //
+        // Like `a_self_declared_workspace_wins_over_package_workspace`, this pins spargen's answer
+        // to a manifest **Cargo will not load** — `optional` is not an accepted key in
+        // `[workspace.dependencies]`, which is *why* reading it from the root would be wrong. So it
+        // guards against a silent change to a rule rather than describing a reachable layout, and
+        // that is the whole of its value.
+        let core_reqwest = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with("reqwest = "))
+            .expect("CORE_MANIFEST declares reqwest under that key");
+        let optional_in_the_root = core_reqwest.replace(" }", ", optional = true }");
+        assert_ne!(
+            optional_in_the_root, core_reqwest,
+            "the entry is an inline table"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies().replace(core_reqwest, &optional_in_the_root)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+    }
+
+    #[test]
     fn a_self_rooted_manifest_reached_by_a_relative_path_is_recorded_once() {
         // A self-rooted manifest is the consumer manifest, already read and already recorded, so
         // resolution must not read it a second time or record it again. Reached by an absolute
