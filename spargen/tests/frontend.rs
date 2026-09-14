@@ -524,10 +524,23 @@ components:
                 .map(|d| d.pointer.as_str())
                 .collect::<Vec<_>>()
         );
-        // The message must name the component it did find, not merely describe the shape.
+        // The message makes two separate claims — which reference could not be followed, and which
+        // component it was found to address a subschema of — and it interpolates `Envelope` for
+        // both. `contains("Envelope")` is therefore satisfied by either half alone, so it pins
+        // neither; both mutations survived it. Assert the two independently.
         assert!(
-            subschema.iter().any(|d| d.message.contains("Envelope")),
-            "{entry}: the message must name the component: {report:#?}"
+            subschema.iter().any(|d| d
+                .message
+                .contains("`#/components/schemas/Envelope/properties/payload`")),
+            "{entry}: the message must name the whole reference that could not be followed, not \
+             only the component it starts from: {report:#?}"
+        );
+        assert!(
+            subschema
+                .iter()
+                .any(|d| d.message.contains("component `Envelope`")),
+            "{entry}: the message must name the component it did find, not merely describe the \
+             shape: {report:#?}"
         );
         // And carry the remedy, as the other rejections in this file do.
         assert!(
