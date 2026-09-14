@@ -5818,19 +5818,67 @@ SIBLING
             "{ type: object, properties: { a: { type: string } } }",
         ),
     ];
-    // The comparison is the emitted `types` module, not the whole file: the provenance header
-    // carries a hash of the spec bytes, which differ by construction here.
+    // What is compared is `Sibling`'s OWN emitted definition, not the whole `types` module.
+    //
+    // The module also holds the intermediate aliases — `SiblingConstraint`,
+    // `SiblingReferenceIntersection` — which are emitted whenever the sibling clears
+    // `schema_has_shape_constraint`, whether the refining keyword participates in the intersection
+    // or not. So a whole-module comparison answers "did adding this keyword change ANY emitted
+    // byte", which is liveness; it does not answer "did it change the type", which is the claim in
+    // the failure message. Measured under the sibling-discarded mutation: `Sibling` itself is
+    // byte-identical with and without the refiner, and the whole-module comparison passed anyway.
     let lowering = |establishing: &str, refiner: &str, target: &str| {
         let spec = format!(
             "{HEAD}components:\n  schemas:\n    Target: {target}\n    Sibling:\n      \
              $ref: '#/components/schemas/Target'\n      {establishing}\n{refiner}"
         );
         let (report, code) = generate_with_code(&spec);
-        let types = code
-            .find("pub mod types {")
-            .map(|start| code[start..].to_owned())
+        // `Sibling`'s own item, ATTRIBUTES INCLUDED — `#[serde(deny_unknown_fields)]` sits above
+        // the declaration and is exactly what `additionalProperties` contributes. A rejection
+        // yields no item at all, which is itself a difference worth seeing.
+        let types = types_module(&code);
+        let lines: Vec<&str> = types.lines().collect();
+        let declares = |line: &str| {
+            let t = line.trim_start();
+            ["pub struct ", "pub type ", "pub enum "]
+                .iter()
+                .filter_map(|decl| t.strip_prefix(decl))
+                .any(|rest| {
+                    rest.split([' ', '<', '{', '(', ';', '='])
+                        .next()
+                        .is_some_and(|name| name == "Sibling")
+                })
+        };
+        let definition = lines
+            .iter()
+            .position(|line| declares(line))
+            .map(|decl| {
+                // Walk back over the item's attributes and rustdoc.
+                let mut start = decl;
+                while start > 0 {
+                    let prev = lines[start - 1].trim_start();
+                    if prev.starts_with("#[") || prev.starts_with("///") {
+                        start -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                // Forward to the end of the item.
+                let mut end = decl;
+                if lines[decl].trim_end().ends_with(';') {
+                    end = decl + 1;
+                } else {
+                    while end < lines.len() {
+                        end += 1;
+                        if lines[end - 1].trim_end() == "}" {
+                            break;
+                        }
+                    }
+                }
+                lines[start..end].join("\n")
+            })
             .unwrap_or_default();
-        (report.outcome(), types)
+        (report.outcome(), definition)
     };
     for (keyword, establishing, refiner, target) in refiners {
         assert_ne!(
@@ -5897,6 +5945,29 @@ components:
     // The causes `E007`'s explain already named must not be borrowed for this one.
     assert!(!messages[0].contains("discriminator"), "{:?}", messages[0]);
     assert!(!messages[0].contains("`anyOf`"), "{:?}", messages[0]);
+
+    // The pointer, which both new `E013` sites pin and this one did not. It is not decoration:
+    // `compat::carve_rules` maps it to the smallest omittable construct, so a diagnostic carrying
+    // the document root instead of the offending node yields no rule, and a carvable rejection
+    // becomes an un-carvable residual that ends the whole run `Rejected`. `carve.rs` proves that
+    // consequence for this site end to end.
+    let pointers: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::NonDisjointUnion)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert_eq!(
+        pointers,
+        vec!["/components/schemas/Collapsed"],
+        "the sole-member collapse must report at the offending component, not the document root: \
+         {report:#?}"
+    );
+
+    // check/generate parity for the same site, which the `E013` sites also assert.
+    let checked = check(spec);
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::NonDisjointUnion), "{checked:#?}");
 
     // And the abstinence Site B spends five lines of comment justifying: the multi-variant path
     // emits a per-variant `W011` before its `E007` and this one deliberately does not, because
@@ -6200,9 +6271,21 @@ fn the_ref_sibling_rejection_does_not_creep_into_the_shapes_that_still_generate(
             !has_code(&report, Code::AllOfIrreconcilable),
             "`{what}` reported E013: {report:#?}"
         );
+        // The RESPONSE BODY's own type, resolved through the operation signature. The earlier
+        // revision asserted `code.contains("String")` and `code.contains("()")`, and both of those
+        // are true of every generated client — `pub fn url(&self) -> String` and `Server0::new()`
+        // are always emitted — so the column could not distinguish any behaviour at all.
+        let types = types_module(&code);
+        let body = code
+            .split("ResponseValue<types::")
+            .nth(1)
+            .and_then(|rest| rest.split('>').next())
+            .unwrap_or_else(|| panic!("`{what}` emitted no typed response: {code}"))
+            .trim()
+            .to_owned();
         assert!(
-            code.contains(expected),
-            "`{what}` did not emit `{expected}`: {code}"
+            types.contains(&format!("pub type {body} = {expected};")),
+            "`{what}` must lower its response body to `{expected}`, but `{body}` is not: {types}"
         );
     }
 
