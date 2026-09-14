@@ -1639,6 +1639,69 @@ fn a_missing_credential_is_a_typed_request_construction_error() {
     }
 }
 
+// The reason the payload is `Vec<Vec<&str>>` and not the flat `Vec<&str>` the issue proposed: an
+// alternative is a conjunction, and flattening loses which schemes must be presented *together*.
+// This is the only place a generated client is driven to produce that shape. It also pins the two
+// properties the grouping exists for, which only a generated requirement can witness: spargen emits
+// a conjunction into the requirement slice in declaration order, and a `mutualTLS` member is left
+// out of the report entirely, because the transport satisfies it and the caller cannot register it.
+#[test]
+fn a_generated_conjunction_reports_each_alternative_grouped() {
+    fn outstanding(client: &basic_client::Client) -> Vec<Vec<&'static str>> {
+        use std::future::Future;
+        let mut call = std::pin::pin!(client.get_conjunction());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+            panic!("a missing credential must fail before anything is sent");
+        };
+        match result {
+            Err(basic_client::Error::RequestConstruction(
+                basic_client::RequestError::MissingCredential { alternatives },
+            )) => alternatives,
+            other => panic!("expected MissingCredential, got {other:?}"),
+        }
+    }
+
+    let bare = basic_client::Client::new("http://127.0.0.1:1").unwrap();
+    assert_eq!(
+        outstanding(&bare),
+        [
+            // A TWO-SCHEME CONJUNCTION, in declaration order. This inner list having length 2 is
+            // the whole reason the payload is not a flat `Vec<&str>`: a caller told "tenant,
+            // bearer, apiKey" cannot tell that the first two must be presented together.
+            vec!["tenant", "bearer"],
+            vec!["apiKey"],
+            // `mtls` is absent. mutualTLS is satisfied by the transport's client certificate, so
+            // it is never a credential the caller can register and must never be reported as one.
+            vec!["tenant"],
+        ]
+    );
+    // The grouping survives rendering: `+` joins a conjunction, `or` separates alternatives.
+    let rendered = basic_client::Error::<std::convert::Infallible>::RequestConstruction(
+        basic_client::RequestError::MissingCredential {
+            alternatives: outstanding(&bare),
+        },
+    );
+    let rendered = std::error::Error::source(&rendered).unwrap().to_string();
+    assert!(
+        rendered.ends_with("(missing: tenant + bearer or apiKey or tenant)"),
+        "{rendered}"
+    );
+
+    // Registering one member of a conjunction satisfies neither alternative it appears in, and
+    // removes only that member from what each reports.
+    let partial = basic_client::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_credential(
+            "bearer",
+            basic_client::Credential::Bearer(basic_client::SecretString::from("t0k")),
+        );
+    assert_eq!(
+        outstanding(&partial),
+        [vec!["tenant"], vec!["apiKey"], vec!["tenant"]]
+    );
+}
+
 // The other credential state an application routes on: a credential *is* registered, but the
 // provider behind it could not refresh it. That is still "unauthenticated", and it is still raised
 // before anything is sent — so the same poll-once shape reaches it, with no server and no runtime.
@@ -2478,6 +2541,23 @@ paths:
             items: { type: string }
       responses:
         "204": { description: No Content }
+  # The payload shape `MissingCredential` carries is `Vec<Vec<&str>>` rather than a flat list
+  # because OpenAPI `security` is a disjunction of conjunctions: "A and B, or C" and "A, B, or C"
+  # flatten to the same three names while demanding different credentials. This operation is the
+  # only place in the repository where a *generated* client is asked to produce that shape — a
+  # two-scheme conjunction, a single-scheme alternative, and an alternative whose other member is
+  # `mutualTLS` and so must be omitted from the report.
+  /conjunction:
+    get:
+      operationId: getConjunction
+      security:
+        - tenant: []
+          bearer: []
+        - apiKey: []
+        - mtls: []
+          tenant: []
+      responses:
+        "204": { description: No Content }
   /users/{id}:
     get:
       operationId: getUser
@@ -2985,6 +3065,12 @@ components:
       type: apiKey
       in: header
       name: X-Api-Key
+    tenant:
+      type: apiKey
+      in: header
+      name: X-Tenant
+    mtls:
+      type: mutualTLS
   schemas:
     # A flat object, so `deepObject` is defined for it (the specification leaves nested objects
     # and arrays inside a deepObject value undefined, and spargen rejects those).
