@@ -2425,26 +2425,6 @@ serde_json.workspace = true
         assert!(messages.is_empty(), "{messages:#?}");
     }
 
-    /// The `E023` explain body, verbatim. Asserted by equality below; see that test for why a
-    /// body this text is pinned twice over.
-    const E023_EXPLAIN: &str = "The generated module is freestanding, so its consuming Cargo package must declare the crates and \
-         dependency features referenced by that specific API. Spargen derives the exact requirement set \
-         after lowering and audits Cargo.toml during build.rs and proc-macro generation. Use the \
-         documented tested lower bounds (or a higher semver-compatible caret floor), keep reqwest default \
-         features disabled, and enable only the reqwest/bytes/XML/UUID/time capabilities named by the \
-         diagnostic. A dependency declared `workspace = true` is followed to the workspace root's \
-         `[workspace.dependencies]` — the consumer manifest itself when it declares `[workspace]`, \
-         otherwise the root `package.workspace` names, otherwise the nearest ancestor manifest that \
-         parses and declares `[workspace]` — taking the version from there, the union of both feature \
-         lists, and default features on when the root leaves them on or the member sets `default-features \
-         = true` (a member's `default-features = false` cannot turn off defaults the root leaves on, so \
-         disable them in `[workspace.dependencies]` and leave the member's `default-features` unset or \
-         `false`), while `optional` is read from the member, as Cargo does. Inheriting a required crate \
-         therefore satisfies the audit; when the root cannot be found, cannot be read, or declares no \
-         such entry, the diagnostic says which of those happened rather than reporting the crate as \
-         missing. Cargo resolves the declared range; Rust compilation then verifies the selected crates \
-         expose the APIs and traits used by the generated client.";
-
     /// `spargen explain E023` prints `Code::RuntimeDependencyContract`'s explain body verbatim, and
     /// that body specifies workspace-dependency inheritance as an algorithm rather than describing
     /// the audit in a paragraph. Nothing else holds it to anything —
@@ -2458,25 +2438,43 @@ serde_json.workspace = true
     /// them. No count of the body's propositions is offered: three counts have been produced for
     /// this text and each was wrong.
     ///
-    /// Why the body is pinned twice. The clause assertions say *what each sentence is for* and
-    /// localise a failure to the promise that broke. They cannot say what the body does **not**
-    /// contain: every one of them is a substring test, so text may be **added** around them freely
-    /// — a sentence appended that contradicts the algorithm, or a line prefixed saying none of the
-    /// description is accurate, leaves every assertion passing. Sentence-anchoring does not close
-    /// that either, since a prefix leaves each pinned sentence verbatim. Only equality does, so the
-    /// body is also asserted whole against `E023_EXPLAIN`. Keep both: equality alone reports that
-    /// the text changed without saying which promise broke.
+    /// Why the body is pinned twice, and what each pin is worth. The equality assertion against
+    /// `runtime_contract_e023_explain.txt` **logically implies every clause assertion above it** —
+    /// the same string has the same substrings, the same counts and the same order — so the clause
+    /// assertions add no coverage. Their entire value is the failure message: equality says the
+    /// text changed, and they say **which promise broke** and which fixture was supposed to make it
+    /// true. That is worth keeping and is not worth claiming as coverage.
+    ///
+    /// Equality is also the only thing here that constrains what the body does **not** say. Every
+    /// clause assertion is a substring test, so text may be **added** around them freely — a
+    /// sentence appended that contradicts the algorithm, or a line prefixed saying none of the
+    /// description is accurate, leaves every one of them passing. Sentence-anchoring would not
+    /// close that either, since a prefix leaves each pinned sentence verbatim.
     ///
     /// The cost, stated rather than discovered. Requiring each clause **exactly once** is a
     /// false-gate hazard: a short clause such as "taking the version from there" or "the union of
     /// both feature lists" will red this test if a future edit legitimately uses the same words a
     /// second time, even though nothing is wrong. That is the price of closing the
     /// matched-the-wrong-occurrence class, and the fix in that case is to lengthen the assertion,
-    /// not to drop the rule. Equality is likewise deliberate friction: editing this text means
-    /// updating `E023_EXPLAIN` in the same commit, which is the point.
+    /// not to drop the rule. Equality is likewise deliberate friction, and the friction is the
+    /// mechanism: editing the explain text means re-typing it into a second file.
+    ///
+    /// What the pair therefore delivers, exactly: **no clause can change without someone re-typing
+    /// it in the test.** It does not make the body true. A clause that is false today stays false
+    /// with both guards green — the three-outcome promise below is exactly that — and a maintainer
+    /// who re-types a change into the expected file has made this test agree with it, not verified
+    /// it. Holding the prose to the code is a wider question than this one code, tracked separately.
     #[test]
     fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
         let explain = Code::RuntimeDependencyContract.explain();
+        // The expected body lives in its own file, not in this one, and that placement is the
+        // guard. With the mirror inline, a single find-and-replace over `runtime_contract.rs`
+        // rewrote the mirror and every clause assertion in one stroke — negating "taking the
+        // version from there" that way left the suite green. An edit to `code.rs` must now be
+        // re-typed in a second file that no edit to this module can reach.
+        // The file carries a trailing newline, as a text file should; the explain body does not.
+        let expected = include_str!("runtime_contract_e023_explain.txt").trim_end_matches('\n');
+
         // This module's own source, so the fixture each clause names as its pin can be checked to
         // resolve. Those citations are the whole argument that a clause assertion means anything,
         // and nothing checked them: deleting a cited fixture left the suite green.
@@ -2649,10 +2647,23 @@ serde_json.workspace = true
         // And the body as a whole, which is the only assertion here that constrains what the text
         // does *not* say. Every check above is a substring, so without this one a sentence may be
         // appended or prefixed that contradicts all of them with the suite green.
-        assert_eq!(
-            explain, E023_EXPLAIN,
-            "the E023 explain body changed; update `E023_EXPLAIN` in the same commit, and check \
-             that the clause assertions above still describe what the new text promises"
+        //
+        // Deliberately not `assert_eq!`: its output prints the actual value in full, which beside
+        // an instruction to update the expected file amounts to handing over the paste that makes
+        // any change pass. The point of this assertion is that a reader has to decide the new text
+        // is correct, so it reports where the two diverge and nothing more.
+        assert!(
+            explain == expected,
+            "the `E023` explain body no longer matches \
+             `spargen/src/runtime_contract_e023_explain.txt`; they first differ at byte {}. Read \
+             the new text, satisfy yourself that every clause asserted above is still true of \
+             `workspace_root` and `check_declaration`, and only then re-type the change into that \
+             file.",
+            explain
+                .char_indices()
+                .zip(expected.chars())
+                .find(|((_, actual), expected)| actual != expected)
+                .map_or_else(|| explain.len().min(expected.len()), |((at, _), _)| at)
         );
     }
 
