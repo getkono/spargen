@@ -45,8 +45,9 @@ pub enum Code {
     /// A `security` requirement references a scheme that is not declared under
     /// `components.securitySchemes` (or is of an unsupported type) (matrix: Security).
     UnknownSecurityScheme,
-    /// `allOf` members could not be reconciled into a single merged type — conflicting property
-    /// types, conflicting `additionalProperties`, an object/scalar mix, incompatible scalars, or a
+    /// An intersecting composition — `allOf` members, or a `$ref` and its own shape-bearing sibling
+    /// keywords — could not be reconciled into a single type: conflicting property types,
+    /// conflicting `additionalProperties`, an object/scalar mix, incompatible scalars, or a
     /// direct recursive `$ref` member whose fields are not yet known (matrix: Schema shape).
     AllOfIrreconcilable,
     /// The input could not be parsed or violates a required structural OpenAPI shape.
@@ -166,7 +167,7 @@ impl Code {
             Code::InvalidInput => "invalid input document",
             Code::DuplicateObjectKey => "duplicate object key",
             Code::UnknownSecurityScheme => "unknown security scheme",
-            Code::AllOfIrreconcilable => "irreconcilable allOf composition",
+            Code::AllOfIrreconcilable => "irreconcilable allOf or $ref-sibling composition",
             Code::InvalidOmitRule => "invalid omit rule",
             Code::OmittedConstruct => "construct omitted",
             Code::OmitCreatedInvalidDocument => "omit profile created an invalid document",
@@ -237,7 +238,7 @@ impl Code {
                 "Every scheme named in a `security` requirement must be declared under `components.securitySchemes` as `http` bearer/basic, `apiKey`, `oauth2`, or `openIdConnect` so credentials can be attached at the right location."
             }
             Code::AllOfIrreconcilable => {
-                "`allOf` members are intersected into one type: object members flatten into a single struct (union of properties; a property required by any member is required; repeated properties recursively retain their narrower compatible intersection; `additionalProperties` is intersected conservatively), while scalar members narrow compatible primitives, enums, arrays, objects, unions, and nullability. Examples include integer within number, enum within its scalar type, and a detailed object within a broader object; an empty array-item intersection becomes an uninhabited item type so the valid empty array remains representable. It is rejected only when the overall intersection is empty or cannot be represented faithfully: incompatible scalar categories, conflicting property/additional-value constraints, an object/scalar mix, or a direct recursive `$ref` member whose fields are not yet known. Restructure the composition or omit this API segment with `spargen::omit!`."
+                "Two constructs intersect schemas into one type and report this code when the result is empty or unrepresentable: the members of an `allOf`, and — because `$ref` is an applicator in JSON Schema 2020-12 rather than a replacement — a `$ref` together with its own shape-bearing sibling keywords (`type`, `properties`, `required`, `items`, `enum`, `const`, and so on), which are intersected with the referenced schema instead of being discarded. Either way, object members flatten into a single struct (union of properties; a property required by any member is required; repeated properties recursively retain their narrower compatible intersection; `additionalProperties` is intersected conservatively), while scalar members narrow compatible primitives, enums, arrays, objects, unions, and nullability. Examples include integer within number, enum within its scalar type, and a detailed object within a broader object; an empty array-item intersection becomes an uninhabited item type so the valid empty array remains representable. It is rejected only when the overall intersection is empty or cannot be represented faithfully: incompatible scalar categories (`{$ref: '#/components/schemas/Name', type: integer}` where `Name` is a string accepts no value at all), conflicting property/additional-value constraints, an object/scalar mix, or a direct recursive `$ref` member whose fields are not yet known. Restructure the composition — or make the `$ref` target and its siblings agree — or omit this API segment with `spargen::omit!`."
             }
             Code::InvalidOmitRule => {
                 "A compatibility omit rule must match at least one exact path, operation, component, pointer, or file-local pointer and cannot omit the document root."

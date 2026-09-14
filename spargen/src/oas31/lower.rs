@@ -635,8 +635,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return Some(referenced);
             }
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
-            let intersection =
-                self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))?;
+            let Some(intersection) =
+                self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
+            else {
+                // `$ref` is an applicator: the value must satisfy the target AND these siblings. An
+                // empty intersection means no value can, which is a document error — dropping the
+                // construct here would silently delete a body, parameter or property from the
+                // generated client.
+                return self.reject_empty_intersection(
+                    schema,
+                    "the `$ref` target and this schema's own sibling keywords have an empty \
+                     intersection, so no value can satisfy both",
+                );
+            };
             let kind = self.graph.get(intersection.id)?.kind.clone();
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
@@ -880,7 +891,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if real_members.len() == 1 {
             let mut inner = self.lower_schema_or(real_members[0], hint)?;
             if let Some(sibling) = sibling {
-                inner = self.intersect_types(inner, sibling, &format!("{hint}Constrained"))?;
+                let Some(constrained) =
+                    self.intersect_types(inner, sibling, &format!("{hint}Constrained"))
+                else {
+                    // The only real member cannot satisfy the enclosing schema's own constraints, so
+                    // nothing is left to collapse to. The multi-variant path below reports exactly
+                    // this with `E007`; the count of variants the author wrote must not change which
+                    // diagnostic they get.
+                    return self.reject_union(
+                        schema,
+                        "union sibling constraints make every variant impossible",
+                    );
+                };
+                inner = constrained;
             }
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
             let mut ty = self.insert_schema_type(schema, hint, kind);
@@ -1687,6 +1710,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     fn reject_all_of(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
         self.reject_all_of_unit(schema.provenance.clone(), message);
+        None
+    }
+
+    /// Report an empty typed intersection between a `$ref` target and its own sibling keywords.
+    /// `$ref` is a 2020-12 applicator, so this is the same class of unsatisfiable composition
+    /// [`Self::reject_all_of`] reports — `E013` covers both spellings — but the remedy names the
+    /// construct the author actually wrote.
+    fn reject_empty_intersection(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(
+                "restructure the schema so the `$ref` target and its sibling keywords agree, or \
+                 omit this API segment with spargen::omit!",
+            )
+            .emit(self.diags);
         None
     }
 
