@@ -1800,6 +1800,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     );
                 }
                 let ty = self.ensure_component(name, &schema.provenance)?;
+                // The pre-check above sees root components only. A name the root does not declare
+                // is a *sub-file* component, and it reaches its own reservation through
+                // `ensure_resolved`, so a direct recursive member there arrives here as a back-edge
+                // rather than being caught above. Refuse to read it for the same reason: see
+                // `is_in_progress_root`.
+                if self.is_in_progress_root(ty.id) {
+                    return self.reject_all_of_unit(
+                        schema.provenance.clone(),
+                        "an `allOf` member is a direct recursive `$ref` to the component being \
+                         lowered",
+                    );
+                }
                 self.push_ref_member(ty, out);
                 return Some(());
             }
@@ -1815,6 +1827,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     );
                 }
                 let ty = self.ensure_remote(reference)?;
+                if self.is_in_progress_root(ty.id) {
+                    return self.reject_all_of_unit(
+                        schema.provenance.clone(),
+                        "an `allOf` member is a direct recursive remote `$ref` to the schema being \
+                         lowered",
+                    );
+                }
                 self.push_ref_member(ty, out);
                 return Some(());
             }
@@ -1825,6 +1844,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .resolve(reference, &schema.provenance, self.diags)
                 .ok()?;
             let target = resolved.schema.into_owned();
+            // This arm inlines rather than referencing a shared type, so there is no `Ty` to test —
+            // test the target instead. Without this, a member that is the very schema being lowered
+            // descends into its own body again and stops only at `MAX_SCHEMA_DEPTH`, reporting a
+            // chain length for what is a cycle of length one. The component and remote arms above
+            // refuse to read an in-progress member; this one now does too.
+            if self.resolved_target_in_progress(&target.provenance) {
+                return self.reject_all_of_unit(
+                    schema.provenance.clone(),
+                    "an `allOf` member is a direct recursive `$ref` to the schema being lowered",
+                );
+            }
             return self.gather_inline(&target, hint, out);
         }
 
@@ -3989,6 +4019,43 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .chain(self.remote_components.values())
             .chain(self.remote_in_progress.values())
             .any(|&(root, _)| root == id)
+    }
+
+    /// Whether `id` is a reservation whose body is still being lowered, so its definition is the
+    /// placeholder [`TypeGraph::reserve`] inserted rather than the schema's own shape.
+    ///
+    /// This matters because [`Self::push_ref_member`] classifies an `allOf` member by reading
+    /// `graph.get(id).kind`, and a placeholder's kind is `TypeKind::Any` — so reading one answers
+    /// "scalar" for a type that is not a scalar, and the member silently becomes
+    /// `serde_json::Value`. The three in-progress maps are exactly the set of such ids, and the only
+    /// safe thing to do with one is refuse to read it.
+    fn is_in_progress_root(&self, id: TypeId) -> bool {
+        self.in_progress
+            .values()
+            .chain(self.remote_in_progress.values())
+            .chain(self.resolved_in_progress.values())
+            .any(|&(root, _)| root == id)
+    }
+
+    /// Whether a schema the bundle resolver just produced is the very schema whose body is being
+    /// lowered. The inlining arm of [`Self::gather_member`] has no shared `Ty` to test against
+    /// [`Self::is_in_progress_root`], so it tests the resolved target's identity instead.
+    fn resolved_target_in_progress(&self, provenance: &Provenance) -> bool {
+        let Some(key) = resolved_identity(provenance) else {
+            return false;
+        };
+        if self.resolved_in_progress.contains_key(&key) {
+            return true;
+        }
+        // A target inside the root document's component map has its identity there instead —
+        // `ensure_resolved` routes such a reference back to `ensure_component` — so consult that
+        // map too, or a root component addressed by file reference escapes the check.
+        provenance.span.is_some_and(|span| span.file == ROOT_FILE)
+            && provenance
+                .pointer
+                .as_str()
+                .strip_prefix("/components/schemas/")
+                .is_some_and(|name| self.in_progress.contains_key(name))
     }
 
     /// Read an untyped body on a binary media type as raw octets.
