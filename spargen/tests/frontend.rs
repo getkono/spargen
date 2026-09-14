@@ -6065,6 +6065,73 @@ components:
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
     assert!(!code.contains("serde_json :: Value"), "{code}");
+
+    // The claim in the doc comment above — "lowers to the NARROWER type" — and the whole point of
+    // treating `$ref` as an applicator. Outcome assertions cannot see it: they pin when the tool
+    // refuses, and this is what it emits when it proceeds.
+    //
+    // `integer` ∧ `number` is `integer`, so the body must be `i64`. Two substitutions were green
+    // before this: taking the SIBLING alone, which is the exact defect this pull request exists to
+    // fix, and taking the TARGET alone, which is the behaviour before it. The first widens the body
+    // to `f64` — a generated type that accepts values the description forbids — and neither changes
+    // an outcome, a code, or introduces `serde_json::Value`.
+    let types = types_module(&code);
+    let body = code
+        .split("ResponseValue<types::")
+        .nth(1)
+        .and_then(|rest| rest.split('>').next())
+        .unwrap_or_else(|| panic!("no typed response: {code}"))
+        .trim()
+        .to_owned();
+    assert!(
+        types.contains(&format!("pub type {body} = i64;")),
+        "`integer` narrowed by `number` must stay `i64`; `f64` would accept values the document \
+         forbids: {types}"
+    );
+    // And the sibling is not simply discarded either: the intersection is taken, so the derived
+    // type exists rather than the response naming the target component directly.
+    assert!(
+        types.contains("pub type Count = i64;"),
+        "the target must still be emitted under its own name: {types}"
+    );
+
+    // The mirror, and the row that catches the OTHER substitution. Above, `integer` is both the
+    // intersection and the target, so taking the target alone happens to give the right answer and
+    // is invisible. Here the SIBLING is the narrower side: `number` narrowed by `integer` is
+    // `integer`, so target-alone would emit `f64` and widen the body.
+    let mirrored = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Measure', type: integer }
+components:
+  schemas:
+    Measure: { type: number }
+"##;
+    let (report, code) = generate_with_code(mirrored);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    let body = code
+        .split("ResponseValue<types::")
+        .nth(1)
+        .and_then(|rest| rest.split('>').next())
+        .unwrap_or_else(|| panic!("no typed response: {code}"))
+        .trim()
+        .to_owned();
+    assert!(
+        types.contains(&format!("pub type {body} = i64;")),
+        "`number` narrowed by `integer` must be `i64`; `f64` is the target alone, which is the \
+         behaviour before `$ref` was treated as an applicator: {types}"
+    );
 }
 
 /// Over-rejection is the whole risk of reporting where the code used to drop, and the fixture above
