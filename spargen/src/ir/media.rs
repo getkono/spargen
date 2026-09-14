@@ -210,9 +210,12 @@ impl Responses {
     /// bodies yield a per-operation success enum whose entries are sorted into decode precedence
     /// (exact code ascending, then range ascending) and which also carries any documented bodyless
     /// success status as a payload-free unit variant, so no documented success status is silently
-    /// dropped. `default` never joins those entries: it *always* contributes to the error shape as
-    /// the `Range(0)` sentinel (see [`Self::error`]), and is *additionally* the success source when
-    /// no explicit status is declared at all — that lone case types both sides with the same body.
+    /// dropped. `default` never joins those entries. It is *offered* to the error shape
+    /// unconditionally as the `Range(0)` sentinel, but shapes count bodied entries, so a bodyless
+    /// `default` only survives where two or more bodied error entries make an enum for it to be the
+    /// catch-all unit variant of; with fewer it is dropped and contributes nothing (see
+    /// [`Self::error`]). It is *additionally* the success source when no explicit status is
+    /// declared at all — that lone case types both sides with the same body.
     ///
     /// An undocumented 2xx is *not* uniformly rejected: generated code enters the success branch on
     /// the raw transport status alone, so the outcome is per shape. `Enum` dispatches on its
@@ -341,9 +344,12 @@ impl Responses {
     /// typed `E` body; two or more yield a per-operation error enum, sorted into classification
     /// precedence (exact code ascending, then range ascending, then `default` — the `Range(0)`
     /// sentinel — last) and carrying any documented bodyless error status as a unit variant.
-    /// `default` contributes here as `Range(0)` whenever it is declared, unconditionally —
-    /// including when it is also the operation's sole success source (see [`Self::success`]), which
-    /// then types both sides with the same body.
+    /// `default` is *offered* here as `Range(0)` whenever it is declared — including when it is
+    /// also the operation's sole success source (see [`Self::success`]), which then types both
+    /// sides with the same body — but it reaches the shape only through the body count above. A
+    /// bodyless `default` therefore becomes the catch-all unit variant of an `Enum` and is dropped
+    /// from a `None` or a `Single`, where every undocumented status stays `UnexpectedStatus`
+    /// instead of classifying as `Api`.
     pub(crate) fn error(&self) -> ErrorShape {
         let mut entries: Vec<(StatusSpec, Option<Ty>)> = Vec::new();
         for (status, response) in &self.by_status {
