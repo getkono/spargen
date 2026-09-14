@@ -2941,11 +2941,69 @@ serde_json.workspace = true
     }
 
     #[test]
-    fn a_runtime_crate_renamed_in_the_workspace_root_is_reported() {
+    fn a_package_key_in_the_workspace_root_is_rejected_whatever_it_names() {
         // "A renamed runtime crate" is an advertised `E023` trigger, and the check reads `package`
         // from the member *and* the root — generated code names the canonical crate either way.
         // Every other rename fixture renames in the member's own table, so the root half of that
-        // pair was reached by nothing.
+        // pair was reached by nothing; this covers it.
+        //
+        // What it pins is the rule as written, which is **wider than a rename**: the check tests
+        // that a `package` key is *present* and never compares it with the dependency name, so the
+        // identity spelling `bytes = { package = "bytes", … }` — a no-op Cargo accepts — is
+        // rejected too. That is tracked as a production defect (#168); the second half of this
+        // fixture pins it as current behaviour so the fix has something to change, and the name of
+        // this test says "whatever it names" rather than asserting a rename occurred.
+        let core_bytes = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with("bytes = "))
+            .expect("CORE_MANIFEST declares bytes under that key");
+        let floor = core_bytes
+            .split('"')
+            .nth(1)
+            .expect("the bytes entry pins a quoted version");
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies().replace(
+                    core_bytes,
+                    &format!("bytes = {{ package = \"bytes-fork\", version = \"{floor}\" }}")
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert!(
+            diagnostics[0].message.contains("`bytes` cannot be renamed"),
+            "{diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn an_identity_package_key_in_the_workspace_root_is_rejected_although_cargo_accepts_it() {
+        // `bytes = { package = "bytes", … }` renames nothing: Cargo's `package` field defaults to
+        // the key, so this is the fully-qualified spelling of an ordinary dependency and `cargo
+        // check` is happy with it. Spargen refuses it with a hard `E023` because the rule tests the
+        // key's presence rather than its value, so a workspace written in that style cannot use
+        // spargen at all.
+        //
+        // This asserts the **current, wrong** behaviour, deliberately, so that #168's fix has a
+        // fixture to flip. When it lands, this becomes `assert!(diagnostics.is_empty())` and the
+        // name loses its second clause. The same false positive is already pinned at the member
+        // level by a fixture on master; this is the workspace-root half of it.
         let core_bytes = core_workspace_dependencies()
             .lines()
             .find(|line| line.starts_with("bytes = "))
@@ -2978,10 +3036,10 @@ serde_json.workspace = true
         .unwrap();
 
         let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
-        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics.len(), 1, "#168: {diagnostics:#?}");
         assert!(
             diagnostics[0].message.contains("`bytes` cannot be renamed"),
-            "{diagnostics:#?}"
+            "#168: {diagnostics:#?}"
         );
     }
 
