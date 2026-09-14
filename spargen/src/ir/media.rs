@@ -408,8 +408,10 @@ pub(crate) enum SuccessShape {
     Plain(Ty),
     /// Two or more documented success statuses. Generated as a per-operation response enum, one
     /// variant per status — a payload-carrying variant for a bodied status, a unit variant for a
-    /// documented bodyless status (e.g. `204`). Entries are pre-sorted into decode precedence
-    /// (exact before range; `default` last); decode dispatches by HTTP status in that order.
+    /// documented bodyless status (e.g. `204`). Entries are the documented *success* statuses only
+    /// — `default` is never among them — pre-sorted into decode precedence (exact before range);
+    /// decode dispatches by HTTP status in that order and rejects any other 2xx as
+    /// `Error::UnexpectedStatus`.
     Enum(Vec<(StatusSpec, Option<Ty>)>),
 }
 
