@@ -2477,7 +2477,12 @@ serde_json.workspace = true
     #[test]
     fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
         let explain = Code::RuntimeDependencyContract.explain();
-        let promises = |clause: &str| {
+        // This module's own source, so the fixture each clause names as its pin can be checked to
+        // resolve. Those citations are the whole argument that a clause assertion means anything,
+        // and nothing checked them: deleting a cited fixture left the suite green.
+        const SOURCE: &str = include_str!("runtime_contract.rs");
+
+        let promises = |clause: &str, pinned_by: &[&str]| {
             // Exactly once, not merely present: an assertion whose text also occurs earlier or
             // later matches the wrong sentence and leaves the one it was written for unpinned.
             // `[workspace.dependencies]` appears twice in this body, and that is how the opening
@@ -2488,100 +2493,158 @@ serde_json.workspace = true
                 "`spargen explain E023` says {clause:?} {occurrences} times, expected exactly \
                  once:\n{explain}"
             );
+            assert!(!pinned_by.is_empty(), "no fixture cited for {clause:?}");
+            for fixture in pinned_by {
+                assert!(
+                    SOURCE.contains(&format!("fn {fixture}(")),
+                    "the clause {clause:?} names `{fixture}` as the fixture that makes it true, \
+                     and no such test exists in this module"
+                );
+            }
         };
 
-        // How the requirement set is arrived at, and where it is enforced. Pinned by
-        // `conditional_dependencies_and_features_are_required_only_when_used` and
-        // `the_time_requirement_never_asks_for_serde` for exactness, and by
-        // `macro_manifest_audit_derives_only_capabilities_referenced_by_the_api` in `tests/e2e.rs`
-        // for the proc-macro half of where it runs.
+        // How the requirement set is arrived at, and where it is enforced. The proc-macro half of
+        // "where it runs" is covered by `macro_manifest_audit_derives_only_capabilities_referenced_by_the_api`
+        // in `tests/e2e.rs`, which is outside this file and so cannot be cited below.
         promises(
             "Spargen derives the exact requirement set after lowering and audits Cargo.toml during \
              build.rs and proc-macro generation",
+            &[
+                "conditional_dependencies_and_features_are_required_only_when_used",
+                "the_time_requirement_never_asks_for_serde",
+            ],
         );
 
-        // The sentence every clause below qualifies, and the one this test exists to pin. Pinned by
-        // `workspace_inheritance_uses_the_workspace_version_and_features`, where a member declaring
-        // nothing but `workspace = true` resolves against the root's table.
+        // The sentence every clause below qualifies, and the one this test exists to pin: a member
+        // declaring nothing but `workspace = true` resolves against the root's table.
         promises(
             "A dependency declared `workspace = true` is followed to the workspace root's \
              `[workspace.dependencies]`",
+            &["workspace_inheritance_uses_the_workspace_version_and_features"],
         );
 
         // Which side decides default features, in both directions. Asserting the rule rather than
-        // the bare words `default-features` is what makes a negation of it fail here. Pinned by
-        // `a_member_default_features_false_cannot_turn_off_defaults_the_root_leaves_on` and
-        // `a_member_default_features_true_turns_on_defaults_the_root_turned_off`.
+        // the bare words `default-features` is what makes a negation of it fail here.
+        let both_directions: &[&str] = &[
+            "a_member_default_features_false_cannot_turn_off_defaults_the_root_leaves_on",
+            "a_member_default_features_true_turns_on_defaults_the_root_turned_off",
+        ];
         promises(
             "default features on when the root leaves them on or the member sets \
              `default-features = true`",
+            both_directions,
         );
         promises(
             "a member's `default-features = false` cannot turn off defaults the root leaves on",
+            both_directions,
         );
-        // The layout that rule leaves a consumer, pinned by
-        // `a_member_default_features_false_keeps_the_defaults_the_root_turned_off` and
-        // `a_silent_member_keeps_the_defaults_the_root_turned_off`.
+        // The layout that rule leaves a consumer.
         promises(
             "disable them in `[workspace.dependencies]` and leave the member's `default-features` \
              unset or `false`",
+            &[
+                "a_member_default_features_false_keeps_the_defaults_the_root_turned_off",
+                "a_silent_member_keeps_the_defaults_the_root_turned_off",
+            ],
         );
 
         // The three outcomes `WorkspaceOrigin` distinguishes, and the promise that the diagnostic
-        // tells them apart instead of reporting the crate as missing. Pinned respectively by
-        // `an_unresolvable_inheritance_says_where_the_lookup_went` (not found, and declares no such
-        // entry), `a_workspace_root_that_cannot_be_read_is_not_reported_as_missing` and
-        // `a_package_workspace_naming_a_directory_without_a_manifest_is_a_workspace_read_failure`
-        // (cannot be read), and
-        // `a_self_rooted_manifest_names_an_absolute_path_when_an_entry_is_missing`.
-        promises("when the root cannot be found, cannot be read, or declares no such entry");
+        // tells them apart instead of reporting the crate as missing.
+        //
+        // **This clause is not true of the resolver**, and the fixtures below are cited as the ones
+        // that exercise the branches rather than as ones that make the promise good. When no root
+        // is found at all and any ancestor failed to read, the walk reports that read failure
+        // instead — naming a file it never established was a workspace manifest. See
+        // `the_nearest_unreadable_ancestor_is_the_one_the_walk_reports`, which is that case and
+        // asserts the read-failure wording. The explain text is outside this crate module's scope
+        // to correct; `docs/support-matrix.md` row 23 no longer repeats it.
+        let unresolved_outcomes: &[&str] = &[
+            "an_unresolvable_inheritance_says_where_the_lookup_went",
+            "a_workspace_root_that_cannot_be_read_is_not_reported_as_missing",
+            "a_package_workspace_naming_a_directory_without_a_manifest_is_a_workspace_read_failure",
+            "a_self_rooted_manifest_names_an_absolute_path_when_an_entry_is_missing",
+            "the_nearest_unreadable_ancestor_is_the_one_the_walk_reports",
+        ];
+        promises(
+            "when the root cannot be found, cannot be read, or declares no such entry",
+            unresolved_outcomes,
+        );
         promises(
             "the diagnostic says which of those happened rather than reporting the crate as missing",
+            unresolved_outcomes,
         );
 
-        // The three-way root search, each branch pinned by the fixture that exercises it.
+        // The three-way root search, each branch with the fixtures that exercise it. The precedence
+        // between them is pinned behaviourally by
+        // `package_workspace_is_consulted_before_the_ancestor_walk` and
+        // `a_self_declared_workspace_wins_over_package_workspace`; the assertion below pins only
+        // that the text states it in that order.
         let root_search = [
-            // `a_root_package_inherits_its_own_workspace_dependencies`.
-            "the consumer manifest itself when it declares `[workspace]`",
-            // `package_workspace_names_the_workspace_root_directory`, whose root is deliberately
-            // not an ancestor of the member, and `a_relative_manifest_path_still_resolves_the_workspace_root`.
-            "otherwise the root `package.workspace` names",
-            // `a_broken_manifest_below_the_real_root_does_not_stop_the_walk` and
-            // `an_unparseable_ancestor_manifest_is_not_an_error_on_its_own`.
-            "otherwise the nearest ancestor manifest that parses and declares `[workspace]`",
+            (
+                "the consumer manifest itself when it declares `[workspace]`",
+                &[
+                    "a_root_package_inherits_its_own_workspace_dependencies",
+                    "a_self_declared_workspace_wins_over_package_workspace",
+                ][..],
+            ),
+            (
+                "otherwise the root `package.workspace` names",
+                &[
+                    "package_workspace_names_the_workspace_root_directory",
+                    "a_relative_manifest_path_still_resolves_the_workspace_root",
+                    "package_workspace_is_consulted_before_the_ancestor_walk",
+                ][..],
+            ),
+            (
+                "otherwise the nearest ancestor manifest that parses and declares `[workspace]`",
+                &[
+                    "a_broken_manifest_below_the_real_root_does_not_stop_the_walk",
+                    "an_unparseable_ancestor_manifest_is_not_an_error_on_its_own",
+                    "the_walk_climbs_past_an_ancestor_that_parses_and_declares_no_workspace",
+                ][..],
+            ),
         ];
-        for clause in root_search {
-            promises(clause);
+        for (clause, pinned_by) in root_search {
+            promises(clause, pinned_by);
         }
         // Precedence is a claim the three checks above do not make: all three would still pass with
         // the order reversed, and `workspace_root` tries them in exactly this order.
-        let found = root_search.map(|clause| explain.find(clause));
+        let found = root_search.map(|(clause, _)| explain.find(clause));
         assert!(
             found[0] < found[1] && found[1] < found[2],
             "`spargen explain E023` states the root search out of the order `workspace_root` \
              performs it:\n{explain}"
         );
 
-        // What is taken from the root once it is found. Pinned by
-        // `workspace_inheritance_uses_the_workspace_version_and_features`, where the root carries
-        // every version and `serde`'s `derive` while the member declares a bare `workspace = true`;
-        // the member's half of the union is pinned by
-        // `the_manifests_reported_in_issue_71_pass_as_written`, which adds `features = ["stream"]`
-        // to the member's inherited `reqwest`.
-        promises("taking the version from there");
-        promises("the union of both feature lists");
+        // What is taken from the root once it is found: the first fixture's root carries every
+        // version and `serde`'s `derive` while its member declares a bare `workspace = true`, and
+        // the second adds `features = ["stream"]` to the member's inherited `reqwest`, which is the
+        // member's half of the union.
+        let from_the_root: &[&str] = &[
+            "workspace_inheritance_uses_the_workspace_version_and_features",
+            "the_manifests_reported_in_issue_71_pass_as_written",
+        ];
+        promises("taking the version from there", from_the_root);
+        promises("the union of both feature lists", from_the_root);
 
-        // The one field that stays with the member, pinned by
-        // `an_inherited_optional_dependency_in_a_target_table_resolves` and
-        // `workspace_inherited_tokio_under_an_alternative_spelling_resolves`.
-        promises("while `optional` is read from the member");
+        // The one field that stays with the member, in both directions: required-optional, and
+        // forbidden-optional on a crate generated code names unconditionally.
+        promises(
+            "while `optional` is read from the member",
+            &[
+                "an_inherited_optional_dependency_in_a_target_table_resolves",
+                "workspace_inherited_tokio_under_an_alternative_spelling_resolves",
+                "an_inherited_member_cannot_make_an_unconditional_crate_optional",
+            ],
+        );
 
         // The clause that is the answer to #71 itself: an inherited declaration is accepted rather
-        // than reported as missing. Pinned by
-        // `workspace_inheritance_uses_the_workspace_version_and_features` and
-        // `the_manifests_reported_in_issue_71_pass_as_written`, both of which assert the audit
-        // emits nothing at all for five crates the member only inherits.
-        promises("Inheriting a required crate therefore satisfies the audit");
+        // than reported as missing. Both fixtures assert the audit emits nothing at all for five
+        // crates the member only inherits.
+        promises(
+            "Inheriting a required crate therefore satisfies the audit",
+            from_the_root,
+        );
 
         // And the body as a whole, which is the only assertion here that constrains what the text
         // does *not* say. Every check above is a substring, so without this one a sentence may be
