@@ -2486,10 +2486,13 @@ serde_json.workspace = true
             // `[workspace.dependencies]` appears twice in this body, and that is how the opening
             // clause below went unasserted while reading as though it were covered.
             let occurrences = explain.matches(clause).count();
-            assert_eq!(
-                occurrences, 1,
-                "`spargen explain E023` says {clause:?} {occurrences} times, expected exactly \
-                 once:\n{explain}"
+            // The body is deliberately not printed here, for the same reason the equality
+            // assertion below avoids `assert_eq!`: handing a maintainer the new text beside a
+            // failure is handing them the paste that makes the failure go away. Naming the clause
+            // and its count is enough to find it.
+            assert!(
+                occurrences == 1,
+                "`spargen explain E023` says {clause:?} {occurrences} times, expected exactly once"
             );
             assert!(!pinned_by.is_empty(), "no fixture cited for {clause:?}");
             for fixture in pinned_by {
@@ -2611,7 +2614,7 @@ serde_json.workspace = true
         assert!(
             found[0] < found[1] && found[1] < found[2],
             "`spargen explain E023` states the root search out of the order `workspace_root` \
-             performs it:\n{explain}"
+             performs it; the three branches appear at {found:?}"
         );
 
         // What is taken from the root once it is found: the first fixture's root carries every
