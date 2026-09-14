@@ -426,15 +426,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let Some(component) = self.document.components.schemas.get(name) else {
             let reference = format!("#/components/schemas/{name}");
             // A raw `/` here is always a further pointer segment, never part of a component name: a
-            // literal slash in a key is spelled `~1`. So this fragment addresses a *subschema* and
-            // the component it starts from may well be declared — saying "unresolved" would be
-            // false. spargen matches a same-file component reference by name only; the same pointer
-            // written against a relative file goes through the resolver, which does walk it.
-            if name.contains('/') {
+            // literal slash in a key is spelled `~1`. So the fragment addresses a *subschema* — but
+            // only say so when the segment it starts from is actually declared. Otherwise the fault
+            // is the missing component, not the fragment's shape, and claiming otherwise would
+            // assert by implication that the root exists and send the reader to promote a subschema
+            // of something that does not. spargen matches a same-file component reference by name
+            // only; the same pointer written against a relative file goes through the resolver,
+            // which does walk it.
+            let subschema_of = name
+                .split_once('/')
+                .map(|(root, _)| root)
+                .filter(|root| self.document.components.schemas.contains_key(*root));
+            if let Some(root) = subschema_of {
                 Diagnostic::error(Code::UnresolvedRef, at.clone())
                     .message(format!(
-                        "schema reference `{reference}` addresses a subschema rather than a \
-                         top-level component name"
+                        "schema reference `{reference}` addresses a subschema of component \
+                         `{root}` rather than a top-level component name"
                     ))
                     .remedy(
                         "declare the subschema as its own entry under `components/schemas` and \
