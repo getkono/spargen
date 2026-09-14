@@ -1000,3 +1000,64 @@ paths:
         );
     }
 }
+
+/// The round-2 recursive-back-edge rejection reports at a *property* pointer inside the component
+/// being lowered, not at a component root, which is a carve shape the fixture above does not
+/// exercise. The pointer stays load-bearing for the same reason: `compat::carve_rules` maps it to
+/// the smallest omittable construct, so a rejection whose provenance drifted to the document root
+/// would yield no rule and turn a carvable rejection into an un-carvable residual that ends the run
+/// `Rejected`.
+const RECURSIVE_REF_SIBLING_REJECTION: &str = r##"
+openapi: 3.1.0
+info: { title: Recursive, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string } } }
+  /uses-node:
+    get:
+      operationId: getUsesNode
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        next:
+          $ref: "#/components/schemas/Node"
+          type: object
+          properties: { x: { type: string } }
+"##;
+
+#[test]
+fn carve_removes_a_recursive_ref_whose_siblings_bear_a_shape() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", RECURSIVE_REF_SIBLING_REJECTION);
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        !report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::AllOfIrreconcilable),
+        "no residual E013 leaks, so the pointer resolved to an omittable construct: {report:#?}"
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        generated.contains("fn get_good"),
+        "the healthy op is generated: {generated}"
+    );
+}
