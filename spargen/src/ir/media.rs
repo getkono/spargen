@@ -204,24 +204,19 @@ pub(crate) struct Responses {
 }
 
 impl Responses {
-    /// The success shape of the operation, built from its documented *success* statuses. Shapes
-    /// count entries that carry a *body*, not statuses: one bodied success yields plain `T` — the
-    /// common `T`-plus-`204` shape stays `Plain`, its bodyless sibling unmodeled — and two or more
-    /// yield a per-operation success enum, sorted into decode precedence (exact code ascending,
-    /// then range ascending), that also carries each documented bodyless success status as a
-    /// payload-free unit variant.
+    /// The success shape of the operation. Chosen by counting the entries that carry a *body*, not
+    /// the statuses documented: one bodied success yields plain `T` — the common `T`-plus-`204`
+    /// shape stays `Plain`, its bodyless sibling unmodeled — and two or more yield a per-operation
+    /// success enum, sorted into decode precedence (exact code ascending, then range ascending),
+    /// that also carries each documented bodyless success status as a payload-free unit variant.
     ///
-    /// `default` never joins those entries. It is the success source only when no explicit status
-    /// is declared at all, and it is offered to the error shape as the `Range(0)` sentinel whenever
-    /// it is declared — subject there to the same body count (see [`Self::error`]).
+    /// The entries are the documented success statuses; `default` is never among them. It is the
+    /// success source only when no explicit status is declared at all — the early return that
+    /// bypasses the count above — and is offered to the error shape as the `Range(0)` sentinel
+    /// whenever it is declared, subject there to the same body count (see [`Self::error`]).
     ///
-    /// The shape does not bound what the generated client accepts: codegen enters the success
-    /// branch on the raw transport status alone, so an undocumented 2xx is not uniformly rejected,
-    /// and a streaming success overrides the shape entirely (see [`Self::stream_success`]). One
-    /// consequence is worth naming here, because the shape above invites it: a `Plain` operation
-    /// decodes a documented bodyless `204` as `T` like any other 2xx, which is `Error::Decode`
-    /// under the JSON and XML codecs but a silent empty value under the bytes codec and for a
-    /// `text/plain` `String`.
+    /// What codegen makes of the shape — status dispatch, codec selection, and the streaming
+    /// override that [`Self::stream_success`] owns — is deliberately not described here.
     pub(crate) fn success(&self) -> SuccessShape {
         // A default with no explicit status entries is the operation's single success body.
         if self.by_status.is_empty() {
