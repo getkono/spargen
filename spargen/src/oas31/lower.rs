@@ -1159,12 +1159,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
-            // A variant that is a back-edge to the union currently being lowered *is* the whole
-            // union, so it constrains nothing and cannot be decoded: the emitted `Deserialize`
-            // would open by re-entering itself on the same value, with no base case, and recurse
-            // until the stack is exhausted. It compiles, so nothing downstream can catch it —
-            // refusing here is the only place it can be caught.
-            if self.is_in_progress_root(ty.id) {
+            // A variant that is a back-edge to *this* union — the member's type is the very
+            // reservation this schema will occupy — is the whole union, so it constrains nothing and
+            // cannot be decoded: the emitted `Deserialize` opens by re-entering itself on the same
+            // value, with no base case, and recurses until the stack is exhausted. It compiles, so
+            // nothing downstream can catch it; refusing here is the only place it can be caught.
+            //
+            // The test is against *this* schema's own reservation, not against any open one. Asking
+            // `is_in_progress_root(ty.id)` answers the strictly weaker "is the member any open
+            // reservation", which is true of every ordinary recursive schema whose union sits in a
+            // property: `Node.child: {oneOf: [{$ref: Node}, …]}` has a member pointing at `Node`'s
+            // reservation while the union being built is `Nodechild`. That decodes perfectly well —
+            // the member is a *different* type — and rejecting it refuses the most common recursive
+            // construct there is, which `docs/support-matrix.md` lists as supported.
+            if self.reservation_at(&schema.provenance) == Some(ty.id) {
                 return self.reject_union(
                     schema,
                     "a union member is a direct recursive `$ref` to the union being lowered, so \
@@ -1446,10 +1454,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .map(|variant| self.type_specificity(variant.ty, visiting))
                 .min()
                 .unwrap_or(0),
-            // A reservation has no shape to rank, and a union that contains one is rejected before
-            // ranking is reached (`reject_union_back_edge`). Ranked alongside `Any` so a future
-            // caller that arrives here without that rejection degrades to "least specific" rather
-            // than to a confident wrong order.
+            // A reservation has no body yet, so there is nothing to rank: least specific, alongside
+            // `Any` and a missing definition.
+            //
+            // This arm is **live**, not defensive. An earlier comment here claimed a union holding a
+            // reservation was rejected before ranking, and named a function that has never existed.
+            // Neither half was true: `lower_union`'s guard tests the *direct* member's id, while this
+            // function recurses through `Array` and `Union`, so an array-wrapped back edge —
+            // `anyOf: [{type: array, items: {$ref: self}}, …]` — reaches here on a document that
+            // generates cleanly, and the value returned is emitted into the client as the trial-match
+            // order of an `anyOf`. Ranking it least specific is the answer that matches what is known
+            // about it, which is nothing; it is pinned by
+            // `an_array_wrapped_union_back_edge_ranks_least_specific`.
             Some(TypeKind::Reserved) => 0,
             Some(TypeKind::Any) | None => 0,
         };
@@ -4082,10 +4098,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// placeholder [`TypeGraph::reserve`] inserted rather than the schema's own shape.
     ///
     /// This matters because [`Self::push_ref_member`] classifies an `allOf` member by reading
-    /// `graph.get(id).kind`, and a placeholder's kind is `TypeKind::Any` — so reading one answers
-    /// "scalar" for a type that is not a scalar, and the member silently becomes
-    /// `serde_json::Value`. The three in-progress maps are exactly the set of such ids, and the only
+    /// `graph.get(id).kind`. That kind is now [`TypeKind::Reserved`] — it was `TypeKind::Any` until
+    /// the dedicated variant landed, which is why reading one answered "scalar" for a type that is
+    /// not a scalar and the member silently became `serde_json::Value`. `push_ref_member` is still
+    /// shaped that way: its `_` arm absorbs `Reserved` without a compile error, so the guard lives
+    /// here in its callers. The three in-progress maps are exactly the set of such ids, and the only
     /// safe thing to do with one is refuse to read it.
+    ///
+    /// This asks "is `id` **any** open reservation". A caller that needs "is `id` the reservation
+    /// belonging to the schema at *this* provenance" wants [`Self::reservation_at`] instead; the two
+    /// coincide only when the construct being lowered is the component's whole body, and confusing
+    /// them rejects every recursive schema whose reference sits inside a property.
     fn is_in_progress_root(&self, id: TypeId) -> bool {
         self.in_progress
             .values()
@@ -4098,21 +4121,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// lowered. The inlining arm of [`Self::gather_member`] has no shared `Ty` to test against
     /// [`Self::is_in_progress_root`], so it tests the resolved target's identity instead.
     fn resolved_target_in_progress(&self, provenance: &Provenance) -> bool {
-        let Some(key) = resolved_identity(provenance) else {
-            return false;
-        };
-        if self.resolved_in_progress.contains_key(&key) {
-            return true;
+        self.reservation_at(provenance).is_some()
+    }
+
+    /// The reserved id of the schema *at* `provenance`, when that schema is one whose body is
+    /// currently being lowered.
+    ///
+    /// This answers a strictly narrower question than [`Self::is_in_progress_root`], and the
+    /// difference matters. `is_in_progress_root` answers "is this id **any** open reservation";
+    /// this answers "is the schema written **here** the one that reservation belongs to". They
+    /// coincide only when the construct being lowered *is* the component's whole body, which is why
+    /// a guard that needs the second and asks the first over-rejects every case where a recursive
+    /// reference is nested inside a property rather than being the component itself.
+    fn reservation_at(&self, provenance: &Provenance) -> Option<TypeId> {
+        if let Some(key) = resolved_identity(provenance) {
+            if let Some(&(id, _)) = self.resolved_in_progress.get(&key) {
+                return Some(id);
+            }
         }
         // A target inside the root document's component map has its identity there instead —
         // `ensure_resolved` routes such a reference back to `ensure_component` — so consult that
         // map too, or a root component addressed by file reference escapes the check.
-        provenance.span.is_some_and(|span| span.file == ROOT_FILE)
-            && provenance
-                .pointer
-                .as_str()
-                .strip_prefix("/components/schemas/")
-                .is_some_and(|name| self.in_progress.contains_key(name))
+        if !provenance.span.is_some_and(|span| span.file == ROOT_FILE) {
+            return None;
+        }
+        provenance
+            .pointer
+            .as_str()
+            .strip_prefix("/components/schemas/")
+            .and_then(|name| self.in_progress.get(name))
+            .map(|&(id, _)| id)
     }
 
     /// Read an untyped body on a binary media type as raw octets.

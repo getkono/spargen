@@ -1992,6 +1992,243 @@ components:
     assert!(!code.contains("= serde_json::Value;"), "{code}");
 }
 
+/// The archetypal recursive schema: a tree whose `child` is a `oneOf` of itself and something else.
+///
+/// This is the most common recursive construct in real descriptions, `docs/support-matrix.md` lists
+/// recursive `$ref` cycles as supported, and it generates on `2aa5ada`. Round 6's union guard
+/// rejected it, because it asked `is_in_progress_root(ty.id)` — "is the member **any** open
+/// reservation" — when the question it needed was "is the member **this union's own** reservation".
+/// Those coincide only when the union *is* the component's whole body, which is D8's shape and not
+/// this one: here the union is `Nodechild` and the member is `Node`, a different type, so the
+/// generated decoder calls into another impl and terminates on any finite document.
+///
+/// The rejection's message was also false about the document — it said the member was the union
+/// itself when the two are different types — and the fault had two properties worth stating: it
+/// depended on the order `components.schemas` keys were written in, because root components are
+/// pre-lowered in key order, and a description that generated in one file stopped generating when
+/// split, because sub-file components are never pre-lowered.
+///
+/// Every row below was measured against a build of the merge base. The D8 rows are the ones that
+/// must still reject; everything else must still generate.
+#[test]
+fn a_union_member_that_is_a_different_recursive_type_still_generates() {
+    // The union sits in a property, so it is not the component's own reservation.
+    let archetype = |applicator: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Node' }} }}
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: {{ type: string }}
+        child:
+          {applicator}:
+            - {{ $ref: '#/components/schemas/Node' }}
+            - {{ type: string }}
+"##
+        )
+    };
+
+    for applicator in ["oneOf", "anyOf"] {
+        let spec = archetype(applicator);
+        let (generated, code) = generate_with_code(&spec);
+        let checked = check(&spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{applicator}/{entry}: the member is `Node` and the union is `Nodechild` — two \
+                 different types, so the decoder terminates: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::NonDisjointUnion),
+                "{applicator}/{entry}: {report:#?}"
+            );
+        }
+        // The recursion is closed by boxing, as the matrix promises, rather than refused.
+        assert!(code.contains("Box<Node>"), "{applicator}: {code}");
+    }
+
+    // Nested one level deeper — the union inside an array's items — and mutual recursion in both
+    // key orders, because the guard's fault was sensitive to pre-lowering order.
+    let nested = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        kids:
+          type: array
+          items:
+            oneOf:
+              - { $ref: '#/components/schemas/Node' }
+              - { type: string }
+"##;
+    assert_ne!(generate(nested).outcome(), Outcome::Rejected, "{nested}");
+
+    let mutual = |first: &str, second: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/{first}' }} }}
+components:
+  schemas:
+    {first}:
+      type: object
+      required: [one]
+      properties:
+        one: {{ type: string }}
+        via: {{ oneOf: [{{ $ref: '#/components/schemas/{second}' }}, {{ type: string }}] }}
+    {second}:
+      type: object
+      required: [two]
+      properties:
+        two: {{ type: string }}
+        via: {{ oneOf: [{{ $ref: '#/components/schemas/{first}' }}, {{ type: string }}] }}
+"##
+        )
+    };
+    // Both key orders: the guard's fault made acceptance depend on which component was pre-lowered
+    // first, so one order passed and the other did not.
+    for (first, second) in [("A", "B"), ("B", "A")] {
+        let spec = mutual(first, second);
+        assert_ne!(
+            generate(&spec).outcome(),
+            Outcome::Rejected,
+            "{first} before {second}: {spec}"
+        );
+    }
+
+    // And the same archetype split across files, which never pre-lowers its components at all.
+    let (generated, checked, _) = split(
+        "./lib.yaml#/components/schemas/Node",
+        r##"
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        child:
+          oneOf:
+            - { $ref: '#/components/schemas/Node' }
+            - { type: string }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "split/{entry}: {report:#?}"
+        );
+    }
+}
+
+/// `type_specificity`'s reservation arm is **live**, and its value is emitted into the client.
+///
+/// The arm carried a comment justifying itself by saying a union holding a reservation is rejected
+/// before ranking is reached, naming a function `reject_union_back_edge` that **has never existed
+/// anywhere in the repository**. Neither half was true. `lower_union`'s guard tests the *direct*
+/// member's id, while `type_specificity` recurses through `Array` and `Union` — so an array-wrapped
+/// back edge walks straight past it on a document that generates **Clean, zero diagnostics**.
+///
+/// What the arm returns is not inert: it becomes the trial-match priority of an `anyOf` branch in
+/// the generated `Deserialize`, which is a runtime dispatch decision in shipped code. Ranking a
+/// reservation least specific keeps the concrete branch ahead of it; mutating the arm to `4_000`
+/// raises the back-edge branch from 800 to 1200, past the string branch's 850, and **inverts which
+/// variant wins** — a change that survived the entire workspace suite when nothing pinned it.
+#[test]
+fn an_array_wrapped_union_back_edge_ranks_least_specific() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Wrap' } }
+components:
+  schemas:
+    Wrap:
+      anyOf:
+        - type: array
+          items: { $ref: '#/components/schemas/Wrap' }
+        - type: array
+          items: { type: string }
+"##;
+    let (report, code) = generate_with_code(spec);
+    // The document is accepted, which is what makes this arm reachable rather than defensive.
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+
+    // Pull each variant's emitted trial priority out of the generated `Deserialize`.
+    let priority = |variant: &str| -> u32 {
+        let needle = format!("Wrap::{variant}(inner)");
+        code.lines()
+            .find(|line| line.contains(&needle) && line.contains("u32,"))
+            .and_then(|line| {
+                let start = line.find("Some((")? + "Some((".len();
+                let end = line[start..].find("u32")? + start;
+                line[start..end].parse().ok()
+            })
+            .unwrap_or_else(|| panic!("no emitted priority for {variant}: {code}"))
+    };
+    let back_edge = priority("WrapVariant0");
+    let concrete = priority("WrapVariant1");
+
+    // The reservation contributes nothing to its array's specificity, so the branch whose items are
+    // a known type must outrank the branch whose items are not yet lowered. Raising the arm to
+    // `4_000` makes `back_edge` 1200 against `concrete` 850 and reverses this.
+    assert!(
+        back_edge < concrete,
+        "an array of a not-yet-lowered type must not outrank an array of a known one: \
+         back-edge {back_edge}, concrete {concrete}"
+    );
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
