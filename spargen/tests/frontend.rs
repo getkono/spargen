@@ -411,6 +411,81 @@ components:
     }
 }
 
+/// A same-file `#/components/schemas/…` fragment that addresses a *subschema* rather than a
+/// top-level component name. spargen matches these by name only, so this is rejected — but the
+/// component it starts from is declared, and the identical pointer written against a relative file
+/// resolves through the resolver, so the message must not claim the target does not exist.
+///
+/// This pins a deliberate decision that nothing else constrains: the whole test tree contains no
+/// other `$ref` with a `/` inside the component name, so routing these to the resolver instead
+/// would flip a user-visible verdict with no test noticing.
+#[test]
+fn a_same_file_ref_into_a_component_subschema_is_rejected_as_not_a_component_name() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope/properties/payload' }
+components:
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        payload:
+          type: object
+          properties: { id: { type: string } }
+          required: [id]
+"##;
+    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let subschema: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .collect();
+        assert!(!subschema.is_empty(), "{entry}: {report:#?}");
+        // `Envelope` IS declared, so the diagnostic must say the fragment is not a component name
+        // rather than that the target could not be found.
+        assert!(
+            subschema
+                .iter()
+                .any(|d| d.message.contains("addresses a subschema")),
+            "{entry}: the message must not claim the target is missing — `Envelope` is declared: \
+             {report:#?}"
+        );
+        assert!(
+            !subschema.iter().any(|d| d.message.contains("unresolved")),
+            "{entry}: {report:#?}"
+        );
+    }
+
+    // Control: the plain undeclared-name case keeps the "unresolved" wording, so the branch above
+    // is a genuine split rather than a blanket rewording.
+    let plain = spec.replace(
+        "#/components/schemas/Envelope/properties/payload",
+        "#/components/schemas/Missing",
+    );
+    let report = generate(&plain);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef
+                && d.message.contains("unresolved schema reference")),
+        "{report:#?}"
+    );
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();
