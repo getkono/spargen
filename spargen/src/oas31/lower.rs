@@ -711,6 +711,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`Self::resolved_alias_stack`], exactly as `remote_alias_stack` guards the remote one. Only
     /// genuinely new targets descend, so the depth counter still bounds a real chain (`E014`) and
     /// nothing repeated can accumulate against it.
+    ///
+    /// **Semver.** spargen's semver surface is the public API of *generated output*, and this
+    /// changes it for any description that reaches a target through more than one reference. Types
+    /// that existed only because one schema was lowered once per use site are gone, and a type is
+    /// now named for the schema it resolves from rather than for whichever site reached it first.
+    /// `surface`'s own classifier calls a removed public item `ChangeKind::TypeRemoved`, which its
+    /// impact policy grades **Major**, so regenerating against an unchanged description can stop
+    /// compiling a consumer that named one of the removed types. That is the correct outcome — the
+    /// removed types were artefacts of lowering the same schema repeatedly — but it is a breaking
+    /// change to the generated API and is released as one.
     fn ensure_resolved(&mut self, reference: &str, at: &Provenance, hint: &str) -> Option<Ty> {
         let resolved = self.resolver.resolve(reference, at, self.diags).ok()?;
         let schema = resolved.schema.into_owned();
