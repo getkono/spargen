@@ -2426,30 +2426,59 @@ serde_json.workspace = true
     }
 
     /// `spargen explain E023` prints `Code::RuntimeDependencyContract`'s explain body verbatim, and
-    /// that body no longer describes the audit in a paragraph: it specifies workspace-dependency
-    /// inheritance as an algorithm — where the root is searched for and in what order, what is
-    /// taken from it, what stays with the member, that inheriting satisfies the audit, and what a
-    /// failure to resolve reports. Nothing else holds that text to anything —
+    /// that body specifies workspace-dependency inheritance as an algorithm rather than describing
+    /// the audit in a paragraph. Nothing else holds it to anything —
     /// `every_code_has_title_and_explain_text` asserts only that it is non-empty, and
-    /// `docs/errors.md` carries titles — so any clause could be deleted, negated, or made factually
-    /// wrong with the whole suite green.
+    /// `docs/errors.md` carries titles.
     ///
-    /// Every clause that promises behaviour is pinned below against the fixture in this module that
-    /// makes it true, named in the comment beside it. The clauses deliberately left unpinned are
-    /// the ones that promise nothing checkable here: the opening statement that the generated module
-    /// is freestanding, the advice to use the tested floors, and the closing note that Cargo
-    /// resolves and rustc verifies. Whether every code's explain body should be held this way is a
-    /// repository-wide question tracked separately; this pins the one whose text specifies what
-    /// `workspace_root` and `check_declaration` do.
+    /// The rule, rather than a list: **every sentence of that body which states what the resolver
+    /// does is asserted here, against the fixture in this module that makes it true, named in the
+    /// comment beside it.** Sentences that give advice, describe how the crate is built, or restate
+    /// what Cargo and rustc do afterwards are not asserted, because nothing in this module observes
+    /// them. No count of the body's propositions is offered: three counts have been produced for
+    /// this text and each was wrong.
+    ///
+    /// What this can and cannot catch. Each clause must occur **exactly once**, so a clause
+    /// **deleted**, **negated in place**, or — for the root search — **reordered** fails here; the
+    /// exactly-once rule is what stops an assertion silently matching a second occurrence of its
+    /// text and pinning the wrong sentence. A **rewrite** that keeps every asserted substring, and
+    /// their order, while changing the meaning of the prose around them does **not** fail here. A
+    /// substring test cannot foreclose a semantic rewrite; only holding the prose to the code
+    /// could, and whether `Code::explain` bodies should be held that way is a repository-wide
+    /// question tracked separately.
     #[test]
     fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
         let explain = Code::RuntimeDependencyContract.explain();
         let promises = |clause: &str| {
-            assert!(
-                explain.contains(clause),
-                "`spargen explain E023` no longer says {clause:?}:\n{explain}"
+            // Exactly once, not merely present: an assertion whose text also occurs earlier or
+            // later matches the wrong sentence and leaves the one it was written for unpinned.
+            // `[workspace.dependencies]` appears twice in this body, and that is how the opening
+            // clause below went unasserted while reading as though it were covered.
+            let occurrences = explain.matches(clause).count();
+            assert_eq!(
+                occurrences, 1,
+                "`spargen explain E023` says {clause:?} {occurrences} times, expected exactly \
+                 once:\n{explain}"
             );
         };
+
+        // How the requirement set is arrived at, and where it is enforced. Pinned by
+        // `conditional_dependencies_and_features_are_required_only_when_used` and
+        // `the_time_requirement_never_asks_for_serde` for exactness, and by
+        // `macro_manifest_audit_derives_only_capabilities_referenced_by_the_api` in `tests/e2e.rs`
+        // for the proc-macro half of where it runs.
+        promises(
+            "Spargen derives the exact requirement set after lowering and audits Cargo.toml during \
+             build.rs and proc-macro generation",
+        );
+
+        // The sentence every clause below qualifies, and the one this test exists to pin. Pinned by
+        // `workspace_inheritance_uses_the_workspace_version_and_features`, where a member declaring
+        // nothing but `workspace = true` resolves against the root's table.
+        promises(
+            "A dependency declared `workspace = true` is followed to the workspace root's \
+             `[workspace.dependencies]`",
+        );
 
         // Which side decides default features, in both directions. Asserting the rule rather than
         // the bare words `default-features` is what makes a negation of it fail here. Pinned by
