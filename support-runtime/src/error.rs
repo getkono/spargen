@@ -16,8 +16,10 @@ use crate::{AuthError, ResponseValue};
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error<E> {
-    /// #1 — the call failed before any response was produced. **Not every cause here is
-    /// pre-send**, so do not read this class as proof that nothing reached the server.
+    /// #1 — a request could not be built, or failed inside the send before that request produced
+    /// a response. Read it as a statement about *one* request, not about the operation: it is
+    /// neither proof that nothing reached the server, nor proof that no response was already
+    /// produced and delivered to the caller.
     ///
     /// Pre-send, raised while the request is still being assembled — nothing was transmitted:
     /// no registered credential satisfies the operation's security requirement, a registered token
@@ -27,8 +29,19 @@ pub enum Error<E> {
     /// from inside the send itself, so the request may already have been transmitted and the
     /// server may already have acted on it. Retrying it is not safe for a non-idempotent call.
     ///
-    /// [`RequestError`] types the two credential causes; every other cause, including reqwest's
-    /// own request-error class, arrives as [`RequestError::Other`].
+    /// After a response was accepted: when the API has streaming (sequential) responses, the
+    /// generated client also embeds `EventStream`, which raises this class when the stored request
+    /// cannot be cloned for an automatic reconnect — from `with_reconnect`, and from `poll_next`
+    /// once the reconnect wait has elapsed, which is mid-stream, after frames have already been
+    /// yielded to the caller. `StreamError`, that module's alias for this same enum, documents
+    /// itself as the failure yielded by a streaming response *after its initial HTTP response was
+    /// accepted*; the two sentences describe one case. Re-driving such an operation from the start
+    /// is not a safe recovery — it re-delivers events the caller has already consumed and acted
+    /// on.
+    ///
+    /// [`RequestError`] types the two credential causes; every other cause — reqwest's own
+    /// request-error class and both reconnect-clone failures included — arrives as
+    /// [`RequestError::Other`].
     RequestConstruction(RequestError),
     /// #2 — DNS failure, connection refused/reset, TLS handshake or certificate error.
     Transport(TransportError),
@@ -320,6 +333,13 @@ pub enum RequestError {
     /// from inside the send, so the request may already have been transmitted. This variant is
     /// therefore the one place in taxonomy #1 where "the request was never sent" does not hold,
     /// and a caller that retries on it must treat the call as possibly-already-applied.
+    ///
+    /// After a response was accepted: when the API has streaming responses, the embedded
+    /// `EventStream`'s two reconnect-clone failures land here as well. Nothing was transmitted for
+    /// the reconnect itself, but the stream's initial response was accepted and frames may already
+    /// have been yielded, so the possibly-already-applied reading above is not the one that
+    /// describes them — re-driving the operation from the start re-delivers consumed events
+    /// instead. See [`Error::RequestConstruction`] for the class.
     Other(RequestCause),
 }
 
