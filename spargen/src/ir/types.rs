@@ -30,12 +30,20 @@ impl TypeGraph {
     /// Reserving a component's root id *before* its body is lowered lets a `$ref` back-edge
     /// discovered mid-body box a reference to the (not-yet-filled) root, breaking the cycle so a
     /// recursive schema generates a finite Rust type instead of being rejected. Every reserved id
-    /// must be filled before it can be emitted; the placeholder is a valid (if meaningless) def so
-    /// a leak on an already-failing (rejected) lowering is harmless rather than a sentinel.
+    /// must be filled before it can be emitted.
+    ///
+    /// The placeholder kind is [`TypeKind::Reserved`] and **not** a legitimate kind. It used to be
+    /// `TypeKind::Any`, which every `match` already handled, so a site that read a reservation got a
+    /// plausible answer — "untyped value" — instead of a compile error. Four separate sites did
+    /// exactly that over three review rounds, each silently: an `allOf` member became a scalar, a
+    /// `$ref` applicator with siblings was discarded, an octet use retyped a shared component, and a
+    /// `oneOf` variant became the union itself. A dedicated variant makes each of those a compile
+    /// error wherever the `match` is exhaustive, so that part of the audit is the compiler's rather
+    /// than a reviewer's — see [`TypeKind::Reserved`] for what it does not cover.
     pub(crate) fn reserve(&mut self) -> TypeId {
         self.insert(TypeDef {
             name_hint: String::new(),
-            kind: TypeKind::Any,
+            kind: TypeKind::Reserved,
             docs: Docs::default(),
             provenance: Provenance::new(JsonPointer::root(), None),
         })
@@ -197,6 +205,39 @@ pub(crate) enum TypeKind {
     Union(Union),
     /// An untyped value (`{}` / `true` schema). Faithful representation of an untyped spec node.
     Any,
+    /// A **reservation**: an id handed out by [`TypeGraph::reserve`] whose body has not been lowered
+    /// yet, so nothing is known about its shape.
+    ///
+    /// This is not a type. It exists so that a cycle-closing `$ref` can box a reference to a
+    /// component while that component is still being lowered, and it is replaced by
+    /// [`TypeGraph::fill`] as soon as the body finishes. No reservation survives a successful
+    /// lowering — `Api::check_invariants` proves it — so no consumer of a finished [`TypeGraph`]
+    /// ever observes one.
+    ///
+    /// It is a variant of its own rather than a reuse of [`Self::Any`] deliberately. Reading a
+    /// reservation as `Any` is a silent wrong answer, and every `match` in the crate already handled
+    /// `Any`; four sites over three review rounds read one and produced plausible, wrong output with
+    /// no diagnostic. Every **exhaustive** `match` on [`TypeKind`] must now state what it does with a
+    /// back edge, and the compiler will not let a new one omit it.
+    ///
+    /// **The guarantee is narrower than it first appears, and the difference is worth stating.** A
+    /// dedicated variant turns a read site into a compile error only where the `match` was already
+    /// exhaustive. Seven sites are declared that way; roughly thirteen others absorb this variant
+    /// through a catch-all arm and got no error — including [`TypeGraph`]'s own `push_ref_member` in
+    /// `oas31::lower`, which is the historical origin of the whole defect class and is still shaped
+    /// exactly the same way. Its callers guard it, and the guards live in the *callers*, so a new
+    /// caller gets no compile error either. Converting those arms is a change across five subsystems
+    /// and is filed rather than rushed; until then, the compile-time audit covers the minority of
+    /// read sites.
+    ///
+    /// **Semver.** Making the placeholder unreadable did not by itself change any generated output —
+    /// no snapshot moved when this variant landed. Two of the sites it exposed then chose to refuse
+    /// rather than guess, and those two *are* a breaking change to generated output: a `$ref`
+    /// carrying shape siblings whose target is still being lowered, and a `oneOf` member that is the
+    /// union being lowered, both previously generated (untyped and undecodable respectively) and are
+    /// now `E013` and `E007`. Neither shape contains an `allOf` keyword, so neither is covered by the
+    /// scope stated on the earlier footers; both are named on this commit's.
+    Reserved,
 }
 
 /// A `oneOf`/`anyOf` union lowered to a Rust enum. Never `serde(untagged)` and never degraded to

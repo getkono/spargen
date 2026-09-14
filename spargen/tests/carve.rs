@@ -313,6 +313,27 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
             .any(|d| d.message.contains("get /dynamic")),
         "carved operation reported: {report:#?}"
     );
+    // The cascade this spec is built for: omitting `Bad` leaves `/uses-bad` referencing a component
+    // that is no longer declared, which the next round rejects as `E004` against that operation's
+    // own pointer, so the round after carves the operation too. Without that pointer the rejection
+    // would be un-carvable residual and the whole run would end `Rejected`. Assert the code as well
+    // as the message: this must be the carve reporting what it removed, not some other diagnostic
+    // that happens to name the operation.
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::OmittedConstruct && d.message.contains("get /uses-bad")),
+        "the operation referencing the carved component cascaded: {report:#?}"
+    );
+    // And the E004 that drove the cascade was itself consumed, not left as residual.
+    assert!(
+        !report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef),
+        "the cascaded unresolved-ref rejection was carved: {report:#?}"
+    );
     assert!(
         !report
             .diagnostics()
@@ -336,6 +357,10 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
     assert!(
         !generated.contains("fn get_dynamic"),
         "the dynamic-ref op is absent"
+    );
+    assert!(
+        !generated.contains("fn get_uses_bad"),
+        "the op that referenced the carved component is absent: {generated}"
     );
 }
 
@@ -555,6 +580,84 @@ components:
     ));
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
     assert_eq!(w009_count(&report), 2, "one W009 per removal: {report:#?}");
+}
+
+/// A component whose `$ref` names an undeclared target rejects the whole document even when no
+/// operation reaches it, because `lower` eagerly lowers every declared component and every one is
+/// emitted as a type. That is deliberate — a dangling reference is a document error whether or not
+/// anything uses it — but it means a consumer can be blocked by a component they never call, so the
+/// escape has to work. Both halves are pinned here: that it rejects, and that omitting the dangling
+/// component recovers generation.
+#[test]
+fn a_dangling_ref_in_an_unreferenced_component_rejects_and_omitting_it_recovers() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Item" }
+components:
+  schemas:
+    Item: { type: object, properties: { id: { type: string } } }
+    Orphan: { $ref: "#/components/schemas/Missing" }
+"##,
+    );
+    let out = temp.path().join("client.rs");
+
+    // Nothing references `Orphan`, and it still rejects.
+    let report = spargen::generate(&config(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef
+                && d.pointer.as_str() == "/components/schemas/Orphan"),
+        "reported against the dangling component itself: {report:#?}"
+    );
+
+    // Omitting it is the documented escape, and it generates the rest.
+    let report = spargen::generate(&omitting(
+        &spec,
+        &out,
+        spargen::omit! { components { schemas { "Orphan"; } } },
+    ));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        !report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef),
+        "the omitted component takes its dangling ref with it: {report:#?}"
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        generated.contains("fn get_good"),
+        "the healthy operation survives: {generated}"
+    );
+
+    // Auto-carve reaches the same place without the consumer naming the component.
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::OmittedConstruct && d.message.contains("Orphan")),
+        "carve names what it removed: {report:#?}"
+    );
 }
 
 #[test]
