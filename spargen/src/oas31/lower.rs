@@ -634,13 +634,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         if let Some(reference) = &schema.reference {
-            // Whether this `$ref` closes a cycle. A target still being lowered resolves to its
-            // RESERVED id, whose def is the `TypeKind::Any` placeholder `TypeGraph::reserve` put
-            // there — its real shape is not known until its own body finishes. That matters below:
-            // `intersect_non_null`'s `(Any, _)` arm returns the sibling unchanged, so intersecting
-            // against the placeholder silently discards the target rather than composing with it.
+            // Whether this `$ref` closes a reference cycle back through the component that
+            // encloses it — a property of the DOCUMENT, asked of `components.schemas` rather than
+            // of what happens to be mid-flight. Keying it on `in_progress` instead made the verdict
+            // depend on `components.schemas` iteration order, so for mutual recursion the guard
+            // fired on whichever entry the document declared first and re-ordering two map entries
+            // flipped a working client into a hard rejection.
+            //
+            // It matters below because a target inside the cycle cannot be composed with: its
+            // definition depends on the very result being computed, so `intersect_non_null`'s
+            // `(Any, _)` arm would return the sibling and silently discard the target.
             let back_edge = match reference.strip_prefix("#/components/schemas/") {
-                Some(name) => self.in_progress.contains_key(name),
+                Some(name) => self.ref_closes_a_cycle(name, &schema.provenance),
                 None => self.remote_in_progress.contains_key(reference),
             };
             let referenced = if let Some(name) = reference.strip_prefix("#/components/schemas/") {
@@ -676,13 +681,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.reject_ref_sibling_intersection(
                     schema,
                     if reference.starts_with("#/components/schemas/") {
-                        "this `$ref` is a direct recursive reference to the component being \
-                         lowered, whose fields are not yet known, so its shape-bearing siblings \
-                         have nothing to intersect with"
+                        "this `$ref` closes a reference cycle back to the component that encloses \
+                         it, so its shape-bearing siblings would have to be intersected with a \
+                         target whose own definition depends on the result"
                     } else {
-                        "this `$ref` is a direct recursive remote reference to the schema being \
-                         lowered, whose fields are not yet known, so its shape-bearing siblings \
-                         have nothing to intersect with"
+                        "this remote `$ref` closes a reference cycle back to the schema that \
+                         encloses it, so its shape-bearing siblings would have to be intersected \
+                         with a target whose own definition depends on the result"
                     },
                 );
             }
@@ -1955,6 +1960,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             None => None,
         }
+    }
+
+    /// Whether a `$ref` to `target`, written at `at`, closes a reference cycle back through the
+    /// component that encloses it.
+    ///
+    /// This is a property of the DOCUMENT, not of the lowering: it asks whether `target` reaches
+    /// the enclosing component through `components.schemas`, which is the same answer however the
+    /// schemas map happens to be ordered. The predicate it replaced — membership of `in_progress` —
+    /// was a property of *when* lowering happened, and since components are pre-lowered in map
+    /// iteration order, mutual recursion rejected or generated according to which entry the
+    /// document happened to declare first. Re-ordering a YAML map is a no-op in OpenAPI.
+    fn ref_closes_a_cycle(&self, target: &str, at: &crate::diag::Provenance) -> bool {
+        let Some(enclosing) = enclosing_component(at) else {
+            // Not inside a component at all — a body, parameter or response schema. No cycle can
+            // pass through this position, so `ensure_component` will have lowered the target fully.
+            return false;
+        };
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut stack = vec![target.to_owned()];
+        while let Some(name) = stack.pop() {
+            if name == enclosing {
+                return true;
+            }
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            if let Some(component) = self.document.components.schemas.get(&name) {
+                collect_component_refs(component, &mut stack);
+            }
+        }
+        false
     }
 
     /// Whether an already-lowered type admits JSON `null`, resolving its kind out of the graph.
@@ -4089,6 +4125,80 @@ fn parameter_shape_supported_inner(
     };
     visiting.remove(&ty.id);
     supported
+}
+
+/// The `components.schemas` entry a pointer lies inside, if any.
+///
+/// `/components/schemas/Node/properties/next` yields `Node`. A pointer anywhere else — a request
+/// body, a response, a parameter — yields `None`, because no `components.schemas` cycle passes
+/// through such a position.
+fn enclosing_component(at: &crate::diag::Provenance) -> Option<String> {
+    let mut tokens = at.pointer.as_str().split('/').skip(1);
+    if tokens.next()? != "components" || tokens.next()? != "schemas" {
+        return None;
+    }
+    // Component names are matched by name only, and a literal `/` in a key is spelled `~1`, so the
+    // next token is the whole name.
+    Some(tokens.next()?.replace("~1", "/").replace("~0", "~"))
+}
+
+/// Push every local `components.schemas` name this schema subtree references onto `out`.
+///
+/// Only the local component form matters: the cycle predicate asks about `components.schemas`
+/// reachability, and a remote or relative-file target is not a member of that map.
+fn collect_component_refs(schema: &RefOr<Schema>, out: &mut Vec<String>) {
+    match schema {
+        RefOr::Ref(reference) => {
+            if let Some(name) = reference
+                .reference
+                .strip_prefix("#/components/schemas/")
+                .filter(|name| !name.contains('/'))
+            {
+                out.push(name.to_owned());
+            }
+        }
+        RefOr::Item(schema) => collect_schema_refs(schema, out),
+    }
+}
+
+fn collect_schema_or_refs(schema: &SchemaOr, out: &mut Vec<String>) {
+    if let SchemaOr::Schema(schema) = schema {
+        collect_schema_refs(schema, out);
+    }
+}
+
+fn collect_schema_refs(schema: &Schema, out: &mut Vec<String>) {
+    if let Some(reference) = &schema.reference {
+        if let Some(name) = reference
+            .strip_prefix("#/components/schemas/")
+            .filter(|name| !name.contains('/'))
+        {
+            out.push(name.to_owned());
+        }
+    }
+    let nested = schema
+        .properties
+        .values()
+        .chain(schema.pattern_properties.values())
+        .chain(schema.prefix_items.iter())
+        .chain(schema.all_of.iter())
+        .chain(schema.one_of.iter())
+        .chain(schema.any_of.iter())
+        .chain(schema.defs.values())
+        .chain(schema.validation_children.iter().map(|(_, child)| child));
+    for child in nested {
+        collect_schema_or_refs(child, out);
+    }
+    for child in [
+        &schema.additional_properties,
+        &schema.items,
+        &schema.content_schema,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        collect_schema_or_refs(child, out);
+    }
 }
 
 fn type_accepts_null(ty: Ty, kind: &TypeKind) -> bool {

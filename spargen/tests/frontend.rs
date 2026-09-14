@@ -9599,7 +9599,7 @@ fn a_cycle_closing_ref_whose_siblings_bear_a_shape_is_rejected_not_discarded() {
         let messages = messages_for(&report, Code::AllOfIrreconcilable);
         assert_eq!(messages.len(), 1, "{messages:?}");
         assert!(
-            messages[0].contains("direct recursive"),
+            messages[0].contains("closes a reference cycle"),
             "`{what}` must say the reference is recursive: {:?}",
             messages[0]
         );
@@ -9944,4 +9944,98 @@ fn a_union_sibling_without_a_type_does_not_decide_nullability() {
             if *optional { "valid" } else { "invalid" }
         );
     }
+}
+
+/// Accept-versus-reject must not key on `components.schemas` map order.
+///
+/// The round-2 guard tested `in_progress` membership, which is a property of *when* lowering
+/// happens: `lower.rs` pre-lowers components in map iteration order, so for mutual recursion it
+/// fired on whichever entry was declared first. Two documents identical but for the order of two
+/// map entries — a no-op in OpenAPI, and a routine difference between description generators — got
+/// opposite verdicts: one `Rejected`, one `Generated`.
+///
+/// The guard now keys on the schema: a `$ref` whose target reaches back to the component enclosing
+/// it closes a reference cycle, and that is true of the document however its entries are ordered.
+/// The verdict is the same one the `allOf` spelling has always given; what changed is that it no
+/// longer depends on serialisation.
+#[test]
+fn the_recursive_ref_guard_does_not_key_on_component_declaration_order() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths: {}\n";
+    const A: &str = r##"    A:
+      type: object
+      properties:
+        b: { $ref: '#/components/schemas/B' }
+"##;
+    const B: &str = r##"    B:
+      type: object
+      properties:
+        a:
+          $ref: '#/components/schemas/A'
+          type: object
+          properties: { x: { type: string } }
+"##;
+
+    let a_first = format!("{HEAD}components:\n  schemas:\n{A}{B}");
+    let b_first = format!("{HEAD}components:\n  schemas:\n{B}{A}");
+
+    let mut verdicts = Vec::new();
+    for (order, spec) in [("A first", &a_first), ("B first", &b_first)] {
+        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+            verdicts.push((
+                format!("{order}/{entry}"),
+                report.outcome(),
+                has_code(&report, Code::AllOfIrreconcilable),
+            ));
+        }
+    }
+    let first = (verdicts[0].1, verdicts[0].2);
+    for (label, outcome, coded) in &verdicts {
+        assert_eq!(
+            (*outcome, *coded),
+            first,
+            "`{label}` disagrees with `{}`: re-ordering two `components.schemas` entries is a \
+             no-op in OpenAPI, so it cannot change accept-versus-reject. All verdicts: {verdicts:#?}",
+            verdicts[0].0
+        );
+    }
+    // And the verdict both orderings must reach is the `allOf` spelling's, so the three spellings
+    // of one conjunction still agree.
+    assert_eq!(first.0, Outcome::Rejected, "{verdicts:#?}");
+    assert!(first.1, "{verdicts:#?}");
+
+    // The message is now a statement about the schema, not about lowering order: "whose fields are
+    // not yet known" was only true in the ordering that happened to reject.
+    let report = generate(&a_first);
+    let messages = messages_for(&report, Code::AllOfIrreconcilable);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("closes a reference cycle"),
+        "the message must name a property of the document, not of the lowering order: {:?}",
+        messages[0]
+    );
+    assert!(
+        !messages[0].contains("not yet known"),
+        "`not yet known` is a lowering-order claim, false in the other ordering: {:?}",
+        messages[0]
+    );
+
+    // The controls, in both orderings: a `$ref` with shape-bearing siblings whose target does NOT
+    // reach back to it still intersects and generates.
+    const PLAIN: &str = r##"    Leaf: { type: object, properties: { y: { type: integer } } }
+    Holder:
+      type: object
+      properties:
+        l:
+          $ref: '#/components/schemas/Leaf'
+          type: object
+          properties: { x: { type: string } }
+"##;
+    let acyclic = format!("{HEAD}components:\n  schemas:\n{PLAIN}");
+    let report = generate(&acyclic);
+    assert_ne!(
+        report.outcome(),
+        Outcome::Rejected,
+        "an acyclic `$ref` with shape-bearing siblings must still intersect: {report:#?}"
+    );
 }
