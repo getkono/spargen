@@ -2425,6 +2425,26 @@ serde_json.workspace = true
         assert!(messages.is_empty(), "{messages:#?}");
     }
 
+    /// The `E023` explain body, verbatim. Asserted by equality below; see that test for why a
+    /// body this text is pinned twice over.
+    const E023_EXPLAIN: &str = "The generated module is freestanding, so its consuming Cargo package must declare the crates and \
+         dependency features referenced by that specific API. Spargen derives the exact requirement set \
+         after lowering and audits Cargo.toml during build.rs and proc-macro generation. Use the \
+         documented tested lower bounds (or a higher semver-compatible caret floor), keep reqwest default \
+         features disabled, and enable only the reqwest/bytes/XML/UUID/time capabilities named by the \
+         diagnostic. A dependency declared `workspace = true` is followed to the workspace root's \
+         `[workspace.dependencies]` — the consumer manifest itself when it declares `[workspace]`, \
+         otherwise the root `package.workspace` names, otherwise the nearest ancestor manifest that \
+         parses and declares `[workspace]` — taking the version from there, the union of both feature \
+         lists, and default features on when the root leaves them on or the member sets `default-features \
+         = true` (a member's `default-features = false` cannot turn off defaults the root leaves on, so \
+         disable them in `[workspace.dependencies]` and leave the member's `default-features` unset or \
+         `false`), while `optional` is read from the member, as Cargo does. Inheriting a required crate \
+         therefore satisfies the audit; when the root cannot be found, cannot be read, or declares no \
+         such entry, the diagnostic says which of those happened rather than reporting the crate as \
+         missing. Cargo resolves the declared range; Rust compilation then verifies the selected crates \
+         expose the APIs and traits used by the generated client.";
+
     /// `spargen explain E023` prints `Code::RuntimeDependencyContract`'s explain body verbatim, and
     /// that body specifies workspace-dependency inheritance as an algorithm rather than describing
     /// the audit in a paragraph. Nothing else holds it to anything —
@@ -2438,14 +2458,22 @@ serde_json.workspace = true
     /// them. No count of the body's propositions is offered: three counts have been produced for
     /// this text and each was wrong.
     ///
-    /// What this can and cannot catch. Each clause must occur **exactly once**, so a clause
-    /// **deleted**, **negated in place**, or — for the root search — **reordered** fails here; the
-    /// exactly-once rule is what stops an assertion silently matching a second occurrence of its
-    /// text and pinning the wrong sentence. A **rewrite** that keeps every asserted substring, and
-    /// their order, while changing the meaning of the prose around them does **not** fail here. A
-    /// substring test cannot foreclose a semantic rewrite; only holding the prose to the code
-    /// could, and whether `Code::explain` bodies should be held that way is a repository-wide
-    /// question tracked separately.
+    /// Why the body is pinned twice. The clause assertions say *what each sentence is for* and
+    /// localise a failure to the promise that broke. They cannot say what the body does **not**
+    /// contain: every one of them is a substring test, so text may be **added** around them freely
+    /// — a sentence appended that contradicts the algorithm, or a line prefixed saying none of the
+    /// description is accurate, leaves every assertion passing. Sentence-anchoring does not close
+    /// that either, since a prefix leaves each pinned sentence verbatim. Only equality does, so the
+    /// body is also asserted whole against `E023_EXPLAIN`. Keep both: equality alone reports that
+    /// the text changed without saying which promise broke.
+    ///
+    /// The cost, stated rather than discovered. Requiring each clause **exactly once** is a
+    /// false-gate hazard: a short clause such as "taking the version from there" or "the union of
+    /// both feature lists" will red this test if a future edit legitimately uses the same words a
+    /// second time, even though nothing is wrong. That is the price of closing the
+    /// matched-the-wrong-occurrence class, and the fix in that case is to lengthen the assertion,
+    /// not to drop the rule. Equality is likewise deliberate friction: editing this text means
+    /// updating `E023_EXPLAIN` in the same commit, which is the point.
     #[test]
     fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
         let explain = Code::RuntimeDependencyContract.explain();
@@ -2554,6 +2582,15 @@ serde_json.workspace = true
         // `the_manifests_reported_in_issue_71_pass_as_written`, both of which assert the audit
         // emits nothing at all for five crates the member only inherits.
         promises("Inheriting a required crate therefore satisfies the audit");
+
+        // And the body as a whole, which is the only assertion here that constrains what the text
+        // does *not* say. Every check above is a substring, so without this one a sentence may be
+        // appended or prefixed that contradicts all of them with the suite green.
+        assert_eq!(
+            explain, E023_EXPLAIN,
+            "the E023 explain body changed; update `E023_EXPLAIN` in the same commit, and check \
+             that the clause assertions above still describe what the new text promises"
+        );
     }
 
     #[test]
