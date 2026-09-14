@@ -61,6 +61,29 @@ fn has_code(report: &Report, code: Code) -> bool {
 /// matches `LinkPaginator`), and a count alone cannot say *which* types were emitted when it
 /// disagrees. Returning the names makes a failure legible and makes an off-by-a-constant bound
 /// impossible to mistake for a bound.
+/// The name of the `pub struct` that declares the first field line starting with `field`.
+///
+/// A type count plus "both fields exist somewhere" is satisfied by either assignment of two names to
+/// two schemas, so it cannot see a swap. This answers the question the count cannot: which generated
+/// type a given field belongs to.
+fn field_owner(code: &str, field: &str) -> Option<String> {
+    let mut current: Option<String> = None;
+    for line in code.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("pub struct ") {
+            current = rest
+                .split([' ', '<', '{', '(', ';'])
+                .next()
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned);
+        }
+        if trimmed.starts_with(field) {
+            return current;
+        }
+    }
+    None
+}
+
 fn declared_types(code: &str, prefix: &str, suffix_ok: impl Fn(&str) -> bool) -> Vec<String> {
     code.lines()
         .filter_map(|line| line.trim_start().strip_prefix("pub struct "))
@@ -820,7 +843,7 @@ components:
     // name, which is what an unmemoized re-entry would have produced had it terminated.
     assert!(code.contains("Option<Box<Node>>"), "{code}");
     assert_eq!(
-        code.matches("pub struct Node").count(),
+        declared_types(&code, "Node", |tail| tail.trim().is_empty()).len(),
         1,
         "one declared schema, one generated type: {code}"
     );
@@ -884,8 +907,16 @@ components:
             "{entry}: {report:#?}"
         );
     }
-    assert_eq!(code.matches("pub struct A ").count(), 1, "{code}");
-    assert_eq!(code.matches("pub struct B ").count(), 1, "{code}");
+    assert_eq!(
+        declared_types(&code, "A", |tail| tail.is_empty()).len(),
+        1,
+        "{code}"
+    );
+    assert_eq!(
+        declared_types(&code, "B", |tail| tail.is_empty()).len(),
+        1,
+        "{code}"
+    );
     // Exactly one of the two edges carries the indirection; both would be redundant and neither
     // would compile.
     let boxed =
@@ -1000,9 +1031,10 @@ components:
     // One declaration, one type. `pub struct Inner` is a prefix of every hash-suffixed duplicate
     // (`pub struct InnerD5129632`), so this count catches them too.
     assert_eq!(
-        code.matches("pub struct Inner").count(),
+        declared_types(&code, "Inner", |_| true).len(),
         1,
-        "one declared schema must generate one type: {code}"
+        "one declared schema must generate one type: {:?}",
+        declared_types(&code, "Inner", |_| true)
     );
     // And both uses reached that one type, rather than one of them reaching a copy.
     assert!(code.contains("pub first: Inner"), "{code}");
@@ -1367,7 +1399,11 @@ components:
 
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     // One target, one type — the repair this branch exists for, unchanged.
-    assert_eq!(code.matches("pub struct Item ").count(), 1, "{code}");
+    assert_eq!(
+        declared_types(&code, "Item", |tail| tail.is_empty()).len(),
+        1,
+        "{code}"
+    );
     // And the warning names the situation it is actually in.
     let shared: Vec<_> = report
         .diagnostics()
@@ -1514,7 +1550,7 @@ components:
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
     }
-    assert_eq!(code.matches("pub struct Inner").count(), 1, "{code}");
+    assert_eq!(declared_types(&code, "Inner", |_| true).len(), 1, "{code}");
     assert!(code.contains("pub first: Inner"), "{code}");
     assert!(code.contains("pub second: Inner"), "{code}");
 
@@ -1526,9 +1562,10 @@ components:
     );
     let (_, _, code) = split("./lib.yaml#/components/schemas/Node", &mixed);
     assert_eq!(
-        code.matches("pub struct Inner").count(),
+        declared_types(&code, "Inner", |_| true).len(),
         1,
-        "the two spellings of one target must share one type: {code}"
+        "the two spellings of one target must share one type: {:?}",
+        declared_types(&code, "Inner", |_| true)
     );
 }
 
@@ -1599,6 +1636,27 @@ paths:
     // duplicated one.
     assert!(code.contains("pub alpha:"), "{code}");
     assert!(code.contains("pub beta:"), "{code}");
+
+    // *Which* struct owns which field, not merely that both exist somewhere. Counting types and
+    // checking for both fields passes under either assignment of the two names, so on its own it
+    // says nothing about what `types::Shape` denotes — and what `types::Shape` denotes is a public
+    // API fact a consumer writes into their own code.
+    //
+    // This pins one ordering. It does **not** pin that the assignment survives reordering the
+    // document: `Scope::alloc` hands the un-suffixed name to whichever schema is allocated first,
+    // before it reads provenance at all, so swapping these two `paths` entries swaps which schema
+    // is called `Shape`. That is disclosed rather than repaired — see this pull request's
+    // `## Unresolved review notes`.
+    assert_eq!(
+        field_owner(&code, "pub alpha:").as_deref(),
+        Some("Shape"),
+        "the first-allocated schema owns the un-suffixed name: {code}"
+    );
+    assert_eq!(
+        field_owner(&code, "pub beta:").as_deref(),
+        Some("Shape93360b5f"),
+        "and the second carries the pointer-seeded disambiguator: {code}"
+    );
 }
 
 /// The nullability half of the memo entry. A shared sub-file component whose own schema admits
