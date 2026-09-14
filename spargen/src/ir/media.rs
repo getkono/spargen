@@ -219,9 +219,13 @@ impl Responses {
     ///
     /// An undocumented 2xx is *not* uniformly rejected: generated code enters the success branch on
     /// the raw transport status alone, so the outcome is per shape. `Enum` dispatches on its
-    /// documented entries and rejects any other 2xx as `Error::UnexpectedStatus`; `Plain` decodes
-    /// *any* 2xx as `T`; `Unit` accepts any 2xx as `()`, discarding any body. Declaring a `default`
-    /// changes none of that — it is not a success fallback for an unlisted 2xx.
+    /// documented entries and rejects any other 2xx as `Error::UnexpectedStatus`; `Plain` is
+    /// status-blind but not body-blind — it runs its codec over whatever bytes arrive, so an
+    /// undocumented 2xx decodes as `T` or fails as `Error::Decode`, and an empty body fails the
+    /// same way under every codec but the `Bytes` one, *including* on the documented `204` that the
+    /// `T`-plus-`204` shape above keeps `Plain`; `Unit` accepts any 2xx as `()`, discarding any
+    /// body. Declaring a `default` changes none of that — it is not a success fallback for an
+    /// unlisted 2xx.
     pub(crate) fn success(&self) -> SuccessShape {
         // A default with no explicit status entries is the operation's single success body.
         if self.by_status.is_empty() {
