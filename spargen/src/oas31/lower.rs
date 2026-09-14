@@ -425,6 +425,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // parameter with it, which is exactly the silent degradation the taxonomy forbids.
         let Some(component) = self.document.components.schemas.get(name) else {
             let reference = format!("#/components/schemas/{name}");
+            // The name missed the ROOT document's component map — but a `$ref` written inside a
+            // referenced sub-file spells that file's own components exactly the same way, and a
+            // JSON Pointer fragment addresses the document it appears in. `Resolver::resolve`
+            // already implements that: it keys on the provenance's file and shortcuts to the parsed
+            // component map only for the root. `ensure_component` is reached by callers that strip
+            // the `#/components/schemas/` prefix before any file is considered, so a sub-file's
+            // sibling reference never got there. Hand it back to the resolver.
+            //
+            // Root first, file second: the root map was already consulted above, so a document that
+            // resolves today keeps selecting the same component and only a name the root does not
+            // declare reaches the sub-file reading. Which namespace *should* win when both declare
+            // the name is a separate question; this deliberately does not change the answer.
+            let from = at.span.map(|span| span.file);
+            if from.is_some_and(|file| file != crate::diag::FileId(0)) {
+                // The resolver reports its own failure, so a miss here is already diagnosed.
+                let resolved = self.resolver.resolve(&reference, at, self.diags).ok()?;
+                return self.lower_schema(&resolved.schema, name);
+            }
             // A raw `/` here is always a further pointer segment, never part of a component name: a
             // literal slash in a key is spelled `~1`. So the fragment addresses a *subschema* — but
             // only say so when the segment it starts from is actually declared. Otherwise the fault
