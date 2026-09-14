@@ -10,6 +10,9 @@ use crate::{AuthError, ResponseValue};
 /// Nine variants are constructed; taxonomy class #10 (cancellation) is a documented drop-safety
 /// guarantee, not a variant (see the crate docs). Every variant implements [`std::error::Error`]
 /// with full source chains, and `Debug` never leaks secrets.
+///
+/// Adding a variant: raise `ERROR_VARIANTS` in this file's test module and list a value of it in
+/// `every_variant`, for the reasons `request_variant_index` sets out.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error<E> {
@@ -277,6 +280,11 @@ impl std::error::Error for MessageError {}
 /// This runtime is embedded in the consumer's own crate, where `#[non_exhaustive]` does not affect
 /// match exhaustiveness, so a new variant here is a breaking change of the generated output; the
 /// attribute is kept for a consumer that re-exports the generated module across a crate boundary.
+///
+/// Adding a variant: raise `REQUEST_VARIANTS` in this file's test module and list a value of it in
+/// `every_request_variant`. The compiler will demand the classification arms on its own, but it
+/// cannot demand the value — `request_variant_index` documents precisely why, and which ways of
+/// getting this wrong are caught.
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum RequestError {
@@ -584,12 +592,48 @@ mod tests {
         assert!(forwarded.downcast_ref::<Inner>().is_some());
     }
 
-    /// One value of every `RequestError` variant, mirroring `every_variant` for `Error`: the match
-    /// in each test below is exhaustive over this list by construction, so a variant added to
-    /// `RequestError` — the second taxonomy whose variant set is the generated output's semver
-    /// surface — has to be added here, and then classified.
-    fn every_request_variant() -> Vec<RequestError> {
-        vec![
+    /// How many variants `RequestError` has. `every_request_variant` returns an array of exactly
+    /// this length, so raising it will not compile until a value of the new variant is listed.
+    const REQUEST_VARIANTS: usize = 3;
+
+    /// Each variant's position in `every_request_variant`. Indices are dense and unique, which is
+    /// what `every_request_variant_lists_each_variant_exactly_once` checks.
+    ///
+    /// **What this actually enforces, and what it does not.** The match being exhaustive means a
+    /// variant added to `RequestError` cannot compile without being *classified* here and in every
+    /// other match over the enum. Whether it is *listed* in `every_request_variant` — and so
+    /// whether anything it claims is ever compared against anything — is enforced only in part.
+    /// Each of these was run:
+    ///
+    /// - Adding a variant, classifying it everywhere, giving it the next free index, and raising
+    ///   `REQUEST_VARIANTS` to match: **caught**, at compile time — the array is then one element
+    ///   short of its own declared length.
+    /// - Padding that array with a duplicate of some other variant to make it compile: **caught**,
+    ///   by the bijection test — two entries take one index, and another index is unoccupied.
+    /// - Adding a variant, classifying it, giving it the next free index, and leaving
+    ///   `REQUEST_VARIANTS` alone: **not caught**. Nothing ever evaluates this function on a value
+    ///   of the new variant, because no such value is ever constructed.
+    ///
+    /// That last case cannot be closed from inside stable Rust: no construct yields a variant
+    /// count, so no assertion can know the list is short. Closing it needs the enum declared
+    /// through a macro that emits the count alongside it, which would ship a `macro_rules!`
+    /// definition of a public type into every generated client. So raising `REQUEST_VARIANTS` is a
+    /// convention the enum's own doc states, and the two mechanical guards above catch every way
+    /// of getting it wrong once it is raised.
+    fn request_variant_index(error: &RequestError) -> usize {
+        match error {
+            RequestError::MissingCredential { .. } => 0,
+            RequestError::CredentialProvider { .. } => 1,
+            RequestError::Other(_) => 2,
+        }
+    }
+
+    /// One value of every `RequestError` variant, mirroring `every_variant` for `Error`. Listing a
+    /// variant here is what makes its display, source, transience and response accessors actually
+    /// get asserted; an exhaustive match alone only forces it to be *classified*. See
+    /// `request_variant_index` for exactly how much of that listing is mechanically enforced.
+    fn every_request_variant() -> [RequestError; REQUEST_VARIANTS] {
+        [
             RequestError::MissingCredential {
                 alternatives: vec![vec!["token"], vec!["key", "tenant"]],
             },
@@ -602,6 +646,31 @@ mod tests {
                 "bad path segment".to_owned(),
             )))),
         ]
+    }
+
+    /// The enumeration is a bijection onto the variant set: every entry takes a distinct index
+    /// inside the declared count, and every index is occupied. Without this, a variant could be
+    /// added, classified in each exhaustive match, and never constructed — so nothing it claims
+    /// would ever be compared against anything.
+    #[test]
+    fn every_request_variant_lists_each_variant_exactly_once() {
+        let mut seen = [false; REQUEST_VARIANTS];
+        for error in every_request_variant() {
+            let index = request_variant_index(&error);
+            assert!(
+                index < REQUEST_VARIANTS,
+                "`{error}` takes index {index}, outside the declared count of \
+                 {REQUEST_VARIANTS}: raise `REQUEST_VARIANTS` and list a value of the new variant \
+                 in `every_request_variant`"
+            );
+            assert!(!seen[index], "two entries share index {index}");
+            seen[index] = true;
+        }
+        assert!(
+            seen.iter().all(|occupied| *occupied),
+            "an index in 0..{REQUEST_VARIANTS} is unoccupied: `every_request_variant` is missing \
+             a variant"
+        );
     }
 
     #[test]
@@ -700,10 +769,54 @@ mod tests {
             .expect_err("an unparseable URL fails to build")
     }
 
-    /// One value of every variant. The match in each test below is exhaustive over this list by
-    /// construction, so a variant added to `Error` has to be added here — and then classified.
-    fn every_variant() -> Vec<Error<ApiBody>> {
-        vec![
+    /// How many variants `Error` has. `every_variant` returns an array of exactly this length, so
+    /// raising it will not compile until a value of the new variant is listed.
+    const ERROR_VARIANTS: usize = 9;
+
+    /// Each variant's position in `every_variant`. Indices are dense and unique. This is the same
+    /// guard `request_variant_index` carries, applied to the other taxonomy that is a semver
+    /// surface — and it enforces exactly as much, and as little, as that function documents.
+    fn error_variant_index(error: &Error<ApiBody>) -> usize {
+        match error {
+            Error::RequestConstruction(_) => 0,
+            Error::Transport(_) => 1,
+            Error::Timeout(_) => 2,
+            Error::Protocol(_) => 3,
+            Error::Redirect(_) => 4,
+            Error::Api(_) => 5,
+            Error::UnexpectedStatus { .. } => 6,
+            Error::Decode { .. } => 7,
+            Error::InterruptedBody(_) => 8,
+        }
+    }
+
+    /// The enumeration is a bijection onto the variant set. See
+    /// `every_request_variant_lists_each_variant_exactly_once` for why an exhaustive match alone
+    /// is not enough.
+    #[test]
+    fn every_variant_lists_each_variant_exactly_once() {
+        let mut seen = [false; ERROR_VARIANTS];
+        for error in every_variant() {
+            let index = error_variant_index(&error);
+            assert!(
+                index < ERROR_VARIANTS,
+                "`{error}` takes index {index}, outside the declared count of {ERROR_VARIANTS}: \
+                 raise `ERROR_VARIANTS` and list a value of the new variant in `every_variant`"
+            );
+            assert!(!seen[index], "two entries share index {index}");
+            seen[index] = true;
+        }
+        assert!(
+            seen.iter().all(|occupied| *occupied),
+            "an index in 0..{ERROR_VARIANTS} is unoccupied: `every_variant` is missing a variant"
+        );
+    }
+
+    /// One value of every variant. The match in each test below is exhaustive over this array by
+    /// construction, so a variant added to `Error` is classified by the compiler;
+    /// `error_variant_index` is what additionally forces it to be *listed*.
+    fn every_variant() -> [Error<ApiBody>; ERROR_VARIANTS] {
+        [
             Error::request_message("bad path segment"),
             Error::Transport(TransportError::new(reqwest_error())),
             Error::Timeout(TimeoutKind::Total),
