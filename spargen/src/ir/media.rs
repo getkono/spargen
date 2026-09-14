@@ -418,8 +418,10 @@ pub(crate) enum SuccessShape {
     Unit,
     /// A single success body type.
     Plain(Ty),
-    /// Two or more documented success statuses. Generated as a per-operation response enum, one
-    /// variant per status — a payload-carrying variant for a bodied status, a unit variant for a
+    /// Two or more documented success statuses *carrying a body*. Counting statuses instead would
+    /// be wrong: `200` plus a bodyless `204` is two documented success statuses and still yields
+    /// [`SuccessShape::Plain`]. Generated as a per-operation response enum, one variant per
+    /// status — a payload-carrying variant for a bodied status, a unit variant for a
     /// documented bodyless status (e.g. `204`). Entries are the documented *success* statuses only
     /// — `default` is never among them — pre-sorted into decode precedence (exact before range);
     /// decode dispatches by HTTP status in that order and rejects any other 2xx as
