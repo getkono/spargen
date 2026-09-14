@@ -135,6 +135,13 @@ pub async fn attach_auth(
     request: RequestBuilder,
     requirements: &[&[AuthScheme]],
 ) -> Result<RequestBuilder, Error<Infallible>> {
+    // No requirement means "attach nothing", not "unauthenticated". Without this, an empty slice
+    // would fall into the `find` below, which returns `None` for it, and the call would fail as
+    // `MissingCredential` naming no schemes at all. Generated output never produces an empty slice
+    // — `emit.rs` omits the call entirely for an operation with no `security` — but this function
+    // is public in the runtime crate and reachable from sibling code in whichever module `include!`s
+    // a generated client, so this is a contract, not dead code, and
+    // `no_requirement_attaches_nothing` holds it to that.
     if requirements.is_empty() {
         return Ok(request);
     }
@@ -717,6 +724,24 @@ mod tests {
             .build()
             .unwrap();
         assert!(request.headers().is_empty());
+    }
+
+    /// No requirement at all is distinct from a requirement nothing satisfies: it attaches nothing
+    /// and succeeds. Without the early return an empty slice reaches `find`, which answers `None`
+    /// for it, and the call would fail as `MissingCredential` naming no schemes — the degenerate
+    /// rendering `Display` was made total for. Generated output cannot reach this (`emit.rs` omits
+    /// the call when an operation declares no `security`), but the function is public.
+    #[test]
+    fn no_requirement_attaches_nothing() {
+        let mut core = core();
+        // A registered credential must not be attached speculatively either.
+        core.set_credential("token", Credential::Bearer(SecretString::from("t0k")));
+        let request = poll_ready(attach_auth(&core, get(&core), &[]))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(request.headers().is_empty(), "{:?}", request.headers());
+        assert_eq!(request.url().query(), None);
     }
 
     #[test]
