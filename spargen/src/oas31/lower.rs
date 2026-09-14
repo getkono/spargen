@@ -4018,6 +4018,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .chain(self.in_progress.values())
             .chain(self.remote_components.values())
             .chain(self.remote_in_progress.values())
+            .chain(self.resolved_components.values())
+            .chain(self.resolved_in_progress.values())
             .any(|&(root, _)| root == id)
     }
 
