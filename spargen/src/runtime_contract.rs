@@ -2297,6 +2297,423 @@ serde_json.workspace = true
         assert_eq!(result.manifests, vec![root, member]);
     }
 
+    /// Whether the fixture's `[workspace.dependencies]` entry for `reqwest` leaves default features
+    /// on. That bit is the only thing these fixtures vary about the root, so it is the only thing
+    /// they state; the version floor comes from `CORE_MANIFEST` either way.
+    enum RootDefaults {
+        On,
+        Off,
+    }
+
+    /// Audits a root/member pair that differ from the core fixtures only in how `reqwest` is
+    /// declared, and returns every diagnostic message the audit produced.
+    ///
+    /// The root entry is derived from `core_workspace_dependencies()` rather than written out at
+    /// the call sites. Passing the whole declaration in re-stated the `reqwest` floor three times
+    /// over, and a bump to that floor in `CORE_MANIFEST` would then stop the substitution matching
+    /// — the root would silently keep `default-features = false`, and the fixture that needs them
+    /// on would fail for a reason unrelated to what it names. Locating the entry by its key and
+    /// asserting it was found makes a rename of it fail loudly instead of quietly.
+    fn inherited_reqwest_default_feature_diagnostics(
+        root_defaults: RootDefaults,
+        member_reqwest: &str,
+    ) -> Vec<String> {
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        let core_reqwest = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with("reqwest = "))
+            .expect("CORE_MANIFEST declares reqwest under that key");
+        let root_dependencies = match root_defaults {
+            // `CORE_MANIFEST` already disables them, so this is the core body unchanged.
+            RootDefaults::Off => core_workspace_dependencies().to_owned(),
+            RootDefaults::On => {
+                let floor = core_reqwest
+                    .split('"')
+                    .nth(1)
+                    .expect("the reqwest entry pins a quoted version");
+                core_workspace_dependencies()
+                    .replace(core_reqwest, &format!("reqwest = \"{floor}\""))
+            }
+        };
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n\
+                 {root_dependencies}"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{}",
+                CORE_INHERITED.replace("reqwest.workspace = true", member_reqwest)
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .all(|diagnostic| diagnostic.code == Code::RuntimeDependencyContract),
+            "{:#?}",
+            result.diagnostics
+        );
+        result
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.message)
+            .collect()
+    }
+
+    #[test]
+    fn a_member_default_features_false_cannot_turn_off_defaults_the_root_leaves_on() {
+        // Cargo's rule for inheritance: the workspace entry decides, and a member's `false` is
+        // ignored when that entry leaves defaults on. The fix belongs in the root.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            RootDefaults::On,
+            "reqwest = { workspace = true, default-features = false }",
+        );
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("`reqwest` must set `default-features = false`"),
+            "{messages:#?}"
+        );
+    }
+
+    #[test]
+    fn a_member_default_features_true_turns_on_defaults_the_root_turned_off() {
+        // The other direction: a member may re-enable defaults, so a root that already disables
+        // them does not satisfy the audit on its own.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            RootDefaults::Off,
+            "reqwest = { workspace = true, default-features = true }",
+        );
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("`reqwest` must set `default-features = false`"),
+            "{messages:#?}"
+        );
+    }
+
+    #[test]
+    fn a_silent_member_keeps_the_defaults_the_root_turned_off() {
+        // No diagnostic at all, not merely no default-features one: a root that failed to resolve
+        // reports the inheritance instead, and must not pass this test.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            RootDefaults::Off,
+            "reqwest = { workspace = true }",
+        );
+        assert!(messages.is_empty(), "{messages:#?}");
+    }
+
+    #[test]
+    fn a_member_default_features_false_keeps_the_defaults_the_root_turned_off() {
+        // The layout the E023 explain text advises: defaults disabled in the root, and the member
+        // repeating `false`. Only a member `true` re-enables them, so any explicit member flag must
+        // not count as one.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            RootDefaults::Off,
+            "reqwest = { workspace = true, default-features = false }",
+        );
+        assert!(messages.is_empty(), "{messages:#?}");
+    }
+
+    /// `spargen explain E023` prints `Code::RuntimeDependencyContract`'s explain body verbatim, and
+    /// that body specifies workspace-dependency inheritance as an algorithm rather than describing
+    /// the audit in a paragraph. Nothing else holds it to anything —
+    /// `every_code_has_title_and_explain_text` asserts only that it is non-empty, and
+    /// `docs/errors.md` carries titles.
+    ///
+    /// The rule, rather than a list: **every sentence of that body which states what the resolver
+    /// does is asserted here, against the fixture in this module that makes it true, named in the
+    /// comment beside it.** Sentences that give advice, describe how the crate is built, or restate
+    /// what Cargo and rustc do afterwards are not asserted, because nothing in this module observes
+    /// them. No count of the body's propositions is offered: three counts have been produced for
+    /// this text and each was wrong.
+    ///
+    /// Why the body is pinned twice, and what each pin is worth. The equality assertion against
+    /// `runtime_contract_e023_explain.txt` **logically implies every clause assertion above it** —
+    /// the same string has the same substrings, the same counts and the same order — so the clause
+    /// assertions add no coverage. Their entire value is the failure message: equality says the
+    /// text changed, and they say **which promise broke** and which fixture was supposed to make it
+    /// true. That is worth keeping and is not worth claiming as coverage.
+    ///
+    /// Equality is also the only thing here that constrains what the body does **not** say. Every
+    /// clause assertion is a substring test, so text may be **added** around them freely — a
+    /// sentence appended that contradicts the algorithm, or a line prefixed saying none of the
+    /// description is accurate, leaves every one of them passing. Sentence-anchoring would not
+    /// close that either, since a prefix leaves each pinned sentence verbatim.
+    ///
+    /// The cost, stated rather than discovered. Requiring each clause **exactly once** is a
+    /// false-gate hazard: a short clause such as "taking the version from there" or "the union of
+    /// both feature lists" will red this test if a future edit legitimately uses the same words a
+    /// second time, even though nothing is wrong. That is the price of closing the
+    /// matched-the-wrong-occurrence class, and the fix in that case is to lengthen the assertion,
+    /// not to drop the rule. Equality is likewise deliberate friction, and the friction is the
+    /// mechanism: editing the explain text means re-typing it into a second file.
+    ///
+    /// What the pair therefore delivers, exactly: **no clause can change without someone re-typing
+    /// it in the test.** It does not make the body true. A clause that is false today stays false
+    /// with both guards green — the three-outcome promise below is exactly that — and a maintainer
+    /// who re-types a change into the expected file has made this test agree with it, not verified
+    /// it. Holding the prose to the code is a wider question than this one code, and is **#137**.
+    #[test]
+    fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
+        let explain = Code::RuntimeDependencyContract.explain();
+        // The expected body lives in its own file, not in this one, and that placement is the
+        // guard. With the mirror inline, a single find-and-replace over `runtime_contract.rs`
+        // rewrote the mirror and every clause assertion in one stroke — negating "taking the
+        // version from there" that way left the suite green. An edit to `code.rs` must now be
+        // re-typed in a second file that no edit to this module can reach.
+        // The file carries a trailing newline, as a text file should; the explain body does not.
+        let expected = include_str!("runtime_contract_e023_explain.txt").trim_end_matches('\n');
+
+        // This module's own source, so the fixture each clause names as its pin can be checked to
+        // resolve.
+        //
+        // Be precise about what that is worth. The check catches a **rename or a typo** and nothing
+        // else: it verifies the name belongs to a `#[test]` in this module, not that the test has
+        // anything to do with the clause citing it. Repointing the version clause at
+        // `the_time_requirement_never_asks_for_serde`, which asserts nothing about versions, passes.
+        // Before round 6 it did not even require a test — `fn messages(`, `fn linux(` and any other
+        // helper satisfied it. Turning a citation into *evidence* means deriving the text from the
+        // behaviour, which is #137's subject and not this test's.
+        const SOURCE: &str = include_str!("runtime_contract.rs");
+
+        // A cited name must be a `#[test]` in this module: the attribute immediately precedes it,
+        // with only whitespace between.
+        let is_test_fn = |name: &str| {
+            SOURCE.match_indices(&format!("fn {name}(")).any(|(at, _)| {
+                SOURCE[..at]
+                    .rsplit_once("#[test]")
+                    .is_some_and(|(_, between)| between.trim().is_empty())
+            })
+        };
+
+        let promises = |clause: &str, pinned_by: &[&str]| {
+            // Exactly once, not merely present: an assertion whose text also occurs earlier or
+            // later matches the wrong sentence and leaves the one it was written for unpinned.
+            // `[workspace.dependencies]` appears twice in this body, and that is how the opening
+            // clause below went unasserted while reading as though it were covered.
+            let occurrences = explain.matches(clause).count();
+            // The body is deliberately not printed here, for the same reason the equality
+            // assertion below avoids `assert_eq!`: handing a maintainer the new text beside a
+            // failure is handing them the paste that makes the failure go away. Naming the clause
+            // and its count is enough to find it.
+            assert!(
+                occurrences == 1,
+                "`spargen explain E023` says {clause:?} {occurrences} times, expected exactly once"
+            );
+            assert!(!pinned_by.is_empty(), "no fixture cited for {clause:?}");
+            for fixture in pinned_by {
+                assert!(
+                    is_test_fn(fixture),
+                    "the clause {clause:?} names `{fixture}` as the fixture that makes it true, \
+                     and no `#[test]` of that name exists in this module"
+                );
+            }
+        };
+
+        // How the requirement set is arrived at, and where it is enforced. The proc-macro half of
+        // "where it runs" is covered by `macro_manifest_audit_derives_only_capabilities_referenced_by_the_api`
+        // in `tests/e2e.rs`, which is outside this file and so cannot be cited below.
+        promises(
+            "Spargen derives the exact requirement set after lowering and audits Cargo.toml during \
+             build.rs and proc-macro generation",
+            &[
+                "conditional_dependencies_and_features_are_required_only_when_used",
+                "the_time_requirement_never_asks_for_serde",
+            ],
+        );
+
+        // The sentence every clause below qualifies, and the one this test exists to pin: a member
+        // declaring nothing but `workspace = true` resolves against the root's table.
+        promises(
+            "A dependency declared `workspace = true` is followed to the workspace root's \
+             `[workspace.dependencies]`",
+            &["workspace_inheritance_uses_the_workspace_version_and_features"],
+        );
+
+        // Which side decides default features, in both directions. Asserting the rule rather than
+        // the bare words `default-features` is what makes a negation of it fail here.
+        let both_directions: &[&str] = &[
+            "a_member_default_features_false_cannot_turn_off_defaults_the_root_leaves_on",
+            "a_member_default_features_true_turns_on_defaults_the_root_turned_off",
+        ];
+        promises(
+            "default features on when the root leaves them on or the member sets \
+             `default-features = true`",
+            both_directions,
+        );
+        promises(
+            "a member's `default-features = false` cannot turn off defaults the root leaves on",
+            both_directions,
+        );
+        // The layout that rule leaves a consumer.
+        promises(
+            "disable them in `[workspace.dependencies]` and leave the member's `default-features` \
+             unset or `false`",
+            &[
+                "a_member_default_features_false_keeps_the_defaults_the_root_turned_off",
+                "a_silent_member_keeps_the_defaults_the_root_turned_off",
+            ],
+        );
+
+        // The three outcomes `WorkspaceOrigin` distinguishes, and the promise that the diagnostic
+        // tells them apart instead of reporting the crate as missing.
+        //
+        // **This clause is not true of the resolver — that is #171** — and the fixtures below are
+        // cited as the ones exercising the branches, not as ones making the promise good. When no
+        // root is found at all and any ancestor failed to read, the walk reports that read failure
+        // instead, naming a file it never established was a workspace manifest.
+        //
+        // The two fixtures that pin the wrong wording are the last two in this list, and both say
+        // so at their own definitions:
+        // `a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found`
+        // requires "could not be read", the path and "TOML parse error", and explicitly requires
+        // the message *not* to say "no workspace manifest was found above" — which is the answer
+        // #171 says it should give — and
+        // `the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found` chooses
+        // between two such files. **Fixing #171 reds both.** The clause itself lives in
+        // `spargen/src/diag/code.rs`; `docs/support-matrix.md` row 23 no longer repeats it.
+        let unresolved_outcomes: &[&str] = &[
+            "an_unresolvable_inheritance_says_where_the_lookup_went",
+            "a_workspace_root_that_cannot_be_read_is_not_reported_as_missing",
+            "a_package_workspace_naming_a_directory_without_a_manifest_is_a_workspace_read_failure",
+            "a_self_rooted_manifest_names_an_absolute_path_when_an_entry_is_missing",
+            "a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found",
+            "the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found",
+        ];
+        promises(
+            "when the root cannot be found, cannot be read, or declares no such entry",
+            unresolved_outcomes,
+        );
+        promises(
+            "the diagnostic says which of those happened rather than reporting the crate as missing",
+            unresolved_outcomes,
+        );
+
+        // The three-way root search, each branch with the fixtures that exercise it. The precedence
+        // between them is pinned behaviourally by
+        // `package_workspace_is_consulted_before_the_ancestor_walk` and
+        // `a_self_declared_workspace_wins_over_package_workspace`; the assertion below pins only
+        // that the text states it in that order.
+        let root_search = [
+            (
+                "the consumer manifest itself when it declares `[workspace]`",
+                &[
+                    "a_root_package_inherits_its_own_workspace_dependencies",
+                    "a_self_declared_workspace_wins_over_package_workspace",
+                ][..],
+            ),
+            (
+                "otherwise the root `package.workspace` names",
+                &[
+                    "package_workspace_names_the_workspace_root_directory",
+                    "a_relative_manifest_path_still_resolves_the_workspace_root",
+                    "package_workspace_is_consulted_before_the_ancestor_walk",
+                ][..],
+            ),
+            (
+                "otherwise the nearest ancestor manifest that parses and declares `[workspace]`",
+                &[
+                    "a_broken_manifest_below_the_real_root_does_not_stop_the_walk",
+                    "an_unparseable_ancestor_manifest_is_not_an_error_on_its_own",
+                    "the_walk_climbs_past_an_ancestor_that_parses_and_declares_no_workspace",
+                ][..],
+            ),
+        ];
+        for (clause, pinned_by) in root_search {
+            promises(clause, pinned_by);
+        }
+        // Precedence is a claim the three checks above do not make: all three would still pass with
+        // the order reversed, and `workspace_root` tries them in exactly this order.
+        let found = root_search.map(|(clause, _)| explain.find(clause));
+        assert!(
+            found[0] < found[1] && found[1] < found[2],
+            "`spargen explain E023` states the root search out of the order `workspace_root` \
+             performs it; the three branches appear at {found:?}"
+        );
+
+        // What is taken from the root once it is found: the first fixture's root carries every
+        // version and `serde`'s `derive` while its member declares a bare `workspace = true`, and
+        // the second adds `features = ["stream"]` to the member's inherited `reqwest`, which is the
+        // member's half of the union.
+        let from_the_root: &[&str] = &[
+            "workspace_inheritance_uses_the_workspace_version_and_features",
+            "the_manifests_reported_in_issue_71_pass_as_written",
+        ];
+        promises("taking the version from there", from_the_root);
+        promises("the union of both feature lists", from_the_root);
+
+        // The one field that stays with the member, in both directions: required-optional, and
+        // forbidden-optional on a crate generated code names unconditionally.
+        promises(
+            "while `optional` is read from the member",
+            &[
+                "an_inherited_optional_dependency_in_a_target_table_resolves",
+                "workspace_inherited_tokio_under_an_alternative_spelling_resolves",
+                "an_inherited_member_cannot_make_an_unconditional_crate_optional",
+            ],
+        );
+
+        // The clause that is the answer to #71 itself: an inherited declaration is accepted rather
+        // than reported as missing. Both fixtures assert the audit emits nothing at all for five
+        // crates the member only inherits.
+        promises(
+            "Inheriting a required crate therefore satisfies the audit",
+            from_the_root,
+        );
+
+        // And the body as a whole, which is the only assertion here that constrains what the text
+        // does *not* say. Every check above is a substring, so without this one a sentence may be
+        // appended or prefixed that contradicts all of them with the suite green.
+        //
+        // Deliberately not `assert_eq!`: its output prints the actual value in full, which beside
+        // an instruction to update the expected file amounts to handing over the paste that makes
+        // any change pass. The point of this assertion is that a reader has to decide the new text
+        // is correct, so it reports where the two diverge and nothing more.
+        assert!(
+            explain == expected,
+            "the `E023` explain body no longer matches \
+             `spargen/src/runtime_contract_e023_explain.txt`; they first differ at byte {}. Read \
+             the new text, satisfy yourself that every clause asserted above is still true of \
+             `workspace_root` and `check_declaration`, and only then re-type the change into that \
+             file.",
+            explain
+                .char_indices()
+                .zip(expected.chars())
+                .find(|((_, actual), expected)| actual != expected)
+                .map_or_else(|| explain.len().min(expected.len()), |((at, _), _)| at)
+        );
+    }
+
+    #[test]
+    fn an_inherited_member_cannot_make_an_unconditional_crate_optional() {
+        // The mirror of `an_inherited_optional_dependency_in_a_target_table_resolves`: `optional`
+        // is read from the member, so a member that adds `optional = true` to a crate generated
+        // code names unconditionally must be rejected — the inheritance resolving is not the same
+        // thing as the declaration being acceptable. Every other test that reaches this rule
+        // declares its crate directly, so nothing held it on the inheritance path, which is the
+        // path this branch is about.
+        let messages = inherited_reqwest_default_feature_diagnostics(
+            RootDefaults::Off,
+            "reqwest = { workspace = true, optional = true }",
+        );
+        assert_eq!(messages.len(), 1, "{messages:#?}");
+        assert!(
+            messages[0].contains("`reqwest` must not be optional"),
+            "{messages:#?}"
+        );
+    }
+
     /// The five core dependencies as a `[workspace.dependencies]` body, reusing `CORE_MANIFEST` so
     /// the floors in these fixtures cannot drift from the ones every other test audits against.
     fn core_workspace_dependencies() -> &'static str {
@@ -2396,6 +2813,66 @@ serde_json.workspace = true
     }
 
     #[test]
+    fn package_workspace_is_consulted_before_the_ancestor_walk() {
+        // The first edge of the documented precedence, and the one no fixture put in a single
+        // layout: a member that names a root with `package.workspace` *and* sits under an ancestor
+        // that is a perfectly good workspace root. Cargo takes the field; so must the audit. If the
+        // walk were consulted first the ancestor would resolve every inherited dependency and the
+        // audit would fall silent about a root the member explicitly named and that does not exist.
+        let directory = tempfile::tempdir().unwrap();
+        let ancestor = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &ancestor,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../elsewhere\"\n\n\
+                 {CORE_INHERITED}"
+            ),
+        )
+        .unwrap();
+
+        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        let message = messages(&diagnostics);
+        assert!(!diagnostics.is_empty(), "the named root does not exist");
+        assert!(message.contains("elsewhere"), "{message}");
+    }
+
+    #[test]
+    fn a_self_declared_workspace_wins_over_package_workspace() {
+        // The other edge: `[workspace]` in the consumer manifest is checked before
+        // `package.workspace`, so a manifest carrying both resolves against its own table. Reversed,
+        // the audit would chase a directory that is not there and report every inherited dependency
+        // as unresolvable, about a table it had already parsed.
+        let directory = tempfile::tempdir().unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../nowhere\"\n\n\
+                 [workspace]\n\n[workspace.dependencies]\n{}\n{CORE_INHERITED}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        assert_eq!(result.manifests, vec![member]);
+    }
+
+    #[test]
     fn a_relative_manifest_path_still_resolves_the_workspace_root() {
         // `generate_api!` falls back to a bare `./Cargo.toml` when Cargo names no manifest in the
         // environment. A one-component path has no ancestors to walk, so the workspace root was
@@ -2476,11 +2953,24 @@ serde_json.workspace = true
     }
 
     #[test]
-    fn a_corrupt_root_reached_by_the_ancestor_walk_is_not_reported_as_missing() {
+    fn a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found() {
         // The commonest layout reaches its root through the walk rather than through
         // `package.workspace`, and the walk used to skip any candidate it could not parse and keep
         // climbing — collapsing the three-way distinction back to "nothing found" for exactly the
         // case where a file the reader can open is the problem.
+        //
+        // **This fixture pins behaviour that is known to be wrong, deliberately**, in the same way
+        // as `an_identity_package_key_in_the_workspace_root_is_rejected_although_cargo_accepts_it`
+        // twelve fixtures below. The `E023` explain text promises that a root which cannot be
+        // *found* is reported differently from one that cannot be *read*. It is not: when no
+        // workspace root exists anywhere on the walk and any ancestor failed to parse, that
+        // ancestor is reported as "its workspace manifest", though nothing established it was one
+        // and it may be an unrelated crate outside the project. That is **#171**.
+        //
+        // When #171 is fixed this test **must** change — it is one of the two that will red, and
+        // both of them argued the behaviour was correct until round 6 said so here. The assertion
+        // then becomes that the diagnostic says no workspace manifest was found, while still
+        // naming the unreadable candidate as a hint rather than as the root.
         let directory = tempfile::tempdir().unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -2572,6 +3062,373 @@ serde_json.workspace = true
 
         let result = audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+    }
+
+    /// One choice in `workspace_root` is left unguarded, and the reason has a precondition that an
+    /// earlier version of this comment stated as though it were unconditional. The walk starts at
+    /// `absolute.parent().and_then(Utf8Path::parent)`, skipping the consumer's own directory.
+    /// Starting at `.parent()` instead re-reads the consumer's *directory*, whose `Cargo.toml` is
+    /// already known to parse and already known to declare no `[workspace]` — `workspace_root`
+    /// returns early when it does — so it falls through the `Ok(_) => {}` arm and climbs on.
+    ///
+    /// That holds **only when the audited manifest is itself named `Cargo.toml`**. Point the audit
+    /// at `dir/Other.toml` with a real workspace root beside it at `dir/Cargo.toml` and the two
+    /// differ sharply: the original skips the sibling and reports every inherited dependency
+    /// unresolvable, the mutant adopts it and reports nothing. So the mutant is equivalent **under
+    /// that precondition** and distinguishable without it.
+    ///
+    /// The precondition is not enforced anywhere: `manifest_from_env` returns `CARGO_MANIFEST_PATH`
+    /// verbatim with no filename check. It holds because Cargo sets that variable to a `Cargo.toml`
+    /// and because the `generate_api!` fallback is a literal `./Cargo.toml`, which is why this is a
+    /// comment rather than a fixture — there is no reachable input that distinguishes the two.
+    #[test]
+    fn the_walk_climbs_past_an_ancestor_that_parses_and_declares_no_workspace() {
+        // "A manifest that parses but declares no `[workspace]` is an ordinary member or an
+        // unrelated crate: keep climbing." Nested workspaces and vendored crates make that layout
+        // ordinary, and treating the first *parseable* ancestor as the root silently resolves every
+        // inherited dependency against a table that is not there. The existing walk fixtures all
+        // put an ancestor that fails to *parse* in the way, which is a different arm.
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let middle_dir = directory.path().join("middle");
+        let member_dir = middle_dir.join("client");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        let middle = Utf8PathBuf::from_path_buf(middle_dir.join("Cargo.toml")).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = []\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        // Parses, and declares no `[workspace]`: the walk must step over it, not stop on it.
+        std::fs::write(
+            &middle,
+            "[package]\nname = \"middle\"\nversion = \"0.0.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        assert!(result.manifests.contains(&root), "{:#?}", result.manifests);
+        assert!(
+            !result.manifests.contains(&middle),
+            "{:#?}",
+            result.manifests
+        );
+    }
+
+    #[test]
+    fn a_package_key_in_the_workspace_root_is_rejected_whatever_it_names() {
+        // "A renamed runtime crate" is an advertised `E023` trigger, and the check reads `package`
+        // from the member *and* the root — generated code names the canonical crate either way.
+        // Every other rename fixture renames in the member's own table, so the root half of that
+        // pair was reached by nothing; this covers it.
+        //
+        // What it pins is the rule as written, which is **wider than a rename**: the check tests
+        // that a `package` key is *present* and never compares it with the dependency name, so the
+        // identity spelling `bytes = { package = "bytes", … }` — a no-op Cargo accepts — is
+        // rejected too. That is tracked as a production defect (#168); the second half of this
+        // fixture pins it as current behaviour so the fix has something to change, and the name of
+        // this test says "whatever it names" rather than asserting a rename occurred.
+        let core_bytes = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with("bytes = "))
+            .expect("CORE_MANIFEST declares bytes under that key");
+        let floor = core_bytes
+            .split('"')
+            .nth(1)
+            .expect("the bytes entry pins a quoted version");
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies().replace(
+                    core_bytes,
+                    &format!("bytes = {{ package = \"bytes-fork\", version = \"{floor}\" }}")
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert!(
+            diagnostics[0].message.contains("`bytes` cannot be renamed"),
+            "{diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn an_identity_package_key_in_the_workspace_root_is_rejected_although_cargo_accepts_it() {
+        // `bytes = { package = "bytes", … }` renames nothing: Cargo's `package` field defaults to
+        // the key, so this is the fully-qualified spelling of an ordinary dependency and `cargo
+        // check` is happy with it. Spargen refuses it with a hard `E023` because the rule tests the
+        // key's presence rather than its value, so a workspace written in that style cannot use
+        // spargen at all.
+        //
+        // This asserts the **current, wrong** behaviour, deliberately, so that #168's fix has a
+        // fixture to flip. When it lands, this becomes `assert!(diagnostics.is_empty())` and the
+        // name loses its second clause. The same false positive is already pinned at the member
+        // level by a fixture on master; this is the workspace-root half of it.
+        let core_bytes = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with("bytes = "))
+            .expect("CORE_MANIFEST declares bytes under that key");
+        let floor = core_bytes
+            .split('"')
+            .nth(1)
+            .expect("the bytes entry pins a quoted version");
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies().replace(
+                    core_bytes,
+                    &format!("bytes = {{ package = \"bytes\", version = \"{floor}\" }}")
+                )
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        assert_eq!(diagnostics.len(), 1, "#168: {diagnostics:#?}");
+        assert!(
+            diagnostics[0].message.contains("`bytes` cannot be renamed"),
+            "#168: {diagnostics:#?}"
+        );
+    }
+
+    #[test]
+    fn a_workspace_root_that_failed_to_parse_explains_itself_once() {
+        // `WorkspaceOrigin::Unreadable::reason` is `None` for a root named by `package.workspace`,
+        // and its doc argues why: that root *is* audited, so `read_toml` already reported the parse
+        // failure on its own line and "repeating it here would print it twice". Threading the real
+        // reason through would do exactly that, and nothing noticed.
+        let directory = tempfile::tempdir().unwrap();
+        let root_dir = directory.path().join("root");
+        let member_dir = directory.path().join("outside");
+        std::fs::create_dir(&root_dir).unwrap();
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(root_dir.join("Cargo.toml"), "[workspace\nbroken = ").unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../root\"\n\n\
+                 {CORE_INHERITED}"
+            ),
+        )
+        .unwrap();
+
+        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        let message = messages(&diagnostics);
+        // Reported once, by the audit of the root itself.
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic
+                    .message
+                    .contains("failed to parse workspace manifest"))
+                .count(),
+            1,
+            "{message}"
+        );
+        // And not a second time on every inheritance that could not resolve: those say the file
+        // could not be read, without restating why.
+        assert!(message.contains("could not be read"), "{message}");
+        assert!(!message.contains("could not be read: "), "{message}");
+    }
+
+    #[test]
+    fn the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found() {
+        // The walk remembers the *first* unparseable candidate it meets and never overwrites it,
+        // so of the files a reader might be sent to open, it is the one closest to their crate.
+        // With two broken manifests on one path and no `[workspace]` anywhere, only that choice is
+        // observable, and no other fixture puts two of them on a single walk.
+        //
+        // **This fixture pins behaviour that is known to be wrong, deliberately**, in the same way
+        // as `an_identity_package_key_in_the_workspace_root_is_rejected_although_cargo_accepts_it`
+        // twelve fixtures below. The `E023` explain text promises that a root which cannot be
+        // *found* is reported differently from one that cannot be *read*. It is not: when no
+        // workspace root exists anywhere on the walk and any ancestor failed to parse, that
+        // ancestor is reported as "its workspace manifest", though nothing established it was one
+        // and it may be an unrelated crate outside the project. That is **#171**.
+        //
+        // When #171 is fixed this test **must** change — it is one of the two that will red, and
+        // both of them argued the behaviour was correct until round 6 said so here. The assertion
+        // then becomes that the diagnostic says no workspace manifest was found, while still
+        // naming the unreadable candidate as a hint rather than as the root.
+        let directory = tempfile::tempdir().unwrap();
+        let far = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let near_dir = directory.path().join("near");
+        let member_dir = near_dir.join("client");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        let near = Utf8PathBuf::from_path_buf(near_dir.join("Cargo.toml")).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(&far, "[workspace\nbroken = ").unwrap();
+        std::fs::write(&near, "[workspace\nalso broken = ").unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        let message = messages(&diagnostics);
+        assert!(message.contains(near.as_str()), "{message}");
+        assert!(!message.contains(far.as_str()), "{message}");
+    }
+
+    #[test]
+    fn the_nearest_workspace_root_wins_when_two_are_on_the_walk() {
+        // "The **nearest** ancestor manifest that parses and declares `[workspace]`" — the clause
+        // the explain text states and this module's explain test pins as *text*. Nothing pinned it
+        // as behaviour: every other walk fixture has at most one valid root on the path, the
+        // obstacles being unparseable or workspace-less, never a second workspace root. Nested
+        // workspaces are ordinary — a vendored tree, or a crate inside someone else's checkout —
+        // and returning the farthest root instead resolves inherited dependencies against a table
+        // belonging to an unrelated project.
+        let directory = tempfile::tempdir().unwrap();
+        let far = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let near_dir = directory.path().join("near");
+        let member_dir = near_dir.join("client");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        let near = Utf8PathBuf::from_path_buf(near_dir.join("Cargo.toml")).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        // The far root declares the core crates; the near one declares none, so whichever is
+        // chosen is visible in the diagnostics rather than only in `manifests`.
+        std::fs::write(
+            &far,
+            format!(
+                "[workspace]\nmembers = []\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        std::fs::write(&near, "[workspace]\nmembers = [\"client\"]\n").unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        let message = messages(&result.diagnostics);
+        assert!(
+            message.contains(near.as_str()) && message.contains("declares no `bytes` there"),
+            "the walk must stop at the nearest workspace root: {message}"
+        );
+        assert!(!message.contains(far.as_str()), "{message}");
+        assert!(result.manifests.contains(&near), "{:#?}", result.manifests);
+        assert!(!result.manifests.contains(&far), "{:#?}", result.manifests);
+    }
+
+    #[test]
+    fn a_root_declaring_optional_does_not_make_an_inherited_crate_optional() {
+        // The `package` rule reads both the member's and the root's declaration, and this branch
+        // added the root half deliberately. The `optional` rule reads the member only, and nothing
+        // held it there: making it read the root as well leaves every other test green.
+        //
+        // Like `a_self_declared_workspace_wins_over_package_workspace`, this pins spargen's answer
+        // to a manifest **Cargo will not load** — `optional` is not an accepted key in
+        // `[workspace.dependencies]`, which is *why* reading it from the root would be wrong. So it
+        // guards against a silent change to a rule rather than describing a reachable layout, and
+        // that is the whole of its value.
+        let core_reqwest = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with("reqwest = "))
+            .expect("CORE_MANIFEST declares reqwest under that key");
+        let optional_in_the_root = core_reqwest.replace(" }", ", optional = true }");
+        assert_ne!(
+            optional_in_the_root, core_reqwest,
+            "the entry is an inline table"
+        );
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies().replace(core_reqwest, &optional_in_the_root)
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+    }
+
+    #[test]
+    fn a_self_rooted_manifest_reached_by_a_relative_path_is_recorded_once() {
+        // A self-rooted manifest is the consumer manifest, already read and already recorded, so
+        // resolution must not read it a second time or record it again. Reached by an absolute
+        // path the duplicate is invisible — `manifests` is sorted and deduplicated — so the guard
+        // has to come in through the `generate_api!` `./Cargo.toml` fallback, where the second
+        // spelling is a different string and Cargo would receive two `rerun-if-changed` directives
+        // for one file.
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[workspace]\n\n\
+                 [workspace.dependencies]\n{}\n{CORE_INHERITED}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+
+        let _lock = WORKING_DIRECTORY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreWorkingDirectory(std::env::current_dir().unwrap());
+        std::env::set_current_dir(directory.path()).unwrap();
+
+        let result = audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        assert_eq!(
+            result.manifests,
+            vec![Utf8PathBuf::from("Cargo.toml")],
+            "the consumer manifest must be recorded once, under the spelling it was given"
+        );
     }
 
     #[test]
@@ -2667,6 +3524,14 @@ serde_json.workspace = true
             result.diagnostics
         );
         assert!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("consumer manifest")),
+            "the file that failed is the workspace root, not the consumer's own manifest: {:#?}",
+            result.diagnostics
+        );
+        assert!(
             result.diagnostics.iter().any(|diagnostic| {
                 diagnostic.message.contains("`bytes` inherits")
                     && diagnostic.message.contains("could not be read")
@@ -2680,6 +3545,176 @@ serde_json.workspace = true
                 .contains("no workspace manifest was found")),
             "found-but-broken must not be reported as missing: {:#?}",
             result.diagnostics
+        );
+    }
+
+    #[test]
+    fn a_consumer_manifest_that_cannot_be_read_or_parsed_is_named_as_the_consumer_manifest() {
+        // The other half of the role noun: the consumer's own manifest is never called the
+        // workspace manifest, on either failure. Swapping the two call-site nouns fails this test.
+        let directory = tempfile::tempdir().unwrap();
+
+        let unparseable = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        std::fs::write(&unparseable, "[package\nnot toml at all\n").unwrap();
+        let result = audit(&unparseable, &RuntimeRequirements::default());
+        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
+        let message = &result.diagnostics[0].message;
+        assert!(
+            message.contains("failed to parse consumer manifest"),
+            "{message}"
+        );
+        assert!(!message.contains("workspace manifest"), "{message}");
+        // Nothing past the consumer manifest was looked up, so nothing else is a rebuild input.
+        assert_eq!(result.manifests, vec![unparseable]);
+
+        let absent =
+            Utf8PathBuf::from_path_buf(directory.path().join("absent").join("Cargo.toml")).unwrap();
+        let result = audit(&absent, &RuntimeRequirements::default());
+        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
+        let message = &result.diagnostics[0].message;
+        assert!(
+            message.contains("failed to read consumer manifest"),
+            "{message}"
+        );
+        assert!(!message.contains("workspace manifest"), "{message}");
+    }
+
+    #[test]
+    fn a_package_workspace_naming_a_directory_without_a_manifest_is_a_workspace_read_failure() {
+        // `package.workspace` is taken at its word, so a root directory holding no `Cargo.toml` is
+        // a workspace manifest that could not be *read* — not a parse failure, and not a missing
+        // root.
+        let directory = tempfile::tempdir().unwrap();
+        let root_dir = directory.path().join("root");
+        let member_dir = directory.path().join("outside");
+        std::fs::create_dir(&root_dir).unwrap();
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nworkspace = \"../root\"\n\n\
+                 {CORE_INHERITED}"
+            ),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        let any = |needle: &str| {
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(needle))
+        };
+        assert!(
+            any("failed to read workspace manifest"),
+            "{:#?}",
+            result.diagnostics
+        );
+        assert!(!any("failed to parse"), "{:#?}", result.diagnostics);
+        assert!(!any("consumer manifest"), "{:#?}", result.diagnostics);
+        assert!(
+            result.diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains("`bytes` inherits")
+                    && diagnostic.message.contains("could not be read")
+            }),
+            "{:#?}",
+            result.diagnostics
+        );
+        assert!(
+            !any("no workspace manifest was found"),
+            "{:#?}",
+            result.diagnostics
+        );
+    }
+
+    #[test]
+    fn the_manifests_reported_in_issue_71_pass_as_written() {
+        // The layout exactly as #71 reported it: the root spells `futures-core` as a plain string
+        // and `uuid` as a table with its own features; the member inherits both beside the five
+        // core crates. The report said both came back as "generated client requires …". The
+        // member adds `stream` to the inherited `reqwest`, which is the feature union a stream
+        // needs and the half of it no other fixture exercises.
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
+                 futures-core = \"0.3.32\"\n\
+                 uuid = {{ version = \"1.26.0\", features = [\"v4\", \"serde\"] }}\n",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{}\
+                 futures-core = {{ workspace = true }}\nuuid = {{ workspace = true }}\n",
+                CORE_INHERITED.replace(
+                    "reqwest.workspace = true",
+                    "reqwest = { workspace = true, features = [\"stream\"] }"
+                )
+            ),
+        )
+        .unwrap();
+
+        let requirements = RuntimeRequirements {
+            streams: true,
+            uuid: true,
+            ..RuntimeRequirements::default()
+        };
+        let result = audit(&member, &requirements);
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        assert_eq!(result.manifests, vec![root, member]);
+    }
+
+    #[test]
+    fn an_inherited_optional_dependency_in_a_target_table_resolves() {
+        // The one optional requirement lives in a `[target.'cfg(…)'.dependencies]` table, and
+        // Cargo does not inherit `optional`: the root declares version and features, the member
+        // adds `optional = true` beside `workspace = true`. Every other inheritance fixture sits
+        // in `[dependencies]`, so the target table's lookup was unpinned.
+        let directory = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
+                 tokio = {{ version = \"1.53.1\", features = [\"rt\"] }}\n",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        let inherited_optional = format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[features]\n\
+             blocking = [\"dep:tokio\"]\n\n{CORE_INHERITED}\n\
+             [target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]\n\
+             tokio = {{ workspace = true, optional = true }}\n"
+        );
+        std::fs::write(&member, &inherited_optional).unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+
+        // `optional` is the member's to declare, exactly as Cargo reads it: the inherited entry
+        // still resolves, and only the optional rule fires.
+        std::fs::write(&member, inherited_optional.replace(", optional = true", "")).unwrap();
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
+        assert!(
+            result.diagnostics[0]
+                .message
+                .contains("`tokio` must be optional"),
+            "{}",
+            result.diagnostics[0].message
         );
     }
 
