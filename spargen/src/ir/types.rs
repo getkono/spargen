@@ -76,6 +76,70 @@ impl TypeGraph {
     pub(crate) fn iter(&self) -> impl Iterator<Item = (TypeId, &TypeDef)> {
         self.defs.iter().map(|(id, def)| (*id, def))
     }
+
+    /// Whether two references emit the identical Rust type. Sound rather than complete: `true`
+    /// means the generated types are one type, because every non-nominal definition is emitted as a
+    /// transparent `pub type` alias of its structure. A nominal definition (a struct, string enum,
+    /// union, or `Never`) is its own item and matches only itself. Both use-site modifiers must
+    /// agree, so callers strip the top-level ones they absorb; nested ones are compared, because a
+    /// tuple item keeps its `Box`. Independent of the `uuid`/`time` features: a feature-mapped
+    /// primitive never equals `String`, even in a build where it would emit one.
+    pub(crate) fn same_generated_type(&self, a: Ty, b: Ty) -> bool {
+        self.same_generated_type_guarded(a, b, &mut Vec::new())
+    }
+
+    fn same_generated_type_guarded(
+        &self,
+        a: Ty,
+        b: Ty,
+        visiting: &mut Vec<(TypeId, TypeId)>,
+    ) -> bool {
+        if a.nullable != b.nullable || a.boxed != b.boxed {
+            return false;
+        }
+        if a.id == b.id {
+            return true;
+        }
+        let pair = (a.id, b.id);
+        if visiting.contains(&pair) {
+            // A `$ref` cycle through containers: this pair is already being compared further up the
+            // stack, and along the cycle both sides unfold identically.
+            return true;
+        }
+        let (Some(a_def), Some(b_def)) = (self.get(a.id), self.get(b.id)) else {
+            return false;
+        };
+        visiting.push(pair);
+        let same = match (&a_def.kind, &b_def.kind) {
+            (TypeKind::Primitive(x), TypeKind::Primitive(y)) => x == y,
+            // Integer and boolean enums are `pub type X = i64` / `bool` aliases; a string enum is a
+            // real `pub enum`, so it is nominal.
+            (TypeKind::Enum(x), TypeKind::Enum(y)) => {
+                x.repr == y.repr && x.repr != ScalarRepr::String
+            }
+            (TypeKind::Enum(scalar), TypeKind::Primitive(prim))
+            | (TypeKind::Primitive(prim), TypeKind::Enum(scalar)) => matches!(
+                (scalar.repr, prim),
+                (ScalarRepr::Int, Prim::I64) | (ScalarRepr::Bool, Prim::Bool)
+            ),
+            (TypeKind::Array(x), TypeKind::Array(y)) => {
+                self.same_generated_type_guarded(**x, **y, visiting)
+            }
+            (TypeKind::Tuple(xs), TypeKind::Tuple(ys)) => {
+                xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .zip(ys)
+                        .all(|(x, y)| self.same_generated_type_guarded(*x, *y, visiting))
+            }
+            (TypeKind::Bytes, TypeKind::Bytes)
+            | (TypeKind::Null, TypeKind::Null)
+            | (TypeKind::Any, TypeKind::Any) => true,
+            _ => false,
+        };
+        visiting.pop();
+        same
+    }
 }
 
 /// A named or structurally-derived type definition.

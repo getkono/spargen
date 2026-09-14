@@ -33,7 +33,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
-    Api, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec, SuccessShape, Ty, TypeKind,
+    Api, ApiErrorBodyImpl, ErrorShape, Prim, ScalarRepr, ScalarValue, StatusSpec, SuccessShape, Ty,
+    TypeKind,
 };
 use crate::name::Names;
 
@@ -61,6 +62,9 @@ struct OpSurface {
     success: String,
     /// Canonical rendering of the error type.
     error: String,
+    /// The canonical `<E as ApiErrorBody>::Body` of the error type, or `None` when it does not
+    /// implement `ApiErrorBody`.
+    error_body: Option<String>,
 }
 
 /// A single parameter's surface: its canonical type and whether it is required (required params are
@@ -150,6 +154,12 @@ pub enum ChangeKind {
     SuccessTypeChanged,
     /// An operation's error type changed. **Major**.
     ErrorTypeChanged,
+    /// An operation's error type now implements the runtime's `ApiErrorBody` (a uniform-body enum
+    /// also gains `body()`). **Minor** — additive.
+    ApiErrorBodyAdded,
+    /// An operation's error type no longer implements `ApiErrorBody`. **Major** — `body()`,
+    /// `Error::api_body()`, and `E: ApiErrorBody` bounds stop compiling.
+    ApiErrorBodyRemoved,
     /// A new required parameter was added. **Major** — a new positional argument.
     RequiredParamAdded,
     /// A new optional parameter was added. **Minor** — a new `…Params` field defaulting to unset.
@@ -190,6 +200,7 @@ impl ChangeKind {
     pub fn impact(self) -> Impact {
         match self {
             ChangeKind::OperationAdded
+            | ChangeKind::ApiErrorBodyAdded
             | ChangeKind::OptionalParamAdded
             | ChangeKind::TypeAdded
             | ChangeKind::FieldAdded
@@ -201,6 +212,7 @@ impl ChangeKind {
             | ChangeKind::RequestBodyTypeChanged
             | ChangeKind::SuccessTypeChanged
             | ChangeKind::ErrorTypeChanged
+            | ChangeKind::ApiErrorBodyRemoved
             | ChangeKind::RequiredParamAdded
             | ChangeKind::ParamRemoved
             | ChangeKind::ParamTypeChanged
@@ -227,6 +239,8 @@ impl ChangeKind {
             ChangeKind::RequestBodyTypeChanged => "request-body-type-changed",
             ChangeKind::SuccessTypeChanged => "success-type-changed",
             ChangeKind::ErrorTypeChanged => "error-type-changed",
+            ChangeKind::ApiErrorBodyAdded => "api-error-body-added",
+            ChangeKind::ApiErrorBodyRemoved => "api-error-body-removed",
             ChangeKind::RequiredParamAdded => "required-param-added",
             ChangeKind::OptionalParamAdded => "optional-param-added",
             ChangeKind::ParamRemoved => "param-removed",
@@ -374,6 +388,7 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                 request_body,
                 success: success_sig(&operation.responses.success(), api, names),
                 error: error_sig(&operation.responses.error(), api, names),
+                error_body: error_body_sig(&operation.responses.error(), api, names),
             },
         );
     }
@@ -523,6 +538,21 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
             key,
             format!("error type `{}` -> `{}`", old.error, new.error),
         ));
+    }
+    match (&old.error_body, &new.error_body) {
+        (None, Some(body)) => changes.push(Change::new(
+            ChangeKind::ApiErrorBodyAdded,
+            key,
+            format!("error type now implements `ApiErrorBody` (`Body = {body}`)"),
+        )),
+        (Some(body), None) => changes.push(Change::new(
+            ChangeKind::ApiErrorBodyRemoved,
+            key,
+            format!("error type no longer implements `ApiErrorBody` (was `Body = {body}`)"),
+        )),
+        // A different `Body` on both sides always changes `error` too (the shared body is one of
+        // the rendered status types, or the single body itself), so `ErrorTypeChanged` reports it.
+        _ => {}
     }
     for name in keys(&old.params, &new.params) {
         let location = format!("{key} param `{name}`");
@@ -805,6 +835,19 @@ fn error_sig(shape: &ErrorShape, api: &Api, names: &Names) -> String {
     }
 }
 
+/// The canonical `<E as ApiErrorBody>::Body` of an operation's error type, or `None` when the type
+/// does not implement `ApiErrorBody`. Recorded directly rather than derived from [`error_sig`]:
+/// the rendered signature cannot see every change in whether the trait is implemented (a bodyless
+/// status and a `null` body both render `()`, and a tuple item's `Box` is not rendered at all).
+fn error_body_sig(shape: &ErrorShape, api: &Api, names: &Names) -> Option<String> {
+    shape
+        .api_error_body(&api.types)
+        .map(|implementation| match implementation {
+            ApiErrorBodyImpl::Uninhabited => "Infallible".to_owned(),
+            ApiErrorBodyImpl::Body(ty) => canon_ty(ty, api, names),
+        })
+}
+
 /// Render a multi-status success/error enum shape: the per-status body types in the IR's
 /// pre-sorted decode/classification precedence, so it is deterministic and reflects the generated
 /// enum's structure.
@@ -880,6 +923,8 @@ mod tests {
             ChangeKind::RequestBodyTypeChanged,
             ChangeKind::SuccessTypeChanged,
             ChangeKind::ErrorTypeChanged,
+            ChangeKind::ApiErrorBodyAdded,
+            ChangeKind::ApiErrorBodyRemoved,
             ChangeKind::RequiredParamAdded,
             ChangeKind::OptionalParamAdded,
             ChangeKind::ParamRemoved,
@@ -909,6 +954,8 @@ mod tests {
                 | ChangeKind::RequestBodyTypeChanged
                 | ChangeKind::SuccessTypeChanged
                 | ChangeKind::ErrorTypeChanged
+                | ChangeKind::ApiErrorBodyAdded
+                | ChangeKind::ApiErrorBodyRemoved
                 | ChangeKind::RequiredParamAdded
                 | ChangeKind::OptionalParamAdded
                 | ChangeKind::ParamRemoved
@@ -941,6 +988,8 @@ mod tests {
             ChangeKind::RequestBodyTypeChanged => "RequestBodyTypeChanged",
             ChangeKind::SuccessTypeChanged => "SuccessTypeChanged",
             ChangeKind::ErrorTypeChanged => "ErrorTypeChanged",
+            ChangeKind::ApiErrorBodyAdded => "ApiErrorBodyAdded",
+            ChangeKind::ApiErrorBodyRemoved => "ApiErrorBodyRemoved",
             ChangeKind::RequiredParamAdded => "RequiredParamAdded",
             ChangeKind::OptionalParamAdded => "OptionalParamAdded",
             ChangeKind::ParamRemoved => "ParamRemoved",
@@ -964,7 +1013,7 @@ mod tests {
     fn the_kind_list_covers_the_whole_enum() {
         assert_eq!(
             all_kinds().len(),
-            24,
+            26,
             "a `ChangeKind` variant reached the exhaustive match without joining the list"
         );
     }
@@ -1015,9 +1064,10 @@ mod tests {
     /// reclassifying a kind — which changes the version bump spargen recommends — is a deliberate
     /// edit here rather than a silent consequence of moving a match arm.
     #[test]
-    fn only_the_five_additive_kinds_are_minor() {
+    fn only_the_six_additive_kinds_are_minor() {
         const MINOR: &[ChangeKind] = &[
             ChangeKind::OperationAdded,
+            ChangeKind::ApiErrorBodyAdded,
             ChangeKind::OptionalParamAdded,
             ChangeKind::TypeAdded,
             ChangeKind::FieldAdded,

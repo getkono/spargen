@@ -29,6 +29,8 @@ serde_json = { workspace = true }
 semver = { workspace = true }
 toml = { workspace = true }
 camino = { workspace = true }
+# runtime_contract — cfg evaluation for target-scoped dependency tables (host-only for consumers)
+cfg-expr = { workspace = true }
 # source
 indexmap = { workspace = true }
 yaml-rust2 = { workspace = true }
