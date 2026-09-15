@@ -890,23 +890,41 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // It matters below because a target inside the cycle cannot be composed with: its
             // definition depends on the very result being computed, so `intersect_non_null`'s
             // `(Any, _)` arm would return the sibling and silently discard the target.
-            let back_edge = match reference.strip_prefix("#/components/schemas/") {
-                Some(name) => self.ref_closes_a_cycle(name, &schema.provenance),
-                None => self.remote_in_progress.contains_key(reference),
-            };
-            let referenced = if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                self.ensure_component(name, &schema.provenance)?
-                // Remote refs go through the cycle-safe, deduped remote path (keyed by
-                // `url#fragment`), mirroring `ensure_component`; a bare relative/other ref falls
-                // through to `resolve`, which reports it (E003/E004).
-            } else if is_remote_ref(reference) {
-                self.ensure_remote(reference)?
-            } else {
-                // Bundle refs go through the cycle-safe, deduped path too, keyed by the resolved
-                // `file#pointer`. That key is why the ordinary spelling and the explicit
-                // `./lib.yaml#/…` spelling of one target now share one type rather than two.
-                self.ensure_resolved(reference, &schema.provenance, hint)?
-            };
+            // Each arm answers the back-edge question with the predicate that arm can actually
+            // answer, and both are resolved-identity questions rather than questions about how the
+            // reference was spelled.
+            //
+            // `#/components/schemas/…` is answered from the DOCUMENT, before lowering: the walk
+            // through `components.schemas` gives the same verdict however the map is ordered.
+            //
+            // Every other spelling has no such map to walk — `ref_closes_a_cycle` consults the ROOT
+            // document's components only, so a sub-file or remote target is invisible to it — and is
+            // answered from the reservation the `ensure_*` call just returned. That call is what
+            // resolves the spelling to an identity, so the test has to come after it.
+            //
+            // It used to come before it, keyed on `remote_in_progress` alone. A sub-file target's
+            // reservation lives in `resolved_in_progress`, so the explicit `./lib.yaml#/…` spelling
+            // of a cycle-closing reference answered `false` unconditionally and fell through to the
+            // intersection below, against a placeholder. `is_in_progress_root` chains all three
+            // maps, which is the same shape `gather_member` already applies after its own `ensure_*`
+            // calls.
+            let (referenced, back_edge) =
+                if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                    let back_edge = self.ref_closes_a_cycle(name, &schema.provenance);
+                    (self.ensure_component(name, &schema.provenance)?, back_edge)
+                    // Remote refs go through the cycle-safe, deduped remote path (keyed by
+                    // `url#fragment`), mirroring `ensure_component`; a bare relative/other ref falls
+                    // through to `resolve`, which reports it (E003/E004).
+                } else if is_remote_ref(reference) {
+                    let ty = self.ensure_remote(reference)?;
+                    (ty, self.is_in_progress_root(ty.id))
+                } else {
+                    // Bundle refs go through the cycle-safe, deduped path too, keyed by the resolved
+                    // `file#pointer`. That key is why the ordinary spelling and the explicit
+                    // `./lib.yaml#/…` spelling of one target now share one type rather than two.
+                    let ty = self.ensure_resolved(reference, &schema.provenance, hint)?;
+                    (ty, self.is_in_progress_root(ty.id))
+                };
 
             // In JSON Schema 2020-12 `$ref` is an applicator, not a replacement for the containing
             // schema. Intersect every shape-bearing sibling instead of silently discarding it.
@@ -929,16 +947,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // and the alternative here is not "compose anyway" but "discard the target", which
                 // produces a type accepting documents the description forbids — a recursive `Node`
                 // flattened to a one-off struct, or to the sibling's own scalar.
+                // The wording is chosen by what the reference RESOLVES TO, not by how it was
+                // spelled. It used to branch on whether the string began `#/components/schemas/`,
+                // which is a fact about the author's typing: the explicit `./lib.yaml#/…` spelling
+                // of a sub-file component was therefore described to the reader as *remote*, which
+                // it is not, while the bare spelling of the same target in the same file was
+                // described correctly. One reference, two spellings, two different accounts of one
+                // fact — the mistake decision 23 removed from the verdict, left standing in the
+                // explanation.
+                //
+                // `is_remote_ref` is the same predicate that routes the lowering a few lines above,
+                // so the message and the code path now agree by construction. A genuinely remote
+                // target still says so; every local target, however addressed, says the same thing.
                 return self.reject_ref_sibling_intersection(
                     schema,
-                    if reference.starts_with("#/components/schemas/") {
-                        "this `$ref` closes a reference cycle back to the component that encloses \
-                         it, so its shape-bearing siblings would have to be intersected with a \
-                         target whose own definition depends on the result"
-                    } else {
+                    if is_remote_ref(reference) {
                         "this remote `$ref` closes a reference cycle back to the schema that \
                          encloses it, so its shape-bearing siblings would have to be intersected \
                          with a target whose own definition depends on the result"
+                    } else {
+                        "this `$ref` closes a reference cycle back to the component that encloses \
+                         it, so its shape-bearing siblings would have to be intersected with a \
+                         target whose own definition depends on the result"
                     },
                 );
             }
@@ -1205,17 +1235,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         // The third spelling of the conjunction the `$ref`-sibling and `allOf` arms already guard.
         // A union member that closes a reference cycle resolves to the target's RESERVED id, whose
-        // def is the `TypeKind::Any` placeholder, and `intersect_non_null`'s `(Any, _)` arm returns
-        // the sibling — so intersecting a variant against it silently discards the recursive
-        // target. Only reachable when there IS a sibling to intersect with: without one, an
-        // ordinary recursive union boxes its back-edge and generates, which is what makes a
+        // def is the `TypeKind::Reserved` placeholder, so intersecting a variant against it can
+        // produce no true answer. Only reachable when there IS a sibling to intersect with: without
+        // one, an ordinary recursive union boxes its back-edge and generates, which is what makes a
         // recursive `oneOf` usable at all.
+        //
+        // This is the DOCUMENT half of the test and it is answered before lowering, so it covers
+        // only the `#/components/schemas/…` spelling — `ref_closes_a_cycle` has no map to walk for
+        // any other. The reservation half is applied after each member is lowered, at the two sites
+        // below where the member's `Ty` exists; between them the three spellings of one conjunction
+        // give one verdict, which they did not before.
         if sibling.is_some() {
             for member in &real_members {
                 if self.member_closes_a_cycle(member, &schema.provenance) {
                     return self.reject_ref_sibling_intersection(
                         schema,
-                        "this union member's `$ref` closes a reference cycle back to the component \
+                        "this union member's `$ref` closes a reference cycle back to the schema \
                          that encloses it, so the enclosing schema's own sibling keywords would \
                          have to be intersected with a target whose definition depends on the \
                          result",
@@ -1234,6 +1269,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // The member's OWN nullability, before the intersection overwrites `inner`. Needed
             // below when the sibling is not entitled to decide.
             let member_nullable = inner.nullable;
+            // The reservation half of the cycle test, on the sole real member. The document half
+            // above answers only the `#/components/schemas/…` spelling; a sub-file or remote member
+            // reference reaches here still pointing at a placeholder, and the intersection below
+            // cannot compose with one. Reported with the same wording the other two spellings use,
+            // because it is the same fact about the same document.
+            if sibling.is_some() && self.is_in_progress_root(inner.id) {
+                return self.reject_ref_sibling_intersection(
+                    schema,
+                    "this union member's `$ref` closes a reference cycle back to the schema that \
+                     encloses it, so the enclosing schema's own sibling keywords would have to be \
+                     intersected with a target whose definition depends on the result",
+                );
+            }
             if let Some(sibling) = sibling {
                 // The null-only MEMBER's branch was stripped out above, BEFORE this intersection,
                 // so `inner` carries `nullable: false` and `type_accepts_null` — which reads
@@ -1312,6 +1360,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     schema,
                     "a union member is a direct recursive `$ref` to the union being lowered, so \
                      the member is the union itself and decoding it would never terminate",
+                );
+            }
+            // The reservation half of the cycle test again, on a multi-variant union. Same fact,
+            // same wording, same place in the order: before anything tries to intersect against the
+            // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
+            // `oneOf` still boxes its back-edge and generates.
+            if sibling.is_some() && self.is_in_progress_root(ty.id) {
+                return self.reject_ref_sibling_intersection(
+                    schema,
+                    "this union member's `$ref` closes a reference cycle back to the schema that \
+                     encloses it, so the enclosing schema's own sibling keywords would have to be \
+                     intersected with a target whose definition depends on the result",
                 );
             }
             if let Some(sibling) = sibling {
@@ -2307,6 +2367,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn intersect_types(&mut self, a: Ty, b: Ty, hint: &str) -> Option<Ty> {
         let a_kind = self.graph.get(a.id)?.kind.clone();
         let b_kind = self.graph.get(b.id)?.kind.clone();
+
+        // Fail closed on a reservation, BEFORE nullability is consulted. A `TypeKind::Reserved`
+        // operand is a placeholder whose body is still being lowered, so no true statement can be
+        // made about the intersection — `is_in_progress_root`'s own documentation says the only
+        // safe thing to do with one is refuse to read it. The callers above guard their own paths,
+        // but a guard that asks about the *spelling* of a reference rather than its resolved
+        // identity lets one through, and the rescue below then converted that unanswerable
+        // intersection into a confident wrong answer: `intersect_non_null` has no `Reserved` arm, so
+        // it returned `None`, and `None if accepts_null` typed the position as the exact JSON null
+        // type. The result was `pub type X = ();` — a client that decodes only `null` for a schema
+        // that accepts objects — emitted with no diagnostic, which is the standing invariant's
+        // fourth, silent behaviour.
+        //
+        // Returning `None` here routes to each caller's own rejection instead. This is what makes
+        // the class unreachable rather than one spelling of it: any future guard that misses a
+        // reservation lands on a rejection, never on generated code.
+        if matches!(a_kind, TypeKind::Reserved) || matches!(b_kind, TypeKind::Reserved) {
+            return None;
+        }
+
         let accepts_null = type_accepts_null(a, &a_kind) && type_accepts_null(b, &b_kind);
 
         let non_null = if matches!(a_kind, TypeKind::Null) || matches!(b_kind, TypeKind::Null) {

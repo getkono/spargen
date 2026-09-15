@@ -1772,6 +1772,20 @@ components:
                 has_code(report, Code::AllOfIrreconcilable),
                 "{spelling}/{entry}: {report:#?}"
             );
+            // The code being right is not the same as the message being true. Both spellings name
+            // one document, so both must name the same cause — decision 23's rule applied to the
+            // wording rather than only to the verdict. The explicit spelling reported the generic
+            // empty-intersection message, which is FALSE here: the intersection is inhabited and
+            // representable, and the reader who goes looking for a contradiction will not find one.
+            // Asserting only the code cannot see that; asserting per spelling can.
+            let messages = messages_for(report, Code::AllOfIrreconcilable);
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m.contains("closes a reference cycle")),
+                "{spelling}/{entry}: the rejection must name the recursion as the cause, not the \
+                 generic empty-intersection wording: {messages:?}"
+            );
         }
         // The observable damage, asserted directly rather than through the verdict: whatever is
         // emitted, no type may carry the sibling's field while having silently lost the
@@ -1874,6 +1888,199 @@ paths:
     let report = generate(&root);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+}
+
+/// A cycle-closing `$ref` carrying shape siblings, in the explicit `file#pointer` spelling, where
+/// **both sides accept `null`**.
+///
+/// This is the conjunction `a_recursive_ref_with_shape_siblings_is_rejected_rather_than_silently_dropped`
+/// already pins, with one thing added: the target and the sibling are both nullable. That addition
+/// turns a wrong rejection into wrong *code*. `back_edge` consulted `remote_in_progress` for every
+/// spelling that is not `#/components/schemas/…`, and a sub-file target's reservation lives in
+/// `resolved_in_progress`, so the explicit spelling was never recognised as a back-edge. The
+/// `TypeKind::Reserved` placeholder then reached `intersect_types`, `intersect_non_null` has no
+/// `Reserved` arm and returned `None`, and the null-collapse rescue swallowed that `None` into
+/// `TypeKind::Null` because both operands accept null — emitting `pub type Treekid = ();` with no
+/// diagnostic at all.
+///
+/// `()` is not a degraded type, it is the *wrong* type: the description accepts
+/// `{"kid": {"x": "a"}}` and the generated client rejects it at runtime with
+/// `invalid type: map, expected unit`. Only `null` decodes. Output is byte-stable across two
+/// generations, so `determinism.rs` cannot see it, and `check` reports clean.
+///
+/// Both spellings are pinned together because the verdict is a property of the DOCUMENT — decision
+/// 23's rule — and these two documents are the same document.
+#[test]
+fn a_nullable_cycle_closing_ref_with_nullable_siblings_is_rejected_in_every_spelling() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Tree:
+      type: [object, 'null']
+      properties:
+        kid:
+          $ref: 'PREFIX#/components/schemas/Tree'
+          type: [object, 'null']
+          properties:
+            extra: { type: string }
+"##;
+
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        let (generated, checked, code) = split(
+            "./lib.yaml#/components/schemas/Tree",
+            &LIB.replace("PREFIX", prefix),
+        );
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: a reservation cannot be intersected against, and collapsing \
+                 the failed intersection to the JSON null type emits a client that decodes only \
+                 `null` for a schema that accepts objects: {report:#?}"
+            );
+            assert!(
+                has_code(report, Code::AllOfIrreconcilable),
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+        // The observable damage, asserted directly rather than through the verdict: `()` accepts
+        // exactly one JSON value, and this schema accepts objects.
+        assert!(
+            !code.contains("= ();"),
+            "{spelling}: the failed intersection collapsed to the exact JSON null type, so the \
+             generated client decodes only `null`: {code}"
+        );
+    }
+}
+
+/// The same conjunction again, written as a **union member** — the third spelling.
+///
+/// `member_closes_a_cycle` stripped only `#/components/schemas/` and answered `false` for anything
+/// else, so a sub-file or remote member reference was never recognised as a back-edge. The single
+/// real member then collapsed through `intersect_types` against the union's own sibling, hit the
+/// same `Reserved`/`None`/null-rescue path, and emitted `pub type Treekid = ();`.
+///
+/// Three spellings of one conjunction must give one verdict. They gave two silent generations and
+/// one rejection.
+#[test]
+fn a_nullable_cycle_closing_union_member_is_rejected_in_every_spelling() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Tree:
+      type: [object, 'null']
+      properties:
+        kid:
+          type: [object, 'null']
+          properties:
+            extra: { type: string }
+          oneOf:
+            - { $ref: 'PREFIX#/components/schemas/Tree' }
+"##;
+
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        let (generated, checked, code) = split(
+            "./lib.yaml#/components/schemas/Tree",
+            &LIB.replace("PREFIX", prefix),
+        );
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: a union member that closes a reference cycle cannot be \
+                 intersected against the union's own siblings: {report:#?}"
+            );
+        }
+        assert!(
+            !code.contains("= ();"),
+            "{spelling}: the failed member intersection collapsed to the exact JSON null type: \
+             {code}"
+        );
+    }
+}
+
+/// Decision 23's invariant, applied to the predicate that now answers the sub-file spelling.
+///
+/// The `#/components/schemas/…` arm asks the DOCUMENT, so it is order-independent by construction.
+/// Every other spelling asks `is_in_progress_root`, which is a question about lowering state — the
+/// exact shape decision 23 removed from the component arm because it gave two byte-identical
+/// documents opposite verdicts when only the order of two `components.schemas` entries differed.
+///
+/// It is order-independent here for a reason worth pinning rather than assuming: the reservation is
+/// made *before* the body is lowered, so whichever of a mutually recursive pair is lowered first,
+/// the re-entrant edge still meets an open reservation. Both orders must therefore give one
+/// verdict. This fixture writes the same two schemas in both orders and requires it.
+#[test]
+fn a_sub_file_cycle_verdict_does_not_depend_on_the_order_the_schemas_are_declared() {
+    const A: &str = r##"    A:
+      type: [object, 'null']
+      properties:
+        b:
+          $ref: './lib.yaml#/components/schemas/B'
+          type: [object, 'null']
+          properties:
+            extra: { type: string }
+"##;
+    // Siblings on BOTH back-edges, so the conjunction genuinely closes a cycle whichever schema is
+    // entered first. With siblings on one edge only, the other edge boxes, the first schema is
+    // fully lowered by the time the conjunction is reached, and the intersection is an ordinary one
+    // against a real type — which generates, correctly, and would make this fixture assert the
+    // wrong thing.
+    const B: &str = r##"    B:
+      type: [object, 'null']
+      properties:
+        a:
+          $ref: './lib.yaml#/components/schemas/A'
+          type: [object, 'null']
+          properties:
+            extra: { type: string }
+"##;
+
+    let mut verdicts = Vec::new();
+    for (order, lib) in [
+        ("A first", format!("components:\n  schemas:\n{A}{B}")),
+        ("B first", format!("components:\n  schemas:\n{B}{A}")),
+    ] {
+        let (generated, checked, code) = split("./lib.yaml#/components/schemas/A", &lib);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{order}/{entry}: {report:#?}"
+            );
+            assert!(
+                has_code(report, Code::AllOfIrreconcilable),
+                "{order}/{entry}: {report:#?}"
+            );
+        }
+        assert!(
+            !code.contains("= ();"),
+            "{order}: the failed intersection collapsed to the exact JSON null type: {code}"
+        );
+        // The outcome alone is held up by `intersect_types`' fail-closed arm, which rejects with
+        // the generic empty-intersection wording whatever the back-edge predicate answered. Naming
+        // the cause is what requires the predicate itself to be right, so it is asserted here too.
+        let messages = messages_for(&generated, Code::AllOfIrreconcilable);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("closes a reference cycle")),
+            "{order}: the rejection must name the recursion as the cause: {messages:?}"
+        );
+        verdicts.push((
+            order,
+            messages_for(&generated, Code::AllOfIrreconcilable)
+                .iter()
+                .map(|m| (*m).to_owned())
+                .collect::<Vec<_>>(),
+        ));
+    }
+    // Not merely the same outcome — the same diagnosis. Reordering a YAML map is a no-op in
+    // OpenAPI, so it may not change what the tool says about the document either.
+    assert_eq!(
+        verdicts[0].1, verdicts[1].1,
+        "reordering two sub-file schemas changed the diagnosis: {verdicts:?}"
+    );
 }
 
 /// A sub-file schema that reaches a **root document** component twice, by explicit file reference.
