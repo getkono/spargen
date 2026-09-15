@@ -12093,41 +12093,38 @@ fn only_a_null_member_can_rescue_an_empty_union_intersection() {
         emitted.push((what, code));
     }
 
-    // The original defect was that two documents with DIFFERENT instance sets lowered to the same
-    // bytes, so a per-case assertion could not see it. The rows above no longer make that
-    // comparison possible — the unsatisfiable ones now reject, and a rejected run emits nothing —
-    // so the comparison is made between two rows that both GENERATE and whose instance sets differ:
-    // the one only `null` satisfies, and the one only `1` does.
+    // What each generating row lowers TO, asserted positively.
     //
-    // It compares `types_module`, not whole files. Two runs of the same spec already differ as
-    // whole files, because the provenance header carries the output path and per-run hashes, so a
-    // whole-file `assert_ne!` is true unconditionally and guards nothing. An earlier revision of
-    // this fixture made both mistakes at once, and its comment claimed it was the strongest
-    // assertion here.
-    let null_only = types_module(&emitted[0].1);
+    // This replaces a differential that could not fail on the defect it named. It compared row 0
+    // (two members, lowers to `()`) against a one-member probe (lowers to `i64`) and required them
+    // to differ — but two documents of different member counts and different result types differ in
+    // every reachable state, independent of the null fact, so the `assert_ne!` was true whatever
+    // the production code did. Measured directly: under the re-merged-flag mutation the fixture
+    // fails at the per-case outcome assertion above, and with those assertions neutralised the
+    // fixture PASSED. It was held up entirely by its neighbours.
+    //
+    // A differential that varies only the null fact is not available here, because the null fact is
+    // exactly what decides whether a row generates at all: its partner rejects and emits nothing.
+    // So the pin is positive instead. A row only `null` satisfies must lower to the exact JSON null
+    // type — not to `serde_json::Value`, not to `Option<T>` of anything — and that is a statement a
+    // mutation can falsify without changing any outcome, which is what the removed assertion could
+    // not manage.
+    for (what, code) in &emitted {
+        let module = types_module(code);
+        if module.is_empty() {
+            // A rejected row emits nothing; its verdict is asserted per case above.
+            continue;
+        }
+        assert!(
+            module.contains("= ();"),
+            "`{what}` is satisfied by `null` and nothing else, so it must lower to the exact JSON \
+             null type: {module}"
+        );
+    }
     assert!(
-        !null_only.is_empty(),
+        !types_module(&emitted[0].1).is_empty(),
         "the null-only row generated nothing: {:?}",
         emitted[0].0
-    );
-    let narrowing = format!(
-        "{HEAD}{}",
-        PATH.replace(
-            "BODY",
-            "type: [integer, 'null']\n                oneOf: [{ type: integer }]"
-        )
-    );
-    let (narrowing_report, narrowing_code) = generate_with_code(&narrowing);
-    assert_ne!(
-        narrowing_report.outcome(),
-        Outcome::Rejected,
-        "{narrowing_report:#?}"
-    );
-    assert_ne!(
-        null_only,
-        types_module(&narrowing_code),
-        "a schema only `null` satisfies and one only `1` satisfies lowered to the same types \
-         module — the distinction the merged flag destroyed has been lost again"
     );
 
     // The control the whole repair must not disturb: a non-empty intersection under the same
