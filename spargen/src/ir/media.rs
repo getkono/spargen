@@ -215,9 +215,6 @@ impl Responses {
     /// empty — the early return that bypasses the count above — and is offered to the error shape
     /// as the `Range(0)` sentinel whenever it is declared, subject there to the same body count
     /// (see [`Self::error`]).
-    ///
-    /// What codegen makes of the shape — status dispatch, codec selection, and the streaming
-    /// override that [`Self::stream_success`] owns — is deliberately not described here.
     pub(crate) fn success(&self) -> SuccessShape {
         // A default with no explicit status entries is the operation's single success body.
         if self.by_status.is_empty() {
