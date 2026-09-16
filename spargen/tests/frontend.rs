@@ -2381,7 +2381,16 @@ components:
     let (generated, code) = generate_with_code(self_file);
     assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
     assert_ne!(check(self_file).outcome(), Outcome::Rejected);
-    assert!(code.contains("Option<Box<"), "{code}");
+    // Named, and read off `parent`'s own declaration rather than searched for in the file. The
+    // embedded runtime emits `source: Option<Box<dyn std::error::Error + Send + Sync>>` into every
+    // generated module, so `code.contains("Option<Box<")` is unconditionally true of any successful
+    // generation and pins nothing beyond the `assert_ne!` above it. What must hold here is that the
+    // alias resolved to `Node` — optional, and boxed so the recursion has a finite size.
+    assert_eq!(
+        field_type(&code, "pub parent").as_deref(),
+        Some("Option<Box<Node>>"),
+        "{code}"
+    );
 
     // (2) The split description: every schema in the sub-file, the alias member spelled as that
     //     file's own sibling reference. This is #107's namespace case.
@@ -2406,7 +2415,11 @@ components:
             "{entry}: {report:#?}"
         );
     }
-    assert!(code.contains("Option<Box<"), "{code}");
+    assert_eq!(
+        field_type(&code, "pub parent").as_deref(),
+        Some("Option<Box<Node>>"),
+        "{code}"
+    );
 
     // (3) Whole-file references, which carry no pointer at all — the spelling whose rejection had
     //     no `at` to point the reader at.
@@ -2449,7 +2462,13 @@ components:
             "{entry}: {report:#?}"
         );
     }
-    assert!(code.contains("Option<Box<"), "{code}");
+    // The whole-file spelling has no component name to take, so the target is named for the
+    // position that reached it — but it is still one boxed optional reference to one type.
+    assert_eq!(
+        field_type(&code, "pub parent").as_deref(),
+        Some("Option<Box<ResponseBody>>"),
+        "{code}"
+    );
 }
 
 /// A nullable alias whose member is a name the **root** declares reads the root's component, and
@@ -3504,8 +3523,15 @@ mod remote {
             );
         }
         // The alias is the target, optional and boxed — what the direct `{$ref: T}` spelling of the
-        // same construct already produces and what the support matrix promises for it.
-        assert!(code.contains("Option<Box<"), "{code}");
+        // same construct already produces and what the support matrix promises for it. Named, and
+        // read off `parent`'s own declaration: the embedded runtime supplies an `Option<Box<…>>` of
+        // its own to every generated module, so a bare `contains("Option<Box<")` would hold even if
+        // this reference had been emitted unboxed.
+        assert_eq!(
+            field_type(&code, "pub parent").as_deref(),
+            Some("Option<Box<HttpsApiExampleComSchemasNodeYaml>>"),
+            "{code}"
+        );
         assert!(!code.contains("serde_json::Value>"), "{code}");
     }
 
