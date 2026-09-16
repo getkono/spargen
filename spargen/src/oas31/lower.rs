@@ -4555,6 +4555,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // guard below, to be aborted by `TypeDefs::fill`'s `fill of an unreserved id` instead
             // of reported.
             //
+            // That abort is a `debug_assert!`, so it is an enforcement point that degrades: it
+            // holds under `cargo test` and not in a consumer's release `build.rs`. Both halves are
+            // measured with this loop deleted. Debug assertions on: the process aborts at
+            // `TypeDefs::fill`. Debug assertions off: it neither aborts nor emits — `fill` writes
+            // the unreserved id, the reservation survives, and `check_invariants` rejects with
+            // `E011`, "type `` is still a reservation, so its body was never lowered", naming no
+            // type and carrying no pointer. So the release outcome is a poor diagnostic rather
+            // than silent wrong output, and the second net is `check_invariants`, not `fill`.
+            //
             // Only one shape reaches here: a vendored document whose **whole body** is the union,
             // because only then does the provenance canonicalise to a frame's own `file#pointer`.
             // `remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected` is that
