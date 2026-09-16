@@ -3200,6 +3200,114 @@ components:
     assert!(!code.contains("from_sub_file"), "{code}");
 }
 
+/// The matched pair for the warning above: a reference that **names its own document** shadowed
+/// nothing, and must not be told that it did.
+///
+/// Only the bare-fragment spelling can be shadowed. `#/components/schemas/Shared` addresses the
+/// file it is written in, so writing it inside `lib.yaml` asks for `lib.yaml`'s `Shared` and is
+/// given the root's — the whole of `W011`, and what `W011`'s own explain text scopes it to.
+/// `./openapi.yaml#/components/schemas/Shared` asks for exactly one declaration and gets that one.
+///
+/// It warned on both. `ensure_resolved` routes any target that lands in the root's component map
+/// back to `ensure_component` carrying the *referring site's* provenance, and the warning was
+/// raised there on the strength of three facts that never included how the reference was written.
+/// So a deliberately disambiguated reference drew a message quoting a `$ref` string absent from
+/// that site, and a remedy — "address the file-local one explicitly with a relative-file
+/// reference" — naming the form already in use. Worse, the same string through the nullable-alias
+/// path correctly did *not* warn, so one reference got two answers depending only on whether the
+/// root's component happened to be open at the time.
+///
+/// Both spellings are driven against one pair of files so the fixture cannot pass by the warning
+/// having gone dead: the bare one must still fire, on the same document, in the same run.
+#[test]
+fn an_explicit_relative_file_reference_to_the_roots_component_is_not_a_shadowing() {
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Wrapper' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      required: [from_root]
+      properties: { from_root: { type: string } }
+"##;
+    let lib = |spelling: &str| {
+        format!(
+            r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      required: [inner]
+      properties:
+        inner: {{ $ref: '{spelling}' }}
+    Shared:
+      type: object
+      required: [from_sub_file]
+      properties: {{ from_sub_file: {{ type: string }} }}
+"##
+        )
+    };
+
+    for (spelling, shadows) in [
+        ("#/components/schemas/Shared", true),
+        ("./openapi.yaml#/components/schemas/Shared", false),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), root).unwrap();
+        std::fs::write(dir.join("lib.yaml"), lib(spelling)).unwrap();
+        let out = dir.join("client.rs");
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: {report:#?}"
+            );
+            let raised = report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::DeclarationHasNoEffect && d.message.contains("Shared"));
+            assert_eq!(
+                raised, shadows,
+                "{spelling}/{entry}: W011 must fire for the bare fragment and only for it — this \
+                 reference names the document it wants, so nothing of the author's is without \
+                 effect and the remedy would ask for the spelling already written: {report:#?}"
+            );
+        }
+
+        // Precedence is unchanged by which spelling was used: both read the root's `Shared`. Read
+        // on the bound type's fields rather than its name, because the emitter suffixes the
+        // sub-file's colliding copy and a substring test would pass on the wrong answer.
+        let inner = field_type(&code, "pub inner")
+            .unwrap_or_else(|| panic!("{spelling}: no `inner` field at all: {code}"));
+        let bound = inner
+            .rsplit_once('<')
+            .map_or(inner.as_str(), |(_, tail)| tail)
+            .trim_end_matches('>');
+        let fields = declared_fields(&code, bound);
+        assert!(
+            fields.iter().any(|field| field == "from_root")
+                && !fields.iter().any(|field| field == "from_sub_file"),
+            "{spelling}: `inner` bound `{inner}`, whose fields are {fields:?}: {code}"
+        );
+    }
+}
+
 /// `type_specificity`'s reservation arm is **live**, and its value is emitted into the client.
 ///
 /// The arm carried a comment justifying itself by saying a union holding a reservation is rejected
