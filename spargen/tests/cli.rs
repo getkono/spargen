@@ -67,7 +67,7 @@ fn generate_is_rejected_as_an_unknown_command() {
 ///    panics on a code no longer in the enum, so removing one breaks these tests — and that is the
 ///    correct outcome, since the CLI could no longer explain it either.
 /// 2. The two must not explain to **identical text**. Both the human and the `--format json` case
-///    below require the two outputs to differ; identical prose would make that assertion vacuous.
+///    below require the two outputs to differ; identical prose reddens both of those assertions.
 ///
 /// Both hold for `E008` and `W005`. Whatever pair is used must satisfy them; a single code cannot,
 /// which is why there are two.
@@ -257,5 +257,9 @@ fn explain_rejects_an_unresolvable_code() {
         serde_json::from_str::<serde_json::Value>(json_stderr.trim()).is_err(),
         "a usage error stays plain text under `--format json`, which applies to reports and not to \
          argument errors: {json_stderr}"
+    );
+    assert!(
+        json_stderr.starts_with("error: "),
+        "a failed lookup must still be reported as an error under `--format json`: {json_stderr}"
     );
 }
