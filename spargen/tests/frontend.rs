@@ -2589,6 +2589,38 @@ components:
     }
 }
 
+/// The aliased spelling of [`a_nullable_alias_carries_its_targets_own_nullability`]'s document,
+/// hoisted so [`PARITY_FIXTURES`] can drive it through `check` as well as `generate`.
+///
+/// That fixture reads emitted source, so it can only call `generate`; `PARITY_FIXTURES` is where a
+/// spec is held to reporting the same thing through both entry points, and it is a hand-maintained
+/// list, so an omission costs nothing and warns nobody. The fixture asserts this constant equals
+/// what its own builder produces, so the two cannot drift apart.
+const NULLABLE_ALIAS_CARRY_SPEC: &str = "openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/A' } }
+components:
+  schemas:
+    A:
+      type: [object, 'null']
+      required: [b]
+      properties:
+        x: { type: string }
+        b: { $ref: '#/components/schemas/B' }
+    B:
+      oneOf:
+        - { $ref: '#/components/schemas/A' }
+";
+
 /// A nullable alias whose target is itself nullable is exactly as optional as the direct `$ref`.
 ///
 /// `B: {oneOf: [{$ref: A}]}` with `A: {type: [object, "null"]}` carries no `{"type": "null"}`
@@ -2633,7 +2665,9 @@ fn a_nullable_alias_carries_its_targets_own_nullability() {
         "{direct_code}"
     );
 
-    // The alias spelling must agree with it.
+    // The alias spelling must agree with it. Held to the constant `PARITY_FIXTURES` drives, so the
+    // spec this fixture asserts on and the spec `check` is run against stay the same document.
+    assert_eq!(spec("B"), NULLABLE_ALIAS_CARRY_SPEC);
     let (aliased, aliased_code) = generate_with_code(&spec("B"));
     assert_ne!(aliased.outcome(), Outcome::Rejected, "{aliased:#?}");
     assert!(
@@ -11425,6 +11459,10 @@ const PARITY_FIXTURES: &[(&str, &str)] = &[
         "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n  /a:\n    get:\n      operationId: getA\n      security: [{ nope: [] }]\n      responses: { '204': { description: ok } }\n",
     ),
     ("E013 irreconcilable allOf", ALL_OF_CONFLICT_SPEC),
+    // A nullable alias that generates cleanly. The suite's clean cases are all trivial documents;
+    // this one drives the lowering path this branch reworked, where `check` and `generate` take the
+    // same code and could silently stop agreeing.
+    ("nullable alias carries its target", NULLABLE_ALIAS_CARRY_SPEC),
     ("W005 schema default", W005_SPEC),
     (
         "W001 validation-only keyword",
