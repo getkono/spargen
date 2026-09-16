@@ -2380,7 +2380,10 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
         assert_eq!(
             field_type(&code, "pub b").as_deref(),
             Some(expected),
-            "{first} before {second}: {code}"
+            "{first} before {second}: the `B`-before-`A` expectation is the knowingly-wrong \
+             `Box<B>` that issue #222 exists to fix, pinned as emitted rather than as it ought \
+             to be — if this went red while fixing #222, the expectation becomes \
+             `Option<Box<B>>`; the comment above this assertion says why: {code}"
         );
         assert!(
             !code.contains("serde_json::Value>"),
