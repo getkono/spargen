@@ -3685,6 +3685,52 @@ mod remote {
         assert!(!code.contains("serde_json::Value>"), "{code}");
     }
 
+    /// A vendored remote schema that refers to **itself** directly, with no alias in between: the
+    /// plainest recursion there is, and the one that reaches `ensure_remote`'s own in-progress arm.
+    ///
+    /// The root-component and resolved-file frames each have a fixture that pins their back-edge is
+    /// boxed; the remote frame did not. Flipping that arm to `boxed: false` left the entire
+    /// workspace green while emitting `pub parent: Option<…NodeYaml>` inside the struct it names —
+    /// an infinitely sized type. The two remote fixtures beside this one both reach their back-edge
+    /// through the *alias* path, which boxes at a different site, so neither could see it.
+    #[test]
+    fn a_self_recursive_vendored_remote_schema_is_boxed() {
+        const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
+        const NODE_YAML: &str =
+            "type: object\nproperties:\n  name: { type: string }\n  parent: { $ref: 'node.yaml' }\n";
+        const NODE_SHA: &str = "119cdb35650ee7b837b855d28d5e3eef2f0b622aba52b5721817ae313aa19300";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \
+             \"api.example.com/schemas/node.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/node.yaml", NODE_YAML)];
+
+        let (generated, _temp, out) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{entry}: {report:#?}"
+            );
+        }
+        // Boxed, or the generated struct has no finite size and does not compile.
+        assert_eq!(
+            field_type(&code, "pub parent").as_deref(),
+            Some("Option<Box<HttpsApiExampleComSchemasNodeYaml>>"),
+            "{code}"
+        );
+    }
+
     /// The remote spelling of `Selfy = Selfy | null`: a vendored document whose **whole body** is a
     /// union over a `$ref` back to itself plus `null`.
     ///
