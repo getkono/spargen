@@ -208,12 +208,13 @@ impl Responses {
     /// the statuses documented: one bodied success yields plain `T` — the common `T`-plus-`204`
     /// shape stays `Plain`, its bodyless sibling unmodeled — and two or more yield a per-operation
     /// success enum, sorted into decode precedence (exact code ascending, then range ascending),
-    /// that also carries each documented bodyless success status as a payload-free unit variant.
+    /// that also carries each bodyless success *entry* as a payload-free unit variant.
     ///
-    /// The entries are the documented success statuses; `default` is never among them. It is the
-    /// success source only when `by_status` is empty — the early return that bypasses the count
-    /// above — and is offered to the error shape as the `Range(0)` sentinel whenever it is
-    /// declared, subject there to the same body count (see [`Self::error`]).
+    /// The entries are the lowered success statuses of `by_status`, not everything the document
+    /// declares; `default` is never among them. It is the success source only when `by_status` is
+    /// empty — the early return that bypasses the count above — and is offered to the error shape
+    /// as the `Range(0)` sentinel whenever it is declared, subject there to the same body count
+    /// (see [`Self::error`]).
     ///
     /// What codegen makes of the shape — status dispatch, codec selection, and the streaming
     /// override that [`Self::stream_success`] owns — is deliberately not described here.
@@ -412,14 +413,14 @@ pub(crate) enum SuccessShape {
     Unit,
     /// A single success body type.
     Plain(Ty),
-    /// Two or more documented success statuses *carrying a body*. Counting statuses instead would
-    /// be wrong: `200` plus a bodyless `204` is two documented success statuses and still yields
-    /// [`SuccessShape::Plain`]. Generated as a per-operation response enum, one variant per
-    /// status — a payload-carrying variant for a bodied status, a unit variant for a
-    /// documented bodyless status (e.g. `204`). Entries are the documented *success* statuses only
-    /// — `default` is never among them — pre-sorted into decode precedence (exact before range);
-    /// decode dispatches by HTTP status in that order and rejects any other 2xx as
-    /// `Error::UnexpectedStatus`.
+    /// Two or more entries *carrying a body*, counted over the success `by_status` entries.
+    /// Counting entries instead of bodies would be wrong: a bodied `200` beside a bodyless `204`
+    /// is two entries and still yields [`SuccessShape::Plain`]. Generated as a per-operation
+    /// response enum, one variant per entry — a payload-carrying variant for a bodied status, a
+    /// unit variant for a bodyless one (e.g. `204`). Entries are the lowered *success* statuses
+    /// only, not everything the document declares — `default` is never among them — pre-sorted
+    /// into decode precedence (exact before range); decode dispatches by HTTP status in that
+    /// order and rejects any other 2xx as `Error::UnexpectedStatus`.
     Enum(Vec<(StatusSpec, Option<Ty>)>),
 }
 
