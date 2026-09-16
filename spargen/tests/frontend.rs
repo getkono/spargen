@@ -117,6 +117,26 @@ fn declared_fields(code: &str, ty: &str) -> Vec<String> {
         .collect()
 }
 
+/// The variant declarations `pub enum ty` carries, in source order, each trimmed of its trailing
+/// comma.
+///
+/// The union counterpart of [`declared_fields`], and the only way to see a union *member* go
+/// missing. Binding the enum's name says the union was represented; it does not say how many
+/// branches survived, and a collapse that erases one member leaves a type with the right name and
+/// the wrong contents.
+fn enum_variants(code: &str, ty: &str) -> Vec<String> {
+    let mut lines = code
+        .lines()
+        .map(str::trim_start)
+        .skip_while(|line| !line.starts_with(&format!("pub enum {ty} ")));
+    lines.next();
+    lines
+        .take_while(|line| !line.starts_with('}'))
+        .filter(|line| !line.is_empty() && !line.starts_with("#[") && !line.starts_with("///"))
+        .map(|line| line.trim_end_matches(',').to_owned())
+        .collect()
+}
+
 fn declared_types(code: &str, prefix: &str, suffix_ok: impl Fn(&str) -> bool) -> Vec<String> {
     code.lines()
         .filter_map(|line| line.trim_start().strip_prefix("pub struct "))
@@ -2365,6 +2385,186 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
         assert!(
             !code.contains("serde_json::Value>"),
             "{first} before {second}: {code}"
+        );
+    }
+}
+
+/// The `A`/`B` mutual-recursion skeleton of `a_nullable_alias_under_mutual_recursion_generates`,
+/// with `B`'s body substituted — the shape the four narrowness fixtures below vary.
+///
+/// `A` is always declared first, because that is the order that reaches `nullable_alias_back_edge`
+/// at all: lowering `A` first leaves it open when `B`'s body is read. Declared the other way round
+/// the recogniser never runs, so that order cannot observe a guard inside it and driving it would
+/// weaken these fixtures rather than widen them.
+fn alias_shaped_mutual_recursion(b_body: &str) -> String {
+    format!(
+        "openapi: 3.1.0\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\n\
+         paths:\n  \
+         /u:\n    \
+         get:\n      \
+         operationId: getU\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json: {{ schema: {{ $ref: '#/components/schemas/A' }} }}\n\
+         components:\n  \
+         schemas:\n    \
+         A:\n      \
+         type: object\n      \
+         required: [b]\n      \
+         properties:\n        \
+         b: {{ $ref: '#/components/schemas/B' }}\n    \
+         B:\n{b_body}"
+    )
+}
+
+/// A component carrying a `discriminator` or a `default` beside its union is **not** a nullable
+/// alias, however alias-shaped the union itself looks.
+///
+/// `nullable_alias_back_edge` answers with the target's own id and inserts no def, so everything
+/// the component said apart from the union has nowhere left to go.
+/// `schema_has_shape_constraint`, which holds the rest of that narrowness, checks neither `default`
+/// nor `discriminator`, so the early return at the head of the function is the only thing refusing
+/// these two — and nothing held that early return. Deleting it left
+/// `cargo test --workspace --all-features` entirely green while this document, with
+/// `discriminator: {propertyName: kind}` on `B`, went from `E007` to a clean `Generated` emitting
+/// `Option<Box<A>>`, the discriminator gone and nothing said: the fourth, silent behaviour the
+/// standing invariants forbid.
+///
+/// What is pinned is the verdict as it stands, not an endorsement of it. Both are refused and the
+/// refusal is reported; a change that chooses to represent either one has to move this fixture
+/// deliberately.
+#[test]
+fn a_union_carrying_a_discriminator_or_a_default_is_not_an_alias() {
+    let cases = [
+        (
+            "discriminator",
+            "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        \
+             - { type: \"null\" }\n      discriminator: { propertyName: kind }\n",
+        ),
+        (
+            "default",
+            "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        \
+             - { type: \"null\" }\n      default: null\n",
+        ),
+    ];
+    for (label, body) in cases {
+        let spec = alias_shaped_mutual_recursion(body);
+        let generated = generate(&spec);
+        let checked = check(&spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: a `{label}` beside the union has nowhere to go, so the document \
+                 must be refused rather than have it dropped: {report:#?}\n{spec}"
+            );
+            assert!(
+                has_code(report, Code::NonDisjointUnion),
+                "{label}/{entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A union with a **second** non-null member is a union, not an alias — even when one of its
+/// members is the cycle-closing `$ref` that would otherwise make it one.
+///
+/// The sharpest of the four. The recogniser answers with the *target's* type, so every member
+/// beside the one `$ref` is erased. Deleting the `if real.next().is_some()` arity check survives
+/// the whole workspace, and on this document it turns `pub b: B` — a two-variant enum — into
+/// `pub b: Box<A>`: the `string` branch disappears from the generated API with a clean report and
+/// no diagnostic at all. A dropped union member is worse than the `serde_json::Value` degradation
+/// the invariants name, because nothing in the output records that the branch ever existed.
+#[test]
+fn a_union_with_a_second_real_member_beside_the_back_edge_stays_a_union() {
+    let spec = alias_shaped_mutual_recursion(
+        "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        - { type: string }\n",
+    );
+    let (generated, code) = generate_with_code(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    // `b` binds `B` itself rather than the target of `B`'s `$ref` member: the union is represented,
+    // so it has a type of its own.
+    assert_eq!(
+        field_type(&code, "pub b").as_deref(),
+        Some("B"),
+        "the second union member was collapsed away: {code}"
+    );
+    // And that type is an enum holding both branches. Asserted separately, because binding `B`
+    // alone would still be satisfied by a `B` that had quietly become a newtype over `A`.
+    let variants = enum_variants(&code, "B");
+    assert_eq!(
+        variants.len(),
+        2,
+        "`B` must keep one variant per union member, got {variants:?}: {code}"
+    );
+    assert!(
+        variants.iter().any(|variant| variant.starts_with("A(")),
+        "the `$ref` member lost its variant, got {variants:?}: {code}"
+    );
+}
+
+/// A member spelled `{$ref: A, properties: {...}}` is a `$ref` with shape-bearing siblings — an
+/// intersection — and an intersection is not an alias.
+///
+/// Reading it as one answers with `A` and discards the siblings, which is the silent-sibling
+/// discard the `allOf` path refuses under `E013`. Deleting the member-side
+/// `schema_has_shape_constraint` guard survives the whole workspace and flips this document from
+/// `Rejected`/`E013` to a clean `Generated` with `pub b: Option<Box<A>>` and the declared `x` gone.
+#[test]
+fn an_alias_member_with_shape_bearing_siblings_is_not_an_alias() {
+    let spec = alias_shaped_mutual_recursion(
+        "      oneOf:\n        \
+         - { $ref: '#/components/schemas/A', properties: { x: { type: string } } }\n        \
+         - { type: \"null\" }\n",
+    );
+    let generated = generate(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{entry}: the member's sibling `properties` must not be dropped in silence: \
+             {report:#?}\n{spec}"
+        );
+        assert!(
+            has_code(report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
+/// A component that declares a shape of its own beside the union is not another name for its
+/// target: an alias carries no shape, and this one does.
+///
+/// This is the guard that makes that sentence true, and nothing held it. Deleting it survives the
+/// whole workspace, and this document — whose `B` declares `type: object` and an `extra` property
+/// beside the union — goes from `Rejected`/`E013` to a clean `Generated` with
+/// `pub b: Option<Box<A>>`, `extra` absent from the generated API and nothing said about it.
+#[test]
+fn an_alias_shaped_component_that_declares_its_own_shape_is_not_an_alias() {
+    let spec = alias_shaped_mutual_recursion(
+        "      type: object\n      properties: { extra: { type: string } }\n      oneOf:\n        \
+         - { $ref: '#/components/schemas/A' }\n        - { type: \"null\" }\n",
+    );
+    let generated = generate(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{entry}: the component's own `extra` must not be dropped in silence: \
+             {report:#?}\n{spec}"
+        );
+        assert!(
+            has_code(report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
         );
     }
 }
