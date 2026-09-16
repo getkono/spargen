@@ -671,10 +671,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The cycle-closing back-edge a **nullable alias** component resolves to, when its target's
     /// body is still being lowered.
     ///
-    /// `Some` only for a body that is a `oneOf`/`anyOf` over exactly one bare
-    /// `#/components/schemas/…` reference plus any number of null-only members, carrying no shape,
-    /// discriminator, sibling `$ref` or `default` of its own — and only when that target is one of
-    /// the components currently in progress.
+    /// `Some` only for a body that is a `oneOf`/`anyOf` over exactly one bare `$ref` plus any
+    /// number of null-only members, carrying no shape, discriminator, sibling `$ref` or `default`
+    /// of its own — and only when that reference resolves to a target whose body is currently being
+    /// lowered, in any of the three frames. The question is asked of the resolved *target*, not of
+    /// the reference's spelling: see [`Self::open_reservation_for_ref`].
     ///
     /// Both halves of that narrowness are load-bearing. Recognising an alias whose target is
     /// **finished** would change what is generated for a document that already generates: the
@@ -711,10 +712,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if real.next().is_some() {
             return None;
         }
-        let target = only
-            .reference
-            .as_deref()?
-            .strip_prefix("#/components/schemas/")?;
+        let target = only.reference.as_deref()?;
         // A bare reference and nothing else: a member carrying its own keywords is a `$ref` with
         // siblings, which is an intersection and not an alias.
         let mut member_without_ref = only.clone();
@@ -722,7 +720,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if schema_has_shape_constraint(&member_without_ref) {
             return None;
         }
-        let &(id, _) = self.in_progress.get(target)?;
+        let (id, _) = self.open_reservation_for_ref(target, &only.provenance)?;
         Some(Ty {
             id,
             nullable: members.iter().any(member_is_null_only),
@@ -730,6 +728,52 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // for the recursive type to have a finite size.
             boxed: true,
         })
+    }
+
+    /// The still-open reservation `reference`, written at `at`, refers to — under any spelling.
+    ///
+    /// A `$ref` is identified by the target it resolves to, not by the characters used to write it.
+    /// The three in-progress maps are each keyed by a different spelling of that identity, so this
+    /// mirrors [`Self::lower_schema`]'s own `$ref` dispatch exactly: whichever `ensure_*` the
+    /// reference would be lowered through is the map consulted for it. Keying on the literal
+    /// `#/components/schemas/` prefix instead made a target's identity depend on the reference
+    /// site's spelling, which is how one schema came to be both an alias and an unrepresentable
+    /// shape in the same document.
+    ///
+    /// `None` for a target that is finished, absent, or was never a reservation — every one of
+    /// which the ordinary lowering path handles and reports for itself. Purely a lookup: it
+    /// resolves no node, lowers nothing and emits no diagnostic, so asking is free of consequence
+    /// for the lowering that follows.
+    fn open_reservation_for_ref(&self, reference: &str, at: &Provenance) -> Option<(TypeId, bool)> {
+        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+            // A root component the root document declares: `ensure_component`'s own key. A name it
+            // does not declare is a sub-file's sibling reference, which `ensure_component` hands to
+            // `ensure_resolved` — so fall through to the identity below rather than answering.
+            if let Some(&entry) = self.in_progress.get(name) {
+                return Some(entry);
+            }
+        } else if is_remote_ref(reference) {
+            // `ensure_remote` keys on the absolute URL, and a reference inside a vendored document
+            // has already been rewritten absolute, so the reference *is* the key.
+            return self.remote_in_progress.get(reference).copied();
+        }
+        let (file, pointer) = self.resolver.reference_identity(reference, at)?;
+        // `ensure_resolved` routes a target inside the root's component map back to
+        // `ensure_component`, whose identity is the name; ask the map that actually holds it.
+        if file == self.resolver.root_id() {
+            if let Some(name) = pointer
+                .as_str()
+                .strip_prefix("/components/schemas/")
+                .filter(|name| !name.is_empty() && !name.contains('/'))
+            {
+                if self.document.components.schemas.contains_key(name) {
+                    return self.in_progress.get(name).copied();
+                }
+            }
+        }
+        self.resolved_in_progress
+            .get(&format!("{}#{}", file.0, pointer))
+            .copied()
     }
 
     /// Lower a remote (`http`/`https`) `$ref` to a shared, cycle-safe type — the remote analogue of
@@ -772,6 +816,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let ty = self.lower_schema(&schema, reference);
             self.remote_alias_stack.remove(reference);
             return ty;
+        }
+        // The union spelling of that same alias: a body that is `oneOf`/`anyOf` over one `$ref`
+        // back into a frame still being lowered, plus `null`. It has no more shape of its own than
+        // the bare `$ref` above does, and — exactly as above — no body to reserve a root for: the
+        // collapse resolves it to the target's reservation, which is not this frame's, so the
+        // `pop_last()` below would lift the wrong def and the `assert_eq!` after it would abort the
+        // process. Recognised here, before anything is reserved, so the frame never opens and there
+        // is nothing to pop. `ensure_component` has always done this; the other two frames had the
+        // guard only downstream, where it could not see a remote frame's reservations.
+        if let Some(alias) = self.nullable_alias_back_edge(&schema) {
+            return Some(alias);
         }
 
         let nullable = schema_is_nullable(&schema);
@@ -908,6 +963,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let ty = self.lower_schema(&schema, &hint);
             self.resolved_alias_stack.remove(&key);
             return ty;
+        }
+        // The union spelling of that same alias — see the matching arm in [`Self::ensure_remote`].
+        // This is the split-description case: a sub-file whose `MaybeNode` is nothing but "a
+        // `Node`, or null", which is the namespace shape issue #107 exists to make resolve.
+        if let Some(alias) = self.nullable_alias_back_edge(&schema) {
+            return Some(alias);
         }
 
         let nullable = schema_is_nullable(&schema);
@@ -4412,6 +4473,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(key) = resolved_identity(provenance) {
             if let Some(&(id, _)) = self.resolved_in_progress.get(&key) {
                 return Some(id);
+            }
+            // A remote frame keys on the URL it was reached by rather than on its target's
+            // `file#pointer`, so a string comparison against this provenance can never match one.
+            // Canonicalise its keys to the same identity instead of reconstructing a URL from a
+            // file id: a URL is only one of the spellings that reaches a vendored document, and
+            // the map holds at most one entry per open recursion frame. Omitting this frame is what
+            // let a remote body whose union collapses onto another open remote reservation past the
+            // guard below, to be aborted by `ensure_remote`'s last-insert assertion instead of
+            // reported.
+            for (reference, &(id, _)) in &self.remote_in_progress {
+                let matches = self
+                    .resolver
+                    .reference_identity(reference, &self.document.provenance)
+                    .is_some_and(|(file, pointer)| key == format!("{}#{}", file.0, pointer));
+                if matches {
+                    return Some(id);
+                }
             }
         }
         // A target inside the root document's component map has its identity there instead —

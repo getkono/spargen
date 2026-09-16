@@ -2304,6 +2304,121 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
     }
 }
 
+/// The same alias, spelled the other three ways one target can be written.
+///
+/// A `$ref` is not identified by its spelling. `#/components/schemas/Node`, the root's own
+/// `./openapi.yaml#/components/schemas/Node`, a split description's
+/// `./lib.yaml#/components/schemas/Node` and a whole-file `./node.yaml` can all name one schema —
+/// `ensure_resolved`'s own contract says the last two "resolve to the same file and pointer and
+/// share one type". The alias recognition keyed on the literal `#/components/schemas/` prefix and
+/// on the root component map alone, so only the first spelling was an alias and the other three
+/// fell through to a rejection whose sentence — "names no shape of its own and cannot be given a
+/// generated type" — the same binary disproves by generating `Option<Box<Node>>` for spelling one.
+///
+/// The split-description spelling is the case issue #107 exists to make resolve, so it is the one
+/// that must not reject.
+#[test]
+fn a_nullable_alias_is_recognised_however_its_target_is_spelled() {
+    // (1) The root document referring to its own components by relative file path.
+    let self_file = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        name: { type: string }
+        parent: { $ref: '#/components/schemas/MaybeNode' }
+    MaybeNode:
+      oneOf:
+        - { $ref: './openapi.yaml#/components/schemas/Node' }
+        - { type: "null" }
+"##;
+    let (generated, code) = generate_with_code(self_file);
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    assert_ne!(check(self_file).outcome(), Outcome::Rejected);
+    assert!(code.contains("Option<Box<"), "{code}");
+
+    // (2) The split description: every schema in the sub-file, the alias member spelled as that
+    //     file's own sibling reference. This is #107's namespace case.
+    let lib = r##"
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        name: { type: string }
+        parent: { $ref: '#/components/schemas/MaybeNode' }
+    MaybeNode:
+      oneOf:
+        - { $ref: '#/components/schemas/Node' }
+        - { type: "null" }
+"##;
+    let (generated, checked, code) = split("./lib.yaml#/components/schemas/Node", lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::InvalidInput),
+            "{entry}: {report:#?}"
+        );
+    }
+    assert!(code.contains("Option<Box<"), "{code}");
+
+    // (3) Whole-file references, which carry no pointer at all — the spelling whose rejection had
+    //     no `at` to point the reader at.
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        "openapi: 3.1.0\n\
+         info: { title: T, version: 1.0.0 }\n\
+         servers: [{ url: 'https://e.com' }]\n\
+         paths:\n  \
+         /u:\n    \
+         get:\n      \
+         operationId: getU\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json: { schema: { $ref: './node.yaml' } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("node.yaml"),
+        "type: object\nproperties:\n  name: { type: string }\n  parent: { $ref: './maybe.yaml' }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("maybe.yaml"),
+        "oneOf:\n  - { $ref: './node.yaml' }\n  - { type: \"null\" }\n",
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::InvalidInput),
+            "{entry}: {report:#?}"
+        );
+    }
+    assert!(code.contains("Option<Box<"), "{code}");
+}
+
 /// The one shape in this family that must **not** generate: a union that is a component's whole
 /// body and whose only non-null member is a `$ref` back to that same component.
 ///
@@ -3128,6 +3243,73 @@ mod remote {
         // The degradation itself, so the guard's removal fails on the emitted output and not only
         // on the verdict.
         assert!(!code.contains("= serde_json::Value;"), "{code}");
+    }
+
+    /// Two vendored remote schemas in mutual recursion through a nullable alias — the remote
+    /// spelling of the commonest recursive idiom there is, and the one frame of the three whose
+    /// open reservations no guard could see.
+    ///
+    /// `node.yaml` has a `parent` of `maybe.yaml`; `maybe.yaml` is nothing but "a `node.yaml`, or
+    /// null". Both are hash-pinned, so the document is legal and hermetic. The union collapse's
+    /// escape hatch asked `reservation_at`, which consults the root component map and
+    /// `resolved_in_progress` and **not** `remote_in_progress`, so the collapse handed
+    /// `ensure_remote` a foreign id and inserted no def — and `pop_last()` then popped a def that
+    /// was not this frame's root into an `assert_eq!` that is live in release builds too. The
+    /// failure was a **process abort**, not a diagnostic: inside a consumer's `build.rs` it is a
+    /// panicking build script with no code, no pointer and no `--carve` escape, which is the
+    /// prohibited fourth behaviour in its worst form. A panic is not an `Outcome`, so nothing in
+    /// this suite could have observed it; this fixture is what observes it.
+    #[test]
+    fn a_nullable_alias_between_two_vendored_remote_schemas_generates() {
+        const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
+        const MAYBE_URL: &str = "https://api.example.com/schemas/maybe.yaml";
+        const NODE_YAML: &str =
+            "type: object\nproperties:\n  name: { type: string }\n  parent: { $ref: 'maybe.yaml' }\n";
+        const MAYBE_YAML: &str = "oneOf:\n  - $ref: 'node.yaml'\n  - type: 'null'\n";
+        const NODE_SHA: &str = "b0b0741c3519d771b634a8cee182500b35efbfb9e20e84dd3b4dd62497174569";
+        const MAYBE_SHA: &str = "33b37680c6082b1e81bb769383543219f1d1477bca2e9838f7da314631eac815";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \
+             \"api.example.com/schemas/node.yaml\"\n\n[[remote]]\nurl = \"{MAYBE_URL}\"\nsha256 = \
+             \"{MAYBE_SHA}\"\npath = \"api.example.com/schemas/maybe.yaml\"\n"
+        );
+        let vendor = [
+            ("api.example.com/schemas/node.yaml", NODE_YAML),
+            ("api.example.com/schemas/maybe.yaml", MAYBE_YAML),
+        ];
+
+        let (generated, _temp, out) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            // The pins are live, so the document really reaches lowering.
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::AbsoluteRefUnsupported),
+                "{entry}: {report:#?}"
+            );
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{entry}: a hermetically pinned, legal description: {report:#?}"
+            );
+            // The reservation must not survive into the finished graph either.
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{entry}: {report:#?}"
+            );
+        }
+        // The alias is the target, optional and boxed — what the direct `{$ref: T}` spelling of the
+        // same construct already produces and what the support matrix promises for it.
+        assert!(code.contains("Option<Box<"), "{code}");
+        assert!(!code.contains("serde_json::Value>"), "{code}");
     }
 
     fn responds_with(url: &str) -> String {

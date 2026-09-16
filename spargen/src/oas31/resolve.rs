@@ -38,6 +38,32 @@ impl<'doc> Resolver<'doc> {
         self.bundle.root_id()
     }
 
+    /// The `(file, pointer)` pair a `$ref` written at `at` denotes, independent of how it is spelled.
+    ///
+    /// `lower` keeps three separate in-progress maps, each keyed by a different spelling of the
+    /// same kind of fact — a root component's name, a remote document's absolute URL, a resolved
+    /// target's `file#pointer`. A question about *which target* a reference names therefore cannot
+    /// be answered by comparing reference strings: `#/components/schemas/Node`,
+    /// `./openapi.yaml#/components/schemas/Node`, `./lib.yaml#/components/schemas/Node` and a
+    /// whole-file `./node.yaml` can all name one schema. This is the spelling-independent answer,
+    /// and it is the same one [`Self::resolve`] would reach.
+    ///
+    /// Resolution *without* parsing: no node is read, no schema is built and no diagnostic is
+    /// emitted, so a caller may ask speculatively about a reference it has not committed to
+    /// lowering. A miss here is never an error — it means "not a target this bundle knows", which
+    /// the ordinary lowering path will report in its own words when it gets there.
+    pub(super) fn reference_identity(
+        &self,
+        reference: &str,
+        at: &Provenance,
+    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+        let from = at
+            .span
+            .map(|span| span.file)
+            .unwrap_or_else(|| self.bundle.root_id());
+        self.bundle.reference_target(reference, from)
+    }
+
     /// The path of `file`, when `file` declares a schema component called `name` of its own.
     ///
     /// A JSON Pointer fragment addresses the document it appears in, so a sub-file's own
