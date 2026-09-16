@@ -234,12 +234,22 @@ jobs:
       - uses: actions/checkout@v4
       # `--all-features` is what puts the TLS stack in scope: `rustls` reaches the graph only
       # through reqwest's TLS feature, so under default features `cargo deny list` matches it
-      # zero times and `cargo tree --workspace -i rustls` finds no such package. Both of these
+      # zero times and `cargo tree --workspace -i rustls` finds no such package. Both values
       # match the action's own defaults, so the gate's behaviour is unchanged — but a default is
-      # the action's property, not this repository's, and were `arguments` to change, this would
-      # silently become an audit of a graph with no TLS stack in it: every run green, nothing
-      # noticing. (`arguments` and `command` are separate inputs, composed as
-      # `cargo-deny <arguments> <command>`; both are stated so neither is inherited.)
+      # the action's property, not this repository's: *without the block below*, a change to the
+      # action's `arguments` default would silently turn this into an audit of a graph with no
+      # TLS stack in it, every run green and nothing noticing. That is a statement about the
+      # counterfactual, not about this step as configured — the `with:` block below is what makes
+      # it false here, which is the whole reason it is there.
+      #
+      # The action composes its argv as `cargo-deny <rust-version> <credentials> <ssh-key>
+      # <ssh-known-hosts> --log-level <log-level> --manifest-path <manifest-path> <arguments>
+      # <command> <command-arguments>`; only `arguments` and `command` are stated here. Of the
+      # rest, the one that decides what is audited is `command-arguments`: it is the second input
+      # feeding `check`'s `[WHICH]...` positional, so `command-arguments: licenses` would drop
+      # `advisories` exactly as a narrowed `command` would. It is deliberately left unset, and
+      # `the_deny_gate_states_the_feature_scope_it_audits` asserts it stays unset. The remaining
+      # inherited slots, and the moving `@v2` ref itself, are #229's.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           arguments: --all-features

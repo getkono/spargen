@@ -217,6 +217,12 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
     // job. A line-level assertion over the job's text cannot tell this step's `with:` from one
     // hung on `actions/checkout`, cannot see an `if:` that stops the job running at all, and reds
     // on a requoted or strictly stricter value that audits exactly the same graph.
+    //
+    // Both scopes are guarded, because a gate that does not run and a gate whose failure is
+    // swallowed are indistinguishable from a gate that audits nothing: `if:` and
+    // `continue-on-error:` are checked on the job map *and* on the step map. Narrowing is guarded
+    // on both inputs that reach `check`'s `[WHICH]...` positional — `command` and
+    // `command-arguments` — since either alone drops `advisories`.
     let ci = read(".github/workflows/ci.yml");
     let documents = yaml_rust2::YamlLoader::load_from_str(&ci)
         .expect("`.github/workflows/ci.yml` must parse as YAML");
@@ -231,20 +237,51 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
     );
     assert!(
         deny["if"].is_badvalue(),
-        "the `deny` job carries an `if:` guard, so the audit it states the scope of need never run"
+        "the `deny` job map carries an `if:` key, so the whole audit can be conditioned out"
+    );
+    assert!(
+        deny["continue-on-error"].is_badvalue(),
+        "the `deny` job map carries a `continue-on-error:` key, so a failing audit need not fail \
+         the gate"
     );
 
     let steps = deny["steps"]
         .as_vec()
         .expect("the `deny` job must carry a list of steps");
-    let audit = steps
+    // GitHub resolves `uses: owner/repo@ref` case-insensitively, so the comparison is too:
+    // `embarkstudios/cargo-deny-action@v2` is a working spelling and must not red a gate that
+    // audits the same graph. Exactly one match is required rather than the first, because `find`
+    // would read the assertions below against whichever step came first and let a second,
+    // narrower cargo-deny step through unread.
+    let audits: Vec<_> = steps
         .iter()
-        .find(|step| {
-            step["uses"]
-                .as_str()
-                .is_some_and(|uses| uses.starts_with("EmbarkStudios/cargo-deny-action@"))
+        .filter(|step| {
+            step["uses"].as_str().is_some_and(|uses| {
+                uses.to_ascii_lowercase()
+                    .starts_with("embarkstudios/cargo-deny-action@")
+            })
         })
-        .expect("the `deny` job must run a step that `uses: EmbarkStudios/cargo-deny-action@…`");
+        .collect();
+    assert_eq!(
+        audits.len(),
+        1,
+        "the `deny` job must run exactly one step that `uses: EmbarkStudios/cargo-deny-action@…`, \
+         and runs {}; every such step is audited by the assertions below, so a second one is a \
+         second, unread configuration",
+        audits.len()
+    );
+    let audit = audits[0];
+
+    assert!(
+        audit["if"].is_badvalue(),
+        "the cargo-deny-action step map carries an `if:` key, so the audit can be conditioned out \
+         while the `deny` job it sits in still reports success"
+    );
+    assert!(
+        audit["continue-on-error"].is_badvalue(),
+        "the cargo-deny-action step map carries a `continue-on-error:` key, so a failing audit \
+         would leave the `deny` job green"
+    );
 
     let arguments = audit["with"]["arguments"]
         .as_str()
@@ -263,6 +300,13 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
         command, "check",
         "the cargo-deny-action step's `command` selects a subset of the checks; anything narrower \
          than a bare `check` drops `advisories`, which is the check #147 is about"
+    );
+    assert!(
+        audit["with"]["command-arguments"].is_badvalue(),
+        "the cargo-deny-action step states `command-arguments`, the second input feeding `check`'s \
+         `[WHICH]...` positional: `command-arguments: licenses` composes `cargo-deny \
+         --all-features check licenses` and drops `advisories` exactly as a narrowed `command` \
+         does, leaving `command: check` true and this suite otherwise green"
     );
 }
 
