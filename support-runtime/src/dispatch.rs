@@ -864,7 +864,14 @@ mod tests {
     /// downcast to `AuthError`; a succeeding one had its token discarded by the `Basic` arm on the
     /// next line and returned this same mismatch. So no succeeding call becomes a failing one, and
     /// what changes for a consumer is that the round trip to the identity provider is gone and the
-    /// cause now downcasts to the mismatch message rather than to `AuthError`.
+    /// cause no longer downcasts to `AuthError`.
+    ///
+    /// Nothing typed replaces it. `credential_mismatch` goes through `Error::request_message`,
+    /// which boxes its text as a private `MessageError` — declared without `pub` in `error.rs`, and
+    /// named by none of the four lists that re-export the runtime into generated output — so the
+    /// cause has **no public type a consumer can name**, and `to_string()` matching is the only
+    /// recourse left. That is the same observable the typed missing-credential cause exists to
+    /// remove; this path still has it, tracked separately as #192.
     #[test]
     fn a_token_provider_under_a_basic_scheme_is_a_mismatch_without_calling_it() {
         use std::sync::atomic::{AtomicBool, Ordering};
