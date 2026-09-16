@@ -226,8 +226,10 @@ fn explain_rejects_an_unresolvable_code() {
     // The same failure under `--format json`. This is deliberate, not an oversight to be "fixed":
     // an unresolvable code is a *usage* error — the user mistyped an argument — and `--format`
     // governs diagnostic *reports*. `check` and `diff` route their reports through `emit`, which
-    // honours the flag; `config_error` renders usage errors as plain text everywhere, and this is
-    // one of those. Pinned in both directions so the choice is recorded rather than merely current.
+    // honours the flag; `config_error` renders usage errors as plain text everywhere, and the
+    // `Explain` arm renders its own the same way at `run.rs:103` — by convention, not by calling
+    // `config_error`, which no `Explain` path reaches. Pinned in both directions so the choice is
+    // recorded rather than merely current.
     let as_json = Command::new(spargen_bin())
         .args(["explain", "E999", "--format", "json"])
         .output()
@@ -238,7 +240,17 @@ fn explain_rejects_an_unresolvable_code() {
         Some(3),
         "`--format json` must not change a usage error's exit status"
     );
+    assert!(
+        as_json.stdout.is_empty(),
+        "a failed lookup must print nothing on stdout under `--format json` either — a consumer \
+         piping stdout to a parser must not receive the error text: {}",
+        String::from_utf8_lossy(&as_json.stdout)
+    );
     let json_stderr = String::from_utf8(as_json.stderr).unwrap();
+    assert!(
+        json_stderr.contains("E999"),
+        "stderr must still name the code it could not resolve under `--format json`: {json_stderr}"
+    );
     assert!(
         serde_json::from_str::<serde_json::Value>(json_stderr.trim()).is_err(),
         "a usage error stays plain text under `--format json`, which applies to reports and not to \
