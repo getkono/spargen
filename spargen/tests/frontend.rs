@@ -8268,3 +8268,281 @@ fn the_parity_fixtures_span_both_verdicts() {
     assert!(warned >= 3, "only {warned} fixtures warn");
     assert!(succeeded >= 2, "only {succeeded} fixtures succeed");
 }
+
+/// Write a root document whose only Path Item is a `$ref` to a sibling file holding `path_item`,
+/// then run both entry points over it. The indirection is the point: `lower_frontend` validates
+/// `bundle.root()` against the metaschema and nothing else, so a Path Item reached by `$ref` never
+/// meets it. Returns `(generate, check)` so a fixture can assert the two agree, the way
+/// `PARITY_FIXTURES` does for inline specs — which those cannot, being single-file by construction.
+fn generate_and_check_refd_path_item(path_item: &str) -> (Report, Report) {
+    let (generated, checked, _) = generate_and_check_refd_path_item_with_code(path_item);
+    (generated, checked)
+}
+
+/// As [`generate_and_check_refd_path_item`], but also returning the emitted module's source (empty
+/// if generation wrote nothing), so a fixture can assert that an accepted response key actually
+/// reaches the client rather than only that it raised no diagnostic.
+fn generate_and_check_refd_path_item_with_code(path_item: &str) -> (Report, Report, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths:\n  /pet:\n    $ref: 'pet.yaml'\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("pet.yaml"), path_item).unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    (generated, checked, code)
+}
+
+/// A root document whose Responses map carries `entries` verbatim, written inline so the
+/// metaschema — which `lower_frontend` runs over `bundle.root()` and nothing else — does see it.
+fn inline_spec_with_response_entries(entries: &str) -> String {
+    format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\npaths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200': {{ description: ok }}\n{entries}"
+    )
+}
+
+/// A Responses key the specification does not define, reached through a Path Item `$ref`.
+///
+/// `references/3.2.0.md` closes the grammar — *"Only the following range definitions are allowed:
+/// `1XX`, `2XX`, `3XX`, `4XX`, and `5XX`"* — and the metaschema spells it `^[1-5](?:[0-9]{2}|XX)$`.
+/// Before the key was checked at parse time, `0XX` lowered to `StatusSpec::Range(0)`, which is the
+/// sentinel `default` itself lowers to: the operation's error enum got **two** `Default` variants
+/// and `rustc` refused the emitted module with `E0428` — at outcome `Generated`, with zero
+/// diagnostics. That is the fourth, silent behavior the contract forbids, on a construct the
+/// specification explicitly closes.
+#[test]
+fn e011_out_of_grammar_response_key_behind_a_ref_is_rejected() {
+    let (generated, checked) = generate_and_check_refd_path_item(
+        "get:\n  operationId: getPet\n  responses:\n    '200': { description: ok }\n    '0XX': { description: collides with the default sentinel }\n    default: { description: fallback }\n",
+    );
+    assert_eq!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    assert!(has_code(&generated, Code::InvalidInput), "{generated:#?}");
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::InvalidInput), "{checked:#?}");
+}
+
+/// The other faces of the same defect, each reached through a `$ref` so the metaschema never sees
+/// it. `02XX` lowered to the same `StatusSpec` as `2XX`, and `0200`/`+200` to the same one as
+/// `200` — a duplication `E022` cannot catch, because these are distinct map keys. `6XX`-`9XX`
+/// lowered to a match arm no status can reach. `XX`, `2xx` and `banana` were dropped with no
+/// diagnostic at all, handing the caller a client with no arm for a response they wrote down.
+///
+/// The last three keys are rejected by the grammar *only*: an empty key and a `200` with leading
+/// or trailing whitespace parse as neither a range nor an exact status, so before this check they
+/// too vanished silently, and nothing anywhere in the tree named them.
+#[test]
+fn e011_every_out_of_grammar_response_key_is_rejected_behind_a_ref() {
+    for key in [
+        "0XX", "02XX", "0200", "+200", "6XX", "9XX", "XX", "2xx", "banana", "200.0", "1000", "20X",
+        "", " 200", "200 ",
+    ] {
+        let (generated, checked) = generate_and_check_refd_path_item(&format!(
+            "get:\n  operationId: getPet\n  responses:\n    '200': {{ description: ok }}\n    '2XX': {{ description: range }}\n    '{key}': {{ description: out of grammar }}\n"
+        ));
+        assert_eq!(
+            generated.outcome(),
+            Outcome::Rejected,
+            "`{key}` was accepted: {generated:#?}"
+        );
+        assert!(
+            has_code(&generated, Code::InvalidInput),
+            "`{key}`: {generated:#?}"
+        );
+        assert_eq!(
+            checked.outcome(),
+            Outcome::Rejected,
+            "`{key}`: check disagreed with generate: {checked:#?}"
+        );
+        assert!(
+            has_code(&checked, Code::InvalidInput),
+            "`{key}`: {checked:#?}"
+        );
+    }
+}
+
+/// The parity property the parse-time check exists to establish: the *same* out-of-grammar key
+/// written inline — where the metaschema does see it — reaches the same verdict under the same
+/// code. Should the vendored metaschema's pattern and the hand-written grammar ever diverge, this
+/// fixture and the one above stop agreeing, which is the only signal that divergence would give.
+#[test]
+fn an_out_of_grammar_response_key_rejects_identically_inline_and_behind_a_ref() {
+    let inline = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200': { description: ok }\n        '0XX': { description: out of grammar }\n        default: { description: fallback }\n";
+    let (refd_generated, refd_checked) = generate_and_check_refd_path_item(
+        "get:\n  operationId: getPet\n  responses:\n    '200': { description: ok }\n    '0XX': { description: out of grammar }\n    default: { description: fallback }\n",
+    );
+    for report in [
+        &generate(inline),
+        &check(inline),
+        &refd_generated,
+        &refd_checked,
+    ] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+/// The keys the metaschema *does* admit keep working behind a `$ref`: both response-key shapes it
+/// allows, the `default` sentinel, and a specification extension, which `specification-extensions`
+/// admits under `^x-` and which is therefore skipped before the grammar is applied. Without this
+/// the grammar check could over-reject with every other suite still green.
+///
+/// The verdict is asserted exactly rather than as "not rejected", and the diagnostics are asserted
+/// empty: a change that started *warning* on in-grammar keys would otherwise pass here. And each
+/// accepted key is asserted to reach the emitted module, so "no diagnostic" cannot be satisfied by
+/// dropping the entry — which is the very failure mode this change exists to close.
+#[test]
+fn in_grammar_response_keys_and_extensions_still_generate_behind_a_ref() {
+    // Every response carries a body, so the emitted client has to build a status→variant table and
+    // the accepted keys become observable selectors in it rather than only doc comments.
+    let body = "content: { application/json: { schema: { type: string } } }";
+    let (generated, checked, code) = generate_and_check_refd_path_item_with_code(&format!(
+        "get:\n  operationId: getPet\n  responses:\n    '200': {{ description: ok, {body} }}\n    '2XX': {{ description: range, {body} }}\n    '404': {{ description: gone, {body} }}\n    '5XX': {{ description: server, {body} }}\n    default: {{ description: fallback, {body} }}\n    x-internal-note: {{ description: a specification extension, not a response }}\n"
+    ));
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    assert!(generated.diagnostics().is_empty(), "{generated:#?}");
+    assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
+    for selector in [
+        "StatusSpec::Exact(200u16)",
+        "StatusSpec::Range(2u8)",
+        "StatusSpec::Exact(404u16)",
+        "StatusSpec::Range(5u8)",
+    ] {
+        assert!(
+            code.contains(selector),
+            "accepted key's selector `{selector}` never reached the emitted client:\n{code}"
+        );
+    }
+}
+
+/// A specification extension is skipped whatever its value is, **inline and behind a `$ref`**.
+///
+/// `specification-extensions` is `^x-: true` in both vendored schemas — *any* value — so an `x-`
+/// entry under `responses` is not a Response and its contents are not spargen's business. Before
+/// the skip, a scalar-, array- or null-valued extension was parsed as a Response and rejected with
+/// `E011: expected an object`, **inline as well as behind a `$ref`**, so this is a relaxation for
+/// documents that pass today and not only a consequence of the new grammar check.
+///
+/// This is the fixture that pins the skip's *scope*. Narrowing it to object-valued extensions —
+/// the shape that already passed before this change — reverts all four relaxations and is
+/// otherwise invisible to the workspace; that mutation reds exactly here.
+#[test]
+fn a_specification_extension_is_skipped_whatever_its_value_shape() {
+    for value in [
+        "hello",
+        "[1, 2]",
+        "null",
+        "42",
+        "true",
+        "{ note: an object, which already passed }",
+    ] {
+        let refd = format!(
+            "get:\n  operationId: getPet\n  responses:\n    '200': {{ description: ok }}\n    x-note: {value}\n"
+        );
+        let (generated, checked) = generate_and_check_refd_path_item(&refd);
+        assert_eq!(
+            generated.outcome(),
+            Outcome::Generated,
+            "`x-note: {value}` behind a $ref: {generated:#?}"
+        );
+        assert!(
+            generated.diagnostics().is_empty(),
+            "`x-note: {value}` behind a $ref: {generated:#?}"
+        );
+        assert_eq!(
+            checked.outcome(),
+            Outcome::Clean,
+            "`x-note: {value}` behind a $ref: {checked:#?}"
+        );
+
+        let inline = inline_spec_with_response_entries(&format!("        x-note: {value}\n"));
+        let generated = generate(&inline);
+        let checked = check(&inline);
+        assert_eq!(
+            generated.outcome(),
+            Outcome::Generated,
+            "`x-note: {value}` inline: {generated:#?}"
+        );
+        assert!(
+            generated.diagnostics().is_empty(),
+            "`x-note: {value}` inline: {generated:#?}"
+        );
+        assert_eq!(
+            checked.outcome(),
+            Outcome::Clean,
+            "`x-note: {value}` inline: {checked:#?}"
+        );
+    }
+}
+
+/// The skip is `^x-`, exactly as the metaschema spells it — case-sensitively. `X-note` is not a
+/// specification extension: `unevaluatedProperties: false` rejects it inline, and behind a `$ref`,
+/// where the metaschema never looks, the grammar check is what rejects it. Both under `E011`, so
+/// the verdict does not depend on placement.
+#[test]
+fn an_uppercase_extension_key_is_not_a_specification_extension() {
+    let (generated, checked) = generate_and_check_refd_path_item(
+        "get:\n  operationId: getPet\n  responses:\n    '200': { description: ok }\n    X-note: { description: not an extension }\n",
+    );
+    let inline =
+        inline_spec_with_response_entries("        X-note: { description: not an extension }\n");
+    for report in [&generated, &checked, &generate(&inline), &check(&inline)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+/// Skipping an extension means not resolving a `$ref` inside one either. A dangling *pointer* ref
+/// in arbitrary user data no longer raises `E004`, which is correct: `^x-: true` admits any value,
+/// so the object is not a Reference Object and never was one — the old diagnostic was spurious.
+#[test]
+fn a_dangling_pointer_ref_inside_an_extension_is_not_resolved() {
+    let (generated, checked) = generate_and_check_refd_path_item(
+        "get:\n  operationId: getPet\n  responses:\n    '200': { description: ok }\n    x-note: { $ref: '#/does/not/exist' }\n",
+    );
+    let inline =
+        inline_spec_with_response_entries("        x-note: { $ref: '#/does/not/exist' }\n");
+    for report in [&generated, &checked, &generate(&inline), &check(&inline)] {
+        assert!(report.outcome().is_success(), "{report:#?}");
+        assert!(!has_code(report, Code::UnresolvedRef), "{report:#?}");
+        assert!(!has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+/// The asymmetry the skip leaves behind, pinned so it is visible rather than merely true: a
+/// dangling **file** ref inside an extension still rejects, because the bundle loader resolves and
+/// reads `$ref` targets *before* anything parses a Responses key, so the skip never gets a say.
+/// A dangling **pointer** ref in the same position does not (the fixture above). Two kinds of
+/// dangling reference inside arbitrary user data now reach different verdicts.
+///
+/// This is bundle-loader behavior, outside this change's reach — filed as #239 rather than fixed.
+/// Should the loader stop eagerly reading refs it has no reason to interpret, this fixture is the
+/// one that says so.
+#[test]
+fn a_dangling_file_ref_inside_an_extension_still_rejects_unlike_a_pointer_ref() {
+    let (generated, checked) = generate_and_check_refd_path_item(
+        "get:\n  operationId: getPet\n  responses:\n    '200': { description: ok }\n    x-note: { $ref: 'nowhere.yaml' }\n",
+    );
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    }
+}
+
+/// The silent-drop face on its own. `XX` parses as neither a range nor an exact status, so
+/// `parse_status` returned `None` and the entry simply vanished: outcome `Generated`, no
+/// diagnostic, and a client missing an arm for a response the author had documented. It reports.
+#[test]
+fn an_unparseable_response_key_behind_a_ref_reports_rather_than_vanishing() {
+    let (generated, checked) = generate_and_check_refd_path_item(
+        "get:\n  operationId: getPet\n  responses:\n    '200': { description: ok }\n    'XX': { description: silently dropped }\n",
+    );
+    assert_eq!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    assert!(has_code(&generated, Code::InvalidInput), "{generated:#?}");
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::InvalidInput), "{checked:#?}");
+}
