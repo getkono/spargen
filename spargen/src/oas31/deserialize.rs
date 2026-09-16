@@ -527,7 +527,28 @@ fn parse_responses(
     let mut responses = ResponsesObject::default();
     if let Some(map) = object(value, pointer, diags) {
         for (key, value) in map.iter() {
-            let parsed = parse_ref_or(value, &pointer.push(&key.name), diags, parse_response);
+            // Specification extensions are admitted here by `specification-extensions` (`^x-`)
+            // with any value at all, so they are skipped before the grammar applies — they are
+            // not responses, and must not be measured against a response key's shape.
+            if key.name.starts_with("x-") {
+                continue;
+            }
+            let at = pointer.push(&key.name);
+            if key.name != "default" && !is_response_status_key(&key.name) {
+                Diagnostic::error(Code::InvalidInput, Provenance::new(at, Some(key.span)))
+                    .message(format!(
+                        "Responses key `{}` is neither `default` nor a status code or range the \
+                         specification defines",
+                        key.name
+                    ))
+                    .remedy(
+                        "use a three-digit status code, or one of the ranges `1XX`, `2XX`, `3XX`, \
+                         `4XX` and `5XX` — the only ones the specification allows",
+                    )
+                    .emit(diags);
+                continue;
+            }
+            let parsed = parse_ref_or(value, &at, diags, parse_response);
             if key.name == "default" {
                 responses.default = parsed;
             } else if let Some(parsed) = parsed {
@@ -1588,6 +1609,28 @@ fn is_method_token(name: &str) -> bool {
                         | b'-'
                 )
         })
+}
+
+/// Whether a Responses key names a status code or one of the ranges the specification defines.
+///
+/// This is the metaschema's own `^[1-5](?:[0-9]{2}|XX)$`, transcribed — deliberately neither the
+/// looser prose nor a stricter IANA registry rule. `references/3.2.0.md` puts the range half
+/// plainly: *"Only the following range definitions are allowed: `1XX`, `2XX`, `3XX`, `4XX`, and
+/// `5XX`."*
+///
+/// It is checked here, not in `lower`, for the same reason `is_method_token` is: the metaschema
+/// validates the root document only, so a Path Item reached by `$ref` into another file never meets
+/// it, and every Path Item passes through here regardless of how it was reached. Without it `0XX`
+/// lowers to `StatusSpec::Range(0)` — the sentinel `default` lowers to — and the operation's error
+/// enum is emitted with two `Default` variants, which `rustc` rejects with `E0428`.
+fn is_response_status_key(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    match bytes {
+        [b'1'..=b'5', rest @ ..] if rest.len() == 2 => {
+            rest == b"XX" || rest.iter().all(u8::is_ascii_digit)
+        }
+        _ => false,
+    }
 }
 
 fn provenance(pointer: &JsonPointer, value: &SpannedValue) -> Provenance {
