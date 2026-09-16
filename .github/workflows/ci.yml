@@ -232,7 +232,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `--all-features` is what puts the TLS stack in scope: `rustls` reaches the graph only
+      # through reqwest's TLS feature, so under default features `cargo deny list` matches it
+      # zero times and `cargo tree --workspace -i rustls` finds no such package. Both of these
+      # match the action's own defaults, so the gate's behaviour is unchanged — but a default is
+      # the action's property, not this repository's, and were `arguments` to change, this would
+      # silently become an audit of a graph with no TLS stack in it: every run green, nothing
+      # noticing. (`arguments` and `command` are separate inputs, composed as
+      # `cargo-deny <arguments> <command>`; both are stated so neither is inherited.)
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --all-features
+          command: check
 
   commits:
     name: Conventional commits
