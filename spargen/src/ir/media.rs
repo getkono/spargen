@@ -343,8 +343,7 @@ impl Responses {
     /// also the operation's sole success source (see [`Self::success`]), which then types both
     /// sides with that one body — but it reaches the shape only through the body count above. A
     /// bodyless `default` therefore becomes the catch-all unit variant of an `Enum` and is dropped
-    /// from a `None` or a `Single`, where every undocumented status stays `UnexpectedStatus`
-    /// instead of classifying as `Api`.
+    /// from a `None` or a `Single`.
     pub(crate) fn error(&self) -> ErrorShape {
         let mut entries: Vec<(StatusSpec, Option<Ty>)> = Vec::new();
         for (status, response) in &self.by_status {
@@ -413,8 +412,7 @@ pub(crate) enum SuccessShape {
     /// status — a payload-carrying variant for a bodied status, a unit variant for a
     /// documented bodyless status (e.g. `204`). Entries are the documented *success* statuses only
     /// — `default` is never among them — pre-sorted into decode precedence (exact before range);
-    /// decode dispatches by HTTP status in that order and rejects any other 2xx as
-    /// `Error::UnexpectedStatus`.
+    /// decode dispatches by HTTP status in that order.
     Enum(Vec<(StatusSpec, Option<Ty>)>),
 }
 
