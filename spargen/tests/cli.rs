@@ -156,11 +156,8 @@ fn explain_json_carries_the_code_and_its_explain_text() {
         "`explain` must carry that code's explain text: {stdout}"
     );
 
-    // A second, distinct code through the same branch, for the reason the human case drives one:
-    // with a single code neither assertion above can distinguish "the handler resolved what it was
-    // given" from "the handler emitted a constant that happens to be that code" — a payload
-    // hardcoded to `EXPLAINED_CODE`'s object satisfies both. Requiring the two objects to differ is
-    // what separates them.
+    // A second, distinct code through the same branch: the echo assertions below are what tell
+    // resolution from a constant payload.
     let other = Command::new(spargen_bin())
         .args(["explain", OTHER_CODE, "--format", "json"])
         .output()
@@ -192,8 +189,9 @@ fn explain_json_carries_the_code_and_its_explain_text() {
         "`explain` must carry that code's explain text: {other_stdout}"
     );
     assert_ne!(
-        object, other_object,
-        "two distinct codes must not produce the same JSON object, or this branch could not tell \
+        object.get("explain"),
+        other_object.get("explain"),
+        "two distinct codes must not explain to the same text, or this branch could not tell \
          resolution from a constant"
     );
 }
@@ -221,6 +219,10 @@ fn explain_rejects_an_unresolvable_code() {
     assert!(
         stderr.contains("E999"),
         "stderr must name the code it could not resolve: {stderr}"
+    );
+    assert!(
+        stderr.starts_with("error: "),
+        "a failed lookup must be reported as an error: {stderr}"
     );
 
     // The same failure under `--format json`. This is deliberate, not an oversight to be "fixed":
