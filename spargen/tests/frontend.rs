@@ -2569,6 +2569,43 @@ fn an_alias_shaped_component_that_declares_its_own_shape_is_not_an_alias() {
     }
 }
 
+/// The same alias spelled `anyOf` rather than `oneOf` is still one.
+///
+/// `nullable_alias_back_edge` picks its members from whichever of the two applicators the
+/// component carries, and only the `oneOf` arm of that selection was driven by anything: every
+/// alias fixture in this file, including the four narrowness fixtures above, spells the union
+/// `oneOf`. Replacing the `anyOf` arm with `return None` left
+/// `cargo test --workspace --all-features` entirely green, while this document went from a clean
+/// `Generated` emitting `Option<Box<A>>` to `Rejected`/`E007` — one of the two spellings the
+/// specification gives the same meaning here stops reaching the recogniser, and nothing said so.
+///
+/// The four above pin what the recogniser refuses once it runs. This one pins *whether it runs*.
+#[test]
+fn a_nullable_alias_spelled_any_of_is_recognised_as_one() {
+    let spec = alias_shaped_mutual_recursion(
+        "      anyOf:\n        - { $ref: '#/components/schemas/A' }\n        \
+         - { type: \"null\" }\n",
+    );
+    let (generated, code) = generate_with_code(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{entry}: an `anyOf`-spelled nullable alias is the same shape as the `oneOf` one and \
+             must generate: {report:#?}\n{spec}"
+        );
+    }
+    // The pair the mutation destroys: the alias binds its *target*, optional for the `"null"`
+    // member and boxed for the cycle. Refusing the spelling gives `Rejected`/`E007` instead, so
+    // both halves of this are what stand over the arm.
+    assert_eq!(
+        field_type(&code, "pub b").as_deref(),
+        Some("Option<Box<A>>"),
+        "the `anyOf` spelling did not reach the alias recogniser: {code}"
+    );
+}
+
 /// The same alias, spelled the other three ways one target can be written.
 ///
 /// A `$ref` is not identified by its spelling. `#/components/schemas/Node`, the root's own
