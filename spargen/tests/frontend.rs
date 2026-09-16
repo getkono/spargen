@@ -2351,7 +2351,7 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
         // The recursion is closed by boxing whichever way round the map is written — read off
         // `b`'s own declaration, not searched for in the file. `code.contains("Box<")` is true of
         // *any* successful generation (the embedded runtime alone supplies ten occurrences:
-        // `Pin<Box<..>>` in `transport.rs`/`auth.rs`/`retry.rs`/`stream.rs` and
+        // `Pin<Box<..>>` in `transport.rs`/`auth.rs`/`retry.rs`/`wasm.rs` and
         // `source: Option<Box<dyn Error + Send + Sync>>` in `error.rs`), so the assertion that
         // stood here pinned nothing: under the mutation that unboxes the alias back-edge it stayed
         // green while four of its neighbours went red.
