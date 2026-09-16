@@ -2354,7 +2354,7 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
         // `Pin<Box<..>>` in `transport.rs`/`auth.rs`/`retry.rs`/`wasm.rs` and
         // `source: Option<Box<dyn Error + Send + Sync>>` in `error.rs`), so the assertion that
         // stood here pinned nothing: under the mutation that unboxes the alias back-edge it stayed
-        // green while four of its neighbours went red.
+        // green while five of its neighbours went red.
         //
         // The two orders emit different types because they take different paths, and this is the
         // only fixture that drives both. Declaring the target first lowers `A` first, so `B`'s body
@@ -2372,18 +2372,30 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
         // has no recursion in it at all, so it is not this change's to fix; when #222 lands this
         // expectation becomes `Option<Box<B>>`. Until then this assertion is the only thing
         // anywhere in the repository standing over what that order emits.
-        let expected = if first == "A" {
-            "Option<Box<A>>"
+        // One message per order. The two orders are pinned for opposite reasons — one is the
+        // correct type, one is the knowingly-wrong one — and a single format string over both
+        // hands a reader of the first iteration a paragraph written about the second, 3,000
+        // output lines above the `left`/`right` that would correct it.
+        let (expected, why) = if first == "A" {
+            (
+                "Option<Box<A>>",
+                "this order takes the nullable-alias path, so `b` binds `A` itself — optional \
+                 because of the `\"null\"` member, boxed because the cycle must have a finite \
+                 size. This is the correct type and is NOT issue #222: a red here is a \
+                 regression in the alias path, not a pin that needs updating",
+            )
         } else {
-            "Box<B>"
+            (
+                "Box<B>",
+                "this order's expectation is the knowingly-wrong `Box<B>` that issue #222 \
+                 exists to fix, pinned as emitted rather than as it ought to be — if this went \
+                 red while fixing #222, the expectation becomes `Option<Box<B>>`",
+            )
         };
         assert_eq!(
             field_type(&code, "pub b").as_deref(),
             Some(expected),
-            "{first} before {second}: the `B`-before-`A` expectation is the knowingly-wrong \
-             `Box<B>` that issue #222 exists to fix, pinned as emitted rather than as it ought \
-             to be — if this went red while fixing #222, the expectation becomes \
-             `Option<Box<B>>`; the comment above this assertion says why: {code}"
+            "{first} before {second}: {why}; the comment above this assertion says why: {code}"
         );
         assert!(
             !code.contains("serde_json::Value>"),
