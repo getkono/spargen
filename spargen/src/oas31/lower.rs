@@ -752,11 +752,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// for the lowering that follows.
     fn open_reservation_for_ref(&self, reference: &str, at: &Provenance) -> Option<(TypeId, bool)> {
         if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-            // A root component the root document declares: `ensure_component`'s own key. A name it
-            // does not declare is a sub-file's sibling reference, which `ensure_component` hands to
-            // `ensure_resolved` — so fall through to the identity below rather than answering.
-            if let Some(&entry) = self.in_progress.get(name) {
-                return Some(entry);
+            // A root component the root document declares: `ensure_component`'s own key, and its
+            // own precedence — root map first, and only a name the root does **not** declare is
+            // handed to `ensure_resolved` against the referring file.
+            //
+            // The gate is the *declaration*, not the reservation. Falling through whenever the
+            // name is merely not open resolves it against the referring file, which for a
+            // reference written inside a sub-file finds that file's own declaration — the one the
+            // root shadows, and one `lower_schema` would never have bound. That answered the same
+            // reference string two ways in one document: the direct `{$ref: T}` spelling read the
+            // root's component and raised `W011`, while the alias spelling silently read the
+            // sub-file's and raised nothing at all.
+            if self.document.components.schemas.contains_key(name) {
+                // Declared by the root, so the root's map is the only identity this reference has.
+                // `None` when it is not currently open is the right answer and not a fall-through:
+                // a finished or not-yet-started root component is exactly the case the ordinary
+                // `ensure_component` path handles — and the case in which it must, because that is
+                // where `W011` is raised.
+                return self.in_progress.get(name).copied();
             }
         } else if is_remote_ref(reference) {
             // `ensure_remote` keys on the absolute URL, and a reference inside a vendored document
