@@ -3619,10 +3619,34 @@ serde_json.workspace = true
              first: {:#?}",
             result.diagnostics
         );
+        // "a read-failure diagnostic naming the same file stands above it" is two claims, and
+        // matching each message by its own prefix pins only the ordering half. A renderer that put
+        // the *consumer* manifest's path on the read-failure line would point the reader at a
+        // different file with every assertion above still green. So take the path the inheritance
+        // message names and require the read failure to name that same one. They are compared to
+        // each other rather than to `root`: `package.workspace` is joined, not normalised, so both
+        // messages spell the root `<tmp>/outside/../root/Cargo.toml` and neither contains
+        // `root.as_str()`.
+        let named = result.diagnostics[inherits]
+            .message
+            .rsplit_once("its workspace manifest `")
+            .and_then(|(_, rest)| rest.split_once('`'))
+            .map(|(path, _)| path)
+            .unwrap_or_else(|| panic!("{:#?}", result.diagnostics));
         assert!(
-            !result.diagnostics[inherits]
+            result.diagnostics[failure].message.contains(named),
+            "the read failure has to name the same file the inheritance message defers to: {:#?}",
+            result.diagnostics
+        );
+        // And the reason must not ride inline in *any* shape, not merely without a colon. The
+        // explain text makes an inline reason the signature of the other limb, so a separator of
+        // any kind appended here falsifies it; `!contains("could not be read:")` forbade one
+        // spelling and left the rest — an em dash among them — free. Pinning the end of the
+        // message forbids all of them. `location` is empty here: one counting table.
+        assert!(
+            result.diagnostics[inherits]
                 .message
-                .contains("could not be read:"),
+                .ends_with("could not be read"),
             "a root reported on its own line must not repeat its reason inline: {:#?}",
             result.diagnostics
         );
@@ -3708,15 +3732,17 @@ serde_json.workspace = true
         );
         // The same identification rule as in `a_workspace_root_that_cannot_be_read_is_not_reported_as_missing`,
         // over the other failure a declared root can have: the reason stays on its own line and the
-        // inheritance message carries no `: {reason}` suffix. A read failure and a parse failure
-        // are rendered by the same arm, so both have to hold it.
+        // inheritance message ends where the noun phrase ends. A read failure and a parse failure
+        // are rendered by the same arm, so both have to hold it — and both hold it against an
+        // appended reason of any shape, not just one introduced by a colon.
         assert!(
             result.diagnostics.iter().any(|diagnostic| {
                 diagnostic.message.contains("`bytes` inherits")
                     && diagnostic.message.contains("its workspace manifest `")
-                    && !diagnostic.message.contains("could not be read:")
+                    && diagnostic.message.ends_with("could not be read")
             }),
-            "a root named by `package.workspace` reports its reason separately: {:#?}",
+            "a root named by `package.workspace` reports its reason separately, appending nothing \
+             of any shape after it: {:#?}",
             result.diagnostics
         );
     }
