@@ -3564,6 +3564,66 @@ mod remote {
         assert!(!code.contains("serde_json::Value>"), "{code}");
     }
 
+    /// The remote spelling of `Selfy = Selfy | null`: a vendored document whose **whole body** is a
+    /// union over a `$ref` back to itself plus `null`.
+    ///
+    /// This is the one document that reaches `reservation_at`'s `remote_in_progress`
+    /// canonicalisation, and the only way to reach it. That loop exists because a remote frame is
+    /// keyed by the URL it was reached through while a provenance canonicalises to a
+    /// `file#pointer`, so a string comparison between the two can never match; the frame is only
+    /// *omitted* — rather than merely spelled differently — when the schema being asked about is a
+    /// remote document's root, which is exactly this shape and nothing else. Every other remote
+    /// recursion sits at a property or an `allOf` member, whose pointer is not the frame's.
+    ///
+    /// Without the canonicalisation this document does not reject. The collapse hands
+    /// `ensure_remote` a foreign id and reserves nothing, and `TypeDefs::fill` is then called on an
+    /// id that was never reserved — `fill of an unreserved id`, a **process abort** from inside a
+    /// consumer's `build.rs` with no code, no pointer and no `--carve` escape. A panic is not an
+    /// `Outcome`, so nothing in this suite could have observed it. That assertion is a
+    /// `debug_assert!`, so a build with debug assertions off does not abort: it fills the
+    /// unreserved id and carries on, which is worse and not better.
+    ///
+    /// The loop had zero iterations across the whole workspace before this fixture, while carrying
+    /// a paragraph crediting it with a fix the two-file remote fixture passes without. It is this
+    /// document that the paragraph is true of.
+    #[test]
+    fn a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected() {
+        const SELFY_URL: &str = "https://api.example.com/schemas/selfy.yaml";
+        const SELFY_YAML: &str = "oneOf:\n  - $ref: 'selfy.yaml'\n  - type: 'null'\n";
+        const SELFY_SHA: &str = "a85d6698c240a7a1bc9f53f18466c179a2f8fcc01492d822aa913b7a7f4e009a";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{SELFY_URL}\"\nsha256 = \"{SELFY_SHA}\"\npath = \
+             \"api.example.com/schemas/selfy.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/selfy.yaml", SELFY_YAML)];
+
+        let (generated, _temp, _out) =
+            run_layout(&responds_with(SELFY_URL), Some(&lock), &vendor, false);
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(SELFY_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            // The pin is live, so the document really reaches lowering rather than stopping at the
+            // lock.
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+            // A spec-facing code, the same one the root-document spelling of this shape draws —
+            // never the internal invariant's `E011`, and never a process abort.
+            assert!(
+                has_code(report, Code::NonDisjointUnion),
+                "{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{entry}: {report:#?}"
+            );
+        }
+    }
+
     fn responds_with(url: &str) -> String {
         format!(
             "openapi: 3.1.0\n\

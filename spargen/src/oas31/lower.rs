@@ -4517,9 +4517,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Canonicalise its keys to the same identity instead of reconstructing a URL from a
             // file id: a URL is only one of the spellings that reaches a vendored document, and
             // the map holds at most one entry per open recursion frame. Omitting this frame is what
-            // let a remote body whose union collapses onto another open remote reservation past the
-            // guard below, to be aborted by `ensure_remote`'s last-insert assertion instead of
-            // reported.
+            // let a remote body whose union collapses onto an open remote reservation past the
+            // guard below, to be aborted by `TypeDefs::fill`'s `fill of an unreserved id` instead
+            // of reported.
+            //
+            // Only one shape reaches here: a vendored document whose **whole body** is the union,
+            // because only then does the provenance canonicalise to a frame's own `file#pointer`.
+            // `remote::a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected` is that
+            // document and the only thing in the suite that executes this loop; deleting the loop
+            // turns it red. Every other remote recursion sits at a property or an `allOf` member,
+            // whose pointer is not the frame's, so it reaches here and matches nothing.
             for (reference, &(id, _)) in &self.remote_in_progress {
                 let matches = self
                     .resolver
