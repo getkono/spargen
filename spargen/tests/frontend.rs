@@ -84,6 +84,39 @@ fn field_owner(code: &str, field: &str) -> Option<String> {
     None
 }
 
+/// The declared type of the first field line starting with `field`, trimmed of its trailing comma.
+///
+/// [`field_owner`] says which type *declares* a field; this says which type the field *is*. Asking
+/// only whether a type name appears somewhere in the module cannot tell two same-named schemas
+/// apart, because both are emitted — so a fixture that must pin *which* of them a reference bound
+/// has to read the field's own right-hand side.
+fn field_type(code: &str, field: &str) -> Option<String> {
+    code.lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with(field))
+        .and_then(|line| line.split_once(':'))
+        .map(|(_, ty)| ty.trim().trim_end_matches(',').to_owned())
+}
+
+/// The field names `pub struct ty` declares, in source order.
+///
+/// The inverse of [`field_owner`], and the answer to "which schema is this type", which a name
+/// alone cannot give when two declarations share a name and the emitter disambiguates one of them —
+/// or when the alias path re-emits a target's *kind* under a third name.
+fn declared_fields(code: &str, ty: &str) -> Vec<String> {
+    let mut lines = code
+        .lines()
+        .map(str::trim_start)
+        .skip_while(|line| !line.starts_with(&format!("pub struct {ty} ")));
+    lines.next();
+    lines
+        .take_while(|line| !line.starts_with('}'))
+        .filter_map(|line| line.strip_prefix("pub "))
+        .filter_map(|rest| rest.split_once(':'))
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
 fn declared_types(code: &str, prefix: &str, suffix_ok: impl Fn(&str) -> bool) -> Vec<String> {
     code.lines()
         .filter_map(|line| line.trim_start().strip_prefix("pub struct "))
@@ -2417,6 +2450,117 @@ components:
         );
     }
     assert!(code.contains("Option<Box<"), "{code}");
+}
+
+/// A nullable alias whose member is a name the **root** declares reads the root's component, and
+/// says so — exactly as the direct `$ref` spelling of that same member already does.
+///
+/// `ensure_component`'s precedence is root first, file second: the root's component map is
+/// consulted before anything else, and only a name the root does **not** declare is handed to
+/// `ensure_resolved` against the referring file. `open_reservation_for_ref` answered the
+/// `#/components/schemas/` arm only on an *open reservation* and otherwise fell through to
+/// `reference_identity`, whose `from` is the **referring file** — so a name the root declares but
+/// is not currently lowering missed the arm, fell through, and bound the sub-file's declaration
+/// that the root shadows. The alias was recognised for a target `lower_schema` would never have
+/// chosen, and `W011` — raised inside `ensure_component`, which the alias never reached — did not
+/// fire, so the document was neither supported as documented nor warned nor rejected.
+///
+/// The two files here are the matched pair: `next` spelled `{$ref: MaybeShared}` against `next`
+/// spelled `{$ref: Shared}` directly, one reference string, one binary, and before this fixture two
+/// different answers. `docs/support-matrix.md`'s References row states the precedence this pins.
+///
+/// The existing spelling fixture cannot catch it: its sub-file names collide with nothing in the
+/// root, so the fall-through and the root map agree there by accident.
+#[test]
+fn a_nullable_alias_member_the_root_shadows_binds_the_roots_component_and_warns() {
+    // The sub-file's `Shared` is reached by the *explicit file* spelling, so it is genuinely the
+    // open reservation when its own `next` property asks for `#/components/schemas/Shared` — which
+    // is the only way the shadowed declaration is a live candidate at all.
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Shared' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      properties:
+        root_only: { type: string }
+      required: [root_only]
+"##;
+    let lib = |member: &str| {
+        format!(
+            r##"
+components:
+  schemas:
+    Shared:
+      type: object
+      properties:
+        lib_only: {{ type: string }}
+        next: {{ $ref: '#/components/schemas/{member}' }}
+    MaybeShared:
+      oneOf:
+        - {{ $ref: '#/components/schemas/Shared' }}
+        - {{ type: "null" }}
+"##
+        )
+    };
+
+    for spelling in ["MaybeShared", "Shared"] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), root).unwrap();
+        std::fs::write(dir.join("lib.yaml"), lib(spelling)).unwrap();
+        let out = dir.join("client.rs");
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: {report:#?}"
+            );
+            // Half one: the shadowing is *said*. Both entry points raise it, or `check` is no
+            // longer reporting what `generate` reports.
+            assert!(
+                has_code(report, Code::DeclarationHasNoEffect),
+                "{spelling}/{entry}: the root shadows `Shared`, so W011 must fire: {report:#?}"
+            );
+        }
+
+        // Half two: the shadowing is *done*. Read on the bound type's own fields rather than on its
+        // name: the emitter disambiguates the collision by *suffixing* the sub-file's copy, so
+        // `Option<Box<Shared2f46d127>>` contains `Shared` and a substring test would pass on the
+        // wrong answer — and the alias spelling reaches its target through `MaybeShared`, a third
+        // name again. `root_only` is declared only by the root's `Shared` and `lib_only` only by
+        // the sub-file's, so the fields say which declaration was read whatever it got called.
+        let next = field_type(&code, "pub next").expect(&code.clone());
+        let bound = next
+            .rsplit_once('<')
+            .map_or(next.as_str(), |(_, tail)| tail)
+            .trim_end_matches('>');
+        let fields = declared_fields(&code, bound);
+        assert!(
+            fields.iter().any(|field| field == "root_only"),
+            "{spelling}: `next` bound `{next}`, whose fields are {fields:?} — not the root's \
+             `Shared`: {code}"
+        );
+        assert!(
+            !fields.iter().any(|field| field == "lib_only"),
+            "{spelling}: `next` bound the sub-file's shadowed `Shared` as `{next}`: {code}"
+        );
+    }
 }
 
 /// A nullable alias whose target is itself nullable is exactly as optional as the direct `$ref`.
