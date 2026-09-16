@@ -222,21 +222,53 @@ pub(crate) enum TypeKind {
     ///
     /// **The guarantee is narrower than it first appears, and the difference is worth stating.** A
     /// dedicated variant turns a read site into a compile error only where the `match` was already
-    /// exhaustive. Seven sites are declared that way; roughly thirteen others absorb this variant
-    /// through a catch-all arm and got no error — including [`TypeGraph`]'s own `push_ref_member` in
-    /// `oas31::lower`, which is the historical origin of the whole defect class and is still shaped
-    /// exactly the same way. Its callers guard it, and the guards live in the *callers*, so a new
-    /// caller gets no compile error either. Converting those arms is a change across five subsystems
-    /// and is filed rather than rushed; until then, the compile-time audit covers the minority of
-    /// read sites.
+    /// exhaustive. Seven sites are declared that way; **seventeen** others absorb this variant
+    /// through a catch-all arm and got no error — counted, not estimated: twelve in `oas31::lower`,
+    /// two each in `codegen::emit` and `runtime_contract`, and one each in this module, `name` and
+    /// `surface`. That population includes [`TypeGraph`]'s own `push_ref_member` in `oas31::lower`,
+    /// which is the historical origin of the whole defect class and is still shaped exactly the same
+    /// way, and it includes `intersect_non_null`, which is the one whose behaviour the new variant
+    /// actually changed: its `TypeKind::Any` arms used to absorb the placeholder and return the
+    /// other operand, and a placeholder now falls to `_ => None` instead. Its callers guard it, and
+    /// the guards live in the *callers*, so a new caller gets no compile error either. Converting
+    /// those arms is a change across five subsystems and is filed rather than rushed; until then,
+    /// the compile-time audit covers the minority of read sites.
     ///
-    /// **Semver.** Making the placeholder unreadable did not by itself change any generated output —
-    /// no snapshot moved when this variant landed. Two of the sites it exposed then chose to refuse
-    /// rather than guess, and those two *are* a breaking change to generated output: a `$ref`
-    /// carrying shape siblings whose target is still being lowered, and a `oneOf` member that is the
-    /// union being lowered, both previously generated (untyped and undecodable respectively) and are
-    /// now `E013` and `E007`. Neither shape contains an `allOf` keyword, so neither is covered by the
-    /// scope stated on the earlier footers; both are named on this commit's.
+    /// **Semver.** The breaks are a list, not a pair, and an earlier revision of this paragraph
+    /// said "two" where it should have said what follows. Making the placeholder unreadable did not
+    /// by itself move a snapshot, but the branch it landed on moves generated output in four ways,
+    /// and nothing but this list records them together.
+    ///
+    /// 1. A `$ref` carrying shape siblings whose target is still being lowered, previously generated
+    ///    untyped, now `E013`.
+    /// 2. A `oneOf` member that is the union being lowered, previously generated and undecodable,
+    ///    now `E007`. Neither shape contains an `allOf` keyword, so neither is covered by the scope
+    ///    stated on the earlier footers.
+    /// 3. Giving a resolved `$ref` one identity and one type: `snapshot__openapi_boilerplate_surface`
+    ///    moved from 35 public types to 25 on the corpus's only multi-file case. Duplicated types
+    ///    disappearing is an improvement and is still a Major break, because a consumer naming one
+    ///    of them no longer compiles.
+    /// 4. Reading a reservation where one may not be read. A union whose only non-null member is a
+    ///    cycle-closing `$ref` — the canonical 3.1 spelling of a nullable recursive reference, since
+    ///    3.1 removed `nullable: true` — cloned the placeholder's kind into a definition nothing
+    ///    would ever `fill`, and seven such documents were rejected with `E011` against input that
+    ///    is not malformed. They generate as `Option<Box<T>>`, which the support matrix promises and
+    ///    which the direct `{$ref: T}` spelling already produced. Where the same construct cannot be
+    ///    answered truthfully it is refused instead: the union that is a component's whole body and
+    ///    refers only to itself (`E007`), and a sibling keyword that would have to be intersected
+    ///    against an unlowered target (`E013`). The second of those *is* a break — such documents
+    ///    generated before, by guessing.
+    ///
+    /// **The invariant's own status.** `Api::check_invariants`' reservation arm is the proof that no
+    /// consumer of a finished graph observes a placeholder, and it is not a user-facing spec
+    /// diagnostic: it reports under `Code::InvalidInput`, whose explain text describes malformed
+    /// input, which is never what a surviving reservation means. It carries that code because after
+    /// the refusals above no document reaches it, so a code of its own would have no fixture that
+    /// could assert it and would fail the test that every declared code is asserted by the suite
+    /// owning it. That argument holds only while the arm stays unreachable — an earlier revision of
+    /// this record asserted the arm was unreachable and it was reachable seven ways, so the claim is
+    /// stated here as a condition rather than as a fact, and the seven documents are fixtures in
+    /// `spargen/tests/frontend.rs` precisely so that it cannot quietly stop being true again.
     Reserved,
 }
 
