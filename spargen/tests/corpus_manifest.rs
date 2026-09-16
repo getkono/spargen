@@ -225,10 +225,28 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
     // default and neutralises nothing; `if:` is banned by presence, because its value is an
     // expression that cannot be evaluated here.
     //
-    // Narrowing is guarded on both inputs that reach `check`'s `[WHICH]...` positional --
-    // `command` and `command-arguments` -- since either alone drops `advisories`, and
-    // `command-arguments` must be *stated* empty rather than absent: leaving it absent would pin
-    // the action's default, which is the one thing this gate exists to stop being load-bearing.
+    // Narrowing is guarded on three inputs, and only on the steps that audit the *root*
+    // manifest. Two of them reach `check`'s `[WHICH]...` positional -- `command` and
+    // `command-arguments` -- since either alone drops `advisories`, and `command-arguments` must
+    // be *stated* empty rather than absent: leaving it absent would pin the action's default,
+    // which is the one thing this gate exists to stop being load-bearing. The third is
+    // `arguments` itself, which the entrypoint's unquoted `cargo-deny $*` splices straight into
+    // the argv, so any word in it is a flag: `--all-features --target wasm32-unknown-unknown`
+    // contains `--all-features`, reads as *added* coverage, and drops RUSTSEC-2026-0285. The
+    // deny-list below is a **list, not a proof** -- it rejects the graph-narrowing flags that
+    // were measured to hide this tree's live advisory, and cannot establish that some other
+    // `arguments` value does not narrow. Containment rather than equality is deliberate:
+    // `--all-features --locked` is strictly stricter and is #146's own ask.
+    //
+    // Scope: `if:` and `continue-on-error:` are asserted on *every* matching step, because any
+    // of them being neutralised is this job not running what it says it runs. The three
+    // narrowing assertions apply only where `manifest-path` is absent or names the root
+    // `Cargo.toml`, because applying them everywhere turns "no step may narrow the gate" into
+    // "every step must be maximal" -- which reds #184's cheapest shape (a cargo-deny step per
+    // example workspace with `command-arguments: advisories`, root `deny.toml` untouched; the
+    // root policy is red on bans and licenses for all three examples and green on advisories).
+    // At least one root-manifest audit is required, so scoping by `manifest-path` cannot be used
+    // to empty the gate by pointing its only step somewhere else.
     let ci = read(".github/workflows/ci.yml");
     let documents = yaml_rust2::YamlLoader::load_from_str(&ci)
         .expect("`.github/workflows/ci.yml` must parse as YAML");
@@ -277,6 +295,27 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
          in it audits the dependency graph"
     );
 
+    // Flags that narrow what cargo-deny *resolves or consults*, rather than which checks it runs
+    // over the result. Measured on this tree with the `mise.toml` pin (cargo-deny 0.19.9), as
+    // `cargo-deny --log-level warn --manifest-path ./Cargo.toml --all-features <flag> check
+    // advisories`: `--exclude rustls` and `--target wasm32-unknown-unknown` each turn
+    // `advisories FAILED` (RUSTSEC-2026-0285, reached only through reqwest's TLS feature) into
+    // `advisories ok`, exit 1 to exit 0. The other five do *not* flip that verdict here and are
+    // rejected as the same class of flag rather than on a measured flip -- `--offline` was
+    // measured against an already-populated advisory database, and `--no-default-features` is
+    // overridden by the `--all-features` this same value is required to carry. Not exhaustive:
+    // see the comment above, and #238.
+    const GRAPH_NARROWING_FLAGS: [&str; 7] = [
+        "--exclude",
+        "--target",
+        "--exclude-dev",
+        "--exclude-unpublished",
+        "--offline",
+        "--frozen",
+        "--no-default-features",
+    ];
+
+    let mut root_audits = 0usize;
     for audit in audits {
         assert!(
             audit["if"].is_badvalue(),
@@ -290,6 +329,18 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
              `false`, so a failing audit would leave the `deny` job green"
         );
 
+        // `manifest-path` absent means the action's `./Cargo.toml` default, which is the
+        // workspace root; `Cargo.toml` and `./Cargo.toml` are the same file and both spellings
+        // are accepted so that writing the default out does not red the gate.
+        let audits_root_manifest = match audit["with"]["manifest-path"].as_str() {
+            None => true,
+            Some(path) => path.trim_start_matches("./") == "Cargo.toml",
+        };
+        if !audits_root_manifest {
+            continue;
+        }
+        root_audits += 1;
+
         let arguments = audit["with"]["arguments"]
             .as_str()
             .expect("the cargo-deny-action step must state `with: { arguments: … }` of its own");
@@ -299,6 +350,19 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
                 .any(|token| token == "--all-features"),
             "the cargo-deny-action step's `arguments: {arguments}` does not pass `--all-features`"
         );
+        for token in arguments.split_whitespace() {
+            // `--flag value` and `--flag=value` are the same flag to clap.
+            let flag = token.split_once('=').map_or(token, |(flag, _)| flag);
+            assert!(
+                !GRAPH_NARROWING_FLAGS.contains(&flag),
+                "the cargo-deny-action step's `arguments: {arguments}` passes `{flag}`, which \
+                 shrinks the graph cargo-deny resolves rather than the checks it runs over it: \
+                 the entrypoint splices `arguments` into an unquoted `cargo-deny $*`, so \
+                 `--all-features {flag} …` still contains `--all-features` and still drops \
+                 RUSTSEC-2026-0285. Strictly stricter values such as `--all-features --locked` \
+                 are deliberately still accepted"
+            );
+        }
 
         let command = audit["with"]["command"]
             .as_str()
@@ -323,6 +387,13 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
              `command: check` true and this suite otherwise green"
         );
     }
+
+    assert!(
+        root_audits > 0,
+        "no cargo-deny-action step in the `deny` job audits the root `Cargo.toml`: every one \
+         states a `manifest-path` pointing elsewhere, so the workspace this gate exists to audit \
+         is audited by nothing and the three narrowing assertions above never run"
+    );
 }
 
 #[test]
