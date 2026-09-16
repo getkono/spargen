@@ -223,9 +223,21 @@ pub(crate) enum TypeKind {
     /// **The guarantee is narrower than it first appears, and the difference is worth stating.** A
     /// dedicated variant turns a read site into a compile error only where the `match` was already
     /// exhaustive. Seven sites are declared that way; **seventeen** others absorb this variant
-    /// through a catch-all arm and got no error — counted, not estimated: twelve in `oas31::lower`,
-    /// two each in `codegen::emit` and `runtime_contract`, and one each in this module, `name` and
-    /// `surface`. That population includes [`TypeGraph`]'s own `push_ref_member` in `oas31::lower`,
+    /// through a catch-all arm and got no error — **ten** in `oas31::lower`, two each in
+    /// `codegen::emit` and `runtime_contract`, and one each in this module, `name` and `surface`.
+    ///
+    /// Counted, not estimated, and by a stated rule so the figure can be re-derived rather than
+    /// re-guessed: a site is every `match` at least one of whose arm patterns names a `TypeKind`
+    /// variant, and it is an absorber when one of that match's own arms is a catch-all (`_`, a bare
+    /// binding, `Some(_)`, or a `| _` tail). `matches!` and `if let`, which test for one variant
+    /// rather than classifying, are not sites. Twenty-four sites satisfy the first rule and seven
+    /// do not satisfy the second, which is the same seven the exhaustive count above reaches
+    /// independently — the two halves agree, which is what an earlier revision of this paragraph
+    /// could not say: it published seventeen over a breakdown that summed to nineteen, in three
+    /// places including this shipped doc comment, because it credited `oas31::lower` with twelve.
+    /// The headline was the right number all along; the breakdown was not.
+    ///
+    /// That population includes [`TypeGraph`]'s own `push_ref_member` in `oas31::lower`,
     /// which is the historical origin of the whole defect class and is still shaped exactly the same
     /// way, and it includes `intersect_non_null`, which is the one whose behaviour the new variant
     /// actually changed: its `TypeKind::Any` arms used to absorb the placeholder and return the
@@ -258,6 +270,16 @@ pub(crate) enum TypeKind {
     ///    refers only to itself (`E007`), and a sibling keyword that would have to be intersected
     ///    against an unlowered target (`E013`). The second of those *is* a break — such documents
     ///    generated before, by guessing.
+    ///
+    ///    The line between the two was first drawn on the `$ref`'s **spelling**, and that was
+    ///    wrong: only a member written `#/components/schemas/…` against the root component map was
+    ///    recognised as an alias, so the same target addressed by relative file, by a sub-file's
+    ///    own sibling reference, or by a whole-file reference was refused by the `E007` above —
+    ///    whose sentence the same binary disproves for the one spelling it did recognise. It is
+    ///    drawn on the resolved target's identity now, so every spelling of one target gets one
+    ///    answer, which is the rule `ensure_resolved` already states for the types themselves. The
+    ///    remote spelling had no line at all: it reached neither guard and aborted the process on
+    ///    an `assert_eq!` instead.
     ///
     /// **The invariant's own status.** `Api::check_invariants`' reservation arm is the proof that no
     /// consumer of a finished graph observes a placeholder, and it is not a user-facing spec

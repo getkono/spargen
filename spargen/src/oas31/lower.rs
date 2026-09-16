@@ -1336,6 +1336,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // gets the same code and the same wording rather than a second code chosen by member
             // count. Asked before the reservation guards below, which would otherwise answer the
             // narrower question first and hand one shape two codes again.
+            //
+            // **PR #125 disagrees with this ordering, and whoever rebases it has to choose.** #125
+            // is based on this branch and adds a document-half guard of its own
+            // (`member_closes_a_cycle`) *before* the collapse, which answers `E013` for the shape
+            // this arm answers `E007` for. Both verdicts are defensible; they cannot both
+            // ship. Reconciling them means porting that branch's whole union rework, which is
+            // outside this change's scope, so the divergence is recorded here — at the site, where
+            // a rebase brings the two texts together — rather than only in a pull-request
+            // description, which does not travel with the code. It fails loudly rather than
+            // silently: the `E007` fixture in `tests/frontend.rs` turns red the moment the other
+            // guard lands first, so the choice is forced rather than made by accident.
             if self.reservation_at(&schema.provenance) == Some(inner.id) {
                 return self.reject_union(
                     schema,
