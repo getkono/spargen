@@ -402,9 +402,10 @@ fn is_success_status(status: StatusSpec) -> bool {
 /// The success return type of an operation (before wrapping in `ResponseValue<T>`). Generated code
 /// enters the success branch on the raw transport status alone, and only [`SuccessShape::Enum`]
 /// carries a status set to compare it against — [`SuccessShape::Unit`] and [`SuccessShape::Plain`]
-/// name no status, so they draw no distinction between a documented 2xx and any other. Once an
-/// explicit status is documented, `default` is not among the entries and is no success fallback
-/// for a 2xx that matches none of them.
+/// name no status, so they draw no distinction between a documented 2xx and any other. `default`
+/// reaches the success side only when `by_status` is empty; while `by_status` holds any entry,
+/// `default` is not among them and is no success fallback for a 2xx that matches none of them —
+/// which is a fact about the lowered entries, not about what the document declares.
 #[derive(Debug, Clone)]
 pub(crate) enum SuccessShape {
     /// No success body.
@@ -429,11 +430,13 @@ pub(crate) enum ErrorShape {
     None,
     /// A single documented error body type.
     Single(Ty),
-    /// Two or more documented error statuses. Generated as a per-operation error enum, one variant
-    /// per status — a payload-carrying variant for a bodied status, a unit variant for a documented
-    /// bodyless status. Entries are pre-sorted into classification precedence (exact before range;
-    /// `default` — carried as the `Range(0)` sentinel — last); classification dispatches by HTTP
-    /// status in that order.
+    /// Two or more entries *carrying a body*, counted over the non-success `by_status` entries plus
+    /// the `Range(0)` sentinel a present `default` contributes. Counting entries instead of bodies
+    /// would be wrong: a bodied `404` beside a bodyless `403` is two entries and still yields
+    /// [`ErrorShape::Single`]. Generated as a per-operation error enum, one variant per entry — a
+    /// payload-carrying variant for a bodied status, a unit variant for a bodyless one. Entries are
+    /// pre-sorted into classification precedence (exact before range; `default` — carried as the
+    /// `Range(0)` sentinel — last); classification dispatches by HTTP status in that order.
     Enum(Vec<(StatusSpec, Option<Ty>)>),
 }
 
