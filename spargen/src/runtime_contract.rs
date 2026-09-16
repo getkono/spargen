@@ -3532,30 +3532,16 @@ serde_json.workspace = true
 
     /// The path a diagnostic spells in backticks directly after `prefix`.
     ///
-    /// Every message that blames a manifest renders it as ``<noun> `<path>` ``, so lifting the
-    /// path out of each of two messages and comparing the two is what pins "the same file".
-    /// Asking whether one message `contains` the other's path cannot: `contains` is a substring
-    /// relation and every string contains the empty one, so a renderer that emitted no path at
-    /// all would satisfy it.
+    /// The messages these fixtures read render the manifest as ``<noun> `<path>` ``, so lifting
+    /// the path out of each is what lets it be compared to the file the fixture itself built.
+    /// Asking whether one message `contains` the other's path cannot pin that: `contains` is a
+    /// substring relation and every string contains the empty one, so a renderer that emitted no
+    /// path at all would satisfy it.
     fn manifest_named_after<'m>(message: &'m str, prefix: &str) -> Option<&'m str> {
         message
             .split_once(prefix)
             .and_then(|(_, rest)| rest.split_once('`'))
             .map(|(path, _)| path)
-    }
-
-    /// Whether a lifted path identifies a manifest file rather than a fragment.
-    ///
-    /// Equality alone pins the two messages to each other, not to anything true: were both
-    /// renderers to degrade the same way they would still agree. This is the independent half —
-    /// a file name of `Cargo.toml` (the regression `workspace_root`'s own doc comment forbids,
-    /// since `./Cargo.toml` tells the reader nothing) under a directory that is actually named.
-    fn names_a_manifest_file(path: &str) -> bool {
-        let path = Utf8Path::new(path);
-        path.file_name() == Some("Cargo.toml")
-            && path
-                .parent()
-                .is_some_and(|parent| !parent.as_str().is_empty())
     }
 
     #[test]
@@ -3652,13 +3638,14 @@ serde_json.workspace = true
         // the *consumer* manifest's path on the read-failure line would point the reader at a
         // different file with every assertion above still green. So take the path the inheritance
         // message names and require the read failure to name that same one. They are compared to
-        // each other rather than to `root`: `package.workspace` is joined, not normalised, so both
-        // messages spell the root `<tmp>/outside/../root/Cargo.toml` and neither contains
-        // `root.as_str()`.
-        // Both paths are lifted and compared for equality. Requiring the read failure to merely
-        // `contain` the inheritance message's path left the claim open: `contains` is a substring
-        // relation, so an arm rendering an empty path, a bare `Cargo.toml`, or the root
-        // *directory* satisfied it, and all three survived this fixture.
+        // each other *and* to the path this fixture itself builds. Requiring the read failure to
+        // merely `contain` the inheritance message's path left the claim open: `contains` is a
+        // substring relation, so an arm rendering an empty path, a bare `Cargo.toml`, or the root
+        // *directory* satisfied it. Agreement alone is no better: two renderers degrading the same
+        // way still agree, and so does one naming a manifest nothing ever opened. The expected
+        // spelling is not `root`: `package.workspace` is joined, not normalised, so both messages
+        // spell the root `<tmp>/outside/../root/Cargo.toml`, and camino joins lexically, so
+        // building it the same way here is portable and needs no canonicalisation.
         let named = manifest_named_after(
             &result.diagnostics[inherits].message,
             "its workspace manifest `",
@@ -3674,10 +3661,10 @@ serde_json.workspace = true
             "the read failure has to name the same file the inheritance message defers to: {:#?}",
             result.diagnostics
         );
-        assert!(
-            names_a_manifest_file(named),
-            "the file both messages name has to be a manifest under a directory they actually \
-             spell, not a fragment two equally degraded renderers would still agree on: {:#?}",
+        assert_eq!(
+            named,
+            member.parent().unwrap().join("../root").join("Cargo.toml"),
+            "both messages have to name the manifest the audit actually read: {:#?}",
             result.diagnostics
         );
         // And the reason must not ride inline in *any* shape, not merely without a colon. The
@@ -3795,13 +3782,20 @@ serde_json.workspace = true
             .position(|diagnostic| {
                 diagnostic.message.contains("`bytes` inherits")
                     && diagnostic.message.contains("its workspace manifest `")
-                    && diagnostic.message.ends_with("could not be read")
+                    && diagnostic.message.contains("` could not be read")
             })
             .unwrap_or_else(|| panic!("{:#?}", result.diagnostics));
         assert!(
             failure < inherits,
             "the read failure is what the inheritance message defers to, so it has to be read \
              first: {:#?}",
+            result.diagnostics
+        );
+        assert!(
+            result.diagnostics[inherits]
+                .message
+                .ends_with("could not be read"),
+            "a root reported on its own line must not repeat its reason inline: {:#?}",
             result.diagnostics
         );
         let named = manifest_named_after(
@@ -3819,10 +3813,10 @@ serde_json.workspace = true
             "the read failure has to name the same file the inheritance message defers to: {:#?}",
             result.diagnostics
         );
-        assert!(
-            names_a_manifest_file(named),
-            "the file both messages name has to be a manifest under a directory they actually \
-             spell, not a fragment two equally degraded renderers would still agree on: {:#?}",
+        assert_eq!(
+            named,
+            member.parent().unwrap().join("../root").join("Cargo.toml"),
+            "both messages have to name the manifest the audit actually read: {:#?}",
             result.diagnostics
         );
     }
