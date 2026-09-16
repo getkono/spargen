@@ -857,6 +857,14 @@ mod tests {
 
     /// A provider under a scheme that takes no token is a registration mismatch, and it must stay
     /// one regardless of whether a refresh would have worked: the provider is never asked.
+    ///
+    /// Not asking is a break against master, where `apply_credential` awaited the provider for
+    /// `AuthKind`: a `Credential::Provider` under an `http basic` scheme *was* called, and a
+    /// failing one reached the chain as `Other`'s source, downcasting to `AuthError`. Master then
+    /// discarded the token in the `Basic` arm and returned this same mismatch anyway, so no
+    /// succeeding call becomes a failing one — what changes is that the round trip to the identity
+    /// provider is gone, and the cause now downcasts to the mismatch message rather than to
+    /// `AuthError`.
     #[test]
     fn a_token_provider_under_a_basic_scheme_is_a_mismatch_without_calling_it() {
         use std::sync::atomic::{AtomicBool, Ordering};
