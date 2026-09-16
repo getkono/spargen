@@ -2461,9 +2461,11 @@ serde_json.workspace = true
     ///
     /// What the pair therefore delivers, exactly: **no clause can change without someone re-typing
     /// it in the test.** It does not make the body true. A clause that is false today stays false
-    /// with both guards green — the three-outcome promise below is exactly that — and a maintainer
-    /// who re-types a change into the expected file has made this test agree with it, not verified
-    /// it. Holding the prose to the code is a wider question than this one code, and is **#137**.
+    /// with both guards green — the promise that a root which cannot be *found* is reported
+    /// differently from one that cannot be *read* was exactly that, pinned here and mirrored in
+    /// the expected file while contradicting `workspace_root`, until it was narrowed to what the
+    /// resolver does — and a maintainer who re-types a change into the expected file has made this
+    /// test agree with it, not verified it. Holding the prose to the code is a wider question than this one code, and is **#137**.
     #[test]
     fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
         let explain = Code::RuntimeDependencyContract.explain();
@@ -2566,38 +2568,41 @@ serde_json.workspace = true
             ],
         );
 
-        // The three outcomes `WorkspaceOrigin` distinguishes, and the promise that the diagnostic
-        // tells them apart instead of reporting the crate as missing.
-        //
-        // **This clause is not true of the resolver — that is #171** — and the fixtures below are
-        // cited as the ones exercising the branches, not as ones making the promise good. When no
-        // root is found at all and any ancestor failed to read, the walk reports that read failure
-        // instead, naming a file it never established was a workspace manifest.
-        //
-        // The two fixtures that pin the wrong wording are the last two in this list, and both say
-        // so at their own definitions:
-        // `a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found`
-        // requires "could not be read", the path and "TOML parse error", and explicitly requires
-        // the message *not* to say "no workspace manifest was found above" — which is the answer
-        // #171 says it should give — and
-        // `the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found` chooses
-        // between two such files. **Fixing #171 reds both.** The clause itself lives in
-        // `spargen/src/diag/code.rs`; `docs/support-matrix.md` row 23 no longer repeats it.
+        // The outcomes a *found* root has, and the promise that the diagnostic tells them apart
+        // instead of reporting the crate as missing. Each fixture below observes one of them, and
+        // the clause now says only what the resolver does: `check_declaration` renders
+        // `WorkspaceOrigin::Resolved` as "declares no `x` there" and `Unreadable` as "could not be
+        // read", so a found root's two failures are distinguished.
         let unresolved_outcomes: &[&str] = &[
             "an_unresolvable_inheritance_says_where_the_lookup_went",
             "a_workspace_root_that_cannot_be_read_is_not_reported_as_missing",
             "a_package_workspace_naming_a_directory_without_a_manifest_is_a_workspace_read_failure",
             "a_self_rooted_manifest_names_an_absolute_path_when_an_entry_is_missing",
-            "a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found",
-            "the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found",
         ];
         promises(
-            "when the root cannot be found, cannot be read, or declares no such entry",
+            "when a root is found but cannot be read, or declares no such entry",
             unresolved_outcomes,
         );
         promises(
             "the diagnostic says which of those happened rather than reporting the crate as missing",
             unresolved_outcomes,
+        );
+
+        // The no-root-found outcome, which the clause above deliberately does not claim precision
+        // for. `workspace_root` keeps the *first* unparseable candidate the walk met and the
+        // renderer prints it as "its workspace manifest", though nothing established it was one —
+        // so the text promises only that the nearest unreadable ancestor is named, and says in the
+        // same breath that being named does not make it a root. Making the stronger promise true
+        // is **#171**: its remedy reports not-found and demotes that file to a hint, which reds
+        // `a_corrupt_ancestor_...` (it asserts the message does *not* say "no workspace manifest
+        // was found above") and leaves `the_nearest_corrupt_ancestor_...` green, because that one
+        // asserts only nearest-over-far, which the remedy preserves.
+        promises(
+            "names the nearest ancestor manifest that failed to read",
+            &[
+                "a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found",
+                "the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found",
+            ],
         );
 
         // The three-way root search, each branch with the fixtures that exercise it. The precedence
