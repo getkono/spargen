@@ -1636,3 +1636,126 @@ fn is_response_status_key(name: &str) -> bool {
 fn provenance(pointer: &JsonPointer, value: &SpannedValue) -> Provenance {
     Provenance::new(pointer.clone(), Some(value.span()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_response_status_key;
+
+    /// The vendored document schemas, included a second time under `cfg(test)` so the assertions
+    /// below read the pattern out of the same bytes `metaschema.rs` compiles rather than out of a
+    /// transcription of it. Nothing here reaches a release build.
+    const OAS31_SCHEMA: &str = include_str!("spec/oas-3.1-2025-09-15.json");
+    const OAS32_SCHEMA: &str = include_str!("spec/oas-3.2-2025-09-17.json");
+
+    /// The single `patternProperties` key of a schema's `responses` definition — the
+    /// specification's own spelling of a Responses status key.
+    fn vendored_response_key_pattern(source: &str, label: &str) -> String {
+        let schema: serde_json::Value = serde_json::from_str(source)
+            .unwrap_or_else(|error| panic!("vendored {label} schema is invalid JSON: {error}"));
+        let patterns = schema
+            .pointer("/$defs/responses/patternProperties")
+            .and_then(serde_json::Value::as_object)
+            .unwrap_or_else(|| {
+                panic!("vendored {label} schema has no `$defs/responses/patternProperties`")
+            });
+        let keys: Vec<&str> = patterns.keys().map(String::as_str).collect();
+        assert_eq!(
+            keys.len(),
+            1,
+            "vendored {label} schema's `responses` no longer has exactly one key pattern: {keys:?}"
+        );
+        keys[0].to_owned()
+    }
+
+    /// Every key the agreement test measures: all strings of length 0-4 over the alphabet the
+    /// grammar can plausibly involve, plus hand-picked oddities that motivated the check.
+    fn candidate_keys() -> Vec<String> {
+        const ALPHABET: &[u8] = b"0123456789Xx";
+        let mut keys = vec![String::new()];
+        let mut frontier = vec![String::new()];
+        for _ in 0..4 {
+            let mut next = Vec::with_capacity(frontier.len() * ALPHABET.len());
+            for prefix in &frontier {
+                for byte in ALPHABET {
+                    let mut key = prefix.clone();
+                    key.push(char::from(*byte));
+                    next.push(key);
+                }
+            }
+            keys.extend(next.iter().cloned());
+            frontier = next;
+        }
+        keys.extend(
+            [
+                "default",
+                "banana",
+                "+200",
+                "-200",
+                "200.0",
+                " 200",
+                "200 ",
+                "\t200",
+                "2 0",
+                "2\n",
+                "x-note",
+                "X-note",
+                "２００",
+                "ok",
+                "1XXX",
+                "1X",
+                "5XX5",
+            ]
+            .into_iter()
+            .map(str::to_owned),
+        );
+        keys
+    }
+
+    /// [`is_response_status_key`] agrees with the vendored metaschema's own pattern, key for key.
+    ///
+    /// The grammar is hand-transcribed into this file, and a hand-transcription can drift from the
+    /// artifact it was copied from — most plausibly when the vendored schema is re-pulled and the
+    /// pattern moves *first*. A fixture that only compares an inline document against a `$ref`'d
+    /// one cannot see that direction: loosening the metaschema alone leaves both routes rejecting,
+    /// because this parse-time check still rejects. So the duplication is checked mechanically
+    /// here, against the pattern read out of `spec/` and evaluated by the same `jsonschema` engine
+    /// that validates the root document.
+    #[test]
+    fn the_grammar_agrees_with_the_vendored_metaschema_pattern() {
+        let keys = candidate_keys();
+        for (source, label) in [(OAS31_SCHEMA, "OpenAPI 3.1"), (OAS32_SCHEMA, "OpenAPI 3.2")] {
+            let pattern = vendored_response_key_pattern(source, label);
+            let validator = jsonschema::validator_for(&serde_json::json!({
+                "type": "string",
+                "pattern": pattern,
+            }))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "vendored {label} response-key pattern {pattern:?} does not compile: {error}"
+                )
+            });
+            for key in &keys {
+                let vendored = validator.is_valid(&serde_json::Value::String(key.clone()));
+                assert_eq!(
+                    is_response_status_key(key),
+                    vendored,
+                    "`is_response_status_key` disagrees with the vendored {label} pattern \
+                     {pattern:?} on key {key:?}: the hand-written grammar in this file and the \
+                     schema in `spec/` have diverged"
+                );
+            }
+        }
+    }
+
+    /// Both vendored schemas spell the Responses key the same way. Should a future pull of one of
+    /// them diverge from the other, one `is_response_status_key` can no longer be right for both
+    /// and the check has to become version-scoped — which the test above would not say on its own,
+    /// since it measures each schema against the function independently.
+    #[test]
+    fn both_vendored_schemas_spell_the_response_key_identically() {
+        assert_eq!(
+            vendored_response_key_pattern(OAS31_SCHEMA, "OpenAPI 3.1"),
+            vendored_response_key_pattern(OAS32_SCHEMA, "OpenAPI 3.2"),
+        );
+    }
+}
