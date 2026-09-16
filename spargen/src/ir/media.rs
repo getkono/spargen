@@ -207,9 +207,8 @@ impl Responses {
     /// The success shape of the operation. Chosen by counting the entries that carry a *body*, not
     /// the statuses documented: one bodied success yields plain `T` — the common `T`-plus-`204`
     /// shape stays `Plain`, its bodyless sibling unmodeled — and two or more yield a per-operation
-    /// success enum, sorted into decode precedence (exact codes ascending, before the lone `2XX`
-    /// range), that also carries each documented bodyless success status as a payload-free unit
-    /// variant.
+    /// success enum, sorted into decode precedence (exact code ascending, then range ascending),
+    /// that also carries each documented bodyless success status as a payload-free unit variant.
     ///
     /// The entries are the documented success statuses; `default` is never among them. It is the
     /// success source only when no explicit status is declared at all — the early return that
