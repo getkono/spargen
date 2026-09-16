@@ -31,10 +31,6 @@ use super::{
 /// facade) so lowering this many levels deep is comfortably safe.
 const MAX_SCHEMA_DEPTH: u32 = 128;
 
-/// The root document's id in every input bundle. The root is the first file loaded, so it is always
-/// zero; `InputBundle::root_id` is the authority and is not reachable from here.
-const ROOT_FILE: crate::diag::FileId = crate::diag::FileId(0);
-
 /// The identity of a schema the bundle resolver produced: the `file#pointer` it was parsed from,
 /// read off the parsed schema's own provenance rather than off the `$ref` spelling that reached it.
 ///
@@ -507,7 +503,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // declare reaches the sub-file reading. Which namespace *should* win when both declare
             // the name is a separate question; this deliberately does not change the answer.
             let from = at.span.map(|span| span.file);
-            if from.is_some_and(|file| file != ROOT_FILE) {
+            if from.is_some_and(|file| file != self.resolver.root_id()) {
                 // The resolver reports its own failure, so a miss here is already diagnosed. Going
                 // through `ensure_resolved` rather than straight to `resolve`/`lower_schema` is what
                 // makes this re-entry safe *and* finite: see that method and the note above.
@@ -813,7 +809,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if schema
             .provenance
             .span
-            .is_some_and(|span| span.file == ROOT_FILE)
+            .is_some_and(|span| span.file == self.resolver.root_id())
         {
             if let Some(name) = schema
                 .provenance
@@ -4375,7 +4371,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A target inside the root document's component map has its identity there instead —
         // `ensure_resolved` routes such a reference back to `ensure_component` — so consult that
         // map too, or a root component addressed by file reference escapes the check.
-        if !provenance.span.is_some_and(|span| span.file == ROOT_FILE) {
+        if !provenance
+            .span
+            .is_some_and(|span| span.file == self.resolver.root_id())
+        {
             return None;
         }
         provenance

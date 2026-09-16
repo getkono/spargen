@@ -26,6 +26,18 @@ impl<'doc> Resolver<'doc> {
         Self { document, bundle }
     }
 
+    /// The root document's file id, which is the bundle's own authority on the question.
+    ///
+    /// `lower` needs it to tell a reference written in the root document from one written in a
+    /// referenced sub-file, and the two branches that distinction gates both retarget a `$ref`
+    /// silently when it is wrong. It re-derived the answer as a hardcoded `FileId(0)`, correct only
+    /// because `InputBundle::load` happens to load the root before anything else; a constructor that
+    /// ever pre-loads a file — an in-memory bundle, a vendored preload, a test harness — would make
+    /// it wrong with no test to notice. The authority is one call away, so ask it.
+    pub(super) fn root_id(&self) -> crate::diag::FileId {
+        self.bundle.root_id()
+    }
+
     /// Resolve a `$ref` string that appears at `at`, reporting an unresolved/unpinned ref through
     /// `diags`. Remote (`http`/`https`) refs are resolved hermetically from the vendored, hash-
     /// pinned copy already loaded into the bundle — no network access.
