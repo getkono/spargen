@@ -2370,6 +2370,7 @@ components:
   schemas:
     Node:
       type: object
+      required: [parent]
       properties:
         name: { type: string }
         parent: { $ref: '#/components/schemas/MaybeNode' }
@@ -2386,6 +2387,12 @@ components:
     // generated module, so `code.contains("Option<Box<")` is unconditionally true of any successful
     // generation and pins nothing beyond the `assert_ne!` above it. What must hold here is that the
     // alias resolved to `Node` — optional, and boxed so the recursion has a finite size.
+    //
+    // `parent` is **required** precisely so the `Option` can only have come from the alias: every
+    // other fixture leaves the field absent from `required`, which makes it optional for a reason
+    // that has nothing to do with the union's `"null"` member, so none of them could see that half
+    // of the alias's nullability being dropped. `Box<Node>` here would make `{"parent": null}`
+    // undecodable against a document that declares it legal.
     assert_eq!(
         field_type(&code, "pub parent").as_deref(),
         Some("Option<Box<Node>>"),
