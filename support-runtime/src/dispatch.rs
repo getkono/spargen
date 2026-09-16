@@ -793,6 +793,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_credential_registered_under_a_mutual_tls_scheme_never_reaches_a_token_provider() {
+        // `apply_credential` picks its token by matching on the *credential* alone, so it would
+        // await a `Provider` whatever the scheme's kind — and then discard the token, because the
+        // `MutualTls` arm returns the request untouched. `set_credential` takes an untyped `&str`,
+        // so a consumer can register a provider under a `mutualTLS` scheme's name. The filter in
+        // `attach_auth` is what keeps that from becoming a live token fetch whose result is thrown
+        // away; drop the filter and this counter reaches 1.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let mut core = core();
+        core.set_credential(
+            "mtls",
+            Credential::Provider(Arc::new(move || {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(SecretString::from("never-fetched")) }) as TokenFuture
+            })),
+        );
+        let request = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "mtls",
+                kind: AuthKind::MutualTls,
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a mutualTLS scheme must never invoke a token provider"
+        );
+        assert!(request.headers().is_empty(), "{:?}", request.headers());
+        assert_eq!(request.url().query(), None, "{}", request.url());
+    }
+
     use super::{build_url, build_url_on, build_url_with_query_string, StatusSpec};
 
     fn core_at(base: &str) -> ClientCore {
