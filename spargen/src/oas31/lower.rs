@@ -720,10 +720,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if schema_has_shape_constraint(&member_without_ref) {
             return None;
         }
-        let (id, _) = self.open_reservation_for_ref(target, &only.provenance)?;
+        let (id, target_nullable) = self.open_reservation_for_ref(target, &only.provenance)?;
         Some(Ty {
             id,
-            nullable: members.iter().any(member_is_null_only),
+            // The target's *own* nullability is as much a fact about this alias as a `"null"`
+            // member is. `ensure_component` computes it at reserve time so that every `$ref`
+            // consumer agrees on it without waiting for the body to finish, and reading only the
+            // members disagrees: an alias with no `"null"` member whose target is nullable emitted
+            // a non-`Option` field where the direct `{$ref: T}` spelling of that same target
+            // emitted an optional one.
+            nullable: target_nullable || members.iter().any(member_is_null_only),
             // The target is mid-lowering, so this is a cycle-closing reference and needs the box
             // for the recursive type to have a finite size.
             boxed: true,

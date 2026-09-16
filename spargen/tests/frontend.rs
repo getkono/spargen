@@ -2419,6 +2419,59 @@ components:
     assert!(code.contains("Option<Box<"), "{code}");
 }
 
+/// A nullable alias whose target is itself nullable is exactly as optional as the direct `$ref`.
+///
+/// `B: {oneOf: [{$ref: A}]}` with `A: {type: [object, "null"]}` carries no `{"type": "null"}`
+/// member of its own, and the alias read its nullability from the members alone — discarding the
+/// reserve-time flag that `ensure_component` records precisely so "every `$ref` consumer … agrees
+/// on it". So a field spelled `{$ref: B}` emitted `Box<A>` where the same field spelled `{$ref: A}`
+/// emitted `Option<Box<A>>`: one schema, two optionalities, chosen by which name was written.
+#[test]
+fn a_nullable_alias_carries_its_targets_own_nullability() {
+    let spec = |field: &str| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /u:\n    \
+             get:\n      \
+             operationId: getU\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json: {{ schema: {{ $ref: '#/components/schemas/A' }} }}\n\
+             components:\n  \
+             schemas:\n    \
+             A:\n      \
+             type: [object, 'null']\n      \
+             required: [b]\n      \
+             properties:\n        \
+             x: {{ type: string }}\n        \
+             b: {{ $ref: '#/components/schemas/{field}' }}\n    \
+             B:\n      \
+             oneOf:\n        \
+             - {{ $ref: '#/components/schemas/A' }}\n"
+        )
+    };
+    // The direct spelling is the control: `A` is nullable, so the field is optional.
+    let (direct, direct_code) = generate_with_code(&spec("A"));
+    assert_ne!(direct.outcome(), Outcome::Rejected, "{direct:#?}");
+    assert!(
+        direct_code.contains("pub b: Option<Box<A>>"),
+        "{direct_code}"
+    );
+
+    // The alias spelling must agree with it.
+    let (aliased, aliased_code) = generate_with_code(&spec("B"));
+    assert_ne!(aliased.outcome(), Outcome::Rejected, "{aliased:#?}");
+    assert!(
+        aliased_code.contains("pub b: Option<Box<A>>"),
+        "the aliased field lost its target's nullability: {aliased_code}"
+    );
+}
+
 /// The one shape in this family that must **not** generate: a union that is a component's whole
 /// body and whose only non-null member is a `$ref` back to that same component.
 ///
