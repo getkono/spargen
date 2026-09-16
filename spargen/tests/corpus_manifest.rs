@@ -6,7 +6,9 @@
 //! `tests/snapshot.rs`. They had already drifted — `openai-openapi` was in the manifest and the
 //! snapshot suite but in neither smoke copy.
 //!
-//! This suite drives the manifest itself, and holds the other copies to it.
+//! This suite drives the manifest itself, and holds the other copies to it. Having already had to
+//! read `.github/workflows/ci.yml` as text to do that, it also carries the assertions over that
+//! file which have nowhere cheaper to live.
 //!
 //! One manifest field stays unchecked: `tree_sha256`, carried by `openapi-boilerplate` alone. How
 //! it was constructed is recorded nowhere, and no natural definition over that directory
@@ -202,6 +204,30 @@ fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
             "`{file}` writes to a fixed `/tmp/` path; corpus-smoke outputs belong under `target/corpus-smoke/`"
         );
     }
+}
+
+#[test]
+fn the_deny_gate_states_the_feature_scope_it_audits() {
+    // `--all-features` is what puts a TLS stack in the audited graph: under default features
+    // `rustls` is absent from the workspace entirely, so an advisory gate run without the flag
+    // passes because it can see nothing (#147). The action's own default happens to match, which
+    // is exactly why deleting this line would read as tidying rather than as narrowing the gate.
+    let ci = read(".github/workflows/ci.yml");
+    let deny: Vec<&str> = ci
+        .lines()
+        .skip_while(|line| *line != "  deny:")
+        .skip(1)
+        .take_while(|line| line.trim().is_empty() || line.starts_with("    "))
+        .collect();
+
+    assert!(
+        !deny.is_empty(),
+        "`.github/workflows/ci.yml` must define a `deny` job"
+    );
+    assert!(
+        deny.iter().any(|line| line.trim() == "arguments: --all-features"),
+        "the `deny` job must state `arguments: --all-features`; without it the advisory gate audits a graph with no TLS stack in it"
+    );
 }
 
 #[test]
