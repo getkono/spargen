@@ -2966,16 +2966,21 @@ serde_json.workspace = true
         //
         // **This fixture pins behaviour that is known to be wrong, deliberately**, in the same way
         // as `an_identity_package_key_in_the_workspace_root_is_rejected_although_cargo_accepts_it`
-        // twelve fixtures below. The `E023` explain text promises that a root which cannot be
-        // *found* is reported differently from one that cannot be *read*. It is not: when no
-        // workspace root exists anywhere on the walk and any ancestor failed to parse, that
-        // ancestor is reported as "its workspace manifest", though nothing established it was one
-        // and it may be an unrelated crate outside the project. That is **#171**.
+        // twelve fixtures below. When no workspace root exists anywhere on the walk and any
+        // ancestor failed to parse, that ancestor is reported as "its workspace manifest", though
+        // nothing established it was one and it may be an unrelated crate outside the project.
+        // The `E023` explain text no longer promises otherwise — it says only that the nearest
+        // unreadable ancestor is named, without that naming establishing it as a root — so what
+        // is wrong here is the diagnostic, and that is **#171**.
         //
-        // When #171 is fixed this test **must** change — it is one of the two that will red, and
-        // both of them argued the behaviour was correct until round 6 said so here. The assertion
-        // then becomes that the diagnostic says no workspace manifest was found, while still
-        // naming the unreadable candidate as a hint rather than as the root.
+        // When #171 is fixed this test **must** change, and it is the **only** one its stated
+        // remedy reds: the second assertion below requires the message *not* to say "no workspace
+        // manifest was found above", which is precisely what the remedy makes it say. The
+        // assertion then becomes that the diagnostic says no workspace manifest was found, while
+        // still naming the unreadable candidate as a hint rather than as the root. Its apparent
+        // sibling `the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found`
+        // is **not** the other half of a pair and must not be changed or deleted with it: that
+        // fixture asserts only nearest-over-far, which the remedy preserves.
         let directory = tempfile::tempdir().unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -3281,18 +3286,16 @@ serde_json.workspace = true
         // With two broken manifests on one path and no `[workspace]` anywhere, only that choice is
         // observable, and no other fixture puts two of them on a single walk.
         //
-        // **This fixture pins behaviour that is known to be wrong, deliberately**, in the same way
-        // as `an_identity_package_key_in_the_workspace_root_is_rejected_although_cargo_accepts_it`
-        // twelve fixtures below. The `E023` explain text promises that a root which cannot be
-        // *found* is reported differently from one that cannot be *read*. It is not: when no
-        // workspace root exists anywhere on the walk and any ancestor failed to parse, that
-        // ancestor is reported as "its workspace manifest", though nothing established it was one
-        // and it may be an unrelated crate outside the project. That is **#171**.
-        //
-        // When #171 is fixed this test **must** change — it is one of the two that will red, and
-        // both of them argued the behaviour was correct until round 6 said so here. The assertion
-        // then becomes that the diagnostic says no workspace manifest was found, while still
-        // naming the unreadable candidate as a hint rather than as the root.
+        // **This fixture must survive #171, and must not be deleted with it.** It is easily
+        // mistaken for a second copy of
+        // `a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found`,
+        // which does pin wording #171 will change. It is not one. Its two assertions say only
+        // that the message names the *near* broken manifest and not the far one, and #171's own
+        // stated remedy — report that no workspace manifest was found, mentioning the unreadable
+        // ancestor as a possible cause — still names the nearest such ancestor, so both
+        // assertions hold unchanged after it lands. No other fixture in this module puts two
+        // broken manifests on one walk, so deleting this one would leave the nearest-wins rule
+        // in `workspace_root` with no guard at all.
         let directory = tempfile::tempdir().unwrap();
         let far = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let near_dir = directory.path().join("near");
