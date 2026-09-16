@@ -1823,7 +1823,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
             .message(message.to_owned())
             .remedy(
-                "add a discriminator, restructure the variants to be disjoint, or omit this API \
+                // The remedy has to serve every situation this rejecter carries, and the two
+                // cycle situations are not answered by a discriminator or by disjointness: what
+                // the author has to change there is the self-reference itself.
+                "add a discriminator, restructure the variants to be disjoint, break the reference \
+                 cycle where a member refers to the union it is written in, or omit this API \
                  segment with spargen::omit!",
             )
             .emit(self.diags);
