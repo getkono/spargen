@@ -3135,19 +3135,19 @@ serde_json.workspace = true
         );
     }
 
-    #[test]
-    fn a_package_key_in_the_workspace_root_is_rejected_whatever_it_names() {
-        // "A renamed runtime crate" is an advertised `E023` trigger, and the check reads `package`
-        // from the member *and* the root — generated code names the canonical crate either way.
-        // Every other rename fixture renames in the member's own table, so the root half of that
-        // pair was reached by nothing; this covers it.
-        //
-        // What it pins is the rule as written, which is **wider than a rename**: the check tests
-        // that a `package` key is *present* and never compares it with the dependency name, so the
-        // identity spelling `bytes = { package = "bytes", … }` — a no-op Cargo accepts — is
-        // rejected too. That is tracked as a production defect (#168); the second half of this
-        // fixture pins it as current behaviour so the fix has something to change, and the name of
-        // this test says "whatever it names" rather than asserting a rename occurred.
+    /// Audits a member that inherits the core crates from a workspace root whose `bytes` entry
+    /// has been rewritten to carry a `package` key, and asserts the single rename rejection that
+    /// produces. `package` is the name that key declares; `note` prefixes both failure messages,
+    /// so a fixture pinning behaviour an issue is going to change can say so where it fails.
+    ///
+    /// The two fixtures below differed in exactly those two things — one string literal and one
+    /// message prefix — with the `bytes` entry lookup, the floor read back out of it and the
+    /// root/member layout written out twice, verbatim.
+    /// `inherited_reqwest_default_feature_diagnostics` three call sites above collapses the same
+    /// pattern, so this is the module's own idiom. Both entry points are kept rather than merged
+    /// into one table-driven test: only the identity-spelling one reds when #168 lands, and a
+    /// single test could not show that.
+    fn workspace_root_package_key_is_rejected(package: &str, note: &str) {
         let core_bytes = core_workspace_dependencies()
             .lines()
             .find(|line| line.starts_with("bytes = "))
@@ -3168,7 +3168,7 @@ serde_json.workspace = true
                 "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
                 core_workspace_dependencies().replace(
                     core_bytes,
-                    &format!("bytes = {{ package = \"bytes-fork\", version = \"{floor}\" }}")
+                    &format!("bytes = {{ package = \"{package}\", version = \"{floor}\" }}")
                 )
             ),
         )
@@ -3180,11 +3180,27 @@ serde_json.workspace = true
         .unwrap();
 
         let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
-        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
+        assert_eq!(diagnostics.len(), 1, "{note}{diagnostics:#?}");
         assert!(
             diagnostics[0].message.contains("`bytes` cannot be renamed"),
-            "{diagnostics:#?}"
+            "{note}{diagnostics:#?}"
         );
+    }
+
+    #[test]
+    fn a_package_key_in_the_workspace_root_is_rejected_whatever_it_names() {
+        // "A renamed runtime crate" is an advertised `E023` trigger, and the check reads `package`
+        // from the member *and* the root — generated code names the canonical crate either way.
+        // Every other rename fixture renames in the member's own table, so the root half of that
+        // pair was reached by nothing; this covers it.
+        //
+        // What it pins is the rule as written, which is **wider than a rename**: the check tests
+        // that a `package` key is *present* and never compares it with the dependency name, so the
+        // identity spelling `bytes = { package = "bytes", … }` — a no-op Cargo accepts — is
+        // rejected too. That is tracked as a production defect (#168); the second half of this
+        // fixture pins it as current behaviour so the fix has something to change, and the name of
+        // this test says "whatever it names" rather than asserting a rename occurred.
+        workspace_root_package_key_is_rejected("bytes-fork", "");
     }
 
     #[test]
@@ -3199,43 +3215,7 @@ serde_json.workspace = true
         // fixture to flip. When it lands, this becomes `assert!(diagnostics.is_empty())` and the
         // name loses its second clause. The same false positive is already pinned at the member
         // level by a fixture on master; this is the workspace-root half of it.
-        let core_bytes = core_workspace_dependencies()
-            .lines()
-            .find(|line| line.starts_with("bytes = "))
-            .expect("CORE_MANIFEST declares bytes under that key");
-        let floor = core_bytes
-            .split('"')
-            .nth(1)
-            .expect("the bytes entry pins a quoted version");
-
-        let directory = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
-        let member_dir = directory.path().join("client");
-        std::fs::create_dir(&member_dir).unwrap();
-        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
-        std::fs::write(
-            &root,
-            format!(
-                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
-                core_workspace_dependencies().replace(
-                    core_bytes,
-                    &format!("bytes = {{ package = \"bytes\", version = \"{floor}\" }}")
-                )
-            ),
-        )
-        .unwrap();
-        std::fs::write(
-            &member,
-            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
-        )
-        .unwrap();
-
-        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
-        assert_eq!(diagnostics.len(), 1, "#168: {diagnostics:#?}");
-        assert!(
-            diagnostics[0].message.contains("`bytes` cannot be renamed"),
-            "#168: {diagnostics:#?}"
-        );
+        workspace_root_package_key_is_rejected("bytes", "#168: ");
     }
 
     #[test]
