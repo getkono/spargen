@@ -1141,6 +1141,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // id and leave the popped root mismatched).
         if real_members.len() == 1 {
             let mut inner = self.lower_schema_or(real_members[0], hint)?;
+            // The reservation half of the cycle test, on the sole real member. The document half
+            // above answers only the `#/components/schemas/…` spelling; a sub-file or remote member
+            // reference reaches here still pointing at a placeholder, and the intersection below
+            // cannot compose with one. Reported with the same wording the other two spellings use,
+            // because it is the same fact about the same document.
+            if sibling.is_some() && self.is_in_progress_root(inner.id) {
+                return self.reject_ref_sibling_intersection(
+                    schema,
+                    "this union member's `$ref` closes a reference cycle back to the schema that \
+                     encloses it, so the enclosing schema's own sibling keywords would have to be \
+                     intersected with a target whose definition depends on the result",
+                );
+            }
             if let Some(sibling) = sibling {
                 inner = self.intersect_types(inner, sibling, &format!("{hint}Constrained"))?;
             }
@@ -1177,6 +1190,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     schema,
                     "a union member is a direct recursive `$ref` to the union being lowered, so \
                      the member is the union itself and decoding it would never terminate",
+                );
+            }
+            // The reservation half of the cycle test again, on a multi-variant union. Same fact,
+            // same wording, same place in the order: before anything tries to intersect against the
+            // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
+            // `oneOf` still boxes its back-edge and generates.
+            if sibling.is_some() && self.is_in_progress_root(ty.id) {
+                return self.reject_ref_sibling_intersection(
+                    schema,
+                    "this union member's `$ref` closes a reference cycle back to the schema that \
+                     encloses it, so the enclosing schema's own sibling keywords would have to be \
+                     intersected with a target whose definition depends on the result",
                 );
             }
             if let Some(sibling) = sibling {
@@ -2018,6 +2043,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
+    /// Report that a `$ref` target and its own sibling keywords have no single typed intersection.
+    /// `$ref` is a 2020-12 applicator, so this is the same class of irreconcilable composition
+    /// [`Self::reject_all_of`] reports — `E013` covers both spellings — but the remedy names the
+    /// construct the author actually wrote. The name says *which site* rather than *why*: the
+    /// underlying `None` covers an empty intersection and an inhabited but unrepresentable one, and
+    /// the caller's message must distinguish no further than that.
+    fn reject_ref_sibling_intersection(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(
+                "restructure the schema so the `$ref` target and its sibling keywords describe one \
+                 representable type, or omit this API segment with spargen::omit!",
+            )
+            .emit(self.diags);
+        None
+    }
+
     fn reject_all_of_unit(
         &mut self,
         provenance: crate::diag::Provenance,
@@ -2117,6 +2159,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn intersect_types(&mut self, a: Ty, b: Ty, hint: &str) -> Option<Ty> {
         let a_kind = self.graph.get(a.id)?.kind.clone();
         let b_kind = self.graph.get(b.id)?.kind.clone();
+
+        // Fail closed on a reservation, BEFORE nullability is consulted. A `TypeKind::Reserved`
+        // operand is a placeholder whose body is still being lowered, so no true statement can be
+        // made about the intersection — `is_in_progress_root`'s own documentation says the only
+        // safe thing to do with one is refuse to read it. The callers above guard their own paths,
+        // but a guard that asks about the *spelling* of a reference rather than its resolved
+        // identity lets one through, and the rescue below then converted that unanswerable
+        // intersection into a confident wrong answer: `intersect_non_null` has no `Reserved` arm, so
+        // it returned `None`, and `None if accepts_null` typed the position as the exact JSON null
+        // type. The result was `pub type X = ();` — a client that decodes only `null` for a schema
+        // that accepts objects — emitted with no diagnostic, which is the standing invariant's
+        // fourth, silent behaviour.
+        //
+        // Returning `None` here routes to each caller's own rejection instead. This is what makes
+        // the class unreachable rather than one spelling of it: any future guard that misses a
+        // reservation lands on a rejection, never on generated code.
+        if matches!(a_kind, TypeKind::Reserved) || matches!(b_kind, TypeKind::Reserved) {
+            return None;
+        }
+
         let accepts_null = type_accepts_null(a, &a_kind) && type_accepts_null(b, &b_kind);
 
         let non_null = if matches!(a_kind, TypeKind::Null) || matches!(b_kind, TypeKind::Null) {
