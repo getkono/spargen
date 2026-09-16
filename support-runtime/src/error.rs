@@ -749,8 +749,12 @@ mod tests {
         }
     }
 
-    /// Whatever the cause, a request was never sent: nothing to retry, no status, no typed body.
-    /// Pinned over every `RequestError` variant so a new one cannot arrive misclassified.
+    /// No request-construction variant is classified transient, and none carries a response: no
+    /// status, no typed body, because taxonomy #1 never has one to carry. Non-transmission is
+    /// *not* the shared reason — `RequestError::Other` can arrive from inside reqwest's send, so
+    /// it is the one variant where "the request was never sent" does not hold; see its own
+    /// documentation before retrying on it. Pinned over every `RequestError` variant so a new one
+    /// cannot arrive misclassified.
     #[test]
     fn no_request_variant_is_transient_or_carries_a_response() {
         for request_error in every_request_variant() {
