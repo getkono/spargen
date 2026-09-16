@@ -399,7 +399,12 @@ fn is_success_status(status: StatusSpec) -> bool {
     status.is_success()
 }
 
-/// The success return type of an operation (before wrapping in `ResponseValue<T>`).
+/// The success return type of an operation (before wrapping in `ResponseValue<T>`). Generated code
+/// enters the success branch on the raw transport status alone, and only [`SuccessShape::Enum`]
+/// carries a status set to compare it against — [`SuccessShape::Unit`] and [`SuccessShape::Plain`]
+/// name no status, so they draw no distinction between a documented 2xx and any other. Once an
+/// explicit status is documented, `default` is not among the entries and is no success fallback
+/// for a 2xx that matches none of them.
 #[derive(Debug, Clone)]
 pub(crate) enum SuccessShape {
     /// No success body.
@@ -412,7 +417,8 @@ pub(crate) enum SuccessShape {
     /// status — a payload-carrying variant for a bodied status, a unit variant for a
     /// documented bodyless status (e.g. `204`). Entries are the documented *success* statuses only
     /// — `default` is never among them — pre-sorted into decode precedence (exact before range);
-    /// decode dispatches by HTTP status in that order.
+    /// decode dispatches by HTTP status in that order and rejects any other 2xx as
+    /// `Error::UnexpectedStatus`.
     Enum(Vec<(StatusSpec, Option<Ty>)>),
 }
 
