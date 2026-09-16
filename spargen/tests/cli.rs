@@ -129,9 +129,9 @@ fn explain_json_carries_the_code_and_its_explain_text() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
-    // Parsed rather than substring-matched. `stdout.contains("\"code\"")` is satisfied by explain
-    // prose that merely mentions the word, so it would pass against output carrying no such field;
-    // a JSON consumer breaks on a renamed or dropped field, which is what these assertions catch.
+    // Parsed, not substring-matched. `stdout.contains("\"code\"")` holds while `code` carries the
+    // wrong value, and asserts nothing whatever about `explain` — renaming that field to `detail`
+    // leaves it green. A JSON consumer breaks on both, which is what these assertions catch.
     let value: serde_json::Value = serde_json::from_str(&stdout)
         .unwrap_or_else(|error| panic!("--format json must emit JSON: {error}: {stdout}"));
     let object = value
