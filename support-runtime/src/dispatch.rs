@@ -901,6 +901,13 @@ mod tests {
         );
         let source = std::error::Error::source(&error).unwrap();
         assert!(source.to_string().contains("http basic"), "{source}");
+        // The break 0adccc5's footer declares, asserted at the level master's `AuthError` occupied:
+        // the cause is still reachable, and it is no longer that type.
+        assert!(
+            std::error::Error::source(source)
+                .is_some_and(|cause| cause.downcast_ref::<AuthError>().is_none()),
+            "the mismatch cause must be reachable and must not downcast to `AuthError`"
+        );
         assert!(!called.load(Ordering::SeqCst), "the provider was called");
     }
 
