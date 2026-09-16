@@ -38,6 +38,31 @@ impl<'doc> Resolver<'doc> {
         self.bundle.root_id()
     }
 
+    /// The path of `file`, when `file` declares a schema component called `name` of its own.
+    ///
+    /// A JSON Pointer fragment addresses the document it appears in, so a sub-file's own
+    /// `#/components/schemas/<name>` is a reference to that file's declaration. spargen consults the
+    /// root document's component map first, which means a name both documents declare resolves to
+    /// the root's and the sub-file's is never read. That precedence is deliberate, but it is a
+    /// decision about the *document*, and the reader has to be told which of the two declarations
+    /// was used. This answers the second half — the path is returned rather than a bare `bool`
+    /// because a diagnostic that says only "shadowed" names neither namespace.
+    pub(super) fn declares_locally(
+        &self,
+        file: crate::diag::FileId,
+        name: &str,
+    ) -> Option<&camino::Utf8Path> {
+        let reference = format!("#/components/schemas/{name}");
+        let (target, pointer) = self.bundle.reference_target(&reference, file)?;
+        // An in-document fragment always resolves to the file it is written in; anything else is
+        // not a local declaration and is not what this asks about.
+        if target != file {
+            return None;
+        }
+        self.bundle.value_at(file).pointer(&pointer)?;
+        Some(self.bundle.file(file)?.path.as_path())
+    }
+
     /// Resolve a `$ref` string that appears at `at`, reporting an unresolved/unpinned ref through
     /// `diags`. Remote (`http`/`https`) refs are resolved hermetically from the vendored, hash-
     /// pinned copy already loaded into the bundle — no network access.

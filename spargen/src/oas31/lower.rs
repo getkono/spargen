@@ -468,6 +468,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// memos do not compete for one target: a resolved reference that lands on a root component
     /// comes straight back here by name, so `components` stays the single identity for those.
     fn ensure_component(&mut self, name: &str, at: &crate::diag::Provenance) -> Option<Ty> {
+        self.warn_if_root_shadows_the_referring_file(name, at);
         if let Some(&(id, nullable)) = self.components.get(name) {
             return Some(Ty {
                 id,
@@ -620,6 +621,51 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ty.nullable = nullable;
         self.components.insert(name.to_owned(), (root_id, nullable));
         Some(ty)
+    }
+
+    /// Acknowledge a sub-file's own component declaration that a same-named root declaration
+    /// shadows.
+    ///
+    /// A JSON Pointer fragment addresses the document it appears in, so a `$ref` written inside
+    /// `lib.yaml` as `#/components/schemas/Shared` asks for `lib.yaml`'s `Shared`. spargen consults
+    /// the root document's component map first, so when the root declares the name too, the root's
+    /// wins and the sub-file's declaration is never read.
+    ///
+    /// The precedence is kept — changing it would retype every split description that relies on it
+    /// — but until now nothing said it. Before the sub-file branch existed the reference did not
+    /// resolve at all, so only one of the two declarations was ever live and no choice had to be
+    /// made; making the reference resolve makes the choice, and it is consequential: adding one
+    /// unrelated component to the root document silently retargets a reference written in another
+    /// file, and `spargen diff` across that pair reports a breaking change.
+    ///
+    /// `W011` is what the shadowed declaration is — a declaration with no effect — so no ordinal
+    /// moves and the code keeps the matrix cell and `errors.md` row it already has. Emitted per
+    /// reference site rather than once per name, because the site is what the reader has to find.
+    fn warn_if_root_shadows_the_referring_file(
+        &mut self,
+        name: &str,
+        at: &crate::diag::Provenance,
+    ) {
+        let Some(file) = at.span.map(|span| span.file) else {
+            return;
+        };
+        if file == self.resolver.root_id() || !self.document.components.schemas.contains_key(name) {
+            return;
+        }
+        let Some(path) = self.resolver.declares_locally(file, name) else {
+            return;
+        };
+        let message = format!(
+            "`#/components/schemas/{name}` here reads the root document's `{name}`; the `{name}` \
+             declared in `{path}` is shadowed by it and has no effect on this reference"
+        );
+        Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
+            .message(message)
+            .remedy(
+                "rename one of the two declarations, or address the file-local one explicitly with \
+                 a relative-file reference, if the root's is not the one you meant",
+            )
+            .emit(self.diags);
     }
 
     /// The cycle-closing back-edge a **nullable alias** component resolves to, when its target's
