@@ -220,9 +220,15 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
     //
     // Both scopes are guarded, because a gate that does not run and a gate whose failure is
     // swallowed are indistinguishable from a gate that audits nothing: `if:` and
-    // `continue-on-error:` are checked on the job map *and* on the step map. Narrowing is guarded
-    // on both inputs that reach `check`'s `[WHICH]...` positional — `command` and
-    // `command-arguments` — since either alone drops `advisories`.
+    // `continue-on-error:` are checked on the job map *and* on the step map. `continue-on-error:`
+    // is read by *value* rather than by presence, since `false` is byte-for-byte GitHub's own
+    // default and neutralises nothing; `if:` is banned by presence, because its value is an
+    // expression that cannot be evaluated here.
+    //
+    // Narrowing is guarded on both inputs that reach `check`'s `[WHICH]...` positional --
+    // `command` and `command-arguments` -- since either alone drops `advisories`, and
+    // `command-arguments` must be *stated* empty rather than absent: leaving it absent would pin
+    // the action's default, which is the one thing this gate exists to stop being load-bearing.
     let ci = read(".github/workflows/ci.yml");
     let documents = yaml_rust2::YamlLoader::load_from_str(&ci)
         .expect("`.github/workflows/ci.yml` must parse as YAML");
@@ -240,9 +246,10 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
         "the `deny` job map carries an `if:` key, so the whole audit can be conditioned out"
     );
     assert!(
-        deny["continue-on-error"].is_badvalue(),
-        "the `deny` job map carries a `continue-on-error:` key, so a failing audit need not fail \
-         the gate"
+        deny["continue-on-error"].is_badvalue()
+            || deny["continue-on-error"].as_bool() == Some(false),
+        "the `deny` job map sets `continue-on-error:` to something other than `false`, so a \
+         failing audit need not fail the gate"
     );
 
     let steps = deny["steps"]
@@ -250,9 +257,11 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
         .expect("the `deny` job must carry a list of steps");
     // GitHub resolves `uses: owner/repo@ref` case-insensitively, so the comparison is too:
     // `embarkstudios/cargo-deny-action@v2` is a working spelling and must not red a gate that
-    // audits the same graph. Exactly one match is required rather than the first, because `find`
-    // would read the assertions below against whichever step came first and let a second,
-    // narrower cargo-deny step through unread.
+    // audits the same graph. *Every* match is audited, not the first and not exactly one: a
+    // second step is only unread if the test declines to read it, and forbidding one would
+    // forbid the obvious shape of #184 (a cargo-deny step per example workspace manifest) for no
+    // gain -- GitHub runs steps in order and fails the job on the first failure, so a later step
+    // cannot weaken an earlier one.
     let audits: Vec<_> = steps
         .iter()
         .filter(|step| {
@@ -262,52 +271,58 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
             })
         })
         .collect();
-    assert_eq!(
-        audits.len(),
-        1,
-        "the `deny` job must run exactly one step that `uses: EmbarkStudios/cargo-deny-action@…`, \
-         and runs {}; every such step is audited by the assertions below, so a second one is a \
-         second, unread configuration",
-        audits.len()
-    );
-    let audit = audits[0];
-
     assert!(
-        audit["if"].is_badvalue(),
-        "the cargo-deny-action step map carries an `if:` key, so the audit can be conditioned out \
-         while the `deny` job it sits in still reports success"
-    );
-    assert!(
-        audit["continue-on-error"].is_badvalue(),
-        "the cargo-deny-action step map carries a `continue-on-error:` key, so a failing audit \
-         would leave the `deny` job green"
+        !audits.is_empty(),
+        "the `deny` job runs no step that `uses: EmbarkStudios/cargo-deny-action@…`, so nothing \
+         in it audits the dependency graph"
     );
 
-    let arguments = audit["with"]["arguments"]
-        .as_str()
-        .expect("the cargo-deny-action step must state `with: { arguments: … }` of its own");
-    assert!(
-        arguments
-            .split_whitespace()
-            .any(|token| token == "--all-features"),
-        "the cargo-deny-action step's `arguments: {arguments}` does not pass `--all-features`"
-    );
+    for audit in audits {
+        assert!(
+            audit["if"].is_badvalue(),
+            "the cargo-deny-action step map carries an `if:` key, so the audit can be \
+             conditioned out while the `deny` job it sits in still reports success"
+        );
+        assert!(
+            audit["continue-on-error"].is_badvalue()
+                || audit["continue-on-error"].as_bool() == Some(false),
+            "the cargo-deny-action step map sets `continue-on-error:` to something other than \
+             `false`, so a failing audit would leave the `deny` job green"
+        );
 
-    let command = audit["with"]["command"]
-        .as_str()
-        .expect("the cargo-deny-action step must state `with: { command: … }` of its own");
-    assert_eq!(
-        command, "check",
-        "the cargo-deny-action step's `command` selects a subset of the checks; anything narrower \
-         than a bare `check` drops `advisories`, which is the check #147 is about"
-    );
-    assert!(
-        audit["with"]["command-arguments"].is_badvalue(),
-        "the cargo-deny-action step states `command-arguments`, the second input feeding `check`'s \
-         `[WHICH]...` positional: `command-arguments: licenses` composes `cargo-deny \
-         --all-features check licenses` and drops `advisories` exactly as a narrowed `command` \
-         does, leaving `command: check` true and this suite otherwise green"
-    );
+        let arguments = audit["with"]["arguments"]
+            .as_str()
+            .expect("the cargo-deny-action step must state `with: { arguments: … }` of its own");
+        assert!(
+            arguments
+                .split_whitespace()
+                .any(|token| token == "--all-features"),
+            "the cargo-deny-action step's `arguments: {arguments}` does not pass `--all-features`"
+        );
+
+        let command = audit["with"]["command"]
+            .as_str()
+            .expect("the cargo-deny-action step must state `with: { command: … }` of its own");
+        assert_eq!(
+            command, "check",
+            "the cargo-deny-action step's `command` selects a subset of the checks; anything \
+             narrower than a bare `check` drops `advisories`, which is the check #147 is about"
+        );
+
+        let command_arguments = audit["with"]["command-arguments"].as_str().expect(
+            "the cargo-deny-action step must state `with: { command-arguments: \"\" } ` of its \
+             own: it is the second input feeding `check`'s `[WHICH]...` positional, and leaving \
+             it absent inherits the action's default for the one remaining input that can \
+             silently narrow the audit",
+        );
+        assert_eq!(
+            command_arguments, "",
+            "the cargo-deny-action step's `command-arguments` narrows `check`'s `[WHICH]...` \
+             positional: `command-arguments: licenses` composes `cargo-deny --all-features check \
+             licenses` and drops `advisories` exactly as a narrowed `command` does, leaving \
+             `command: check` true and this suite otherwise green"
+        );
+    }
 }
 
 #[test]

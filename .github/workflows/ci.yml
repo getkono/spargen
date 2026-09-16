@@ -244,16 +244,23 @@ jobs:
       #
       # The action composes its argv as `cargo-deny <rust-version> <credentials> <ssh-key>
       # <ssh-known-hosts> --log-level <log-level> --manifest-path <manifest-path> <arguments>
-      # <command> <command-arguments>`; only `arguments` and `command` are stated here. Of the
-      # rest, the one that decides what is audited is `command-arguments`: it is the second input
-      # feeding `check`'s `[WHICH]...` positional, so `command-arguments: licenses` would drop
-      # `advisories` exactly as a narrowed `command` would. It is deliberately left unset, and
-      # `the_deny_gate_states_the_feature_scope_it_audits` asserts it stays unset. The remaining
-      # inherited slots, and the moving `@v2` ref itself, are #229's.
+      # <command> <command-arguments>`. The three inputs stated below are the ones that decide
+      # *which checks run*: `arguments` sets the feature scope, while `command` and
+      # `command-arguments` both feed `check`'s `[WHICH]...` positional, so
+      # `command-arguments: licenses` would drop `advisories` exactly as a narrowed `command`
+      # would. `command-arguments: ""` is the action's own default written out — the entrypoint's
+      # unquoted `cargo-deny $*` discards the empty slot, so the argv is unchanged — and stating
+      # it is what keeps that slot this repository's property rather than the action's.
+      # `the_deny_gate_states_the_feature_scope_it_audits` asserts all three.
+      #
+      # Still inherited: `manifest-path`, which decides *which manifest is audited at all* rather
+      # than which checks run over it, and `log-level`. Those two and the moving `@v2` ref itself
+      # are #229's.
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           arguments: --all-features
           command: check
+          command-arguments: ""
 
   commits:
     name: Conventional commits
