@@ -570,6 +570,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             return ty;
         };
+        // A component whose whole body is `oneOf`/`anyOf` over one `$ref` and one or more `null`
+        // members names no shape of its own: it is a **nullable alias** for its target, the union
+        // spelling of `B: {$ref: A}` with a null branch added. Recognised here, before anything is
+        // reserved, and only while the target's own body is still being lowered.
+        //
+        // That is mutual recursion — `A.b: {$ref: B}` with `B: {oneOf: [{$ref: A}, {type: "null"}]}`
+        // — one of the commonest recursive spellings there is. The union then collapses to the
+        // target's reservation and has no def to hand back as this component's root: cloning the
+        // reservation's kind inserts a second reservation nothing fills, and returning the
+        // reservation itself breaks the last-insert invariant asserted below. Chaining to the
+        // target, exactly as the bare-`$ref` alias arm above does, sidesteps both and yields the
+        // `Option<Box<A>>` the direct spelling already yields.
+        if let Some(alias) = self.nullable_alias_back_edge(schema) {
+            return Some(alias);
+        }
         // Nullability is a pure function of the component's own schema — the same inputs
         // `lower_schema`/`lower_enum` use — so computing it once at reserve time lets every `$ref`
         // consumer (cache hit, back-edge, or fresh) agree on it without waiting for the body to
@@ -609,6 +624,70 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ty.nullable = nullable;
         self.components.insert(name.to_owned(), (root_id, nullable));
         Some(ty)
+    }
+
+    /// The cycle-closing back-edge a **nullable alias** component resolves to, when its target's
+    /// body is still being lowered.
+    ///
+    /// `Some` only for a body that is a `oneOf`/`anyOf` over exactly one bare
+    /// `#/components/schemas/…` reference plus any number of null-only members, carrying no shape,
+    /// discriminator, sibling `$ref` or `default` of its own — and only when that target is one of
+    /// the components currently in progress.
+    ///
+    /// Both halves of that narrowness are load-bearing. Recognising an alias whose target is
+    /// **finished** would change what is generated for a document that already generates: the
+    /// ordinary path re-emits the target's kind under this component's own name, and that named
+    /// type is part of the published API, so deleting it is a breaking change to output with
+    /// nothing wrong with it. And the answer is only true while the target is open, which is why
+    /// nothing is written to [`Self::components`]: a cached hit returns `boxed: false`, and a second
+    /// reference taken during the same cycle would then emit an infinitely sized type. Each
+    /// reference re-derives it; the memo stays the target's own name.
+    fn nullable_alias_back_edge(&self, schema: &Schema) -> Option<Ty> {
+        if schema.default.is_some() || schema.discriminator.is_some() {
+            return None;
+        }
+        let members = match (schema.one_of.is_empty(), schema.any_of.is_empty()) {
+            (false, true) => &schema.one_of,
+            (true, false) => &schema.any_of,
+            // Neither, or both — the second is rejected by `lower_union` as an intersected
+            // applicator and must reach it to be reported.
+            _ => return None,
+        };
+        // Everything the component says apart from the union itself. A `type`, a `properties`, an
+        // `enum`, a sibling `$ref`: anything at all makes it a constrained schema rather than
+        // another name for its target.
+        let mut without_union = schema.clone();
+        without_union.one_of.clear();
+        without_union.any_of.clear();
+        if schema_has_shape_constraint(&without_union) {
+            return None;
+        }
+        let mut real = members.iter().filter(|member| !member_is_null_only(member));
+        let SchemaOr::Schema(only) = real.next()? else {
+            return None;
+        };
+        if real.next().is_some() {
+            return None;
+        }
+        let target = only
+            .reference
+            .as_deref()?
+            .strip_prefix("#/components/schemas/")?;
+        // A bare reference and nothing else: a member carrying its own keywords is a `$ref` with
+        // siblings, which is an intersection and not an alias.
+        let mut member_without_ref = only.clone();
+        member_without_ref.reference = None;
+        if schema_has_shape_constraint(&member_without_ref) {
+            return None;
+        }
+        let &(id, _) = self.in_progress.get(target)?;
+        Some(Ty {
+            id,
+            nullable: members.iter().any(member_is_null_only),
+            // The target is mid-lowering, so this is a cycle-closing reference and needs the box
+            // for the recursive type to have a finite size.
+            boxed: true,
+        })
     }
 
     /// Lower a remote (`http`/`https`) `$ref` to a shared, cycle-safe type — the remote analogue of
