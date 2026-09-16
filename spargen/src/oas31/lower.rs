@@ -100,7 +100,7 @@ pub(crate) fn lower(
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
     // provenance is never used for a rejection; the document root is the only site there is.
     for name in document.components.schemas.keys() {
-        let _ = ctx.ensure_component(name, &document.provenance);
+        let _ = ctx.ensure_component(name, None, &document.provenance);
     }
 
     let mut operations = Vec::new();
@@ -467,8 +467,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// one step, every target is lowered once, and only genuinely new targets consume depth. The two
     /// memos do not compete for one target: a resolved reference that lands on a root component
     /// comes straight back here by name, so `components` stays the single identity for those.
-    fn ensure_component(&mut self, name: &str, at: &crate::diag::Provenance) -> Option<Ty> {
-        self.warn_if_root_shadows_the_referring_file(name, at);
+    fn ensure_component(
+        &mut self,
+        name: &str,
+        reference: Option<&str>,
+        at: &crate::diag::Provenance,
+    ) -> Option<Ty> {
+        self.warn_if_root_shadows_the_referring_file(name, reference, at);
         if let Some(&(id, nullable)) = self.components.get(name) {
             return Some(Ty {
                 id,
@@ -554,7 +559,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             let ty = if let Some(target) = reference.reference.strip_prefix("#/components/schemas/")
             {
-                self.ensure_component(target, &reference.provenance)
+                self.ensure_component(target, Some(&reference.reference), &reference.provenance)
             } else if is_remote_ref(&reference.reference) {
                 self.ensure_remote(&reference.reference)
             } else {
@@ -641,11 +646,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `W011` is what the shadowed declaration is — a declaration with no effect — so no ordinal
     /// moves and the code keeps the matrix cell and `errors.md` row it already has. Emitted per
     /// reference site rather than once per name, because the site is what the reader has to find.
+    ///
+    /// `reference` is the `$ref` **as the site wrote it**, and only the bare-fragment spelling can
+    /// be shadowed: `#/components/schemas/<name>` addresses the document it appears in, so writing
+    /// it inside a sub-file that declares `<name>` asks for that file's declaration and is given
+    /// the root's instead — which is the entire warning. A reference that names its own document
+    /// (`./openapi.yaml#/components/schemas/<name>`) asked for one declaration and got that one:
+    /// nothing is shadowed, the message would quote a spelling the site does not contain, and the
+    /// remedy — "address the file-local one explicitly with a relative-file reference" — would tell
+    /// the author to do what they have already done. `None` is the root's own pre-lowering pass,
+    /// which walks declarations rather than references and has no spelling to judge.
     fn warn_if_root_shadows_the_referring_file(
         &mut self,
         name: &str,
+        reference: Option<&str>,
         at: &crate::diag::Provenance,
     ) {
+        if reference.and_then(|reference| reference.strip_prefix("#/components/schemas/"))
+            != Some(name)
+        {
+            return;
+        }
         let Some(file) = at.span.map(|span| span.file) else {
             return;
         };
@@ -780,7 +801,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // the shadowing is acknowledged. Say it on the way past, or a reference the
                     // root wins silently retargets a sub-file's own declaration — supported as the
                     // matrix describes, but unreported, which the matrix also promises against.
-                    self.warn_if_root_shadows_the_referring_file(name, at);
+                    self.warn_if_root_shadows_the_referring_file(name, Some(reference), at);
                 }
                 return entry;
             }
@@ -952,7 +973,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .filter(|name| !name.is_empty() && !name.contains('/'))
             {
                 if self.document.components.schemas.contains_key(name) {
-                    return self.ensure_component(name, at);
+                    return self.ensure_component(name, Some(reference), at);
                 }
             }
         }
@@ -1076,7 +1097,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         if let Some(reference) = &schema.reference {
             let referenced = if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                self.ensure_component(name, &schema.provenance)?
+                self.ensure_component(name, Some(reference), &schema.provenance)?
                 // Remote refs go through the cycle-safe, deduped remote path (keyed by
                 // `url#fragment`), mirroring `ensure_component`; a bare relative/other ref falls
                 // through to `resolve`, which reports it (E003/E004).
@@ -1612,7 +1633,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let SchemaOr::Schema(schema) = member {
             if let Some(reference) = &schema.reference {
                 if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                    let ty = self.ensure_component(name, &schema.provenance)?;
+                    let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
                     return Some((ty, Some(name.to_owned())));
                 }
             }
@@ -2204,7 +2225,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          lowered",
                     );
                 }
-                let ty = self.ensure_component(name, &schema.provenance)?;
+                let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
                 // The pre-check above sees root components only. A name the root does not declare
                 // is a *sub-file* component, and it reaches its own reservation through
                 // `ensure_resolved`, so a direct recursive member there arrives here as a back-edge
@@ -4442,7 +4463,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             RefOr::Item(schema) => self.lower_schema(schema, hint),
             RefOr::Ref(reference) => {
                 if let Some(name) = reference.reference.strip_prefix("#/components/schemas/") {
-                    self.ensure_component(name, &reference.provenance)
+                    self.ensure_component(name, Some(&reference.reference), &reference.provenance)
                 } else if is_remote_ref(&reference.reference) {
                     self.ensure_remote(&reference.reference)
                 } else {
