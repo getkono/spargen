@@ -859,12 +859,12 @@ mod tests {
     /// one regardless of whether a refresh would have worked: the provider is never asked.
     ///
     /// Not asking is a break against master, where `apply_credential` awaited the provider for
-    /// `AuthKind`: a `Credential::Provider` under an `http basic` scheme *was* called, and a
-    /// failing one reached the chain as `Other`'s source, downcasting to `AuthError`. Master then
-    /// discarded the token in the `Basic` arm and returned this same mismatch anyway, so no
-    /// succeeding call becomes a failing one — what changes is that the round trip to the identity
-    /// provider is gone, and the cause now downcasts to the mismatch message rather than to
-    /// `AuthError`.
+    /// every `AuthKind`, so a `Credential::Provider` under an `http basic` scheme *was* called. A
+    /// failing one propagated there and then, as the request-construction error's source, which
+    /// downcast to `AuthError`; a succeeding one had its token discarded by the `Basic` arm on the
+    /// next line and returned this same mismatch. So no succeeding call becomes a failing one, and
+    /// what changes for a consumer is that the round trip to the identity provider is gone and the
+    /// cause now downcasts to the mismatch message rather than to `AuthError`.
     #[test]
     fn a_token_provider_under_a_basic_scheme_is_a_mismatch_without_calling_it() {
         use std::sync::atomic::{AtomicBool, Ordering};
