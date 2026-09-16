@@ -6,7 +6,7 @@
 //! warnings and clean runs so it cannot pass vacuously.
 
 use camino::Utf8PathBuf;
-use spargen::{Build, CargoIntegration, Code, Outcome, Report, Spec};
+use spargen::{Build, CargoIntegration, Code, Outcome, Report, Severity, Spec};
 
 /// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
 /// tempdir (and any written output) is discarded once the report — which owns its data — is built.
@@ -2713,20 +2713,42 @@ components:
                 !has_code(report, Code::InvalidInput),
                 "{label}/{entry}: {report:#?}"
             );
-            assert!(
-                has_code(report, Code::NonDisjointUnion)
-                    || has_code(report, Code::AllOfIrreconcilable),
+            // `E007`, and **only** `E007` — not a disjunction with `E013`. The two guards this
+            // shape passes through are ordered deliberately, the cycle question before the
+            // sibling-intersection question, and `lower.rs` records at that site that a reordering
+            // turns this fixture red. A disjunction would not: it is satisfied by either verdict,
+            // so the ordering it claims to protect would be free to flip in silence. The `with
+            // siblings` spelling is the one that carries the difference, because it is the only one
+            // the sibling guard can answer at all.
+            let codes: Vec<Code> = report
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                .map(|diagnostic| diagnostic.code)
+                .collect();
+            assert_eq!(
+                codes,
+                vec![Code::NonDisjointUnion],
                 "{label}/{entry}: {report:#?}"
+            );
+            // The remedy is the sentence the author acts on, and the one this rejecter carries has
+            // to serve its cycle situations as well as its overlap ones — neither of which a
+            // discriminator answers. Nothing else in the suite reads a remedy on this path, so
+            // without this the whole text was free to be replaced by advice that contradicts the
+            // fix.
+            let remedy = report
+                .diagnostics()
+                .iter()
+                .find(|diagnostic| diagnostic.code == Code::NonDisjointUnion)
+                .and_then(|diagnostic| diagnostic.remedy.as_deref())
+                .unwrap_or_default();
+            assert!(
+                remedy.contains("break the reference cycle"),
+                "{label}/{entry}: the remedy must name what an author with a self-referential \
+                 union actually has to change: {remedy:?}"
             );
         }
     }
-    // The bare spelling is the one the multi-member guard's wording was written for, so it must
-    // reach the same code that guard reaches rather than a second one.
-    assert!(
-        has_code(&generate(bare), Code::NonDisjointUnion),
-        "{:#?}",
-        generate(bare)
-    );
 }
 
 /// A union whose sibling keywords would have to be intersected against a target that is still being

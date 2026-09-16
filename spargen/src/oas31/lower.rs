@@ -1358,8 +1358,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // outside this change's scope, so the divergence is recorded here — at the site, where
             // a rebase brings the two texts together — rather than only in a pull-request
             // description, which does not travel with the code. It fails loudly rather than
-            // silently: the `E007` fixture in `tests/frontend.rs` turns red the moment the other
-            // guard lands first, so the choice is forced rather than made by accident.
+            // silently: `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in
+            // `tests/frontend.rs` asserts the reported error codes are **exactly** `[E007]` on both
+            // its spellings, so putting the other guard first turns it red and the choice is forced
+            // rather than made by accident. That assertion is what makes this paragraph true; it
+            // said the same thing while the fixture still asserted `E007 || E013`, which either
+            // verdict satisfies, and the claim was false for as long as it did.
             if self.reservation_at(&schema.provenance) == Some(inner.id) {
                 return self.reject_union(
                     schema,
