@@ -1141,6 +1141,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // id and leave the popped root mismatched).
         if real_members.len() == 1 {
             let mut inner = self.lower_schema_or(real_members[0], hint)?;
+            // The sole member is the reservation *this* schema will occupy, so the union is the
+            // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
+            // exactly as a direct recursive member does in a multi-member union. That path already
+            // refuses it, and this is the same shape written with fewer members beside it, so it
+            // gets the same code and the same wording rather than a second code chosen by member
+            // count. Asked before the reservation guards below, which would otherwise answer the
+            // narrower question first and hand one shape two codes again.
+            if self.reservation_at(&schema.provenance) == Some(inner.id) {
+                return self.reject_union(
+                    schema,
+                    "a union member is a direct recursive `$ref` to the union being lowered, so \
+                     the member is the union itself and decoding it would never terminate",
+                );
+            }
             // The reservation half of the cycle test, on the sole real member. The document half
             // above answers only the `#/components/schemas/…` spelling; a sub-file or remote member
             // reference reaches here still pointing at a placeholder, and the intersection below
@@ -1154,8 +1168,54 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      intersected with a target whose definition depends on the result",
                 );
             }
+            // The member is some *other* type's still-open reservation — the cycle-closing
+            // `$ref` of an ordinary recursive schema. Its kind may not be read: cloning a
+            // `TypeKind::Reserved` inserts a second reservation nothing will ever `fill`, which
+            // `check_invariants` reports as `E011` against a document that is not malformed, and
+            // which on the merge base (where the placeholder was `TypeKind::Any`) cloned as
+            // `serde_json::Value` instead — a typed schema silently degraded.
+            //
+            // A truthful answer exists and needs no def of its own: the member's own `Ty`, boxed so
+            // the cycle has a finite size and optional because the `null` member is what collapsed
+            // away. That is `Option<Box<T>>` — what `docs/support-matrix.md` promises for this
+            // construct, and what the direct `{$ref: T}` spelling already produces.
+            //
+            // Inserting no def is safe exactly where this union is not itself the body of a type
+            // whose root id was reserved before lowering began. Where it is, the caller pops the
+            // last insert and lifts it into that reserved root, so returning a foreign id would
+            // relocate the wrong def and dangle the component. `ensure_component` recognises that
+            // shape as a nullable alias before it reserves anything, so the root-component spelling
+            // never arrives here; a sub-file or remote body reaching it is refused rather than
+            // mis-assembled.
+            if self.is_reservation(inner.id) {
+                if self.reservation_at(&schema.provenance).is_some() {
+                    return self.reject_union(
+                        schema,
+                        "this schema's whole body is a union whose only non-null member is a \
+                         `$ref` that closes a reference cycle, so the schema names no shape of its \
+                         own and cannot be given a generated type",
+                    );
+                }
+                inner.nullable = inner.nullable || nullable;
+                inner.boxed = true;
+                return Some(inner);
+            }
             if let Some(sibling) = sibling {
-                inner = self.intersect_types(inner, sibling, &format!("{hint}Constrained"))?;
+                // A bare `?` here would drop the whole construct with no diagnostic at all — the
+                // silent fourth behaviour. `intersect_types` returns `None` only once its own null
+                // rescue has declined, so this is an irreconcilable intersection and nothing is
+                // left for the union to collapse to.
+                let Some(constrained) =
+                    self.intersect_types(inner, sibling, &format!("{hint}Constrained"))
+                else {
+                    return self.reject_union(
+                        schema,
+                        "the union's sole non-null member and the enclosing schema's own sibling \
+                         keywords have an empty or unrepresentable intersection, leaving the union \
+                         with no variant",
+                    );
+                };
+                inner = constrained;
             }
             let kind = self.graph.get(inner.id).map(|def| def.kind.clone())?;
             let mut ty = self.insert_schema_type(schema, hint, kind);
@@ -4177,6 +4237,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .chain(self.remote_in_progress.values())
             .chain(self.resolved_in_progress.values())
             .any(|&(root, _)| root == id)
+    }
+
+    /// Whether the graph currently holds `id` as a [`TypeKind::Reserved`] placeholder.
+    ///
+    /// A third question, narrower than [`Self::is_in_progress_root`] in one way and wider in
+    /// another: it asks what the graph *holds* rather than which maps are open, so it answers for a
+    /// reservation taken by any of the three in-progress maps without having to name them, and it
+    /// answers `false` for an id whose body has since been filled. It exists so a caller can refuse
+    /// to **clone** a placeholder's kind: a clone inserts a second reservation that nothing will
+    /// ever `fill`, and `Api::check_invariants` reports that as `E011` against a document that is
+    /// not malformed.
+    fn is_reservation(&self, id: TypeId) -> bool {
+        matches!(
+            self.graph.get(id).map(|def| &def.kind),
+            Some(TypeKind::Reserved)
+        )
     }
 
     /// Whether a schema the bundle resolver just produced is the very schema whose body is being
