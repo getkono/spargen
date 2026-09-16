@@ -685,7 +685,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// nothing is written to [`Self::components`]: a cached hit returns `boxed: false`, and a second
     /// reference taken during the same cycle would then emit an infinitely sized type. Each
     /// reference re-derives it; the memo stays the target's own name.
-    fn nullable_alias_back_edge(&self, schema: &Schema) -> Option<Ty> {
+    fn nullable_alias_back_edge(&mut self, schema: &Schema) -> Option<Ty> {
         if schema.default.is_some() || schema.discriminator.is_some() {
             return None;
         }
@@ -747,10 +747,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// shape in the same document.
     ///
     /// `None` for a target that is finished, absent, or was never a reservation — every one of
-    /// which the ordinary lowering path handles and reports for itself. Purely a lookup: it
-    /// resolves no node, lowers nothing and emits no diagnostic, so asking is free of consequence
-    /// for the lowering that follows.
-    fn open_reservation_for_ref(&self, reference: &str, at: &Provenance) -> Option<(TypeId, bool)> {
+    /// which the ordinary lowering path handles and reports for itself. It resolves no node and
+    /// lowers nothing, so asking costs the lowering that follows nothing; the one thing it does
+    /// besides look up is raise [`Code::DeclarationHasNoEffect`] when it answers `Some` for a name
+    /// a sub-file also declares, because answering `Some` is answering *instead of*
+    /// [`Self::ensure_component`], which is where that warning otherwise lives.
+    fn open_reservation_for_ref(
+        &mut self,
+        reference: &str,
+        at: &Provenance,
+    ) -> Option<(TypeId, bool)> {
         if let Some(name) = reference.strip_prefix("#/components/schemas/") {
             // A root component the root document declares: `ensure_component`'s own key, and its
             // own precedence — root map first, and only a name the root does **not** declare is
@@ -764,12 +770,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // root's component and raised `W011`, while the alias spelling silently read the
             // sub-file's and raised nothing at all.
             if self.document.components.schemas.contains_key(name) {
-                // Declared by the root, so the root's map is the only identity this reference has.
                 // `None` when it is not currently open is the right answer and not a fall-through:
                 // a finished or not-yet-started root component is exactly the case the ordinary
-                // `ensure_component` path handles — and the case in which it must, because that is
-                // where `W011` is raised.
-                return self.in_progress.get(name).copied();
+                // `ensure_component` path handles, and the case in which it must, because that is
+                // where the shadowing warning is raised.
+                let entry = self.in_progress.get(name).copied();
+                if entry.is_some() {
+                    // Answering here is answering *instead of* `ensure_component`, which is where
+                    // the shadowing is acknowledged. Say it on the way past, or a reference the
+                    // root wins silently retargets a sub-file's own declaration — supported as the
+                    // matrix describes, but unreported, which the matrix also promises against.
+                    self.warn_if_root_shadows_the_referring_file(name, at);
+                }
+                return entry;
             }
         } else if is_remote_ref(reference) {
             // `ensure_remote` keys on the absolute URL, and a reference inside a vendored document

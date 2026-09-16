@@ -2589,6 +2589,92 @@ components:
     }
 }
 
+/// The other half of the same promise: when the shadowed name's root component *is* open, the
+/// alias binds it — correctly — and must still say that it shadowed something.
+///
+/// This is the one case in which the alias path answers the reference itself rather than handing it
+/// back to `ensure_component`, and `ensure_component` is where `W011` is raised. So the type was
+/// right and the acknowledgement was missing: a sub-file's `Shared` silently had no effect on a
+/// reference that reads it by that name, which is exactly what the References row of
+/// `docs/support-matrix.md` promises will be reported.
+///
+/// The root's `Shared` is open here because it reaches the sub-file and the sub-file comes back to
+/// it — mutual recursion across the file boundary, which is the only way a root component is
+/// mid-lowering while a sub-file schema is being read.
+#[test]
+fn a_nullable_alias_that_binds_an_open_root_component_still_reports_the_shadowing() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Shared' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      properties:
+        root_only: { type: string }
+        holder: { $ref: './lib.yaml#/components/schemas/Holder' }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        next: { $ref: '#/components/schemas/Maybe' }
+    Shared:
+      type: object
+      properties:
+        lib_only: { type: string }
+    Maybe:
+      oneOf:
+        - { $ref: '#/components/schemas/Shared' }
+        - { type: "null" }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(report, Code::DeclarationHasNoEffect),
+            "{entry}: the sub-file's `Shared` is shadowed and read past in silence: {report:#?}"
+        );
+    }
+    // And the binding itself is the root's, boxed because it closes the cycle back to it.
+    assert_eq!(
+        field_type(&code, "pub next").as_deref(),
+        Some("Option<Box<Shared>>"),
+        "{code}"
+    );
+    assert_eq!(
+        declared_fields(&code, "Shared"),
+        vec!["root_only".to_owned(), "holder".to_owned()],
+        "{code}"
+    );
+}
+
 /// The aliased spelling of [`a_nullable_alias_carries_its_targets_own_nullability`]'s document,
 /// hoisted so [`PARITY_FIXTURES`] can drive it through `check` as well as `generate`.
 ///
