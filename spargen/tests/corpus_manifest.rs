@@ -6,7 +6,9 @@
 //! `tests/snapshot.rs`. They had already drifted — `openai-openapi` was in the manifest and the
 //! snapshot suite but in neither smoke copy.
 //!
-//! This suite drives the manifest itself, and holds the other copies to it.
+//! This suite drives the manifest itself, and holds the other copies to it. It is also where this
+//! repository's assertions over its own CI configuration have collected, so the gates over
+//! `.github/workflows/ci.yml` live here beside the corpus ones rather than in a file of their own.
 //!
 //! One manifest field stays unchecked: `tree_sha256`, carried by `openapi-boilerplate` alone. How
 //! it was constructed is recorded nowhere, and no natural definition over that directory
@@ -202,6 +204,196 @@ fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
             "`{file}` writes to a fixed `/tmp/` path; corpus-smoke outputs belong under `target/corpus-smoke/`"
         );
     }
+}
+
+#[test]
+fn the_deny_gate_states_the_feature_scope_it_audits() {
+    // `--all-features` is what puts a TLS stack in the audited graph: under default features
+    // `rustls` is absent from the workspace entirely, so an advisory gate run without the flag
+    // passes because it can see nothing (#147). The action's own defaults happen to match, which
+    // is exactly why deleting these lines would read as tidying rather than as narrowing the gate.
+    //
+    // Asserted over the parsed document rather than over the text, and per step rather than per
+    // job. A line-level assertion over the job's text cannot tell this step's `with:` from one
+    // hung on `actions/checkout`, cannot see an `if:` that stops the job running at all, and reds
+    // on a requoted or strictly stricter value that audits exactly the same graph.
+    //
+    // Both scopes are guarded, because a gate that does not run and a gate whose failure is
+    // swallowed are indistinguishable from a gate that audits nothing: `if:` and
+    // `continue-on-error:` are checked on the job map *and* on the step map. `continue-on-error:`
+    // is read by *value* rather than by presence, since `false` is byte-for-byte GitHub's own
+    // default and neutralises nothing; `if:` is banned by presence, because its value is an
+    // expression that cannot be evaluated here.
+    //
+    // Narrowing is guarded on three inputs, and only on the steps that audit the *root*
+    // manifest. Two of them reach `check`'s `[WHICH]...` positional -- `command` and
+    // `command-arguments` -- since either alone drops `advisories`, and `command-arguments` must
+    // be *stated* empty rather than absent: leaving it absent would pin the action's default,
+    // which is the one thing this gate exists to stop being load-bearing. The third is
+    // `arguments` itself, which the entrypoint's unquoted `cargo-deny $*` splices straight into
+    // the argv, so any word in it is a flag: `--all-features --target wasm32-unknown-unknown`
+    // contains `--all-features`, reads as *added* coverage, and drops RUSTSEC-2026-0285. The
+    // deny-list below is a **list, not a proof** -- it rejects the graph-narrowing flags that
+    // were measured to hide this tree's live advisory, and cannot establish that some other
+    // `arguments` value does not narrow. Containment rather than equality is deliberate:
+    // `--all-features --locked` is strictly stricter and is #146's own ask.
+    //
+    // Scope: `if:` and `continue-on-error:` are asserted on *every* matching step, because any
+    // of them being neutralised is this job not running what it says it runs. The three
+    // narrowing assertions apply only where `manifest-path` is absent or names the root
+    // `Cargo.toml`, because applying them everywhere turns "no step may narrow the gate" into
+    // "every step must be maximal" -- which reds #184's cheapest shape (a cargo-deny step per
+    // example workspace with `command-arguments: advisories`, root `deny.toml` untouched; the
+    // root policy is red on bans and licenses for all three examples and green on advisories).
+    // At least one root-manifest audit is required, so scoping by `manifest-path` cannot be used
+    // to empty the gate by pointing its only step somewhere else.
+    let ci = read(".github/workflows/ci.yml");
+    let documents = yaml_rust2::YamlLoader::load_from_str(&ci)
+        .expect("`.github/workflows/ci.yml` must parse as YAML");
+    let workflow = documents
+        .first()
+        .expect("`.github/workflows/ci.yml` must carry a YAML document");
+
+    let deny = &workflow["jobs"]["deny"];
+    assert!(
+        !deny.is_badvalue(),
+        "`.github/workflows/ci.yml` must define a `deny` job"
+    );
+    assert!(
+        deny["if"].is_badvalue(),
+        "the `deny` job map carries an `if:` key, so the whole audit can be conditioned out"
+    );
+    assert!(
+        deny["continue-on-error"].is_badvalue()
+            || deny["continue-on-error"].as_bool() == Some(false),
+        "the `deny` job map sets `continue-on-error:` to something other than `false`, so a \
+         failing audit need not fail the gate"
+    );
+
+    let steps = deny["steps"]
+        .as_vec()
+        .expect("the `deny` job must carry a list of steps");
+    // GitHub resolves `uses: owner/repo@ref` case-insensitively, so the comparison is too:
+    // `embarkstudios/cargo-deny-action@v2` is a working spelling and must not red a gate that
+    // audits the same graph. *Every* match is audited, not the first and not exactly one: a
+    // second step is only unread if the test declines to read it, and forbidding one would
+    // forbid the obvious shape of #184 (a cargo-deny step per example workspace manifest) for no
+    // gain -- GitHub runs steps in order and fails the job on the first failure, so a later step
+    // cannot weaken an earlier one.
+    let audits: Vec<_> = steps
+        .iter()
+        .filter(|step| {
+            step["uses"].as_str().is_some_and(|uses| {
+                uses.to_ascii_lowercase()
+                    .starts_with("embarkstudios/cargo-deny-action@")
+            })
+        })
+        .collect();
+    assert!(
+        !audits.is_empty(),
+        "the `deny` job runs no step that `uses: EmbarkStudios/cargo-deny-action@…`, so nothing \
+         in it audits the dependency graph"
+    );
+
+    // Flags that narrow what cargo-deny *resolves or consults*, rather than which checks it runs
+    // over the result. Measured on this tree with the `mise.toml` pin (cargo-deny 0.19.9), as
+    // `cargo-deny --log-level warn --manifest-path ./Cargo.toml --all-features <flag> check
+    // advisories`: `--exclude rustls` and `--target wasm32-unknown-unknown` each turn
+    // `advisories FAILED` (RUSTSEC-2026-0285, reached only through reqwest's TLS feature) into
+    // `advisories ok`, exit 1 to exit 0. The other five do *not* flip that verdict here and are
+    // rejected as the same class of flag rather than on a measured flip -- `--offline` was
+    // measured against an already-populated advisory database, and `--no-default-features` is
+    // overridden by the `--all-features` this same value is required to carry. Not exhaustive:
+    // see the comment above, and #238.
+    const GRAPH_NARROWING_FLAGS: [&str; 7] = [
+        "--exclude",
+        "--target",
+        "--exclude-dev",
+        "--exclude-unpublished",
+        "--offline",
+        "--frozen",
+        "--no-default-features",
+    ];
+
+    let mut root_audits = 0usize;
+    for audit in audits {
+        assert!(
+            audit["if"].is_badvalue(),
+            "the cargo-deny-action step map carries an `if:` key, so the audit can be \
+             conditioned out while the `deny` job it sits in still reports success"
+        );
+        assert!(
+            audit["continue-on-error"].is_badvalue()
+                || audit["continue-on-error"].as_bool() == Some(false),
+            "the cargo-deny-action step map sets `continue-on-error:` to something other than \
+             `false`, so a failing audit would leave the `deny` job green"
+        );
+
+        // `manifest-path` absent means the action's `./Cargo.toml` default, which is the
+        // workspace root; `Cargo.toml` and `./Cargo.toml` are the same file and both spellings
+        // are accepted so that writing the default out does not red the gate.
+        let audits_root_manifest = match audit["with"]["manifest-path"].as_str() {
+            None => true,
+            Some(path) => path.trim_start_matches("./") == "Cargo.toml",
+        };
+        if !audits_root_manifest {
+            continue;
+        }
+        root_audits += 1;
+
+        let arguments = audit["with"]["arguments"]
+            .as_str()
+            .expect("the cargo-deny-action step must state `with: { arguments: … }` of its own");
+        assert!(
+            arguments
+                .split_whitespace()
+                .any(|token| token == "--all-features"),
+            "the cargo-deny-action step's `arguments: {arguments}` does not pass `--all-features`"
+        );
+        for token in arguments.split_whitespace() {
+            // `--flag value` and `--flag=value` are the same flag to clap.
+            let flag = token.split_once('=').map_or(token, |(flag, _)| flag);
+            assert!(
+                !GRAPH_NARROWING_FLAGS.contains(&flag),
+                "the cargo-deny-action step's `arguments: {arguments}` passes `{flag}`, which \
+                 shrinks the graph cargo-deny resolves rather than the checks it runs over it: \
+                 the entrypoint splices `arguments` into an unquoted `cargo-deny $*`, so \
+                 `--all-features {flag} …` still contains `--all-features` and still drops \
+                 RUSTSEC-2026-0285. Strictly stricter values such as `--all-features --locked` \
+                 are deliberately still accepted"
+            );
+        }
+
+        let command = audit["with"]["command"]
+            .as_str()
+            .expect("the cargo-deny-action step must state `with: { command: … }` of its own");
+        assert_eq!(
+            command, "check",
+            "the cargo-deny-action step's `command` selects a subset of the checks; anything \
+             narrower than a bare `check` drops `advisories`, which is the check #147 is about"
+        );
+
+        let command_arguments = audit["with"]["command-arguments"].as_str().expect(
+            "the cargo-deny-action step must state `with: { command-arguments: \"\" } ` of its \
+             own: it is the second input feeding `check`'s `[WHICH]...` positional, and leaving \
+             it absent inherits the action's default for the one remaining input that can \
+             silently narrow the audit",
+        );
+        assert_eq!(
+            command_arguments, "",
+            "the cargo-deny-action step's `command-arguments` narrows `check`'s `[WHICH]...` \
+             positional: `command-arguments: licenses` composes `cargo-deny --all-features check \
+             licenses` and drops `advisories` exactly as a narrowed `command` does, leaving \
+             `command: check` true and this suite otherwise green"
+        );
+    }
+
+    assert!(
+        root_audits > 0,
+        "no cargo-deny-action step in the `deny` job audits the root `Cargo.toml`: every one \
+         states a `manifest-path` pointing elsewhere, so the workspace this gate exists to audit \
+         is audited by nothing and the three narrowing assertions above never run"
+    );
 }
 
 #[test]
