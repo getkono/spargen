@@ -1688,8 +1688,10 @@ fn a_generated_conjunction_reports_each_alternative_grouped() {
         "{rendered}"
     );
 
-    // Registering one member of a conjunction satisfies neither alternative it appears in, and
-    // removes only that member from what each reports.
+    // Registering one member of a conjunction does not satisfy the alternative it appears in: that
+    // alternative goes on reporting the members still unregistered. `bearer` is in exactly one of
+    // the three alternatives here, so only that one's report changes — and all three stay
+    // outstanding.
     let partial = basic_client::Client::new("http://127.0.0.1:1")
         .unwrap()
         .with_credential(
