@@ -2571,7 +2571,8 @@ components:
         // wrong answer — and the alias spelling reaches its target through `MaybeShared`, a third
         // name again. `root_only` is declared only by the root's `Shared` and `lib_only` only by
         // the sub-file's, so the fields say which declaration was read whatever it got called.
-        let next = field_type(&code, "pub next").expect(&code.clone());
+        let next = field_type(&code, "pub next")
+            .unwrap_or_else(|| panic!("{spelling}: no `next` field at all: {code}"));
         let bound = next
             .rsplit_once('<')
             .map_or(next.as_str(), |(_, tail)| tail)
