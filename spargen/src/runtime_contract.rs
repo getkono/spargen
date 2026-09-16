@@ -3530,6 +3530,34 @@ serde_json.workspace = true
         );
     }
 
+    /// The path a diagnostic spells in backticks directly after `prefix`.
+    ///
+    /// Every message that blames a manifest renders it as ``<noun> `<path>` ``, so lifting the
+    /// path out of each of two messages and comparing the two is what pins "the same file".
+    /// Asking whether one message `contains` the other's path cannot: `contains` is a substring
+    /// relation and every string contains the empty one, so a renderer that emitted no path at
+    /// all would satisfy it.
+    fn manifest_named_after<'m>(message: &'m str, prefix: &str) -> Option<&'m str> {
+        message
+            .split_once(prefix)
+            .and_then(|(_, rest)| rest.split_once('`'))
+            .map(|(path, _)| path)
+    }
+
+    /// Whether a lifted path identifies a manifest file rather than a fragment.
+    ///
+    /// Equality alone pins the two messages to each other, not to anything true: were both
+    /// renderers to degrade the same way they would still agree. This is the independent half —
+    /// a file name of `Cargo.toml` (the regression `workspace_root`'s own doc comment forbids,
+    /// since `./Cargo.toml` tells the reader nothing) under a directory that is actually named.
+    fn names_a_manifest_file(path: &str) -> bool {
+        let path = Utf8Path::new(path);
+        path.file_name() == Some("Cargo.toml")
+            && path
+                .parent()
+                .is_some_and(|parent| !parent.as_str().is_empty())
+    }
+
     #[test]
     fn a_workspace_root_that_cannot_be_read_is_not_reported_as_missing() {
         // Found-but-broken is a third state. Reporting it as "no workspace manifest was found"
@@ -3627,15 +3655,29 @@ serde_json.workspace = true
         // each other rather than to `root`: `package.workspace` is joined, not normalised, so both
         // messages spell the root `<tmp>/outside/../root/Cargo.toml` and neither contains
         // `root.as_str()`.
-        let named = result.diagnostics[inherits]
-            .message
-            .rsplit_once("its workspace manifest `")
-            .and_then(|(_, rest)| rest.split_once('`'))
-            .map(|(path, _)| path)
-            .unwrap_or_else(|| panic!("{:#?}", result.diagnostics));
-        assert!(
-            result.diagnostics[failure].message.contains(named),
+        // Both paths are lifted and compared for equality. Requiring the read failure to merely
+        // `contain` the inheritance message's path left the claim open: `contains` is a substring
+        // relation, so an arm rendering an empty path, a bare `Cargo.toml`, or the root
+        // *directory* satisfied it, and all three survived this fixture.
+        let named = manifest_named_after(
+            &result.diagnostics[inherits].message,
+            "its workspace manifest `",
+        )
+        .unwrap_or_else(|| panic!("{:#?}", result.diagnostics));
+        let blamed = manifest_named_after(
+            &result.diagnostics[failure].message,
+            "failed to parse workspace manifest `",
+        )
+        .unwrap_or_else(|| panic!("{:#?}", result.diagnostics));
+        assert_eq!(
+            named, blamed,
             "the read failure has to name the same file the inheritance message defers to: {:#?}",
+            result.diagnostics
+        );
+        assert!(
+            names_a_manifest_file(named),
+            "the file both messages name has to be a manifest under a directory they actually \
+             spell, not a fragment two equally degraded renderers would still agree on: {:#?}",
             result.diagnostics
         );
         // And the reason must not ride inline in *any* shape, not merely without a colon. The
@@ -3730,19 +3772,57 @@ serde_json.workspace = true
             "{:#?}",
             result.diagnostics
         );
-        // The same identification rule as in `a_workspace_root_that_cannot_be_read_is_not_reported_as_missing`,
-        // over the other failure a declared root can have: the reason stays on its own line and the
-        // inheritance message ends where the noun phrase ends. A read failure and a parse failure
-        // are rendered by the same arm, so both have to hold it — and both hold it against an
-        // appended reason of any shape, not just one introduced by a colon.
-        assert!(
-            result.diagnostics.iter().any(|diagnostic| {
+        // The whole identification rule as in
+        // `a_workspace_root_that_cannot_be_read_is_not_reported_as_missing`, over the other failure
+        // a declared root can have: the read failure stands above the inheritance message, names
+        // the same manifest, and the reason stays on its own line so the inheritance message ends
+        // where the noun phrase ends. A read failure and a parse failure are rendered by the same
+        // arm, so both limbs have to hold all three — and both hold the last against an appended
+        // reason of any shape, not just one introduced by a colon. Asserting all three here rather
+        // than only the suffix is what stops the shipped clause resting on one fixture.
+        let failure = result
+            .diagnostics
+            .iter()
+            .position(|diagnostic| {
+                diagnostic
+                    .message
+                    .starts_with("failed to read workspace manifest `")
+            })
+            .unwrap_or_else(|| panic!("{:#?}", result.diagnostics));
+        let inherits = result
+            .diagnostics
+            .iter()
+            .position(|diagnostic| {
                 diagnostic.message.contains("`bytes` inherits")
                     && diagnostic.message.contains("its workspace manifest `")
                     && diagnostic.message.ends_with("could not be read")
-            }),
-            "a root named by `package.workspace` reports its reason separately, appending nothing \
-             of any shape after it: {:#?}",
+            })
+            .unwrap_or_else(|| panic!("{:#?}", result.diagnostics));
+        assert!(
+            failure < inherits,
+            "the read failure is what the inheritance message defers to, so it has to be read \
+             first: {:#?}",
+            result.diagnostics
+        );
+        let named = manifest_named_after(
+            &result.diagnostics[inherits].message,
+            "its workspace manifest `",
+        )
+        .unwrap_or_else(|| panic!("{:#?}", result.diagnostics));
+        let blamed = manifest_named_after(
+            &result.diagnostics[failure].message,
+            "failed to read workspace manifest `",
+        )
+        .unwrap_or_else(|| panic!("{:#?}", result.diagnostics));
+        assert_eq!(
+            named, blamed,
+            "the read failure has to name the same file the inheritance message defers to: {:#?}",
+            result.diagnostics
+        );
+        assert!(
+            names_a_manifest_file(named),
+            "the file both messages name has to be a manifest under a directory they actually \
+             spell, not a fragment two equally degraded renderers would still agree on: {:#?}",
             result.diagnostics
         );
     }
