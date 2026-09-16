@@ -2328,8 +2328,40 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
                 "{first} before {second}/{entry}: {report:#?}"
             );
         }
-        // The recursion is closed by boxing whichever way round the map is written.
-        assert!(code.contains("Box<"), "{first} before {second}: {code}");
+        // The recursion is closed by boxing whichever way round the map is written — read off
+        // `b`'s own declaration, not searched for in the file. `code.contains("Box<")` is true of
+        // *any* successful generation (the embedded runtime alone supplies ten occurrences:
+        // `Pin<Box<..>>` in `transport.rs`/`auth.rs`/`retry.rs`/`stream.rs` and
+        // `source: Option<Box<dyn Error + Send + Sync>>` in `error.rs`), so the assertion that
+        // stood here pinned nothing: under the mutation that unboxes the alias back-edge it stayed
+        // green while four of its neighbours went red.
+        //
+        // The two orders emit different types because they take different paths, and this is the
+        // only fixture that drives both. Declaring the target first lowers `A` first, so `B`'s body
+        // meets an open `A`, is recognised as a nullable alias, and `b` binds `A` itself — optional
+        // because of the `"null"` member, boxed because the cycle must have a finite size.
+        //
+        // Declaring the alias first lowers `B` first, so `A` is not open when `B`'s body is read,
+        // the alias recogniser does not fire, and `b` binds `B` as an ordinary in-progress
+        // back-edge. The `Option` is then missing, and that is WRONG: `B`'s `"null"` member makes
+        // `B` nullable, so `{"b": null}` is legal against this document and will not decode. It is
+        // pinned as it is emitted rather than as it ought to be, because fixing it is issue #222 —
+        // `ensure_component` overwrites a body's computed nullability with the value
+        // `schema_is_nullable` produced at reserve time, and that function inspects `type`, `enum`
+        // and `const` only, never a union's members. It reproduces on master with a document that
+        // has no recursion in it at all, so it is not this change's to fix; when #222 lands this
+        // expectation becomes `Option<Box<B>>`. Until then this assertion is the only thing
+        // anywhere in the repository standing over what that order emits.
+        let expected = if first == "A" {
+            "Option<Box<A>>"
+        } else {
+            "Box<B>"
+        };
+        assert_eq!(
+            field_type(&code, "pub b").as_deref(),
+            Some(expected),
+            "{first} before {second}: {code}"
+        );
         assert!(
             !code.contains("serde_json::Value>"),
             "{first} before {second}: {code}"
