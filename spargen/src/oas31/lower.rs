@@ -1926,9 +1926,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ) {
                 Some(merged) => additional = merged,
                 None => {
+                    // `merge_additional` can only decline by failing to intersect the two value
+                    // types, and that has two causes the author has to tell apart. A genuine
+                    // conflict is one sentence; a value schema that is a `$ref` back to the type
+                    // being lowered is another, and calling it "conflicting" sends the reader
+                    // looking for a disagreement that is not in the document — nothing conflicts,
+                    // the target's body simply has not been computed yet.
+                    let unlowered = [&additional, member_additional].into_iter().any(|policy| {
+                        matches!(policy, AdditionalProps::Typed(ty) if self.is_reservation(ty.id))
+                    });
                     return self.reject_all_of(
                         schema,
-                        "`allOf` members declare conflicting `additionalProperties`",
+                        if unlowered {
+                            "an `allOf` member's `additionalProperties` value schema is a `$ref` \
+                             that closes a reference cycle back to the schema being lowered, whose \
+                             body is not yet known, so the merged overflow map has no computable \
+                             value type"
+                        } else {
+                            "`allOf` members declare conflicting `additionalProperties`"
+                        },
                     );
                 }
             }
