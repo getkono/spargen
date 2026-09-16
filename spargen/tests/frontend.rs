@@ -3501,8 +3501,29 @@ components:
 /// path correctly did *not* warn, so one reference got two answers depending only on whether the
 /// root's component happened to be open at the time.
 ///
-/// Both spellings are driven against one pair of files so the fixture cannot pass by the warning
-/// having gone dead: the bare one must still fire, on the same document, in the same run.
+/// Two further cases vary the **sub-file's body** rather than the spelling, because varying the
+/// spelling cannot reach every answer the warning gives.
+///
+/// The third drops `Shared` from `lib.yaml` altogether: a sub-file referring to a root component
+/// it does not redeclare, which is the commonest shape a multi-file description has. Nothing is
+/// shadowed, so nothing may be reported. That negative is decided in `Resolver::declares_locally`,
+/// by the one line that asks whether the node the local address names actually exists —
+/// `Bundle::reference_target` computes an address and never checks, so for an in-document fragment
+/// it answers `Some` unconditionally. Without the third case that line is unheld: deleting it
+/// leaves the whole workspace suite green while every such description gains a warning naming a
+/// declaration it does not contain. The spelling cases cannot cover it, because their `shadows:
+/// false` half is turned away by the bare-fragment gate in `warn_if_root_shadows_the_referring_file`
+/// and never reaches `declares_locally` at all.
+///
+/// The fourth drives `W011`'s **own remedy**: "address the file-local one explicitly with a
+/// relative-file reference". The explicit spelling driven above is `./openapi.yaml#…`, the *root's*
+/// — the one the remedy does not recommend. `./lib.yaml#/components/schemas/Shared` is the one it
+/// does, and it must both silence the warning and change the answer, binding the sub-file's
+/// `Shared` rather than the root's. Otherwise a precedence change could leave spargen printing a
+/// remedy that no longer works, with the suite green.
+///
+/// All four are driven against one pair of files so the fixture cannot pass by the warning having
+/// gone dead: the bare-over-a-local-declaration case must still fire, in the same run.
 #[test]
 fn an_explicit_relative_file_reference_to_the_roots_component_is_not_a_shadowing() {
     let root = r##"
@@ -3525,7 +3546,13 @@ components:
       required: [from_root]
       properties: { from_root: { type: string } }
 "##;
-    let lib = |spelling: &str| {
+    let lib = |spelling: &str, declares_shared: bool| {
+        let shared = if declares_shared {
+            "\n    Shared:\n      type: object\n      required: [from_sub_file]\n      \
+             properties: { from_sub_file: { type: string } }"
+        } else {
+            ""
+        };
         format!(
             r##"
 components:
@@ -3534,23 +3561,45 @@ components:
       type: object
       required: [inner]
       properties:
-        inner: {{ $ref: '{spelling}' }}
-    Shared:
-      type: object
-      required: [from_sub_file]
-      properties: {{ from_sub_file: {{ type: string }} }}
+        inner: {{ $ref: '{spelling}' }}{shared}
 "##
         )
     };
 
-    for (spelling, shadows) in [
-        ("#/components/schemas/Shared", true),
-        ("./openapi.yaml#/components/schemas/Shared", false),
+    for (case, spelling, declares_shared, shadows, from) in [
+        (
+            "the bare fragment, redeclared locally",
+            "#/components/schemas/Shared",
+            true,
+            true,
+            "from_root",
+        ),
+        (
+            "the root addressed explicitly",
+            "./openapi.yaml#/components/schemas/Shared",
+            true,
+            false,
+            "from_root",
+        ),
+        (
+            "the bare fragment, nothing local to shadow",
+            "#/components/schemas/Shared",
+            false,
+            false,
+            "from_root",
+        ),
+        (
+            "the remedy's own spelling",
+            "./lib.yaml#/components/schemas/Shared",
+            true,
+            false,
+            "from_sub_file",
+        ),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
         std::fs::write(dir.join("openapi.yaml"), root).unwrap();
-        std::fs::write(dir.join("lib.yaml"), lib(spelling)).unwrap();
+        std::fs::write(dir.join("lib.yaml"), lib(spelling, declares_shared)).unwrap();
         let out = dir.join("client.rs");
         let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
@@ -3560,34 +3609,50 @@ components:
             assert_ne!(
                 report.outcome(),
                 Outcome::Rejected,
-                "{spelling}/{entry}: {report:#?}"
+                "{case}/{entry}: {report:#?}"
             );
             let raised = report
                 .diagnostics()
                 .iter()
                 .any(|d| d.code == Code::DeclarationHasNoEffect && d.message.contains("Shared"));
             assert_eq!(
-                raised, shadows,
-                "{spelling}/{entry}: W011 must fire for the bare fragment and only for it — this \
-                 reference names the document it wants, so nothing of the author's is without \
-                 effect and the remedy would ask for the spelling already written: {report:#?}"
+                raised,
+                shadows,
+                "{case} ({spelling}, lib.yaml {} `Shared`)/{entry}: W011 must fire when the bare \
+                 fragment is written over a declaration the referring file makes itself, and in \
+                 no other case — every other case has one declaration in play, so nothing of the \
+                 author's is without effect and the remedy would ask for a spelling that is \
+                 already written or would change which declaration is read: {report:#?}",
+                if declares_shared {
+                    "declares"
+                } else {
+                    "does not declare"
+                }
             );
         }
 
-        // Precedence is unchanged by which spelling was used: both read the root's `Shared`. Read
-        // on the bound type's fields rather than its name, because the emitter suffixes the
-        // sub-file's colliding copy and a substring test would pass on the wrong answer.
+        // Which declaration was actually read. The first three cases all reach the root's, by
+        // precedence or because it is the only one; the fourth is the remedy W011 prints, and the
+        // point of driving it is that it does something different — it binds the sub-file's own
+        // `Shared`. Read on the bound type's fields rather than its name, because the emitter
+        // suffixes the sub-file's colliding copy and a substring test would pass on the wrong
+        // answer.
+        let absent = if from == "from_root" {
+            "from_sub_file"
+        } else {
+            "from_root"
+        };
         let inner = field_type(&code, "pub inner")
-            .unwrap_or_else(|| panic!("{spelling}: no `inner` field at all: {code}"));
+            .unwrap_or_else(|| panic!("{case}: no `inner` field at all: {code}"));
         let bound = inner
             .rsplit_once('<')
             .map_or(inner.as_str(), |(_, tail)| tail)
             .trim_end_matches('>');
         let fields = declared_fields(&code, bound);
         assert!(
-            fields.iter().any(|field| field == "from_root")
-                && !fields.iter().any(|field| field == "from_sub_file"),
-            "{spelling}: `inner` bound `{inner}`, whose fields are {fields:?}: {code}"
+            fields.iter().any(|field| field == from) && !fields.iter().any(|field| field == absent),
+            "{case}: `inner` bound `{inner}`, whose fields are {fields:?}, expected `{from}`: \
+             {code}"
         );
     }
 }
