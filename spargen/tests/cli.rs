@@ -58,15 +58,19 @@ fn generate_is_rejected_as_an_unknown_command() {
 
 /// The diagnostic code the `explain` cases below resolve.
 ///
-/// Any code exercises the same handler, so the choice is governed by one constraint: it must be a
-/// code whose title and explain text no open branch is rewriting, or this suite reddens when an
-/// unrelated pull request lands. At the time of writing that rules out `E023` — pr#87's entire
-/// production change is its explain string, and it is the code the issue behind these tests
-/// suggested — along with `E013` and `E007` (pr#112, pr#125) and `E004` and `W011` (pr#112).
-/// `E008` and `W005` are touched by none of them. Please do not "simplify" this back to `E023`.
+/// Any code exercises the same handler, so the choice is nearly free. The assertions never spell
+/// the prose out — they compare the binary's output against [`spargen::explain`] of the *same*
+/// code, so both sides move together and rewriting any code's wording, or its title, cannot redden
+/// this suite. Two constraints do bind, and they are the only two:
 ///
-/// The assertions never spell the prose out; they compare against [`spargen::explain`], so editing
-/// any wording is free and only the delivery path is pinned.
+/// 1. Both this code and [`OTHER_CODE`] must remain **declared**. `spargen::explain(..).unwrap()`
+///    panics on a code no longer in the enum, so removing one breaks these tests — and that is the
+///    correct outcome, since the CLI could no longer explain it either.
+/// 2. The two must not explain to **identical text**. Both the human and the `--format json` case
+///    below require the two outputs to differ; identical prose would make that assertion vacuous.
+///
+/// Both hold for `E008` and `W005`. Whatever pair is used must satisfy them; a single code cannot,
+/// which is why there are two.
 const EXPLAINED_CODE: &str = "E008";
 
 /// A second, distinct code. Requiring the two to explain differently is what pins that the handler
@@ -151,6 +155,47 @@ fn explain_json_carries_the_code_and_its_explain_text() {
         spargen::explain(EXPLAINED_CODE).ok(),
         "`explain` must carry that code's explain text: {stdout}"
     );
+
+    // A second, distinct code through the same branch, for the reason the human case drives one:
+    // with a single code neither assertion above can distinguish "the handler resolved what it was
+    // given" from "the handler emitted a constant that happens to be that code" — a payload
+    // hardcoded to `EXPLAINED_CODE`'s object satisfies both. Requiring the two objects to differ is
+    // what separates them.
+    let other = Command::new(spargen_bin())
+        .args(["explain", OTHER_CODE, "--format", "json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        other.status.code(),
+        Some(0),
+        "explaining a known code as JSON must succeed: {}",
+        String::from_utf8_lossy(&other.stderr)
+    );
+    let other_stdout = String::from_utf8(other.stdout).unwrap();
+    let other_value: serde_json::Value = serde_json::from_str(&other_stdout)
+        .unwrap_or_else(|error| panic!("--format json must emit JSON: {error}: {other_stdout}"));
+    let other_object = other_value
+        .as_object()
+        .unwrap_or_else(|| panic!("--format json must emit a JSON object: {other_stdout}"));
+
+    assert_eq!(
+        other_object.get("code").and_then(serde_json::Value::as_str),
+        Some(OTHER_CODE),
+        "`code` must echo the requested code: {other_stdout}"
+    );
+    assert_eq!(
+        other_object
+            .get("explain")
+            .and_then(serde_json::Value::as_str),
+        spargen::explain(OTHER_CODE).ok(),
+        "`explain` must carry that code's explain text: {other_stdout}"
+    );
+    assert_ne!(
+        object, other_object,
+        "two distinct codes must not produce the same JSON object, or this branch could not tell \
+         resolution from a constant"
+    );
 }
 
 #[test]
@@ -176,5 +221,27 @@ fn explain_rejects_an_unresolvable_code() {
     assert!(
         stderr.contains("E999"),
         "stderr must name the code it could not resolve: {stderr}"
+    );
+
+    // The same failure under `--format json`. This is deliberate, not an oversight to be "fixed":
+    // an unresolvable code is a *usage* error — the user mistyped an argument — and `--format`
+    // governs diagnostic *reports*. `check` and `diff` route their reports through `emit`, which
+    // honours the flag; `config_error` renders usage errors as plain text everywhere, and this is
+    // one of those. Pinned in both directions so the choice is recorded rather than merely current.
+    let as_json = Command::new(spargen_bin())
+        .args(["explain", "E999", "--format", "json"])
+        .output()
+        .unwrap();
+
+    assert_eq!(
+        as_json.status.code(),
+        Some(3),
+        "`--format json` must not change a usage error's exit status"
+    );
+    let json_stderr = String::from_utf8(as_json.stderr).unwrap();
+    assert!(
+        serde_json::from_str::<serde_json::Value>(json_stderr.trim()).is_err(),
+        "a usage error stays plain text under `--format json`, which applies to reports and not to \
+         argument errors: {json_stderr}"
     );
 }
