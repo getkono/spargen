@@ -6,9 +6,9 @@
 //! `tests/snapshot.rs`. They had already drifted — `openai-openapi` was in the manifest and the
 //! snapshot suite but in neither smoke copy.
 //!
-//! This suite drives the manifest itself, and holds the other copies to it. Having already had to
-//! read `.github/workflows/ci.yml` as text to do that, it also carries the assertions over that
-//! file which have nowhere cheaper to live.
+//! This suite drives the manifest itself, and holds the other copies to it. It is also where this
+//! repository's assertions over its own CI configuration have collected, so the gates over
+//! `.github/workflows/ci.yml` live here beside the corpus ones rather than in a file of their own.
 //!
 //! One manifest field stays unchecked: `tree_sha256`, carried by `openapi-boilerplate` alone. How
 //! it was constructed is recorded nowhere, and no natural definition over that directory
@@ -210,23 +210,59 @@ fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
 fn the_deny_gate_states_the_feature_scope_it_audits() {
     // `--all-features` is what puts a TLS stack in the audited graph: under default features
     // `rustls` is absent from the workspace entirely, so an advisory gate run without the flag
-    // passes because it can see nothing (#147). The action's own default happens to match, which
-    // is exactly why deleting this line would read as tidying rather than as narrowing the gate.
+    // passes because it can see nothing (#147). The action's own defaults happen to match, which
+    // is exactly why deleting these lines would read as tidying rather than as narrowing the gate.
+    //
+    // Asserted over the parsed document rather than over the text, and per step rather than per
+    // job. A line-level assertion over the job's text cannot tell this step's `with:` from one
+    // hung on `actions/checkout`, cannot see an `if:` that stops the job running at all, and reds
+    // on a requoted or strictly stricter value that audits exactly the same graph.
     let ci = read(".github/workflows/ci.yml");
-    let deny: Vec<&str> = ci
-        .lines()
-        .skip_while(|line| *line != "  deny:")
-        .skip(1)
-        .take_while(|line| line.trim().is_empty() || line.starts_with("    "))
-        .collect();
+    let documents = yaml_rust2::YamlLoader::load_from_str(&ci)
+        .expect("`.github/workflows/ci.yml` must parse as YAML");
+    let workflow = documents
+        .first()
+        .expect("`.github/workflows/ci.yml` must carry a YAML document");
 
+    let deny = &workflow["jobs"]["deny"];
     assert!(
-        !deny.is_empty(),
+        !deny.is_badvalue(),
         "`.github/workflows/ci.yml` must define a `deny` job"
     );
     assert!(
-        deny.iter().any(|line| line.trim() == "arguments: --all-features"),
-        "the `deny` job must state `arguments: --all-features`; without it the advisory gate audits a graph with no TLS stack in it"
+        deny["if"].is_badvalue(),
+        "the `deny` job carries an `if:` guard, so the audit it states the scope of need never run"
+    );
+
+    let steps = deny["steps"]
+        .as_vec()
+        .expect("the `deny` job must carry a list of steps");
+    let audit = steps
+        .iter()
+        .find(|step| {
+            step["uses"]
+                .as_str()
+                .is_some_and(|uses| uses.starts_with("EmbarkStudios/cargo-deny-action@"))
+        })
+        .expect("the `deny` job must run a step that `uses: EmbarkStudios/cargo-deny-action@…`");
+
+    let arguments = audit["with"]["arguments"]
+        .as_str()
+        .expect("the cargo-deny-action step must state `with: { arguments: … }` of its own");
+    assert!(
+        arguments
+            .split_whitespace()
+            .any(|token| token == "--all-features"),
+        "the cargo-deny-action step's `arguments: {arguments}` does not pass `--all-features`"
+    );
+
+    let command = audit["with"]["command"]
+        .as_str()
+        .expect("the cargo-deny-action step must state `with: { command: … }` of its own");
+    assert_eq!(
+        command, "check",
+        "the cargo-deny-action step's `command` selects a subset of the checks; anything narrower \
+         than a bare `check` drops `advisories`, which is the check #147 is about"
     );
 }
 
