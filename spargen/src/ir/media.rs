@@ -211,9 +211,9 @@ impl Responses {
     /// that also carries each documented bodyless success status as a payload-free unit variant.
     ///
     /// The entries are the documented success statuses; `default` is never among them. It is the
-    /// success source only when no explicit status is declared at all — the early return that
-    /// bypasses the count above — and is offered to the error shape as the `Range(0)` sentinel
-    /// whenever it is declared, subject there to the same body count (see [`Self::error`]).
+    /// success source only when `by_status` is empty — the early return that bypasses the count
+    /// above — and is offered to the error shape as the `Range(0)` sentinel whenever it is
+    /// declared, subject there to the same body count (see [`Self::error`]).
     ///
     /// What codegen makes of the shape — status dispatch, codec selection, and the streaming
     /// override that [`Self::stream_success`] owns — is deliberately not described here.
