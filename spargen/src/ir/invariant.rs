@@ -109,6 +109,20 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
                     );
                 }
             }
+            // A reservation is not a type: it is an id handed out before its body was lowered, and
+            // `fill` replaces it as soon as the body finishes. One surviving into a *successful*
+            // lowering means some path reserved an id and never filled it, and everything
+            // downstream — emit, surface, the runtime contract — would be reading a shape that was
+            // never computed. This is the proof that no consumer of a finished graph sees one.
+            TypeKind::Reserved => {
+                Diagnostic::error(Code::InvalidInput, def.provenance.clone())
+                    .message(format!(
+                        "IR invariant failed: type `{}` is still a reservation, so its body was \
+                         never lowered",
+                        def.name_hint
+                    ))
+                    .emit(diags);
+            }
             TypeKind::Primitive(_)
             | TypeKind::Enum(_)
             | TypeKind::Bytes
@@ -245,6 +259,33 @@ mod tests {
         let mut diags = Diagnostics::new(100);
         check_invariants(&api, &mut diags);
         assert!(!diags.has_errors());
+    }
+
+    /// The reservation check is the load-bearing half of `TypeKind::Reserved`: it is what lets every
+    /// other site say "unreachable" or "unknown" instead of guessing, and what stops a reserved id
+    /// reaching codegen, where the emitter's arm is an `unreachable!`.
+    ///
+    /// Nothing executed it. Emptying its body left the whole workspace green, and a `panic!` placed
+    /// in it never fired across the entire suite, because no document reaches it — the ordering
+    /// argument that makes a leak impossible is sound and was asserted by nothing. If that argument
+    /// were ever wrong the failure mode is not a diagnostic but a panic inside a consumer's
+    /// `build.rs`, so the check is worth ten lines of direct proof.
+    #[test]
+    fn a_surviving_reservation_is_caught() {
+        let mut api = api_with_header_ty(ty(0));
+        api.types.insert(TypeDef {
+            name_hint: String::new(),
+            kind: TypeKind::Reserved,
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+        });
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&api, &mut diags);
+        assert!(
+            diags.has_errors(),
+            "a reservation that survived lowering must be caught here, because the next stage \
+             emits it: {diags:#?}"
+        );
     }
 
     #[test]
