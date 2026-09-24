@@ -17,7 +17,7 @@ the library API.
 | `E010` | Error | unsupported parameter style |
 | `E011` | Error | invalid input document |
 | `E012` | Error | unknown security scheme |
-| `E013` | Error | irreconcilable `allOf` composition |
+| `E013` | Error | irreconcilable composition (an `allOf` merge, or a `$ref` and the keywords beside it) |
 | `E014` | Error | schema nesting is too deep to lower |
 | `E015` | Error | variable-length tuple not representable |
 | `E016` | Error | specification-undefined construct |
