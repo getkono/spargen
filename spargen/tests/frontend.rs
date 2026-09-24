@@ -3156,6 +3156,54 @@ components:
     }
 }
 
+/// A union that collapses to its sole non-null member, whose intersection with the enclosing
+/// schema's own sibling keywords is irreconcilable (`type: object` against `type: string`), leaves
+/// the union with no variant. Before the rejection existed, the collapse `?`-propagated the failed
+/// intersection with no diagnostic, so the run came back clean with the response body silently
+/// dropped — the fourth behaviour. It must be refused with `E007` at the schema that carries the
+/// union, through both entry points.
+#[test]
+fn a_sole_union_member_irreconcilable_with_its_siblings_is_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  a: { type: string }
+                oneOf:
+                  - { type: string }
+                  - { type: "null" }
+"##;
+    let pointer = "/paths/~1u/get/responses/200/content/application~1json/schema";
+    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let e007: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::NonDisjointUnion)
+            .collect();
+        assert!(
+            e007.iter().any(
+                |d| d.pointer.as_str() == pointer && d.message.contains("sole non-null member")
+            ),
+            "{entry}: E007 for the empty sole-member intersection must point at `{pointer}`, \
+             not at {:?}\n{report:#?}",
+            e007.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
+        );
+    }
+}
+
 /// A union whose sibling keywords would have to be intersected against a target that is still being
 /// lowered. Nothing true can be said about that intersection, so it must be refused — not guessed
 /// at, and not quietly dropped.
