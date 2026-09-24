@@ -204,12 +204,17 @@ pub(crate) struct Responses {
 }
 
 impl Responses {
-    /// The success shape of the operation. A single documented success body yields plain `T`
-    /// (any bodyless success sibling, e.g. `204`, is not modeled — the common `T`-plus-`204`
-    /// shape stays `Plain`). Two or more documented success bodies yield a per-operation success
-    /// enum whose entries are sorted into decode precedence (exact code ascending, then range
-    /// ascending, then `default` last) and which also carries any documented bodyless success
-    /// status as a payload-free unit variant, so no documented status is silently dropped.
+    /// The success shape of the operation. Chosen by counting the entries that carry a *body*, not
+    /// the statuses documented: one bodied success yields plain `T` — the common `T`-plus-`204`
+    /// shape stays `Plain`, its bodyless sibling unmodeled — and two or more yield a per-operation
+    /// success enum, sorted into decode precedence (exact code ascending, then range ascending),
+    /// that also carries each bodyless success *entry* as a payload-free unit variant.
+    ///
+    /// The entries are the lowered success statuses of `by_status`, not everything the document
+    /// declares; `default` is never among them. It is the success source only when `by_status` is
+    /// empty — the early return that bypasses the count above — and is offered to the error shape
+    /// as the `Range(0)` sentinel whenever it is declared, subject there to the same body count
+    /// (see [`Self::error`]).
     pub(crate) fn success(&self) -> SuccessShape {
         // A default with no explicit status entries is the operation's single success body.
         if self.by_status.is_empty() {
@@ -332,7 +337,11 @@ impl Responses {
     /// typed `E` body; two or more yield a per-operation error enum, sorted into classification
     /// precedence (exact code ascending, then range ascending, then `default` — the `Range(0)`
     /// sentinel — last) and carrying any documented bodyless error status as a unit variant.
-    /// `default` contributes here (as `Range(0)`) whenever it is not the sole success source.
+    /// `default` is *offered* here as `Range(0)` whenever it is declared — including when it is
+    /// also the operation's sole success source (see [`Self::success`]), which then types both
+    /// sides with that one body — but it reaches the shape only through the body count above. A
+    /// bodyless `default` therefore becomes the catch-all unit variant of an `Enum` and is dropped
+    /// from a `None` or a `Single`.
     pub(crate) fn error(&self) -> ErrorShape {
         let mut entries: Vec<(StatusSpec, Option<Ty>)> = Vec::new();
         for (status, response) in &self.by_status {
@@ -388,17 +397,27 @@ fn is_success_status(status: StatusSpec) -> bool {
     status.is_success()
 }
 
-/// The success return type of an operation (before wrapping in `ResponseValue<T>`).
+/// The success return type of an operation (before wrapping in `ResponseValue<T>`). Generated code
+/// enters the success branch on the raw transport status alone, and only [`SuccessShape::Enum`]
+/// carries a status set to compare it against — [`SuccessShape::Unit`] and [`SuccessShape::Plain`]
+/// name no status, so they draw no distinction between a documented 2xx and any other. `default`
+/// reaches the success side only when `by_status` is empty; while `by_status` holds any entry,
+/// `default` is not among them and is no success fallback for a 2xx that matches none of them —
+/// which is a fact about the lowered entries, not about what the document declares.
 #[derive(Debug, Clone)]
 pub(crate) enum SuccessShape {
     /// No success body.
     Unit,
     /// A single success body type.
     Plain(Ty),
-    /// Two or more documented success statuses. Generated as a per-operation response enum, one
-    /// variant per status — a payload-carrying variant for a bodied status, a unit variant for a
-    /// documented bodyless status (e.g. `204`). Entries are pre-sorted into decode precedence
-    /// (exact before range; `default` last); decode dispatches by HTTP status in that order.
+    /// Two or more entries *carrying a body*, counted over the success `by_status` entries.
+    /// Counting entries instead of bodies would be wrong: a bodied `200` beside a bodyless `204`
+    /// is two entries and still yields [`SuccessShape::Plain`]. Generated as a per-operation
+    /// response enum, one variant per entry — a payload-carrying variant for a bodied status, a
+    /// unit variant for a bodyless one (e.g. `204`). Entries are the lowered *success* statuses
+    /// only, not everything the document declares — `default` is never among them — pre-sorted
+    /// into decode precedence (exact before range); decode dispatches by HTTP status in that
+    /// order and rejects any other 2xx as `Error::UnexpectedStatus`.
     Enum(Vec<(StatusSpec, Option<Ty>)>),
 }
 
@@ -409,11 +428,13 @@ pub(crate) enum ErrorShape {
     None,
     /// A single documented error body type.
     Single(Ty),
-    /// Two or more documented error statuses. Generated as a per-operation error enum, one variant
-    /// per status — a payload-carrying variant for a bodied status, a unit variant for a documented
-    /// bodyless status. Entries are pre-sorted into classification precedence (exact before range;
-    /// `default` — carried as the `Range(0)` sentinel — last); classification dispatches by HTTP
-    /// status in that order.
+    /// Two or more entries *carrying a body*, counted over the non-success `by_status` entries plus
+    /// the `Range(0)` sentinel a present `default` contributes. Counting entries instead of bodies
+    /// would be wrong: a bodied `404` beside a bodyless `403` is two entries and still yields
+    /// [`ErrorShape::Single`]. Generated as a per-operation error enum, one variant per entry — a
+    /// payload-carrying variant for a bodied status, a unit variant for a bodyless one. Entries are
+    /// pre-sorted into classification precedence (exact before range; `default` — carried as the
+    /// `Range(0)` sentinel — last); classification dispatches by HTTP status in that order.
     Enum(Vec<(StatusSpec, Option<Ty>)>),
 }
 
