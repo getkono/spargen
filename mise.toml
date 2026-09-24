@@ -44,40 +44,83 @@ run = [
 ]
 
 [tasks.deny]
-# `--all-features` matches what CI's cargo-deny-action passes by default. Without it the local gate
-# reports a graph the CI gate never audits: rustls, for one, enters only under `--all-features`, so
-# an advisory against it is clean here and failing there.
+# `--all-features` matches the `arguments` CI's cargo-deny-action step states. Without it the local
+# gate reports a graph the CI gate never audits: rustls, for one, enters only under
+# `--all-features`, so an advisory against it is clean here and failing there (#141).
+# `the_mise_deny_task_audits_the_graph_ci_audits` (spargen/tests/corpus_manifest.rs) holds this
+# command identical to the one CI's step composes: the same flags, no more and no fewer, and no
+# `dir` or `env` on the task to change the graph it resolves.
 description = "Supply-chain audit (licenses, advisories, bans)"
 run = "cargo deny --all-features check"
 
 [tasks.bench]
 description = "Run the generation benchmarks (criterion). CI uploads these as a release artifact."
-run = "cargo bench --bench generate"
+# The same bounded warm-up and measurement times `benchmarks.yml` records with, so a local run
+# measures what the published artifact measured.
+run = "cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3"
 
 [tasks.test]
 description = "Run the full workspace test suite, including generated-code E2E checks"
 run = "cargo test --workspace --all-features"
 
+[tasks.bench-build]
+description = "Compile (do not run) the benchmarks, as CI's test job does"
+# A task of its own rather than part of `test`: `test` is the pre-push hook, and this is the
+# second half of CI's `test` job (`every_mise_task_runs_exactly_what_its_ci_job_runs` holds the
+# job to `test` followed by `bench-build`).
+run = "cargo bench --no-run --workspace"
+
+[tasks.msrv]
+description = "Check the workspace and the generated petstore client on the declared rust-version"
+# `+1.88.0` rather than a toolchain installed as the default: `rust-toolchain.toml` overrides the
+# default toolchain but not an explicit `+toolchain`. Needs `rustup toolchain install 1.88.0`.
+run = [
+  "cargo +1.88.0 check --workspace --all-features --locked",
+  "cargo +1.88.0 check --manifest-path examples/petstore/Cargo.toml",
+]
+
+[tasks.package]
+description = "Verify the published crates stay self-contained"
+# CI's `package` job also runs `cargo publish --dry-run -p spargen-macro` against the workspace
+# `spargen`, but only outside release-plz PRs; that step stays CI-only (see the `package` row of
+# `PAIRINGS` in spargen/tests/corpus_manifest.rs). `cargo publish --dry-run` refuses a dirty tree,
+# as it would in CI's fresh checkout.
+run = [
+  "cargo publish --dry-run -p spargen",
+  "cargo package --list -p spargen-macro > /dev/null",
+]
+
 [tasks.corpus-smoke]
 description = "Run fast corpus smoke checks"
+# Each entry is, byte for byte, a `run:` step of CI's `corpus-smoke` job
+# (`every_mise_task_runs_exactly_what_its_ci_job_runs`). mise runs each entry under
+# `sh -c -o errexit`, as CI runs each step under `bash -e`, so a `check` that exits with anything
+# but 0 or 1 fails the entry before its `grep` runs.
 run = [
   "mkdir -p target/corpus-smoke",
-  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json >target/corpus-smoke/github-30.json || test $? -eq 1; grep -q E001 target/corpus-smoke/github-30.json'",
-  "cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml >target/corpus-smoke/github-31.json",
+  "cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json > target/corpus-smoke/github-30.json || test $? -eq 1",
+  "grep -q E001 target/corpus-smoke/github-30.json",
+  # The current exact GitHub 3.1 pin must clear the strict frontend without carve/omits.
+  "cargo run -q -p spargen --features cli -- check corpus/github-api-3-1/api.github.com.json --format json --config corpus/github-api-3-1/spargen.toml > target/corpus-smoke/github-31.json",
   "cargo run -q -p spargen --features cli -- check corpus/ollama/openapi.yaml --format json",
   "cargo run -q -p spargen --features cli -- check corpus/openapi-boilerplate/src/openapi.yaml --format json",
   # 3.1 and past the version gate, but `POST /realtime/calls` documents `application/sdp` as its
   # only 201 content entry and spargen has no codec for an unregistered media type. The cap is
   # raised for the same reason as GitHub 3.1: at the default of 100 the warning volume truncates
   # the batch before the terminal E009 is reached.
-  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/openai-openapi/openapi.yaml --format json --batch-cap 100000 >target/corpus-smoke/openai.json || test $? -eq 1; grep -q E009 target/corpus-smoke/openai.json'",
+  "cargo run -q -p spargen --features cli -- check corpus/openai-openapi/openapi.yaml --format json --batch-cap 100000 > target/corpus-smoke/openai.json || test $? -eq 1",
+  "grep -q E009 target/corpus-smoke/openai.json",
   # 3.0.x/3.0.1/3.0.0 real-world APIs: rejected at the version gate (E001).
-  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json >target/corpus-smoke/stripe.json || test $? -eq 1; grep -q E001 target/corpus-smoke/stripe.json'",
-  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json >target/corpus-smoke/twilio.json || test $? -eq 1; grep -q E001 target/corpus-smoke/twilio.json'",
-  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json >target/corpus-smoke/k8s.json || test $? -eq 1; grep -q E001 target/corpus-smoke/k8s.json'",
+  "cargo run -q -p spargen --features cli -- check corpus/stripe/spec3.json --format json > target/corpus-smoke/stripe.json || test $? -eq 1",
+  "grep -q E001 target/corpus-smoke/stripe.json",
+  "cargo run -q -p spargen --features cli -- check corpus/twilio-api-2010/twilio_api_v2010.json --format json > target/corpus-smoke/twilio.json || test $? -eq 1",
+  "grep -q E001 target/corpus-smoke/twilio.json",
+  "cargo run -q -p spargen --features cli -- check corpus/kubernetes-authentication-v1/apis__authentication.k8s.io__v1_openapi.json --format json > target/corpus-smoke/k8s.json || test $? -eq 1",
+  "grep -q E001 target/corpus-smoke/k8s.json",
   # meilisearch is 3.1.0 and clears the version gate, but its null externalDocs descriptions fail
   # the official 3.1 document schema before lowering.
-  "sh -c 'cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json >target/corpus-smoke/meili.json || test $? -eq 1; grep -q E011 target/corpus-smoke/meili.json'",
+  "cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json > target/corpus-smoke/meili.json || test $? -eq 1",
+  "grep -q E011 target/corpus-smoke/meili.json",
 ]
 
 [tasks.github-api]
@@ -90,14 +133,23 @@ run = [
 [tasks.example]
 description = "Run the end-to-end petstore examples (build.rs + macro) against a local mock server"
 run = [
+  # build.rs path
   "cargo clippy --manifest-path examples/petstore/Cargo.toml -- -D warnings",
-  "cargo clippy --manifest-path examples/petstore-macro/Cargo.toml -- -D warnings",
   "cargo run --manifest-path examples/petstore/Cargo.toml",
+  # macro path (spargen_macro::generate_api!)
+  "cargo clippy --manifest-path examples/petstore-macro/Cargo.toml -- -D warnings",
   "cargo run --manifest-path examples/petstore-macro/Cargo.toml",
   # The macro path must keep spargen out of the consumer's RUNTIME graph — a proc-macro crate and
   # everything it reaches are host-only. `-i spargen` under `-e no-proc-macro` prints nothing to
   # stdout when spargen is absent from the pruned graph; a non-empty print means it leaked in.
-  "sh -c 'leak=$(cargo tree -e no-proc-macro -i spargen --manifest-path examples/petstore-macro/Cargo.toml 2>/dev/null); if [ -n \"$leak\" ]; then echo \"spargen leaked into the runtime graph:\"; echo \"$leak\"; exit 1; fi; echo \"macro runtime graph is spargen-free\"'",
+  # The script is CI's step verbatim, so a failing `cargo tree` fails here as it fails there.
+  '''
+leak=$(cargo tree -e no-proc-macro -i spargen --manifest-path examples/petstore-macro/Cargo.toml)
+if [ -n "$leak" ]; then
+  echo "spargen leaked into the runtime graph:"; echo "$leak"; exit 1
+fi
+echo "macro runtime graph is spargen-free"
+''',
 ]
 
 [tasks.doc-links]
@@ -123,7 +175,10 @@ run = "if git rev-parse --verify --quiet MERGE_HEAD >/dev/null; then exit 0; fi;
 
 [tasks.commit-range]
 description = "Validate the outgoing commit range against Conventional Commits"
-# convco skips merge commits by default for revwalks (do not add --merges).
+# convco skips merge commits by default for revwalks (do not add --merges). CI's `commits` job
+# runs this command with the pull request's `base.sha..head.sha` in place of `origin/master..HEAD`;
+# that range is the one named difference `every_mise_task_runs_exactly_what_its_ci_job_runs`
+# allows, and it holds everything else in the command identical.
 run = "convco check origin/master..HEAD"
 
 [tasks.hooks]
