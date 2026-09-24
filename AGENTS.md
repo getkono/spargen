@@ -74,8 +74,11 @@ its CI counterpart are **identical** — the same commands with the same flags, 
 under the same environment — and neither may be stricter or narrower than the other; change both
 sides together. `spargen/tests/corpus_manifest.rs` enforces it:
 `every_mise_task_runs_exactly_what_its_ci_job_runs` pairs every CI job with every task and compares
-them byte for byte (`deny`, an action rather than `run:` steps, is held by
-`the_mise_deny_task_audits_the_graph_ci_audits`). "Every CI job" is every job of every workflow
+them byte for byte, and `ci_installs_exactly_the_tool_versions_mise_pins` holds every tool CI
+installs to the exact version mise's `[tools]` pins (and every pin but `hk`, which CI never runs,
+to being installed by CI) — so `deny` runs mise's cargo-deny rather than one an action bundles,
+and `the_deny_gate_states_the_feature_scope_it_audits` holds the shared command to
+`--all-features` and a bare `check`. "Every CI job" is every job of every workflow
 under `.github/workflows/`: each file is either a gate workflow whose jobs are all paired or a
 listed non-gate workflow with its reason (only `release-plz.yml`, which publishes), and an
 unclassified file fails. Each gate workflow's `on:`, `concurrency:` and `permissions:` are pinned
@@ -90,8 +93,11 @@ pinned literally on both sides: `commits` checks the pull request's `base.sha..h
 `commit-range` checks `origin/master..HEAD` (only the range is rewritten; the rest must match), the
 `package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only,
 `benchmarks.yml` adds `set -o pipefail` and `| tee bench-results.txt` to capture the artifact, and
-CI installs `mdbook` and `convco` itself where mise's `[tools]` does. Those tool versions are still
-kept in step by hand — `ci.yml` says so where it pins them. The rest — `check`, `bench-build`,
+CI installs `cargo-deny`, `cargo-hack`, `mdbook` and `convco` itself where mise's `[tools]` does, at
+the same versions. What is still not held identical is the Rust toolchain: `rust-toolchain.toml`
+and CI's `dtolnay/rust-toolchain@stable` both name the moving `stable` channel (and the
+`runtime-dependencies` job's `@nightly` the moving nightly), so a local toolchain is as new as its
+last `rustup update`. The rest — `check`, `bench-build`,
 `msrv`, `package`, `runtime-dependencies`, `powerset`, `corpus-smoke`, `example`, `github-api`,
 `deny`, `docs`, and the rustdoc link check `doc-links` runs (a step inside the `docs` job, not a
 job of its own) — never run in a hook; they are too slow, so a green pre-push is not a green CI.

@@ -207,7 +207,7 @@ fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
 }
 
 /// Flags that narrow what cargo-deny *resolves or consults*, rather than which checks it runs
-/// over the result. Measured on this tree with the `mise.toml` pin (cargo-deny 0.19.9), as
+/// over the result. Measured on this tree with cargo-deny 0.19.9 (then the `mise.toml` pin), as
 /// `cargo-deny --log-level warn --manifest-path ./Cargo.toml --all-features <flag> check
 /// advisories`: `--exclude rustls` and `--target wasm32-unknown-unknown` each turn
 /// `advisories FAILED` (RUSTSEC-2026-0285, reached only through reqwest's TLS feature) into
@@ -216,11 +216,11 @@ fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
 /// measured against an already-populated advisory database, and `--no-default-features` is
 /// overridden by the `--all-features` this same value is required to carry. Not exhaustive:
 /// see `the_deny_gate_states_the_feature_scope_it_audits`, and #238. `-t` is clap's short alias
-/// for `--target` (the only one of these flags cargo-deny 0.19.9's `--help` gives a short form),
-/// and is the same flag: `--all-features -t wasm32-unknown-unknown` drops rustls from
-/// `cargo deny list` exactly as the long spelling does.
+/// for `--target` (the only one of these flags whose short form cargo-deny's `--help` lists, in
+/// 0.19.9 and in 0.20.2 alike), and is the same flag: `--all-features -t wasm32-unknown-unknown`
+/// drops rustls from `cargo deny list` exactly as the long spelling does.
 ///
-/// Shared by both copies of the deny gate: CI's cargo-deny-action step and `mise run deny`.
+/// Applied to `mise run deny`'s commands, which CI's `deny` job runs byte for byte.
 const GRAPH_NARROWING_FLAGS: [&str; 8] = [
     "--exclude",
     "--target",
@@ -240,175 +240,6 @@ fn flag_of(token: &str) -> &str {
         Some(rest) if !rest.starts_with('-') && rest.len() > 1 => token.get(..2).unwrap_or(token),
         _ => token.split_once('=').map_or(token, |(flag, _)| flag),
     }
-}
-
-#[test]
-fn the_deny_gate_states_the_feature_scope_it_audits() {
-    // `--all-features` is what puts a TLS stack in the audited graph: under default features
-    // `rustls` is absent from the workspace entirely, so an advisory gate run without the flag
-    // passes because it can see nothing (#147). The action's own defaults happen to match, which
-    // is exactly why deleting these lines would read as tidying rather than as narrowing the gate.
-    //
-    // Asserted over the parsed document rather than over the text, and per step rather than per
-    // job. A line-level assertion over the job's text cannot tell this step's `with:` from one
-    // hung on `actions/checkout`, cannot see an `if:` that stops the job running at all, and reds
-    // on a requoted or strictly stricter value that audits exactly the same graph.
-    //
-    // Both scopes are guarded, because a gate that does not run and a gate whose failure is
-    // swallowed are indistinguishable from a gate that audits nothing: `if:` and
-    // `continue-on-error:` are checked on the job map *and* on the step map. `continue-on-error:`
-    // is read by *value* rather than by presence, since `false` is byte-for-byte GitHub's own
-    // default and neutralises nothing; `if:` is banned by presence, because its value is an
-    // expression that cannot be evaluated here.
-    //
-    // Narrowing is guarded on three inputs, and only on the steps that audit the *root*
-    // manifest. Two of them reach `check`'s `[WHICH]...` positional -- `command` and
-    // `command-arguments` -- since either alone drops `advisories`, and `command-arguments` must
-    // be *stated* empty rather than absent: leaving it absent would pin the action's default,
-    // which is the one thing this gate exists to stop being load-bearing. The third is
-    // `arguments` itself, which the entrypoint's unquoted `cargo-deny $*` splices straight into
-    // the argv, so any word in it is a flag: `--all-features --target wasm32-unknown-unknown`
-    // contains `--all-features`, reads as *added* coverage, and drops RUSTSEC-2026-0285. The
-    // deny-list below is a **list, not a proof** -- it rejects the graph-narrowing flags that
-    // were measured to hide this tree's live advisory, and cannot establish that some other
-    // `arguments` value does not narrow. Containment rather than equality is deliberate:
-    // `--all-features --locked` is strictly stricter and is #146's own ask.
-    //
-    // Scope: `if:` and `continue-on-error:` are asserted on *every* matching step, because any
-    // of them being neutralised is this job not running what it says it runs. The three
-    // narrowing assertions apply only where `manifest-path` is absent or names the root
-    // `Cargo.toml`, because applying them everywhere turns "no step may narrow the gate" into
-    // "every step must be maximal" -- which reds #184's cheapest shape (a cargo-deny step per
-    // example workspace with `command-arguments: advisories`, root `deny.toml` untouched; the
-    // root policy is red on bans and licenses for all three examples and green on advisories).
-    // At least one root-manifest audit is required, so scoping by `manifest-path` cannot be used
-    // to empty the gate by pointing its only step somewhere else.
-    let ci = read(".github/workflows/ci.yml");
-    let documents = yaml_rust2::YamlLoader::load_from_str(&ci)
-        .expect("`.github/workflows/ci.yml` must parse as YAML");
-    let workflow = documents
-        .first()
-        .expect("`.github/workflows/ci.yml` must carry a YAML document");
-
-    let deny = &workflow["jobs"]["deny"];
-    assert!(
-        !deny.is_badvalue(),
-        "`.github/workflows/ci.yml` must define a `deny` job"
-    );
-    assert!(
-        deny["if"].is_badvalue(),
-        "the `deny` job map carries an `if:` key, so the whole audit can be conditioned out"
-    );
-    assert!(
-        deny["continue-on-error"].is_badvalue()
-            || deny["continue-on-error"].as_bool() == Some(false),
-        "the `deny` job map sets `continue-on-error:` to something other than `false`, so a \
-         failing audit need not fail the gate"
-    );
-
-    let steps = deny["steps"]
-        .as_vec()
-        .expect("the `deny` job must carry a list of steps");
-    // GitHub resolves `uses: owner/repo@ref` case-insensitively, so the comparison is too:
-    // `embarkstudios/cargo-deny-action@v2` is a working spelling and must not red a gate that
-    // audits the same graph. *Every* match is audited, not the first and not exactly one: a
-    // second step is only unread if the test declines to read it, and forbidding one would
-    // forbid the obvious shape of #184 (a cargo-deny step per example workspace manifest) for no
-    // gain -- GitHub runs steps in order and fails the job on the first failure, so a later step
-    // cannot weaken an earlier one.
-    let audits: Vec<_> = steps
-        .iter()
-        .filter(|step| {
-            step["uses"].as_str().is_some_and(|uses| {
-                uses.to_ascii_lowercase()
-                    .starts_with("embarkstudios/cargo-deny-action@")
-            })
-        })
-        .collect();
-    assert!(
-        !audits.is_empty(),
-        "the `deny` job runs no step that `uses: EmbarkStudios/cargo-deny-action@…`, so nothing \
-         in it audits the dependency graph"
-    );
-
-    let mut root_audits = 0usize;
-    for audit in audits {
-        assert!(
-            audit["if"].is_badvalue(),
-            "the cargo-deny-action step map carries an `if:` key, so the audit can be \
-             conditioned out while the `deny` job it sits in still reports success"
-        );
-        assert!(
-            audit["continue-on-error"].is_badvalue()
-                || audit["continue-on-error"].as_bool() == Some(false),
-            "the cargo-deny-action step map sets `continue-on-error:` to something other than \
-             `false`, so a failing audit would leave the `deny` job green"
-        );
-
-        // `manifest-path` absent means the action's `./Cargo.toml` default, which is the
-        // workspace root; `Cargo.toml` and `./Cargo.toml` are the same file and both spellings
-        // are accepted so that writing the default out does not red the gate.
-        let audits_root_manifest = match audit["with"]["manifest-path"].as_str() {
-            None => true,
-            Some(path) => path.trim_start_matches("./") == "Cargo.toml",
-        };
-        if !audits_root_manifest {
-            continue;
-        }
-        root_audits += 1;
-
-        let arguments = audit["with"]["arguments"]
-            .as_str()
-            .expect("the cargo-deny-action step must state `with: { arguments: … }` of its own");
-        assert!(
-            arguments
-                .split_whitespace()
-                .any(|token| token == "--all-features"),
-            "the cargo-deny-action step's `arguments: {arguments}` does not pass `--all-features`"
-        );
-        for token in arguments.split_whitespace() {
-            let flag = flag_of(token);
-            assert!(
-                !GRAPH_NARROWING_FLAGS.contains(&flag),
-                "the cargo-deny-action step's `arguments: {arguments}` passes `{flag}`, which \
-                 shrinks the graph cargo-deny resolves rather than the checks it runs over it: \
-                 the entrypoint splices `arguments` into an unquoted `cargo-deny $*`, so \
-                 `--all-features {flag} …` still contains `--all-features` and still drops \
-                 RUSTSEC-2026-0285. Strictly stricter values such as `--all-features --locked` \
-                 are deliberately still accepted"
-            );
-        }
-
-        let command = audit["with"]["command"]
-            .as_str()
-            .expect("the cargo-deny-action step must state `with: { command: … }` of its own");
-        assert_eq!(
-            command, "check",
-            "the cargo-deny-action step's `command` selects a subset of the checks; anything \
-             narrower than a bare `check` drops `advisories`, which is the check #147 is about"
-        );
-
-        let command_arguments = audit["with"]["command-arguments"].as_str().expect(
-            "the cargo-deny-action step must state `with: { command-arguments: \"\" } ` of its \
-             own: it is the second input feeding `check`'s `[WHICH]...` positional, and leaving \
-             it absent inherits the action's default for one of the three inputs \
-             (`arguments`, `command`, `command-arguments`) that can silently narrow the audit",
-        );
-        assert_eq!(
-            command_arguments, "",
-            "the cargo-deny-action step's `command-arguments` narrows `check`'s `[WHICH]...` \
-             positional: `command-arguments: licenses` composes `cargo-deny --all-features check \
-             licenses` and drops `advisories` exactly as a narrowed `command` does, leaving \
-             `command: check` true and this suite otherwise green"
-        );
-    }
-
-    assert!(
-        root_audits > 0,
-        "no cargo-deny-action step in the `deny` job audits the root `Cargo.toml`: every one \
-         states a `manifest-path` pointing elsewhere, so the workspace this gate exists to audit \
-         is audited by nothing and the three narrowing assertions above never run"
-    );
 }
 
 /// The keys a `mise.toml` task may carry. Every other key changes what the task executes or where:
@@ -568,81 +399,53 @@ fn ci_workflow() -> yaml_rust2::Yaml {
 }
 
 #[test]
-fn the_mise_deny_task_audits_the_graph_ci_audits() {
-    // `mise run deny` is the supply-chain gate CLAUDE.md hands a contributor, and CI spells its
-    // own copy out rather than calling it. The two had drifted: the task ran a bare `cargo deny
-    // check`, which resolves default features only and so has no `rustls` in its graph, and
-    // reported `advisories ok` on the very lockfile CI failed with RUSTSEC-2026-0285 (#141). The
-    // flag later arrived in an unrelated commit with nothing holding it there.
+fn the_deny_gate_states_the_feature_scope_it_audits() {
+    // `--all-features` is what puts a TLS stack in the audited graph: under default features
+    // `rustls` is absent from the workspace entirely, so an advisory gate run without the flag
+    // passes because it can see nothing (#147). `mise run deny` ran a bare `cargo deny check`
+    // and reported `advisories ok` on the very lockfile CI failed with RUSTSEC-2026-0285 (#141).
     //
-    // The policy is identity: a mise task runs exactly what its CI job runs, neither stricter nor
-    // narrower. `every_mise_task_runs_exactly_what_its_ci_job_runs` holds the tasks whose CI job
-    // is `run:` steps; CI's deny job is a cargo-deny-action step instead, whose argv the action
-    // composes as `cargo-deny --log-level warn --manifest-path ./Cargo.toml <arguments> check
-    // <command-arguments>`, so this test holds the task to that composition. The task's global
-    // flags must be exactly the words CI passes as `arguments` -- tightening either side (say,
-    // `--locked`, #146) reds here until the other follows. `--log-level warn` and
-    // `--manifest-path ./Cargo.toml` are cargo-deny's own defaults when run from the workspace
-    // root, so the task states neither, and may not: a `--manifest-path`, or a `dir`/`env` on the
-    // task (`mise_tasks` rejects the first; the assertion below the second), changes the graph --
-    // `dir = "support-runtime"` audits 102 crates rather than the workspace's 211. The task is
-    // also held to the rules the CI step is held to: `--all-features`, no graph-narrowing flag,
-    // and a bare `check`.
-    let workflow = ci_workflow();
-    let ci_arguments: Vec<String> = workflow["jobs"]["deny"]["steps"]
-        .as_vec()
-        .expect("the `deny` job must carry a list of steps")
-        .iter()
-        .filter(|step| {
-            step["uses"].as_str().is_some_and(|uses| {
-                uses.to_ascii_lowercase()
-                    .starts_with("embarkstudios/cargo-deny-action@")
-            }) && step["with"]["manifest-path"]
-                .as_str()
-                .is_none_or(|path| path.trim_start_matches("./") == "Cargo.toml")
-        })
-        .filter_map(|step| step["with"]["arguments"].as_str())
-        .flat_map(str::split_whitespace)
-        .map(str::to_owned)
-        .collect();
-    assert!(
-        ci_arguments
-            .iter()
-            .any(|argument| argument == "--all-features"),
-        "CI's root-manifest cargo-deny-action step passes no `--all-features`, so there is no \
-         CI feature scope for `mise run deny` to be held to"
-    );
-
+    // CI's `deny` job runs `mise run deny`'s commands byte for byte, on the same cargo-deny
+    // (`every_mise_task_runs_exactly_what_its_ci_job_runs`,
+    // `ci_installs_exactly_the_tool_versions_mise_pins`), so holding the task's commands here
+    // holds both gates. What identity cannot catch is both sides narrowing together, which is
+    // what this test is for.
+    //
+    // Every command must be a cargo-deny audit, and the task must set no `env` (`CARGO_TARGET_DIR`
+    // or `CARGO_NET_OFFLINE` change what cargo-deny resolves; `mise_tasks` already rejects `dir`).
+    // The narrowing rules apply to each command that audits the *root* manifest -- no
+    // `--manifest-path`, or one naming the root `Cargo.toml` -- and at least one must: applying
+    // them to every command would turn "no command may narrow the gate" into "every command must
+    // be maximal", which reds #184's cheapest shape (a second audit per example workspace with
+    // `check advisories`). A root audit must pass `--all-features`, no graph-narrowing flag, and
+    // a bare `check`, since `check licenses` drops `advisories`. The deny-list is a **list, not a
+    // proof** (#238): it rejects the graph-narrowing flags measured to hide this tree's live
+    // advisory, and cannot establish that some other flag does not narrow.
     let tasks = mise_tasks();
     assert!(
         mise_env(&tasks, "deny").is_empty(),
-        "`[tasks.deny]` sets an `env`, and CI's cargo-deny-action step sets none; an environment \
-         variable such as `CARGO_TARGET_DIR` or `CARGO_NET_OFFLINE` changes what cargo-deny \
-         resolves"
+        "`[tasks.deny]` sets an `env`; an environment variable such as `CARGO_TARGET_DIR` or \
+         `CARGO_NET_OFFLINE` changes what cargo-deny resolves"
     );
     let commands = mise_commands(&tasks, "deny");
-
-    let audits: Vec<Vec<&str>> = commands
-        .iter()
-        .map(|command| command.split_whitespace().collect::<Vec<_>>())
-        .filter(|words| {
-            words.starts_with(&["cargo", "deny"]) || words.first() == Some(&"cargo-deny")
-        })
-        .collect();
     assert!(
-        !audits.is_empty(),
-        "`mise run deny` runs no `cargo deny` command, so the local gate audits nothing"
-    );
-    assert_eq!(
-        audits.len(),
-        commands.len(),
-        "`mise run deny` runs {commands:?}, which is more than cargo-deny audits; CI's deny job \
-         runs nothing else, and the two must run the same thing"
+        !commands.is_empty(),
+        "`mise run deny` runs nothing, so neither gate audits the dependency graph"
     );
 
-    for words in audits {
-        let command = words.join(" ");
-        let skip = if words[0] == "cargo-deny" { 1 } else { 2 };
+    let mut root_audits = 0usize;
+    for command in &commands {
+        let words: Vec<&str> = command.split_whitespace().collect();
+        let skip = if words.starts_with(&["cargo", "deny"]) {
+            2
+        } else if words.first() == Some(&"cargo-deny") {
+            1
+        } else {
+            panic!(
+                "`mise run deny` runs `{command}`, which is not a cargo-deny audit; the gate runs \
+                 nothing else"
+            );
+        };
         let check = words
             .iter()
             .position(|word| *word == "check")
@@ -650,35 +453,47 @@ fn the_mise_deny_task_audits_the_graph_ci_audits() {
         let globals = &words[skip..check];
         let which = &words[check + 1..];
 
-        let mut local = globals.to_vec();
-        local.sort_unstable();
-        let mut remote: Vec<&str> = ci_arguments.iter().map(String::as_str).collect();
-        remote.sort_unstable();
-        assert_eq!(
-            local, remote,
-            "`mise run deny` runs `{command}`, whose global flags are not the words CI's \
-             cargo-deny-action step passes as `arguments`; the two gates must run the same audit, \
-             or one can pass on a lockfile the other fails"
+        let mut manifest = None;
+        let mut rest = globals.iter();
+        while let Some(word) = rest.next() {
+            if *word == "--manifest-path" {
+                manifest = rest.next().copied();
+            } else if let Some(path) = word.strip_prefix("--manifest-path=") {
+                manifest = Some(path);
+            }
+        }
+        if manifest.is_some_and(|path| path.trim_start_matches("./") != "Cargo.toml") {
+            continue;
+        }
+        root_audits += 1;
+
+        assert!(
+            globals.contains(&"--all-features"),
+            "`mise run deny` runs `{command}`, which does not pass `--all-features`, so the \
+             audited graph has no TLS stack in it"
         );
         for word in globals {
             let flag = flag_of(word);
             assert!(
                 !GRAPH_NARROWING_FLAGS.contains(&flag),
                 "`mise run deny` runs `{command}`, whose `{flag}` shrinks the graph cargo-deny \
-                 resolves below the one CI audits"
-            );
-            assert_ne!(
-                flag, "--manifest-path",
-                "`mise run deny` runs `{command}`, which names a `--manifest-path`; CI audits \
-                 the workspace root, and so must the local gate"
+                 resolves rather than the checks it runs over it; `--all-features {flag} …` \
+                 still contains `--all-features` and still drops RUSTSEC-2026-0285. Strictly \
+                 stricter values such as `--all-features --locked` are deliberately still accepted"
             );
         }
         assert!(
             which.is_empty(),
-            "`mise run deny` runs `{command}`, which narrows `check` to {which:?}; CI runs a \
-             bare `check`, so every check it runs must run locally too"
+            "`mise run deny` runs `{command}`, which narrows `check` to {which:?}; anything \
+             narrower than a bare `check` can drop `advisories`, which is the check #147 is about"
         );
     }
+    assert!(
+        root_audits > 0,
+        "no `mise run deny` command audits the root `Cargo.toml`: every one names a \
+         `--manifest-path` elsewhere, so the workspace this gate exists to audit is audited by \
+         nothing"
+    );
 }
 
 /// How a CI job and the mise tasks relate. Every job in the [`GATE_WORKFLOWS`] and every task in
@@ -688,16 +503,6 @@ fn the_mise_deny_task_audits_the_graph_ci_audits() {
 enum Pairing {
     /// The job runs exactly what the tasks run; see [`Pair`].
     Identical(Pair),
-    /// Held identical by another test, because the job's gate is an action rather than `run:`
-    /// steps. The job's steps other than that action are still pinned literally.
-    HeldBy {
-        job: &'static str,
-        task: &'static str,
-        test: &'static str,
-        /// The `uses:` prefix (lowercase) of the gate action `test` holds.
-        action: &'static str,
-        ci_only: &'static [CiOnly],
-    },
     /// A task with no CI counterpart by nature: it rewrites the tree or installs hooks.
     LocalOnly {
         task: &'static str,
@@ -869,7 +674,7 @@ const PAIRINGS: &[Pairing] = &[
             CHECKOUT,
             STABLE,
             CACHE,
-            provision("uses: taiki-e/install-action@cargo-hack"),
+            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-hack@0.6.39"),
         ],
         ..PAIR
     }),
@@ -937,13 +742,16 @@ const PAIRINGS: &[Pairing] = &[
         ],
         ..PAIR
     }),
-    Pairing::HeldBy {
+    Pairing::Identical(Pair {
         job: "deny",
-        task: "deny",
-        test: "the_mise_deny_task_audits_the_graph_ci_audits",
-        action: "embarkstudios/cargo-deny-action@",
-        ci_only: &[CHECKOUT],
-    },
+        tasks: &["deny"],
+        ci_only: &[
+            CHECKOUT,
+            STABLE,
+            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-deny@0.20.2"),
+        ],
+        ..PAIR
+    }),
     Pairing::Identical(Pair {
         job: "commits",
         tasks: &["commit-range"],
@@ -1012,8 +820,8 @@ const PAIRINGS: &[Pairing] = &[
 ];
 
 /// Actions a [`provision`] step may use. Each provisions a checkout, a toolchain, a cache, or a
-/// binary; none runs a gate. An action outside this list may be a gate of its own
-/// (cargo-deny-action is), which a `run:`-step comparison would never see.
+/// binary; none runs a gate. An action outside this list may be a gate of its own (the
+/// cargo-deny-action the `deny` job once ran was), which a `run:`-step comparison would never see.
 const PROVISIONING_ACTIONS: [&str; 4] = [
     "actions/checkout@",
     "dtolnay/rust-toolchain@",
@@ -1096,16 +904,14 @@ fn gate_workflow(gate: &GateWorkflow) -> yaml_rust2::Yaml {
     workflow["jobs"].clone()
 }
 
-/// Checks `job`'s own keys and walks its steps: each is the next of `ci_only` (literally), a step
-/// using `held_action` (held by another test), or a gate `run:` step. Returns the gate steps as
-/// (environment, trimmed command).
+/// Checks `job`'s own keys and walks its steps: each is the next of `ci_only` (literally) or a
+/// gate `run:` step. Returns the gate steps as (environment, trimmed command).
 fn gate_steps(
     file: &str,
     name: &str,
     job: &yaml_rust2::Yaml,
     job_if: Option<&str>,
     ci_only: &[CiOnly],
-    held_action: Option<&str>,
 ) -> Vec<(BTreeMap<String, String>, String)> {
     assert!(!job.is_badvalue(), "`{file}` has no `{name}` job");
     for key in yaml_keys(job, &format!("the `{name}` job")) {
@@ -1166,18 +972,10 @@ fn gate_steps(
         }
         let keys = yaml_keys(step, &format!("a `{name}` step"));
         if let Some(uses) = step["uses"].as_str() {
-            let uses = uses.to_ascii_lowercase();
-            assert!(
-                held_action.is_some_and(|action| uses.starts_with(action)),
-                "the `{name}` job uses `{uses}` in a step no CI-only row pins literally; pin it \
-                 in the job's PAIRINGS row (its `@ref` and `with:` included)"
+            panic!(
+                "the `{name}` job uses `{uses}` in a step no CI-only row pins literally; pin it in \
+                 the job's PAIRINGS row (its `@ref` and `with:` included)"
             );
-            assert!(
-                keys.iter()
-                    .all(|key| ["name", "uses", "with"].contains(key)),
-                "the `{name}` job's `{uses}` step sets more than `name:`, `uses:` and `with:`"
-            );
-            continue;
         }
         let run = step["run"]
             .as_str()
@@ -1231,7 +1029,6 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
     for pairing in PAIRINGS {
         match pairing {
             Pairing::Identical(pair) => claim(&[(pair.workflow, pair.job)], pair.tasks),
-            Pairing::HeldBy { job, task, .. } => claim(&[("ci.yml", *job)], &[*task]),
             Pairing::LocalOnly { task, why } => {
                 assert!(!why.is_empty(), "a local-only task must say why");
                 claim(&[], &[*task]);
@@ -1286,32 +1083,6 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
     for pairing in PAIRINGS {
         let pair = match pairing {
             Pairing::Identical(pair) => pair,
-            Pairing::HeldBy {
-                job,
-                test,
-                action,
-                ci_only,
-                ..
-            } => {
-                assert!(
-                    read("spargen/tests/corpus_manifest.rs").contains(&format!("fn {test}()")),
-                    "`{job}` is held by `{test}`, which does not exist"
-                );
-                let steps = gate_steps(
-                    "ci.yml",
-                    job,
-                    &workflow_jobs["ci.yml"][*job],
-                    None,
-                    ci_only,
-                    Some(action),
-                );
-                assert!(
-                    steps.is_empty(),
-                    "the `{job}` job runs {steps:?} besides the action `{test}` holds; its task \
-                     never runs them"
-                );
-                continue;
-            }
             Pairing::LocalOnly { .. } => continue,
         };
         let name = pair.job;
@@ -1321,7 +1092,6 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
             &workflow_jobs[pair.workflow][name],
             pair.job_if,
             pair.ci_only,
-            None,
         );
         for rewrite in pair.rewrites {
             assert!(!rewrite.why.is_empty(), "a rewrite must say why");
@@ -1429,6 +1199,190 @@ fn the_msrv_gate_runs_on_the_declared_rust_version() {
         [toolchain.as_str()],
         "CI's `msrv` job must install exactly the `rust-version` toolchain its commands name"
     );
+}
+
+/// `mise.toml` `[tools]` entries CI has no counterpart for, each with why. Every other pinned tool
+/// must be installed by CI at exactly the pinned version.
+const LOCAL_ONLY_TOOLS: [(&str, &str); 1] = [(
+    "hk",
+    "the git hook manager; CI runs each gate's commands itself and installs no hooks",
+)];
+
+/// `mise.toml`'s `[tools]` as tool name to pinned version. The name drops the backend
+/// (`cargo:convco` is `convco`, `aqua:EmbarkStudios/cargo-deny` is `cargo-deny`), which is the
+/// name `cargo install` and `taiki-e/install-action` spell the same tool with.
+fn mise_tool_pins() -> BTreeMap<String, String> {
+    let mise: toml::Table = toml::from_str(&read("mise.toml")).expect("mise.toml must parse");
+    let tools = mise["tools"]
+        .as_table()
+        .expect("`mise.toml` must carry a `[tools]` table");
+    tools
+        .iter()
+        .map(|(key, version)| {
+            let name = key.rsplit_once(':').map_or(key.as_str(), |(_, tool)| tool);
+            let name = name.rsplit_once('/').map_or(name, |(_, tool)| tool);
+            let version = version
+                .as_str()
+                .unwrap_or_else(|| panic!("`[tools] {key}` must be a version string"));
+            assert!(
+                !version.is_empty() && version.split('.').all(|part| part.parse::<u64>().is_ok()),
+                "`[tools] {key} = {version:?}` is not an exact version, so what mise installs \
+                 moves without a commit and nothing can hold CI to it"
+            );
+            (name.to_owned(), version.to_owned())
+        })
+        .collect()
+}
+
+/// The `(tool, version)` pairs a `cargo install` / `cargo binstall` line installs, with `None`
+/// for a tool installed without a version (which is whatever is newest at run time).
+fn cargo_installs(line: &str) -> Vec<(String, Option<String>)> {
+    // Flags of `cargo install` that take a value, so the value is not read as a crate name.
+    const VALUED: [&str; 16] = [
+        "--version",
+        "--vers",
+        "--root",
+        "--git",
+        "--branch",
+        "--tag",
+        "--rev",
+        "--path",
+        "--registry",
+        "--index",
+        "--target",
+        "--features",
+        "-F",
+        "--profile",
+        "--jobs",
+        "-j",
+    ];
+    let words: Vec<&str> = line.split_whitespace().collect();
+    let Some(start) = words
+        .windows(2)
+        .position(|pair| pair[0] == "cargo" && ["install", "binstall"].contains(&pair[1]))
+    else {
+        return Vec::new();
+    };
+    let mut version = None;
+    let mut crates = Vec::new();
+    let mut rest = words[start + 2..].iter();
+    while let Some(word) = rest.next() {
+        if ["&&", "||", ";", "|"].contains(word) {
+            break;
+        }
+        if let Some((flag, value)) = word.split_once('=') {
+            if flag == "--version" || flag == "--vers" {
+                version = Some(value.to_owned());
+            }
+            continue;
+        }
+        if *word == "--version" || *word == "--vers" {
+            version = rest.next().map(|value| (*value).to_owned());
+        } else if VALUED.contains(word) {
+            rest.next();
+        } else if !word.starts_with('-') {
+            crates.push(*word);
+        }
+    }
+    crates
+        .into_iter()
+        .map(|krate| match krate.split_once('@') {
+            Some((name, pinned)) => (name.to_owned(), Some(pinned.to_owned())),
+            None => (krate.to_owned(), version.clone()),
+        })
+        .collect()
+}
+
+#[test]
+fn ci_installs_exactly_the_tool_versions_mise_pins() {
+    // The pairing test holds each CI job's commands identical to its mise task's, but a command
+    // is only identical if the binary running it is: `cargo deny check` under cargo-deny 0.19.9
+    // and under 0.20.2 are different audits (0.20.0 added a lint and removed CLI flags), and CI's
+    // deny gate ran the action's bundled 0.20.2 while mise pinned 0.19.9 (#228). The same held for
+    // cargo-hack, which CI installed at whatever was newest. So every tool CI installs must be one
+    // `[tools]` pins, at exactly that version, and every pinned tool must be installed by CI
+    // unless LOCAL_ONLY_TOOLS says why not. A gate action that carries its own copy of a pinned
+    // tool is caught by the second half: the tool is then pinned but never installed.
+    let pins = mise_tool_pins();
+    let mut installed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for file in workflow_files() {
+        let workflow = workflow(&file);
+        let Some(jobs) = workflow["jobs"].as_hash() else {
+            continue;
+        };
+        for (job, body) in jobs {
+            let job = job.as_str().unwrap_or_default();
+            for step in body["steps"].as_vec().into_iter().flatten() {
+                let mut found = Vec::new();
+                if let Some(uses) = step["uses"].as_str() {
+                    let lowered = uses.to_ascii_lowercase();
+                    if lowered.starts_with("taiki-e/install-action@") {
+                        // `taiki-e/install-action@<tool>` installs the newest release of `<tool>`;
+                        // only `with: { tool: <tool>@<version> }` names a version.
+                        let tools = step["with"]["tool"].as_str().unwrap_or_else(|| {
+                            panic!(
+                                "`{file}`'s `{job}` job uses `{uses}` without `with: {{ tool: … }}`, \
+                                 which installs the newest release rather than the version \
+                                 `mise.toml` pins; use `taiki-e/install-action@v2` with \
+                                 `tool: <name>@<version>`"
+                            )
+                        });
+                        for tool in tools.split([',', '\n']).map(str::trim) {
+                            if tool.is_empty() {
+                                continue;
+                            }
+                            found.push(match tool.split_once('@') {
+                                Some((name, version)) => {
+                                    (name.to_owned(), Some(version.to_owned()))
+                                }
+                                None => (tool.to_owned(), None),
+                            });
+                        }
+                    }
+                }
+                if let Some(run) = step["run"].as_str() {
+                    found.extend(run.lines().flat_map(cargo_installs));
+                }
+                for (tool, version) in found {
+                    let pinned = pins.get(&tool).unwrap_or_else(|| {
+                        panic!(
+                            "`{file}`'s `{job}` job installs `{tool}`, which `[tools]` in \
+                             mise.toml does not pin; the mise task that runs it locally would \
+                             run whatever is on PATH"
+                        )
+                    });
+                    assert_eq!(
+                        version.as_deref(),
+                        Some(pinned.as_str()),
+                        "`{file}`'s `{job}` job installs `{tool}` at {version:?}, and `[tools]` in \
+                         mise.toml pins {pinned}; the two gates must run the same binary"
+                    );
+                    installed.entry(tool).or_default().insert(job.to_owned());
+                }
+            }
+        }
+    }
+
+    for (tool, why) in LOCAL_ONLY_TOOLS {
+        assert!(!why.is_empty(), "a local-only tool must say why");
+        assert!(
+            pins.contains_key(tool),
+            "LOCAL_ONLY_TOOLS names `{tool}`, which `[tools]` in mise.toml does not pin"
+        );
+        assert!(
+            !installed.contains_key(tool),
+            "LOCAL_ONLY_TOOLS names `{tool}`, which CI installs; drop it from the list"
+        );
+    }
+    for tool in pins.keys() {
+        assert!(
+            installed.contains_key(tool) || LOCAL_ONLY_TOOLS.iter().any(|(local, _)| local == tool),
+            "`[tools]` in mise.toml pins `{tool}`, and no CI job installs it: either CI runs its \
+             gate through a binary it gets some other way (an action's bundled copy, a runner \
+             image's), whose version nothing holds to the pin, or the tool is local-only and \
+             belongs in LOCAL_ONLY_TOOLS with why"
+        );
+    }
 }
 
 #[test]
