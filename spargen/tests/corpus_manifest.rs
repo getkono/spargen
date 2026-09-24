@@ -763,9 +763,66 @@ struct Rewrite {
     why: &'static str,
 }
 
-/// The workflows whose every job must be named by a [`PAIRINGS`] row. `release-plz.yml` is
-/// absent: it publishes, and gates nothing a contributor could run first.
-const GATE_WORKFLOWS: [&str; 2] = ["ci.yml", "benchmarks.yml"];
+/// A workflow whose every job must be named by a [`PAIRINGS`] row, with the top-level keys that
+/// decide when and whether its jobs run pinned literally (compared as parsed YAML). A `paths:`
+/// filter under `pull_request:`, a narrower `branches:`, or a different `cancel-in-progress`
+/// would make CI gate less than the tasks do without touching a single job.
+struct GateWorkflow {
+    file: &'static str,
+    on: &'static str,
+    /// `None` where the workflow has no `concurrency:`.
+    concurrency: Option<&'static str>,
+    /// `None` where the workflow has no `permissions:`.
+    permissions: Option<&'static str>,
+}
+
+/// Every workflow under `.github/workflows/` (`.yml` or `.yaml`) is one of these or one of
+/// [`NON_GATE_WORKFLOWS`]; an unclassified file fails, so a new workflow cannot run a gate no
+/// pairing sees.
+const GATE_WORKFLOWS: [GateWorkflow; 2] = [
+    GateWorkflow {
+        file: "ci.yml",
+        on: "push:\n  branches: [master]\npull_request:",
+        concurrency: Some("group: ci-${{ github.ref }}\ncancel-in-progress: true"),
+        permissions: None,
+    },
+    GateWorkflow {
+        file: "benchmarks.yml",
+        on: "push:\n  tags: [\"v*\"]\nworkflow_dispatch:",
+        concurrency: None,
+        permissions: None,
+    },
+];
+
+/// Workflows that gate nothing, each with why. None of their jobs is paired, so a gate added to
+/// one would run unseen: keep this list to workflows that are not gates by nature.
+const NON_GATE_WORKFLOWS: [(&str, &str); 1] = [(
+    "release-plz.yml",
+    "publishes releases and maintains the release PR; it gates nothing a contributor could run \
+     first",
+)];
+
+/// The top-level keys a gate workflow may carry. `name` is cosmetic, `env` is held to
+/// [`COSMETIC_WORKFLOW_ENV`], and `on`, `concurrency` and `permissions` are pinned by the
+/// workflow's [`GateWorkflow`] row. Anything else (`defaults:` can change the shell or directory
+/// of every `run:` step without appearing on any of them) is rejected.
+const WORKFLOW_KEYS: [&str; 6] = ["name", "on", "env", "concurrency", "permissions", "jobs"];
+
+/// The file names under `.github/workflows/` that GitHub runs.
+fn workflow_files() -> BTreeSet<String> {
+    let dir = workspace_root().join(".github/workflows");
+    std::fs::read_dir(&dir)
+        .unwrap_or_else(|error| panic!("cannot list `{dir}`: {error}"))
+        .map(|entry| {
+            entry
+                .expect("a directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .filter(|name| name.ends_with(".yml") || name.ends_with(".yaml"))
+        .collect()
+}
 
 const PAIRINGS: &[Pairing] = &[
     Pairing::Identical(Pair {
@@ -1005,8 +1062,30 @@ fn yaml_keys<'a>(map: &'a yaml_rust2::Yaml, whose: &str) -> Vec<&'a str> {
 }
 
 /// Holds a workflow's top level to what no task can see, and returns its `jobs:`.
-fn gate_workflow(file: &str) -> yaml_rust2::Yaml {
+fn gate_workflow(gate: &GateWorkflow) -> yaml_rust2::Yaml {
+    let file = gate.file;
     let workflow = workflow(file);
+    for key in yaml_keys(&workflow, &format!("`{file}`")) {
+        assert!(
+            WORKFLOW_KEYS.contains(&key),
+            "`{file}` sets top-level `{key}:`, which can change whether or how every job runs; \
+             no mise task has anything to match it with"
+        );
+    }
+    for (key, pinned) in [
+        ("on", Some(gate.on)),
+        ("concurrency", gate.concurrency),
+        ("permissions", gate.permissions),
+    ] {
+        let expected = pinned.map_or(yaml_rust2::Yaml::BadValue, |text| {
+            yaml_document(text, &format!("`{file}`'s pinned `{key}:`"))
+        });
+        assert_eq!(
+            workflow[key], expected,
+            "`{file}`'s `{key}:` is not the one its GATE_WORKFLOWS row pins; a trigger filter or a \
+             cancellation rule can skip a gate for a change the mise task would check"
+        );
+    }
     for key in yaml_env(&workflow["env"], &format!("`{file}`'s")).keys() {
         assert!(
             COSMETIC_WORKFLOW_ENV.contains(&key.as_str()),
@@ -1014,11 +1093,6 @@ fn gate_workflow(file: &str) -> yaml_rust2::Yaml {
              task too or, if it only changes how output looks, list it in COSMETIC_WORKFLOW_ENV"
         );
     }
-    assert!(
-        workflow["defaults"].is_badvalue(),
-        "`{file}` sets workflow `defaults:`, which can change the shell or directory of every \
-         `run:` step without appearing on any of them"
-    );
     workflow["jobs"].clone()
 }
 
@@ -1164,10 +1238,27 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
             }
         }
     }
+    let classified: BTreeSet<String> = GATE_WORKFLOWS
+        .iter()
+        .map(|gate| gate.file)
+        .chain(NON_GATE_WORKFLOWS.iter().map(|(file, why)| {
+            assert!(!why.is_empty(), "a non-gate workflow must say why");
+            *file
+        }))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        workflow_files(),
+        classified,
+        "every workflow under `.github/workflows/` must be a GATE_WORKFLOWS row (its jobs paired \
+         with mise tasks) or a NON_GATE_WORKFLOWS entry saying why it gates nothing, and every \
+         listed file must exist"
+    );
     let mut workflow_jobs = BTreeMap::new();
     let mut ci_jobs = BTreeSet::new();
-    for file in GATE_WORKFLOWS {
-        let jobs = gate_workflow(file);
+    for gate in &GATE_WORKFLOWS {
+        let file = gate.file;
+        let jobs = gate_workflow(gate);
         for job in jobs
             .as_hash()
             .unwrap_or_else(|| panic!("`{file}` must carry a `jobs:` mapping"))
@@ -1184,7 +1275,7 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
         .collect();
     assert_eq!(
         ci_jobs, paired_jobs,
-        "every job in {GATE_WORKFLOWS:?} must be named by one PAIRINGS row, and every row's job \
+        "every job in a GATE_WORKFLOWS workflow must be named by one PAIRINGS row, and every row's job \
          must exist"
     );
     assert_eq!(
@@ -1270,6 +1361,63 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
             pair.workflow,
         );
     }
+}
+
+#[test]
+fn the_msrv_gate_runs_on_the_declared_rust_version() {
+    // `rust-toolchain.toml` pins `channel = "stable"`, and a toolchain file overrides rustup's
+    // default toolchain. `dtolnay/rust-toolchain@1.88.0` only sets that default, so CI's msrv job
+    // ran a bare `cargo check` on stable: the master log said the stable toolchain "is currently
+    // in use (overridden by '.../rust-toolchain.toml')". Only an explicit `cargo +<toolchain>`
+    // outranks the file. The pairing test holds the two sides to each other, so reverting both
+    // to a bare `cargo check` passed it; this holds both to the manifest's `rust-version`.
+    let manifest: toml::Table = toml::from_str(&read("Cargo.toml")).expect("Cargo.toml parses");
+    let declared = manifest["workspace"]["package"]["rust-version"]
+        .as_str()
+        .expect("the workspace declares `rust-version`");
+    // Cargo accepts `1.88`; rustup's toolchain spelling is the full `1.88.0`.
+    let toolchain = match declared.split('.').count() {
+        2 => format!("{declared}.0"),
+        3 => declared.to_owned(),
+        _ => panic!("`rust-version = {declared:?}` is not `major.minor[.patch]`"),
+    };
+    let prefix = format!("cargo +{toolchain} ");
+
+    let tasks = mise_tasks();
+    let local = mise_commands(&tasks, "msrv");
+    assert!(!local.is_empty(), "`mise run msrv` runs nothing");
+    for command in &local {
+        assert!(
+            command.trim().starts_with(&prefix),
+            "`mise run msrv` runs `{command}`, which does not start with `{prefix}`; without an \
+             explicit toolchain `rust-toolchain.toml` selects stable, not `rust-version`"
+        );
+    }
+
+    let job = &ci_workflow()["jobs"]["msrv"];
+    let steps = job["steps"].as_vec().expect("the `msrv` job carries steps");
+    let runs: Vec<&str> = steps
+        .iter()
+        .filter_map(|step| step["run"].as_str())
+        .collect();
+    assert!(!runs.is_empty(), "CI's `msrv` job runs nothing");
+    for run in runs {
+        assert!(
+            run.trim().starts_with(&prefix),
+            "CI's `msrv` job runs `{run}`, which does not start with `{prefix}`; without an \
+             explicit toolchain `rust-toolchain.toml` selects stable, not `rust-version`"
+        );
+    }
+    let toolchains: Vec<&str> = steps
+        .iter()
+        .filter_map(|step| step["uses"].as_str())
+        .filter_map(|uses| uses.strip_prefix("dtolnay/rust-toolchain@"))
+        .collect();
+    assert_eq!(
+        toolchains,
+        [toolchain.as_str()],
+        "CI's `msrv` job must install exactly the `rust-version` toolchain its commands name"
+    );
 }
 
 #[test]

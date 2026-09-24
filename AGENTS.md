@@ -75,10 +75,16 @@ under the same environment — and neither may be stricter or narrower than the 
 sides together. `spargen/tests/corpus_manifest.rs` enforces it:
 `every_mise_task_runs_exactly_what_its_ci_job_runs` pairs every CI job with every task and compares
 them byte for byte (`deny`, an action rather than `run:` steps, is held by
-`the_mise_deny_task_audits_the_graph_ci_audits`), pins every other step of each job (checkout,
-toolchain, cache, tool install) as literal YAML, and rejects task keys such as `dir` and mise
-config files beside `mise.toml` that would change what a task runs without appearing in its
-command. CI's `test` job is `mise run test` followed by `mise run bench-build`; `bench` is held to
+`the_mise_deny_task_audits_the_graph_ci_audits`). "Every CI job" is every job of every workflow
+under `.github/workflows/`: each file is either a gate workflow whose jobs are all paired or a
+listed non-gate workflow with its reason (only `release-plz.yml`, which publishes), and an
+unclassified file fails. Each gate workflow's `on:`, `concurrency:` and `permissions:` are pinned
+literally and its other top-level keys allow-listed, so a trigger filter cannot narrow CI unseen.
+The test pins every other step of each job (checkout, toolchain, cache, tool install) as literal
+YAML, and rejects task keys such as `dir` and mise config files beside `mise.toml` that would
+change what a task runs without appearing in its command. `the_msrv_gate_runs_on_the_declared_rust_version`
+holds both sides of `msrv` to the workspace `rust-version` (`cargo +1.88.0 …` and
+`dtolnay/rust-toolchain@1.88.0`), since `rust-toolchain.toml` would otherwise select stable. CI's `test` job is `mise run test` followed by `mise run bench-build`; `bench` is held to
 `benchmarks.yml`. The only differences are named exceptions in that test's `PAIRINGS` table, each
 pinned literally on both sides: `commits` checks the pull request's `base.sha..head.sha` where
 `commit-range` checks `origin/master..HEAD` (only the range is rewritten; the rest must match), the
