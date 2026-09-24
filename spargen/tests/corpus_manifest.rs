@@ -206,6 +206,42 @@ fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
     }
 }
 
+/// Flags that narrow what cargo-deny *resolves or consults*, rather than which checks it runs
+/// over the result. Measured on this tree with the `mise.toml` pin (cargo-deny 0.19.9), as
+/// `cargo-deny --log-level warn --manifest-path ./Cargo.toml --all-features <flag> check
+/// advisories`: `--exclude rustls` and `--target wasm32-unknown-unknown` each turn
+/// `advisories FAILED` (RUSTSEC-2026-0285, reached only through reqwest's TLS feature) into
+/// `advisories ok`, exit 1 to exit 0. The other five do *not* flip that verdict here and are
+/// rejected as the same class of flag rather than on a measured flip -- `--offline` was
+/// measured against an already-populated advisory database, and `--no-default-features` is
+/// overridden by the `--all-features` this same value is required to carry. Not exhaustive:
+/// see `the_deny_gate_states_the_feature_scope_it_audits`, and #238. `-t` is clap's short alias
+/// for `--target` (the only one of these flags cargo-deny 0.19.9's `--help` gives a short form),
+/// and is the same flag: `--all-features -t wasm32-unknown-unknown` drops rustls from
+/// `cargo deny list` exactly as the long spelling does.
+///
+/// Shared by both copies of the deny gate: CI's cargo-deny-action step and `mise run deny`.
+const GRAPH_NARROWING_FLAGS: [&str; 8] = [
+    "--exclude",
+    "--target",
+    "-t",
+    "--exclude-dev",
+    "--exclude-unpublished",
+    "--offline",
+    "--frozen",
+    "--no-default-features",
+];
+
+/// The flag a single argv word spells. `--flag value` and `--flag=value` are the same flag to
+/// clap, and so are `-t value`, `-t=value`, and the attached `-tvalue`: a short flag is its first
+/// two characters.
+fn flag_of(token: &str) -> &str {
+    match token.strip_prefix('-') {
+        Some(rest) if !rest.starts_with('-') && rest.len() > 1 => token.get(..2).unwrap_or(token),
+        _ => token.split_once('=').map_or(token, |(flag, _)| flag),
+    }
+}
+
 #[test]
 fn the_deny_gate_states_the_feature_scope_it_audits() {
     // `--all-features` is what puts a TLS stack in the audited graph: under default features
@@ -295,30 +331,6 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
          in it audits the dependency graph"
     );
 
-    // Flags that narrow what cargo-deny *resolves or consults*, rather than which checks it runs
-    // over the result. Measured on this tree with the `mise.toml` pin (cargo-deny 0.19.9), as
-    // `cargo-deny --log-level warn --manifest-path ./Cargo.toml --all-features <flag> check
-    // advisories`: `--exclude rustls` and `--target wasm32-unknown-unknown` each turn
-    // `advisories FAILED` (RUSTSEC-2026-0285, reached only through reqwest's TLS feature) into
-    // `advisories ok`, exit 1 to exit 0. The other five do *not* flip that verdict here and are
-    // rejected as the same class of flag rather than on a measured flip -- `--offline` was
-    // measured against an already-populated advisory database, and `--no-default-features` is
-    // overridden by the `--all-features` this same value is required to carry. Not exhaustive:
-    // see the comment above, and #238. `-t` is clap's short alias for `--target` (the only one
-    // of these flags cargo-deny 0.19.9's `--help` gives a short form), and is the same flag:
-    // `--all-features -t wasm32-unknown-unknown` drops rustls from `cargo deny list` exactly as
-    // the long spelling does.
-    const GRAPH_NARROWING_FLAGS: [&str; 8] = [
-        "--exclude",
-        "--target",
-        "-t",
-        "--exclude-dev",
-        "--exclude-unpublished",
-        "--offline",
-        "--frozen",
-        "--no-default-features",
-    ];
-
     let mut root_audits = 0usize;
     for audit in audits {
         assert!(
@@ -355,14 +367,7 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
             "the cargo-deny-action step's `arguments: {arguments}` does not pass `--all-features`"
         );
         for token in arguments.split_whitespace() {
-            // `--flag value` and `--flag=value` are the same flag to clap, and so are `-t value`,
-            // `-t=value`, and the attached `-tvalue`: a short flag is its first two characters.
-            let flag = match token.strip_prefix('-') {
-                Some(rest) if !rest.starts_with('-') && rest.len() > 1 => {
-                    token.get(..2).unwrap_or(token)
-                }
-                _ => token.split_once('=').map_or(token, |(flag, _)| flag),
-            };
+            let flag = flag_of(token);
             assert!(
                 !GRAPH_NARROWING_FLAGS.contains(&flag),
                 "the cargo-deny-action step's `arguments: {arguments}` passes `{flag}`, which \
@@ -404,6 +409,114 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
          states a `manifest-path` pointing elsewhere, so the workspace this gate exists to audit \
          is audited by nothing and the three narrowing assertions above never run"
     );
+}
+
+#[test]
+fn the_mise_deny_task_audits_the_graph_ci_audits() {
+    // `mise run deny` is the supply-chain gate CLAUDE.md hands a contributor, and CI spells its
+    // own copy out rather than calling it, so the two are kept in step by hand. They were not:
+    // the task ran a bare `cargo deny check`, which resolves default features only and so has no
+    // `rustls` in its graph, and reported `advisories ok` on the very lockfile CI failed with
+    // RUSTSEC-2026-0285 (#141). The flag later arrived in an unrelated commit with nothing
+    // holding it there.
+    //
+    // Held to CI rather than to a literal: every word CI's root-manifest cargo-deny-action step
+    // passes as `arguments` must also be a global flag of the task, so tightening CI (say,
+    // `--all-features --locked`, #146) reds here until the local gate follows. The task is also
+    // held to the rules the CI step is held to -- `--all-features`, no graph-narrowing flag, a
+    // bare `check` with no `[WHICH]...` narrowing it, and no `--manifest-path` pointing away from
+    // the workspace root.
+    let ci = read(".github/workflows/ci.yml");
+    let documents = yaml_rust2::YamlLoader::load_from_str(&ci)
+        .expect("`.github/workflows/ci.yml` must parse as YAML");
+    let workflow = documents
+        .first()
+        .expect("`.github/workflows/ci.yml` must carry a YAML document");
+    let ci_arguments: BTreeSet<String> = workflow["jobs"]["deny"]["steps"]
+        .as_vec()
+        .expect("the `deny` job must carry a list of steps")
+        .iter()
+        .filter(|step| {
+            step["uses"].as_str().is_some_and(|uses| {
+                uses.to_ascii_lowercase()
+                    .starts_with("embarkstudios/cargo-deny-action@")
+            }) && step["with"]["manifest-path"]
+                .as_str()
+                .is_none_or(|path| path.trim_start_matches("./") == "Cargo.toml")
+        })
+        .filter_map(|step| step["with"]["arguments"].as_str())
+        .flat_map(str::split_whitespace)
+        .map(str::to_owned)
+        .collect();
+    assert!(
+        ci_arguments.contains("--all-features"),
+        "CI's root-manifest cargo-deny-action step passes no `--all-features`, so there is no \
+         CI feature scope for `mise run deny` to be held to"
+    );
+
+    let mise: toml::Value = toml::from_str(&read("mise.toml")).expect("mise.toml must parse");
+    let commands: Vec<&str> = match &mise["tasks"]["deny"]["run"] {
+        toml::Value::String(command) => vec![command.as_str()],
+        toml::Value::Array(commands) => commands
+            .iter()
+            .map(|command| {
+                command
+                    .as_str()
+                    .expect("every `[tasks.deny] run` entry must be a command string")
+            })
+            .collect(),
+        other => panic!("`[tasks.deny] run` must be a string or an array of strings, not {other}"),
+    };
+
+    let audits: Vec<Vec<&str>> = commands
+        .iter()
+        .map(|command| command.split_whitespace().collect::<Vec<_>>())
+        .filter(|words| {
+            words.starts_with(&["cargo", "deny"]) || words.first() == Some(&"cargo-deny")
+        })
+        .collect();
+    assert!(
+        !audits.is_empty(),
+        "`mise run deny` runs no `cargo deny` command, so the local gate audits nothing"
+    );
+
+    for words in audits {
+        let command = words.join(" ");
+        let skip = if words[0] == "cargo-deny" { 1 } else { 2 };
+        let check = words
+            .iter()
+            .position(|word| *word == "check")
+            .unwrap_or_else(|| panic!("`mise run deny` runs `{command}`, which is not `check`"));
+        let globals = &words[skip..check];
+        let which = &words[check + 1..];
+
+        for argument in &ci_arguments {
+            assert!(
+                globals.contains(&argument.as_str()),
+                "`mise run deny` runs `{command}` but CI's cargo-deny-action step passes \
+                 `{argument}`, so the local gate audits a different graph from CI's and can \
+                 pass on a lockfile CI fails"
+            );
+        }
+        for word in globals {
+            let flag = flag_of(word);
+            assert!(
+                !GRAPH_NARROWING_FLAGS.contains(&flag),
+                "`mise run deny` runs `{command}`, whose `{flag}` shrinks the graph cargo-deny \
+                 resolves below the one CI audits"
+            );
+            assert_ne!(
+                flag, "--manifest-path",
+                "`mise run deny` runs `{command}`, which names a `--manifest-path`; CI audits \
+                 the workspace root, and so must the local gate"
+            );
+        }
+        assert!(
+            which.is_empty(),
+            "`mise run deny` runs `{command}`, which narrows `check` to {which:?}; CI runs a \
+             bare `check`, so every check it runs must run locally too"
+        );
+    }
 }
 
 #[test]
