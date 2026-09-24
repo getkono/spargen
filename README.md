@@ -162,7 +162,7 @@ together with the [OpenAPI 3.2 scope](docs/openapi-3.2.md), [support matrix](doc
 Build it locally:
 
 ```bash
-cargo install mdbook        # one-time
+mise install                # one-time: the mdBook version mise.toml pins
 mise run docs               # or: mdbook build docs/book
 ```
 
@@ -171,14 +171,14 @@ builds the book on every push so doc-site breakage is caught.
 
 ## Prerequisites
 
-- [Rust](https://rustup.rs) (toolchain pinned by `rust-toolchain.toml`)
+- [Rust](https://rustup.rs) (the release `rust-toolchain.toml` pins; rustup installs it on first use)
 - [mise](https://github.com/jdx/mise) — dev tool provisioning and task runner
 - [hk](https://hk.jdx.dev) — git hooks (installed via mise)
 
 ## Development
 
 ```bash
-mise install          # provision hk, convco, cargo-deny
+mise install          # provision every tool mise.toml's [tools] pins, at those versions
 mise run hooks        # install git hooks
 ```
 

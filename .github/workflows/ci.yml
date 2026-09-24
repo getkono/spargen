@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
 
@@ -67,10 +67,10 @@ jobs:
       - uses: actions/checkout@v4
       # `rust-version` in the workspace manifest is a published contract: it is what tells a
       # consumer which toolchains can compile spargen and the code it emits. Every other job runs
-      # `stable`, so nothing proved the floor was real.
+      # the release `rust-toolchain.toml` pins, so nothing proved the floor was real.
       #
       # The action installs 1.88.0 as rustup's *default*, but `rust-toolchain.toml` overrides the
-      # default, so a bare `cargo check` here ran on stable (the job log said "overridden by
+      # default, so a bare `cargo check` here ran on the pinned release (the job log said "overridden by
       # rust-toolchain.toml"). An explicit `+1.88.0` outranks the file. The commands are also
       # `mise run msrv`'s, byte for byte.
       - uses: dtolnay/rust-toolchain@1.88.0
@@ -89,9 +89,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-hack
+      # The version is `[tools]`'s in mise.toml: `@cargo-hack` as the ref would install the newest
+      # release instead (`ci_installs_exactly_the_tool_versions_mise_pins`).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack@0.6.39
       # Every other job runs `--all-features`, so a combination such as `xml` on and `time` off was
       # never compiled — and those are exactly the subsets the generator embeds per spec.
       - run: cargo hack check --workspace --each-feature --no-dev-deps
@@ -102,8 +106,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The one floating toolchain, a named exception in CLAUDE.md: `-Z direct-minimal-versions`
+      # needs a nightly cargo, and the proof only resolves the lockfile with it.
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
           targets: wasm32-unknown-unknown
@@ -115,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       # Packages + runs an isolated verify build. Guards that the published .crate stays
       # self-contained — the runtime sources reached via src/support/runtime/ symlinks must ship
@@ -139,7 +145,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       - run: mkdir -p target/corpus-smoke
       - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json > target/corpus-smoke/github-30.json || test $? -eq 1
@@ -175,7 +181,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
           targets: wasm32-unknown-unknown
@@ -188,7 +194,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -215,10 +221,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
-      # Keep this version in step with `[tools]` in mise.toml. `--locked` alone pins only
-      # mdBook's own dependencies, so without `--version` every run picks up the newest release.
+      # The version is `[tools]`'s in mise.toml (`ci_installs_exactly_the_tool_versions_mise_pins`).
+      # `--locked` alone pins only mdBook's own dependencies, so without `--version` every run
+      # picks up the newest release.
       - name: Install mdBook
         run: cargo install mdbook --version 0.5.4 --locked
       # Fails the job on broken includes/links so doc-site breakage is caught. The built HTML
@@ -237,43 +244,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # `--all-features` is what puts the TLS stack in scope: `rustls` reaches the graph only
-      # through reqwest's TLS feature, so under default features `cargo deny list` matches it
-      # zero times and `cargo tree --workspace -i rustls` finds no such package. All three values
-      # stated below match the action's own defaults, so the gate's behaviour is unchanged — but
-      # a default is the action's property, not this repository's: *without the block below*, a
-      # change to the action's `arguments` default would silently turn this into an audit of a
-      # graph with no TLS stack in it, every run green and nothing noticing. That is a statement
-      # about the counterfactual, not about this step as configured — the `with:` block below is
-      # what makes it false here, which is the whole reason it is there.
-      #
-      # The action composes its argv as `cargo-deny <rust-version> <credentials> <ssh-key>
-      # <ssh-known-hosts> --log-level <log-level> --manifest-path <manifest-path> <arguments>
-      # <command> <command-arguments>`. The three inputs stated below are the ones that decide
-      # *which checks run*: `arguments` sets the feature scope, while `command` and
-      # `command-arguments` both feed `check`'s `[WHICH]...` positional, so
-      # `command-arguments: licenses` would drop `advisories` exactly as a narrowed `command`
-      # would. `command-arguments: ""` is the action's own default written out — the entrypoint's
-      # unquoted `cargo-deny $*` discards the empty slot, so the argv is unchanged — and stating
-      # it is what keeps that slot this repository's property rather than the action's.
-      # `the_deny_gate_states_the_feature_scope_it_audits` asserts all three.
-      #
-      # `arguments` is also spliced into that unquoted `cargo-deny $*`, so every *word* in it is
-      # a flag rather than only the feature scope: `--all-features --target
-      # wasm32-unknown-unknown` still contains `--all-features`, reads as added coverage, and
-      # drops RUSTSEC-2026-0285. The test rejects a measured deny-list of such graph-narrowing
-      # flags here -- a list, not a proof; #238 owns the general case.
-      #
-      # Still inherited: `log-level`, and the moving `@v2` ref itself -- both #229's. Of #229's
-      # residual inputs `manifest-path` is now partly held: the test requires at least one step
-      # to audit the root `Cargo.toml`, so this step cannot be pointed at a smaller manifest and
-      # leave the workspace unaudited, but a *second*, narrower step over some other manifest is
-      # deliberately allowed (#184).
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: dtolnay/rust-toolchain@1.98.1
+      # The cargo-deny version `[tools]` pins in mise.toml, not the copy an action bundles: the
+      # action's version moved with its `@v2` ref and nothing held it to the pin (#228), and its
+      # inputs composed an argv this repository could only partly state (#229).
+      # `ci_installs_exactly_the_tool_versions_mise_pins` holds the version here to the pin.
+      - uses: taiki-e/install-action@v2
         with:
-          arguments: --all-features
-          command: check
-          command-arguments: ""
+          tool: cargo-deny@0.20.2
+      # `mise run deny`'s command, byte for byte
+      # (`every_mise_task_runs_exactly_what_its_ci_job_runs`).
+      # `--all-features` is what puts the TLS stack in scope: `rustls` reaches the graph only
+      # through reqwest's TLS feature, so without it the audit sees no TLS stack at all (#147).
+      # `the_deny_gate_states_the_feature_scope_it_audits` holds the command to that scope, to a
+      # bare `check`, and to no graph-narrowing flag.
+      - run: cargo deny --all-features check
 
   commits:
     name: Conventional commits
@@ -283,8 +268,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      # Same version as `[tools]` in mise.toml, so a message that passes the pre-push hook
-      # cannot fail here on a newer convco.
+      # The version is `[tools]`'s in mise.toml, so a message that passes the pre-push hook cannot
+      # fail here on a newer convco (`ci_installs_exactly_the_tool_versions_mise_pins`).
       - name: Install convco
         run: cargo install convco --version 0.7.1 --locked
       - name: Check commits

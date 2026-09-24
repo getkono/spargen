@@ -74,8 +74,11 @@ its CI counterpart are **identical** — the same commands with the same flags, 
 under the same environment — and neither may be stricter or narrower than the other; change both
 sides together. `spargen/tests/corpus_manifest.rs` enforces it:
 `every_mise_task_runs_exactly_what_its_ci_job_runs` pairs every CI job with every task and compares
-them byte for byte (`deny`, an action rather than `run:` steps, is held by
-`the_mise_deny_task_audits_the_graph_ci_audits`). "Every CI job" is every job of every workflow
+them byte for byte, and `ci_installs_exactly_the_tool_versions_mise_pins` holds every tool CI
+installs to the exact version mise's `[tools]` pins (and every pin but `hk`, which CI never runs,
+to being installed by CI, and every job that runs a pinned tool to installing it itself) — so
+`deny` runs mise's cargo-deny rather than one an action bundles, and `the_deny_gate_states_the_feature_scope_it_audits` holds the shared command to
+`--all-features` and a bare `check`. "Every CI job" is every job of every workflow
 under `.github/workflows/`: each file is either a gate workflow whose jobs are all paired or a
 listed non-gate workflow with its reason (only `release-plz.yml`, which publishes), and an
 unclassified file fails. Each gate workflow's `on:`, `concurrency:` and `permissions:` are pinned
@@ -84,14 +87,26 @@ The test pins every other step of each job (checkout, toolchain, cache, tool ins
 YAML, and rejects task keys such as `dir` and mise config files beside `mise.toml` that would
 change what a task runs without appearing in its command. `the_msrv_gate_runs_on_the_declared_rust_version`
 holds both sides of `msrv` to the workspace `rust-version` (`cargo +1.88.0 …` and
-`dtolnay/rust-toolchain@1.88.0`), since `rust-toolchain.toml` would otherwise select stable. CI's `test` job is `mise run test` followed by `mise run bench-build`; `bench` is held to
+`dtolnay/rust-toolchain@1.88.0`), since `rust-toolchain.toml` would otherwise select its own
+release. CI's `test` job is `mise run test` followed by `mise run bench-build`; `bench` is held to
 `benchmarks.yml`. The only differences are named exceptions in that test's `PAIRINGS` table, each
 pinned literally on both sides: `commits` checks the pull request's `base.sha..head.sha` where
 `commit-range` checks `origin/master..HEAD` (only the range is rewritten; the rest must match), the
 `package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only,
 `benchmarks.yml` adds `set -o pipefail` and `| tee bench-results.txt` to capture the artifact, and
-CI installs `mdbook` and `convco` itself where mise's `[tools]` does. Those tool versions are still
-kept in step by hand — `ci.yml` says so where it pins them. The rest — `check`, `bench-build`,
+CI installs `cargo-deny`, `cargo-hack`, `mdbook` and `convco` itself where mise's `[tools]` does, at
+the same versions. The Rust toolchain is pinned the same way: `rust-toolchain.toml`'s `channel`
+is a concrete release (not `stable`), it selects the toolchain for every local `cargo` call and so
+for every `mise run` gate, and every `dtolnay/rust-toolchain@` step in every workflow installs that
+same release — `ci_installs_the_rust_toolchain_this_file_pins` holds them equal. Two named
+exceptions sit in its `TOOLCHAIN_EXCEPTIONS`: `msrv`'s `rust-version` toolchain, and the
+`runtime-dependencies` job's `@nightly`, which stays **floating** (its `-Z
+direct-minimal-versions` lockfile resolution needs a nightly cargo; nothing else runs on it). The
+pin is bumped by hand, in a PR of its own that changes `rust-toolchain.toml`'s `channel`, every
+`dtolnay/rust-toolchain@<version>` step, and the matching literals in `corpus_manifest.rs`'s
+`PAIRINGS` together (this test and the pairing test fail on any one changed alone), and that
+passes clippy and fmt on the new release; locally, `rustup` installs the new release on the first
+`cargo` call in the checkout. The rest — `check`, `bench-build`,
 `msrv`, `package`, `runtime-dependencies`, `powerset`, `corpus-smoke`, `example`, `github-api`,
 `deny`, `docs`, and the rustdoc link check `doc-links` runs (a step inside the `docs` job, not a
 job of its own) — never run in a hook; they are too slow, so a green pre-push is not a green CI.
