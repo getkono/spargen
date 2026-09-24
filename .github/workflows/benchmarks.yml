@@ -25,10 +25,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Bounded warm-up / measurement times keep the run practical on a shared runner while still
       # giving criterion enough samples for stable-ish statistics. Full output is captured verbatim.
+      # The command is `mise run bench`'s; `tee` only captures it. A step's default shell is
+      # `bash -e` without `pipefail`, so without the first line a failing `cargo bench` would
+      # exit through `tee` with status 0.
       - name: Run generation benchmarks
         run: |
-          cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3 \
-            | tee bench-results.txt
+          set -o pipefail
+          cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3 | tee bench-results.txt
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
