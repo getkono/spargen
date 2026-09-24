@@ -304,10 +304,14 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
     // rejected as the same class of flag rather than on a measured flip -- `--offline` was
     // measured against an already-populated advisory database, and `--no-default-features` is
     // overridden by the `--all-features` this same value is required to carry. Not exhaustive:
-    // see the comment above, and #238.
-    const GRAPH_NARROWING_FLAGS: [&str; 7] = [
+    // see the comment above, and #238. `-t` is clap's short alias for `--target` (the only one
+    // of these flags cargo-deny 0.19.9's `--help` gives a short form), and is the same flag:
+    // `--all-features -t wasm32-unknown-unknown` drops rustls from `cargo deny list` exactly as
+    // the long spelling does.
+    const GRAPH_NARROWING_FLAGS: [&str; 8] = [
         "--exclude",
         "--target",
+        "-t",
         "--exclude-dev",
         "--exclude-unpublished",
         "--offline",
@@ -351,8 +355,14 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
             "the cargo-deny-action step's `arguments: {arguments}` does not pass `--all-features`"
         );
         for token in arguments.split_whitespace() {
-            // `--flag value` and `--flag=value` are the same flag to clap.
-            let flag = token.split_once('=').map_or(token, |(flag, _)| flag);
+            // `--flag value` and `--flag=value` are the same flag to clap, and so are `-t value`,
+            // `-t=value`, and the attached `-tvalue`: a short flag is its first two characters.
+            let flag = match token.strip_prefix('-') {
+                Some(rest) if !rest.starts_with('-') && rest.len() > 1 => {
+                    token.get(..2).unwrap_or(token)
+                }
+                _ => token.split_once('=').map_or(token, |(flag, _)| flag),
+            };
             assert!(
                 !GRAPH_NARROWING_FLAGS.contains(&flag),
                 "the cargo-deny-action step's `arguments: {arguments}` passes `{flag}`, which \
