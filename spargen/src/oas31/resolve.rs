@@ -64,6 +64,30 @@ impl<'doc> Resolver<'doc> {
         self.bundle.reference_target(reference, from)
     }
 
+    /// [`Self::reference_identity`] for a `$ref` written anywhere in `from`, when the caller holds
+    /// a file rather than a provenance — a walk over raw nodes, which have no parsed schema to carry
+    /// one. The same resolution, so the same guarantees: no parse, no diagnostic, and a miss means
+    /// only "not a target this bundle knows".
+    pub(super) fn reference_identity_from(
+        &self,
+        reference: &str,
+        from: crate::diag::FileId,
+    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+        self.bundle.reference_target(reference, from)
+    }
+
+    /// The raw node at `pointer` in `file`, before it is parsed into a [`Schema`]. What a
+    /// document-level question walks: it reads the description as written (after any omit profile)
+    /// and lowers nothing.
+    pub(super) fn node_at(
+        &self,
+        file: crate::diag::FileId,
+        pointer: &crate::diag::JsonPointer,
+    ) -> Option<&'doc SpannedValue> {
+        self.bundle.file(file)?;
+        self.bundle.value_at(file).pointer(pointer)
+    }
+
     /// The path of `file`, when `file` declares a schema component called `name` of its own.
     ///
     /// A JSON Pointer fragment addresses the document it appears in, so a sub-file's own

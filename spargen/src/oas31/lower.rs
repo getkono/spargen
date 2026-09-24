@@ -391,6 +391,21 @@ fn append_response_docs(target: &mut Option<String>, status: &str, response: &Re
     }
 }
 
+/// A union's shape-bearing sibling: the lowered type, plus whether the sibling's own keywords say
+/// anything about `null`.
+///
+/// The second field exists because the lowered [`Ty`] cannot answer it. A `properties`-only sibling
+/// and a `type: object` + `properties` sibling both lower to a non-nullable `Struct`, yet only the
+/// second denies `null` — the first is an object applicator, vacuously satisfied by every
+/// non-object. The question has to be asked of the schema, and asked of the SIBLING rather than of
+/// the schema that encloses it: those differ whenever a multi-type array is deleted for lowering,
+/// and whenever the sibling speaks through `enum`/`const` instead of `type`.
+#[derive(Clone, Copy)]
+struct UnionSibling {
+    ty: Ty,
+    speaks_about_null: bool,
+}
+
 struct LowerCtx<'a, 'doc> {
     document: &'doc Document,
     resolver: &'a Resolver<'doc>,
@@ -587,17 +602,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(alias) = self.nullable_alias_back_edge(schema) {
             return Some(alias);
         }
-        // Nullability is a pure function of the component's own schema — the same inputs
-        // `lower_schema`/`lower_enum` use — so computing it once at reserve time lets every `$ref`
-        // consumer (cache hit, back-edge, or fresh) agree on it without waiting for the body to
-        // finish. No graph insert happens here, so the last-insert invariant below is preserved.
-        let nullable = schema_is_nullable(schema);
+        // A PROVISIONAL answer, needed before the body finishes so a back-edge encountered mid-body
+        // has something to carry. It is not the final one: `schema_is_nullable` is three disjuncts
+        // over `types`, `enum_values` and `const_value` and never looks at `oneOf`/`anyOf`/`$ref`/
+        // `allOf`, so for any composed body it is a guess. Writing it back over the lowered result
+        // discarded every decision `lower_union` makes about null the moment a union was spelled as
+        // a named component — the dominant spelling in real descriptions.
+        let provisional_nullable = schema_is_nullable(schema);
         // Reserve the root id before lowering the body so any back-edge encountered mid-body can
         // box a reference to it. The root's def is inserted last (children first) and then lifted
         // into this reserved slot, which keeps ids dense and stable.
         let root_id = self.graph.reserve();
         self.in_progress
-            .insert(name.to_owned(), (root_id, nullable));
+            .insert(name.to_owned(), (root_id, provisional_nullable));
         let lowered = self.lower_schema(schema, name);
         self.in_progress.remove(name);
         let mut ty = lowered?;
@@ -621,9 +638,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.graph.fill(root_id, def);
         ty.id = root_id;
-        // Use the reserve-time nullability consistently, so a direct return and a later cache hit
-        // yield an identical `Ty` (it matches what the body lowering computed).
-        ty.nullable = nullable;
+        // The BODY's answer, not the provisional one: a composed body knows things
+        // `schema_is_nullable` cannot see, and naming a schema must not change what it means. Cached
+        // under the same value, so a direct return and a later cache hit still yield an identical
+        // `Ty`.
+        let nullable = ty.nullable;
         self.components.insert(name.to_owned(), (root_id, nullable));
         Some(ty)
     }
@@ -1115,25 +1134,79 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let mut sibling = schema.clone();
             sibling.reference = None;
             if !schema_has_shape_constraint(&sibling) {
+                // No shape to compose, so a cycle-closing reference here is the ordinary recursive
+                // schema: it boxes and generates. Only the intersection below needs a real target.
                 return Some(referenced);
             }
-            // The reference is a cycle-closing back-edge: the target's fields are not known yet, so
-            // there is nothing to intersect the siblings *against*. Refusing is the only honest
-            // answer — intersecting anyway used to read the reservation's placeholder, and an
-            // intersection with an untyped value is the sibling alone, so the `$ref` applicator was
-            // discarded in silence and the referenced schema's own fields vanished from the result.
-            if self.is_in_progress_root(referenced.id) {
-                self.reject_all_of_unit(
-                    schema.provenance.clone(),
-                    "a `$ref` with shape siblings is a direct recursive reference to the schema \
-                     being lowered, whose fields are not yet known, so the reference and its \
-                     siblings cannot be intersected",
+            // Whether this `$ref` closes a reference cycle back through a schema whose lowering
+            // encloses it. A target inside the cycle cannot be composed with: its definition
+            // depends on the very result being computed, so `intersect_non_null`'s `(Any, _)` arm
+            // would return the sibling and silently discard the target.
+            //
+            // It is asked of the DOCUMENT, for every spelling alike. A lowering-order test — "is the
+            // target mid-flight" — gives two byte-identical documents opposite verdicts when only
+            // the order of two map entries differs (decision 23), and so does a document test that
+            // only one spelling can reach: the sub-file spelling used to fall back to
+            // `is_in_progress_root`, so with siblings on one edge of a two-schema cycle the verdict
+            // followed which end lowering happened to enter first. `ref_closes_a_cycle` walks
+            // resolved identities across every file instead.
+            //
+            // `is_in_progress_root` stays as a backstop and adds no rejection of its own: a target
+            // still being lowered is one whose lowering reached this site, which is a cycle the walk
+            // finds. Kept so that a walk which ever missed one reports the recursion, rather than
+            // leaving `intersect_types`' fail-closed arm to report it as an empty intersection.
+            let back_edge = self.ref_closes_a_cycle(reference, &schema.provenance)
+                || self.is_in_progress_root(referenced.id);
+            if back_edge {
+                // The siblings have nothing yet to intersect with. The `allOf` spelling of the same
+                // conjunction has always rejected this rather than composing against a placeholder,
+                // and the alternative here is not "compose anyway" but "discard the target", which
+                // produces a type accepting documents the description forbids — a recursive `Node`
+                // flattened to a one-off struct, or to the sibling's own scalar.
+                // The wording is chosen by what the reference RESOLVES TO, not by how it was
+                // spelled. It used to branch on whether the string began `#/components/schemas/`,
+                // which is a fact about the author's typing: the explicit `./lib.yaml#/…` spelling
+                // of a sub-file component was therefore described to the reader as *remote*, which
+                // it is not, while the bare spelling of the same target in the same file was
+                // described correctly. One reference, two spellings, two different accounts of one
+                // fact — the mistake decision 23 removed from the verdict, left standing in the
+                // explanation.
+                //
+                // `is_remote_ref` is the same predicate that routes the lowering a few lines above,
+                // so the message and the code path now agree by construction. A genuinely remote
+                // target still says so; every local target, however addressed, says the same thing.
+                // The local noun is "schema", not "component": a local target need not be a
+                // component at all (`./lib.yaml#/bag/Tree`, or `#/bag/Tree` inside a sub-file), and
+                // a two-way predicate cannot tell that case apart, so the wording must hold for it.
+                return self.reject_ref_sibling_intersection(
+                    schema,
+                    if is_remote_ref(reference) {
+                        "this remote `$ref` closes a reference cycle back to the schema that \
+                         encloses it, so its shape-bearing siblings would have to be intersected \
+                         with a target whose own definition depends on the result"
+                    } else {
+                        "this `$ref` closes a reference cycle back to the schema that encloses it, \
+                         so its shape-bearing siblings would have to be intersected with a target \
+                         whose own definition depends on the result"
+                    },
                 );
-                return None;
             }
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
-            let intersection =
-                self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))?;
+            let Some(intersection) =
+                self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
+            else {
+                // `$ref` is an applicator: the value must satisfy the target AND these siblings.
+                // `intersect_types` returns `None` for two distinct conditions — the intersection is
+                // empty, so no value satisfies both, or it is inhabited but has no single Rust type
+                // — and the message must not claim the first when it may be the second. Either way
+                // it is reported rather than dropped: dropping would silently delete a body,
+                // parameter or property from the generated client.
+                return self.reject_ref_sibling_intersection(
+                    schema,
+                    "the `$ref` target and this schema's own sibling keywords have an empty or \
+                     unrepresentable intersection",
+                );
+            };
             let kind = self.graph.get(intersection.id)?.kind.clone();
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
@@ -1353,20 +1426,61 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
         let sibling = self.lower_union_sibling(schema, hint)?;
 
-        // A `"null"` in the enclosing type array, or a null-only member, makes the union nullable.
-        let mut nullable = schema.types.types.contains(&JsonType::Null);
+        // Two DIFFERENT facts, tracked apart because only one of them can rescue an empty
+        // intersection. A null-only MEMBER supplies a branch that `null` validates against. A
+        // `"null"` in the enclosing `type` array only *permits* null: `oneOf` still demands exactly
+        // one matching member and `anyOf` at least one, so with no null member there is nothing for
+        // `null` to match and the schema admits nothing at all. Merging them made
+        // `{type: [integer,'null'], oneOf: [{type: string}]}` — which nothing satisfies —
+        // indistinguishable from the same document with a `{type: 'null'}` member, which only
+        // `null` satisfies.
+        let null_from_type_array = schema.types.types.contains(&JsonType::Null);
+        let mut null_from_member = false;
         let mut real_members: Vec<&SchemaOr> = Vec::new();
         for member in members {
             if member_is_null_only(member) {
-                nullable = true;
+                null_from_member = true;
             } else {
                 real_members.push(member);
             }
         }
+        // The union's overall acceptance needs both; only the rescues below need them apart.
+        let mut nullable = null_from_type_array || null_from_member;
 
         // Only null members remained: the exact JSON null type.
         if real_members.is_empty() {
             return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
+        }
+
+        // The third spelling of the conjunction the `$ref`-sibling and `allOf` arms already guard.
+        // A union member that closes a reference cycle resolves to the target's RESERVED id, whose
+        // def is the `TypeKind::Reserved` placeholder, so intersecting a variant against it can
+        // produce no true answer. Only reachable when there IS a sibling to intersect with: without
+        // one, an ordinary recursive union boxes its back-edge and generates, which is what makes a
+        // recursive `oneOf` usable at all.
+        //
+        // This is the DOCUMENT half of the test and it is answered before lowering, for every
+        // spelling of the member's `$ref`. The reservation half is applied after each member is
+        // lowered, at the two sites below where the member's `Ty` exists; between them the three
+        // spellings of one conjunction give one verdict, which they did not before.
+        if sibling.is_some() {
+            for member in &real_members {
+                // A member that is this union's OWN reservation is not an intersection problem:
+                // the union is itself, which the collapse and variant paths below reject as `E007`
+                // with or without siblings. Left to this guard it would draw `E013` only when
+                // siblings are present, so one shape would get two codes.
+                if self.member_closes_a_cycle(member, &schema.provenance)
+                    && !self.member_is_this_union(member, &schema.provenance)
+                {
+                    return self.reject_ref_sibling_intersection(
+                        schema,
+                        "this union member's `$ref` closes a reference cycle back to the schema \
+                         that encloses it, so the enclosing schema's own sibling keywords would \
+                         have to be intersected with a target whose definition depends on the \
+                         result",
+                    );
+                }
+            }
         }
 
         // A single real member (the rest were null): `Option<ThatType>`, no enum needed. Re-emit the
@@ -1376,6 +1490,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // id and leave the popped root mismatched).
         if real_members.len() == 1 {
             let mut inner = self.lower_schema_or(real_members[0], hint)?;
+            // The member's OWN nullability, before the intersection overwrites `inner`. Needed
+            // below when the sibling is not entitled to decide.
+            let member_nullable = inner.nullable;
             // The sole member is the reservation *this* schema will occupy, so the union is the
             // whole of itself: `Selfy = Selfy | null` describes nothing a decoder can terminate on,
             // exactly as a direct recursive member does in a multi-member union. That path already
@@ -1384,20 +1501,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // count. Asked before the reservation guards below, which would otherwise answer the
             // narrower question first and hand one shape two codes again.
             //
-            // **PR #125 disagrees with this ordering, and whoever rebases it has to choose.** #125
-            // is based on this branch and adds a document-half guard of its own
-            // (`member_closes_a_cycle`) *before* the collapse, which answers `E013` for the shape
-            // this arm answers `E007` for. Both verdicts are defensible; they cannot both
-            // ship. Reconciling them means porting that branch's whole union rework, which is
-            // outside this change's scope, so the divergence is recorded here — at the site, where
-            // a rebase brings the two texts together — rather than only in a pull-request
-            // description, which does not travel with the code. It fails loudly rather than
-            // silently: `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in
-            // `tests/frontend.rs` asserts the reported error codes are **exactly** `[E007]` on both
-            // its spellings, so putting the other guard first turns it red and the choice is forced
-            // rather than made by accident. That assertion is what makes this paragraph true; it
-            // said the same thing while the fixture still asserted `E007 || E013`, which either
-            // verdict satisfies, and the claim was false for as long as it did.
+            // The document-half guard above (`member_closes_a_cycle`) runs before this collapse
+            // and would otherwise answer `E013` for this shape whenever the union carries sibling
+            // keywords. It excludes a member that is this union's own reservation
+            // (`member_is_this_union`), so the self-union reaches here and draws `E007` with or
+            // without siblings, and with one member or several.
+            // `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in `tests/frontend.rs`
+            // asserts the reported error codes are **exactly** `[E007]` on both its spellings.
             if self.reservation_at(&schema.provenance) == Some(inner.id) {
                 return self.reject_union(
                     schema,
@@ -1451,19 +1561,47 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return Some(inner);
             }
             if let Some(sibling) = sibling {
-                // A bare `?` here would drop the whole construct with no diagnostic at all — the
-                // silent fourth behaviour. `intersect_types` returns `None` only once its own null
-                // rescue has declined, so this is an irreconcilable intersection and nothing is
-                // left for the union to collapse to.
+                // The null-only MEMBER's branch was stripped out above, BEFORE this intersection,
+                // so `inner` carries `nullable: false` and `type_accepts_null` — which reads
+                // `Ty::nullable` — cannot see it. Restore exactly that branch. Without it the
+                // intersection reports empty for a schema `null` genuinely satisfies, and the
+                // `$ref` spelling of the identical instance set, where the target's nullability
+                // rides on its own `Ty`, generates while this one rejects.
+                //
+                // `null_from_type_array` is deliberately NOT restored here: it supplies no branch,
+                // and it already reaches the intersection on the sibling side, where it belongs —
+                // it can narrow what the result accepts, never create something to accept.
+                inner.nullable = inner.nullable || null_from_member;
                 let Some(constrained) =
-                    self.intersect_types(inner, sibling, &format!("{hint}Constrained"))
+                    self.intersect_types(inner, sibling.ty, &format!("{hint}Constrained"))
                 else {
+                    // Neither side admits null and the non-null shapes do not meet, so nothing is
+                    // left to collapse to. The terminal code matches the multi-variant path below,
+                    // which rejects with `E007` once every variant has been excluded — but only the
+                    // terminal code: that path also emits a per-variant `W011`, and this one
+                    // deliberately does not, because `W011` describes a construct dropped from
+                    // output that still exists, and here no enum is generated at all.
+                    //
+                    // The message says "empty or unrepresentable" for the same reason Site A's
+                    // does: `None` covers both, and the sole non-null member is named because there
+                    // is exactly one, so the author needs no index to find it.
                     return self.reject_union(
                         schema,
                         "the union's sole non-null member and the enclosing schema's own sibling \
                          keywords have an empty or unrepresentable intersection, leaving the union \
                          with no variant",
                     );
+                };
+                // The intersection owns the answer for nullability too — but ONLY where the sibling
+                // is entitled to give one, which is a question about the SIBLING. Reading the
+                // enclosing schema's `type` instead answered it wrongly in both directions: the two
+                // disagree whenever a multi-type array is deleted for lowering, and whenever the
+                // sibling speaks through `enum`/`const` rather than `type`. An object applicator
+                // denies nothing and must not remove the union's own acceptance.
+                nullable = if sibling.speaks_about_null {
+                    constrained.nullable
+                } else {
+                    member_nullable || null_from_member
                 };
                 inner = constrained;
             }
@@ -1515,9 +1653,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             if let Some(sibling) = sibling {
-                let Some(intersection) =
-                    self.intersect_types(ty, sibling, &format!("{hint}Variant{index}Constrained"))
-                else {
+                let Some(intersection) = self.intersect_types(
+                    ty,
+                    sibling.ty,
+                    &format!("{hint}Variant{index}Constrained"),
+                ) else {
                     // The sibling constraints make this branch impossible; JSON Schema simply
                     // removes it from the union's accepted set. Acknowledge it, because a variant
                     // vanishing from the generated enum is otherwise invisible.
@@ -1553,6 +1693,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         if variants.is_empty() {
+            // The same blind spot as the sole-member site above, on the pre-existing path: every
+            // REAL variant is impossible, but a null-only member's branch was stripped out before
+            // any of them were intersected, so it is not among the variants that just vanished.
+            // When the sibling admits null too, `null` still satisfies the whole schema and the
+            // exact JSON null type is the answer — the same type the all-null-members branch above
+            // returns for the same reason. Again only the MEMBER-derived flag can rescue: a
+            // `"null"` in the enclosing `type` array leaves nothing for `null` to match.
+            if null_from_member && sibling.is_none_or(|sibling| self.ty_accepts_null(sibling.ty)) {
+                return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
+            }
             return self.reject_union(
                 schema,
                 "union sibling constraints make every variant impossible",
@@ -1602,25 +1752,51 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` so every branch is intersected with
     /// them. A multi-non-null `type` array is already expressed by the union members and is removed
     /// here (its `null` member is handled by the union's outer nullability).
-    fn lower_union_sibling(&mut self, schema: &Schema, hint: &str) -> Option<Option<Ty>> {
+    fn lower_union_sibling(&mut self, schema: &Schema, hint: &str) -> Option<Option<UnionSibling>> {
         let mut sibling = schema.clone();
         sibling.one_of.clear();
         sibling.any_of.clear();
         sibling.discriminator = None;
+
+        // Asked of the sibling's OWN keywords, and asked BEFORE the type array is deleted below.
+        // `type`, `enum`, `const`, `$ref` and `allOf` each state something about `null` — an `enum`
+        // either lists it or does not, a `$ref`'s target carries its own nullability. The object and
+        // array applicators (`properties`, `patternProperties`, `required`, `additionalProperties`,
+        // `items`, `prefixItems`) state nothing: in 2020-12 they are vacuously satisfied by every
+        // instance of another category, `null` included.
+        let speaks_about_null = !sibling.types.types.is_empty()
+            || sibling.enum_values.is_some()
+            || sibling.const_value.is_some()
+            || sibling.reference.is_some()
+            || !sibling.all_of.is_empty();
+        let declared_types_admit_null = sibling.types.types.contains(&JsonType::Null);
+
         let non_null_types = sibling
             .types
             .types
             .iter()
             .filter(|kind| **kind != JsonType::Null)
             .count();
-        if non_null_types > 1 {
+        // More than one non-null type has no single lowered representation, so the array is dropped
+        // for lowering. That is a lowering convenience, not a statement about the document.
+        let types_deleted = non_null_types > 1;
+        if types_deleted {
             sibling.types.types.clear();
         }
         if !schema_has_shape_constraint(&sibling) {
             return Some(None);
         }
-        self.lower_schema(&sibling, &format!("{hint}Constraint"))
-            .map(Some)
+        let mut ty = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
+        if types_deleted {
+            // Restore the one piece of the deleted array that still has a faithful representation.
+            // Without this the lowered sibling reads as null-rejecting for an array that admitted
+            // null, and the union's acceptance is removed by a deletion the author never wrote.
+            ty.nullable = declared_types_admit_null;
+        }
+        Some(Some(UnionSibling {
+            ty,
+            speaks_about_null,
+        }))
     }
 
     /// Lower one union member, returning its type and — when the member is a `$ref` to a component —
@@ -2502,10 +2678,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // that accepts objects — emitted with no diagnostic, which is the standing invariant's
         // fourth, silent behaviour.
         //
-        // Returning `None` here routes to each caller's own rejection instead. This is what makes
-        // the class unreachable rather than one spelling of it: any future guard that misses a
-        // reservation lands on a rejection, never on generated code.
-        if matches!(a_kind, TypeKind::Reserved) || matches!(b_kind, TypeKind::Reserved) {
+        // Returning `None` here hands the refusal to the caller. It is a backstop, not a guarantee
+        // of rejection: most callers report `None` as an irreconcilable composition, but two treat
+        // it as "provably empty" — the `Array` arm of `intersect_non_null` types the items as
+        // `Never`, and `intersect_structs` keeps an optional conflicting property as `Never` — so a
+        // reservation that reaches either through a missed caller-side guard is still emitted as an
+        // uninhabited type rather than rejected. The caller-side guards are what reject; this arm
+        // only keeps the null-collapse rescue below from turning the refusal into `()`.
+        //
+        // A reservation intersected with ITSELF is exempt: `X ∩ X = X` needs no knowledge of the
+        // body, and it is how every ordinary recursive schema composes when two `allOf` members
+        // repeat one construct. Refusing it rejected those documents with a false "conflicting
+        // types" message, and at the two `Never` callers above emitted a `kids` array that decodes
+        // only `[]`. `intersect_non_null` answers it by its identity short-circuit.
+        if a.id != b.id
+            && (matches!(a_kind, TypeKind::Reserved) || matches!(b_kind, TypeKind::Reserved))
+        {
             return None;
         }
 
@@ -2527,6 +2715,131 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             None => None,
         }
+    }
+
+    /// Whether `reference`, written at `at`, closes a reference cycle back through a schema whose
+    /// lowering encloses `at`.
+    ///
+    /// This is a property of the DOCUMENT, not of the lowering: it asks whether the target reaches,
+    /// through `$ref`s, a schema that contains `at` along the keywords lowering descends into. That
+    /// is the same answer however any map is ordered and whichever end of a cycle lowering entered
+    /// first. The predicate it replaced — membership of an in-progress map — was a property of
+    /// *when* lowering happened, so mutual recursion rejected or generated according to which entry
+    /// the document happened to declare, or which operation happened to reach it, first. Re-ordering
+    /// a YAML map is a no-op in OpenAPI.
+    ///
+    /// Every schema is named by its resolved `(file, pointer)`, for every spelling alike, which is
+    /// what makes the answer spelling-independent. An earlier form walked the root document's
+    /// `components.schemas` by name, so it could not see a sub-file or remote target at all, and it
+    /// matched a sub-file component's name against the root's map — a sub-file `Item` sharing its
+    /// name with a root `Item` in a cycle was reported as closing that cycle.
+    fn ref_closes_a_cycle(&self, reference: &str, at: &Provenance) -> bool {
+        let site_file = at
+            .span
+            .map_or_else(|| self.resolver.root_id(), |span| span.file);
+        let Some(start) = self.schema_ref_identity(reference, site_file) else {
+            // Not a target this bundle knows; the lowering reports it in its own words.
+            return false;
+        };
+        let mut seen: HashSet<(crate::diag::FileId, crate::diag::JsonPointer)> = HashSet::new();
+        let mut stack = vec![start];
+        while let Some((file, pointer)) = stack.pop() {
+            if file == site_file && lowering_encloses(&pointer, &at.pointer) {
+                return true;
+            }
+            if !seen.insert((file, pointer.clone())) {
+                continue;
+            }
+            let Some(node) = self.resolver.node_at(file, &pointer) else {
+                continue;
+            };
+            let mut references = Vec::new();
+            collect_node_refs(node, &mut references);
+            stack.extend(
+                references
+                    .into_iter()
+                    .filter_map(|reference| self.schema_ref_identity(reference, file)),
+            );
+        }
+        false
+    }
+
+    /// The `(file, pointer)` a schema `$ref` written in `from` lowers to, with the lowering's own
+    /// precedence: `#/components/schemas/<name>` is the ROOT document's component whenever the root
+    /// declares `name`, from whichever file it is written in (see [`Self::ensure_component`]), and
+    /// every other reference resolves against the file it is written in.
+    fn schema_ref_identity(
+        &self,
+        reference: &str,
+        from: crate::diag::FileId,
+    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+            if self.document.components.schemas.contains_key(name) {
+                return Some((
+                    self.resolver.root_id(),
+                    crate::diag::JsonPointer::from(format!("/components/schemas/{name}")),
+                ));
+            }
+        }
+        self.resolver.reference_identity_from(reference, from)
+    }
+
+    /// Whether a union member is a `$ref` that closes a reference cycle back through the component
+    /// enclosing the union. Only a member that IS a reference counts: a member with recursive
+    /// *fields* lowers fine, exactly as it does on the `allOf` path.
+    ///
+    /// Every spelling is asked. Asking only `#/components/schemas/…` left the explicit
+    /// `./lib.yaml#/…` spelling to the reservation checks after lowering, so with siblings on one
+    /// edge of a two-schema cycle it generated when lowering entered at one end and rejected when
+    /// it entered at the other.
+    fn member_closes_a_cycle(&self, member: &SchemaOr, at: &crate::diag::Provenance) -> bool {
+        let SchemaOr::Schema(member) = member else {
+            return false;
+        };
+        member
+            .reference
+            .as_deref()
+            .is_some_and(|reference| self.ref_closes_a_cycle(reference, at))
+    }
+
+    /// Whether a union member is a `$ref` to the very schema the union at `at` is. Such a union
+    /// resolves to itself, which is `E007` rather than a sibling-intersection question.
+    ///
+    /// Answered by resolved identity, for every spelling, and also by the reservation the schema at
+    /// `at` occupies, which is how the `#/components/schemas/…` spelling was answered before the
+    /// document half of the union guard was asked of every spelling.
+    fn member_is_this_union(&self, member: &SchemaOr, at: &crate::diag::Provenance) -> bool {
+        let SchemaOr::Schema(member) = member else {
+            return false;
+        };
+        let Some(reference) = member.reference.as_deref() else {
+            return false;
+        };
+        let site_file = at
+            .span
+            .map_or_else(|| self.resolver.root_id(), |span| span.file);
+        if self
+            .schema_ref_identity(reference, site_file)
+            .is_some_and(|(file, pointer)| file == site_file && pointer == at.pointer)
+        {
+            return true;
+        }
+        let Some(own) = self.reservation_at(at) else {
+            return false;
+        };
+        reference
+            .strip_prefix("#/components/schemas/")
+            .and_then(|name| self.in_progress.get(name))
+            .is_some_and(|&(id, _)| id == own)
+    }
+
+    /// Whether an already-lowered type admits JSON `null`, resolving its kind out of the graph.
+    /// [`type_accepts_null`] needs the kind beside the [`Ty`]; callers outside the intersection
+    /// machinery hold only the [`Ty`].
+    fn ty_accepts_null(&self, ty: Ty) -> bool {
+        self.graph
+            .get(ty.id)
+            .is_some_and(|def| type_accepts_null(ty, &def.kind))
     }
 
     fn intersect_non_null(
@@ -2648,12 +2961,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for field in &right.fields {
             match fields.get_mut(&field.name.wire) {
                 Some(existing) => {
-                    existing.ty = self.intersect_types(
-                        existing.ty,
-                        field.ty,
-                        &format!("{hint}{}", field.name.wire),
-                    )?;
-                    existing.required = existing.required || field.required;
+                    let field_hint = format!("{hint}{}", field.name.wire);
+                    let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
+                    let required = existing.required || field.required;
+                    existing.ty = match intersection {
+                        Some(ty) => ty,
+                        // Mirrors the array arm above, and for the same reason `E013`'s explain
+                        // gives for it: a property NEITHER side requires does not empty the
+                        // object when its two types cannot meet, because every instance that
+                        // omits it still satisfies both sides. The field takes an uninhabited
+                        // type, so the instances that remain representable are exactly the valid
+                        // ones. Propagating the failure would reject a document that `{}`
+                        // satisfies.
+                        None if !required => {
+                            self.insert_type(&field_hint, TypeKind::Never, Docs::default(), None)
+                        }
+                        // Required on one side or the other: every instance must carry a value no
+                        // type admits, so the composition really is empty.
+                        None => return None,
+                    };
+                    existing.required = required;
                     if existing.required {
                         if let Some(default) = &mut existing.default {
                             default.applied = None;
@@ -4751,6 +5078,82 @@ fn parameter_shape_supported_inner(
     };
     visiting.remove(&ty.id);
     supported
+}
+
+/// Whether lowering the schema at `frame` descends into the schema at `site`, both pointers into
+/// one file: `site` is `frame` itself, or lies below it along only the keywords
+/// [`collect_node_refs`] walks.
+///
+/// Lexical containment alone is not enough. A whole-file target (`./lib.yaml`, pointer `""`)
+/// contains every pointer in that file, but lowering it as a schema never enters its `components`,
+/// so a `$ref` there is not inside that frame and cannot be handed its placeholder.
+fn lowering_encloses(frame: &crate::diag::JsonPointer, site: &crate::diag::JsonPointer) -> bool {
+    let Some(rest) = site.as_str().strip_prefix(frame.as_str()) else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(rest) = rest.strip_prefix('/') else {
+        // `/components/schemas/Ab` is not below `/components/schemas/A`.
+        return false;
+    };
+    let mut tokens = rest.split('/');
+    while let Some(keyword) = tokens.next() {
+        match keyword {
+            // Each of these is followed by a member name or an index.
+            "properties" | "patternProperties" | "prefixItems" | "allOf" | "oneOf" | "anyOf" => {
+                if tokens.next().is_none() {
+                    return false;
+                }
+            }
+            "additionalProperties" | "items" | "contentSchema" => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Push every `$ref` string this raw schema subtree carries onto `out`, its own included.
+///
+/// Every spelling counts — a root component, a sub-file pointer, a whole file, a remote URL — since
+/// the cycle predicate resolves each to its `(file, pointer)` identity before comparing anything.
+///
+/// The keywords walked here are exactly the ones `lower_schema_inner` descends into. `$defs` and
+/// the validation-only applicators — `not`, `if`/`then`/`else`, `contains`, `propertyNames`,
+/// `unevaluated*`, `dependentSchemas` — are deliberately NOT walked: lowering never enters them, so
+/// a `$ref` reachable only that way can never put a component mid-flight and can never yield the
+/// placeholder this predicate exists to detect. Counting them made an unreferenced `$defs` entry —
+/// zero emitted bytes, not one instance added or removed — flip a document into a hard rejection
+/// whose message asserted a dependence that does not exist. [`lowering_encloses`] accepts exactly
+/// the same keywords, so the two halves of the predicate agree on what "inside" means.
+fn collect_node_refs<'v>(node: &'v SpannedValue, out: &mut Vec<&'v str>) {
+    // A boolean schema, or anything that is not a schema object, carries no reference.
+    let Some(object) = node.as_object() else {
+        return;
+    };
+    if let Some(reference) = object.get("$ref").and_then(SpannedValue::as_str) {
+        out.push(reference);
+    }
+    for keyword in ["properties", "patternProperties"] {
+        if let Some(members) = object.get(keyword).and_then(SpannedValue::as_object) {
+            for (_, child) in members.iter() {
+                collect_node_refs(child, out);
+            }
+        }
+    }
+    for keyword in ["prefixItems", "allOf", "oneOf", "anyOf"] {
+        if let Some(members) = object.get(keyword).and_then(SpannedValue::as_array) {
+            for child in members {
+                collect_node_refs(child, out);
+            }
+        }
+    }
+    for keyword in ["additionalProperties", "items", "contentSchema"] {
+        if let Some(child) = object.get(keyword) {
+            collect_node_refs(child, out);
+        }
+    }
 }
 
 fn type_accepts_null(ty: Ty, kind: &TypeKind) -> bool {

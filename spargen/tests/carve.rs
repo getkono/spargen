@@ -364,6 +364,84 @@ fn carve_reaches_a_fixpoint_and_terminates_with_a_component_cascade() {
     );
 }
 
+// --- (c2) The `$ref`-sibling flavour of E013 carves like the allOf one ---------------------------
+
+/// `E013` has two spellings. The `allOf` one is carved by `MIXED_REJECTIONS` above; this is the
+/// other — a `$ref` whose own sibling keywords have no typed intersection with its target. Carve
+/// only works on a rejection whose pointer names a construct it can omit, so this pins the whole
+/// chain the pointer is load-bearing for: the component is carved, the operation that referenced it
+/// cascades, the healthy operation survives, and no residual `E013` leaks to end the run
+/// `Rejected`. A root pointer on the new diagnostic would break every one of those.
+const REF_SIBLING_REJECTION: &str = r##"
+openapi: 3.1.0
+info: { title: RefSibling, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string } } }
+  /uses-bad:
+    get:
+      operationId: getUsesBad
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Bad" }
+components:
+  schemas:
+    Name: { type: string }
+    Bad:
+      $ref: "#/components/schemas/Name"
+      type: integer
+"##;
+
+#[test]
+fn carve_removes_a_ref_whose_siblings_cannot_be_intersected() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", REF_SIBLING_REJECTION);
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("component schemas Bad")),
+        "the contradictory component is carved and reported: {report:#?}"
+    );
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("get /uses-bad")),
+        "the operation referencing the carved component cascaded: {report:#?}"
+    );
+    assert!(
+        !report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::AllOfIrreconcilable),
+        "no residual E013 leaks: {report:#?}"
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        generated.contains("fn get_good"),
+        "the healthy op is generated: {generated}"
+    );
+    assert!(
+        !generated.contains("fn get_uses_bad"),
+        "the carved op is absent: {generated}"
+    );
+}
+
 // --- (d) Carve is a no-op on a clean spec -------------------------------------------------------
 
 const CLEAN_SPEC: &str = r#"
@@ -921,4 +999,159 @@ paths:
             "{label}: {report:#?}"
         );
     }
+}
+
+/// The round-2 recursive-back-edge rejection reports at a *property* pointer inside the component
+/// being lowered, not at a component root, which is a carve shape the fixture above does not
+/// exercise. The pointer stays load-bearing for the same reason: `compat::carve_rules` maps it to
+/// the smallest omittable construct, so a rejection whose provenance drifted to the document root
+/// would yield no rule and turn a carvable rejection into an un-carvable residual that ends the run
+/// `Rejected`.
+const RECURSIVE_REF_SIBLING_REJECTION: &str = r##"
+openapi: 3.1.0
+info: { title: Recursive, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string } } }
+  /uses-node:
+    get:
+      operationId: getUsesNode
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Node" }
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        next:
+          $ref: "#/components/schemas/Node"
+          type: object
+          properties: { x: { type: string } }
+"##;
+
+#[test]
+fn carve_removes_a_recursive_ref_whose_siblings_bear_a_shape() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", RECURSIVE_REF_SIBLING_REJECTION);
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        !report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::AllOfIrreconcilable),
+        "no residual E013 leaks, so the pointer resolved to an omittable construct: {report:#?}"
+    );
+    // The assertion the sibling fixture thirty lines up already carries, and without which this one
+    // executes its subject without constraining it: deleting the rejection outright leaves the
+    // document generating cleanly, carve doing nothing, and every assertion above still true.
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("get /uses-node")),
+        "the operation reaching the recursive composition must have been carved, not merely left \
+         alone by a rejection that no longer fires: {report:#?}"
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        generated.contains("fn get_good"),
+        "the healthy op is generated: {generated}"
+    );
+    assert!(
+        !generated.contains("fn get_uses_node"),
+        "the carved op is absent: {generated}"
+    );
+}
+
+/// The sole-member union collapse reports `E007`, and its pointer is load-bearing for exactly the
+/// reason both `E013` sites' pointers are: `compat::carve_rules` maps it to the smallest omittable
+/// construct, so a provenance that drifted to the document root yields no rule and a carvable
+/// rejection becomes an un-carvable residual — measured, a `--compat` run over this spec flips from
+/// `Generated` to `Rejected` with nothing generated at all, taking the healthy operation with it.
+///
+/// Both `E013` sites got a pointer assertion and a carve fixture; this site had neither, though the
+/// rationale is the same one word for word.
+const UNION_COLLAPSE_REJECTION: &str = r##"
+openapi: 3.1.0
+info: { title: Collapse, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string } } }
+  /uses-bad:
+    get:
+      operationId: getUsesBad
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Collapsed" }
+components:
+  schemas:
+    Collapsed:
+      type: integer
+      oneOf:
+        - { type: string }
+        - { type: 'null' }
+"##;
+
+#[test]
+fn carve_removes_a_union_whose_sole_member_cannot_be_intersected() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(temp.path(), "openapi.yaml", UNION_COLLAPSE_REJECTION);
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("component schemas Collapsed")),
+        "the collapsed component is carved and reported: {report:#?}"
+    );
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.message.contains("get /uses-bad")),
+        "the operation referencing the carved component cascaded: {report:#?}"
+    );
+    assert!(
+        !report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::NonDisjointUnion),
+        "no residual E007 leaks, so the pointer resolved to an omittable construct: {report:#?}"
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        generated.contains("fn get_good"),
+        "the healthy op survives the carve: {generated}"
+    );
+    assert!(
+        !generated.contains("fn get_uses_bad"),
+        "the carved op is absent: {generated}"
+    );
 }
