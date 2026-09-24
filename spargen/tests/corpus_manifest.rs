@@ -391,8 +391,8 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
         let command_arguments = audit["with"]["command-arguments"].as_str().expect(
             "the cargo-deny-action step must state `with: { command-arguments: \"\" } ` of its \
              own: it is the second input feeding `check`'s `[WHICH]...` positional, and leaving \
-             it absent inherits the action's default for the one remaining input that can \
-             silently narrow the audit",
+             it absent inherits the action's default for one of the three inputs \
+             (`arguments`, `command`, `command-arguments`) that can silently narrow the audit",
         );
         assert_eq!(
             command_arguments, "",
