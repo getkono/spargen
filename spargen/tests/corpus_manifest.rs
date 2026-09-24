@@ -1382,15 +1382,25 @@ fn the_msrv_gate_runs_on_the_declared_rust_version() {
         _ => panic!("`rust-version = {declared:?}` is not `major.minor[.patch]`"),
     };
     let prefix = format!("cargo +{toolchain} ");
+    // A prefix check alone passes `cargo +1.88.0 fetch && cargo check …` or a `run: |` block
+    // whose later lines are bare `cargo check`, both of which check on stable. So each command
+    // must be one line with no shell control operator or substitution: one pinned cargo call.
+    let pinned = |command: &str| {
+        let command = command.trim();
+        command.starts_with(&prefix)
+            && !command.contains(['\n', '\r', ';', '&', '|', '`'])
+            && !command.contains("$(")
+    };
 
     let tasks = mise_tasks();
     let local = mise_commands(&tasks, "msrv");
     assert!(!local.is_empty(), "`mise run msrv` runs nothing");
     for command in &local {
         assert!(
-            command.trim().starts_with(&prefix),
-            "`mise run msrv` runs `{command}`, which does not start with `{prefix}`; without an \
-             explicit toolchain `rust-toolchain.toml` selects stable, not `rust-version`"
+            pinned(command),
+            "`mise run msrv` runs `{command}`, which is not a single `{prefix}…` invocation (one \
+             line, no shell operators); without an explicit toolchain on every cargo call \
+             `rust-toolchain.toml` selects stable, not `rust-version`"
         );
     }
 
@@ -1403,9 +1413,10 @@ fn the_msrv_gate_runs_on_the_declared_rust_version() {
     assert!(!runs.is_empty(), "CI's `msrv` job runs nothing");
     for run in runs {
         assert!(
-            run.trim().starts_with(&prefix),
-            "CI's `msrv` job runs `{run}`, which does not start with `{prefix}`; without an \
-             explicit toolchain `rust-toolchain.toml` selects stable, not `rust-version`"
+            pinned(run),
+            "CI's `msrv` job runs `{run}`, which is not a single `{prefix}…` invocation (one \
+             line, no shell operators); without an explicit toolchain on every cargo call \
+             `rust-toolchain.toml` selects stable, not `rust-version`"
         );
     }
     let toolchains: Vec<&str> = steps
