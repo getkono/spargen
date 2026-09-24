@@ -44,9 +44,11 @@ run = [
 ]
 
 [tasks.deny]
-# `--all-features` matches what CI's cargo-deny-action passes by default. Without it the local gate
-# reports a graph the CI gate never audits: rustls, for one, enters only under `--all-features`, so
-# an advisory against it is clean here and failing there.
+# `--all-features` matches the `arguments` CI's cargo-deny-action step states. Without it the local
+# gate reports a graph the CI gate never audits: rustls, for one, enters only under
+# `--all-features`, so an advisory against it is clean here and failing there (#141).
+# `the_mise_deny_task_audits_the_graph_ci_audits` (spargen/tests/corpus_manifest.rs) holds this
+# command to CI's flags.
 description = "Supply-chain audit (licenses, advisories, bans)"
 run = "cargo deny --all-features check"
 
