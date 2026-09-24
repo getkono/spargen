@@ -3735,6 +3735,48 @@ components:
     }
 }
 
+/// The sub-file spellings of the sibling-bearing self-union above. The root spelling is answered by
+/// the reservation arm of `member_is_this_union`; a sub-file member — bare `#/components/schemas/…`
+/// resolved against `lib.yaml`, or the explicit `./lib.yaml#/…` — reaches no root reservation by
+/// name, and only the resolved-identity arm keeps the document-half cycle guard from answering
+/// `E013` for it. Both spellings must draw exactly `[E007]`, as the root spelling does.
+#[test]
+fn a_sibling_bearing_self_union_in_a_sub_file_is_rejected_as_e007_on_both_spellings() {
+    const SELFY: &str = r##"
+components:
+  schemas:
+    Selfy:
+      type: object
+      properties:
+        x: { type: string }
+      oneOf:
+        - { $ref: 'PREFIX#/components/schemas/Selfy' }
+        - { type: "null" }
+"##;
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        let lib = SELFY.replace("PREFIX", prefix);
+        let (generated, checked, _) = split("./lib.yaml#/components/schemas/Selfy", &lib);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: {report:#?}"
+            );
+            let codes: Vec<Code> = report
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                .map(|diagnostic| diagnostic.code)
+                .collect();
+            assert_eq!(
+                codes,
+                vec![Code::NonDisjointUnion],
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+    }
+}
+
 /// A union that collapses to its sole non-null member, whose intersection with the enclosing
 /// schema's own sibling keywords is irreconcilable (`type: object` against `type: string`), leaves
 /// the union with no variant. Before the rejection existed, the collapse `?`-propagated the failed
