@@ -2076,6 +2076,39 @@ components:
     }
 }
 
+/// A cycle-closing `$ref` with shape siblings whose target is a local schema that is **not a
+/// component** — `./lib.yaml#/bag/Tree`, in a sub-file with no `components` key at all.
+///
+/// The guard's local message used to say the reference closed a cycle back to "the component that
+/// encloses it", naming a construct this document does not contain.
+#[test]
+fn a_cycle_closing_ref_to_a_non_component_schema_names_no_component() {
+    const LIB: &str = r##"
+bag:
+  Tree:
+    type: object
+    properties:
+      kid:
+        $ref: './lib.yaml#/bag/Tree'
+        type: object
+        properties:
+          extra: { type: string }
+"##;
+    let (generated, checked, _) = split("./lib.yaml#/bag/Tree", LIB);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let messages = messages_for(report, Code::AllOfIrreconcilable);
+        assert!(
+            messages.iter().any(|message| {
+                message.contains("closes a reference cycle back to the schema that encloses it")
+                    && !message.contains("component")
+                    && !message.contains("remote")
+            }),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
 /// A reservation intersected with **itself** is not unanswerable: `X ∩ X = X`, which is how every
 /// ordinary recursive schema composes when two `allOf` members repeat one construct.
 ///
@@ -4733,8 +4766,8 @@ mod remote {
             local_messages[0]
         );
         assert!(
-            local_messages[0].contains("component that encloses it"),
-            "the local arm must name the enclosing component: {:?}",
+            local_messages[0].contains("back to the schema that encloses it"),
+            "the local arm must name the enclosing schema: {:?}",
             local_messages[0]
         );
 

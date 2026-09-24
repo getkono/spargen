@@ -1197,6 +1197,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // `is_remote_ref` is the same predicate that routes the lowering a few lines above,
                 // so the message and the code path now agree by construction. A genuinely remote
                 // target still says so; every local target, however addressed, says the same thing.
+                // The local noun is "schema", not "component": a local target need not be a
+                // component at all (`./lib.yaml#/bag/Tree`, or `#/bag/Tree` inside a sub-file), and
+                // a two-way predicate cannot tell that case apart, so the wording must hold for it.
                 return self.reject_ref_sibling_intersection(
                     schema,
                     if is_remote_ref(reference) {
@@ -1204,9 +1207,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          encloses it, so its shape-bearing siblings would have to be intersected \
                          with a target whose own definition depends on the result"
                     } else {
-                        "this `$ref` closes a reference cycle back to the component that encloses \
-                         it, so its shape-bearing siblings would have to be intersected with a \
-                         target whose own definition depends on the result"
+                        "this `$ref` closes a reference cycle back to the schema that encloses it, \
+                         so its shape-bearing siblings would have to be intersected with a target \
+                         whose own definition depends on the result"
                     },
                 );
             }
