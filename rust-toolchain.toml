@@ -1,3 +1,9 @@
+# A concrete release, not the moving `stable` channel: this file selects the toolchain for every
+# local `cargo` call (so every `mise run` gate), and CI's `dtolnay/rust-toolchain@` steps install
+# exactly this version, so a local gate and its CI job compile, lint and format with the same
+# rustc. `ci_installs_the_rust_toolchain_this_file_pins` in spargen/tests/corpus_manifest.rs holds
+# every workflow to it. Bump it in a PR of its own that changes this line and every
+# `dtolnay/rust-toolchain@<version>` step together.
 [toolchain]
-channel = "stable"
+channel = "1.98.1"
 components = ["rustfmt", "clippy", "rust-analyzer"]

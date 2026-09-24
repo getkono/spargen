@@ -18,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: rustfmt
       - run: cargo fmt --all --check
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -41,7 +41,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
@@ -55,7 +55,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
 
@@ -67,10 +67,10 @@ jobs:
       - uses: actions/checkout@v4
       # `rust-version` in the workspace manifest is a published contract: it is what tells a
       # consumer which toolchains can compile spargen and the code it emits. Every other job runs
-      # `stable`, so nothing proved the floor was real.
+      # the release `rust-toolchain.toml` pins, so nothing proved the floor was real.
       #
       # The action installs 1.88.0 as rustup's *default*, but `rust-toolchain.toml` overrides the
-      # default, so a bare `cargo check` here ran on stable (the job log said "overridden by
+      # default, so a bare `cargo check` here ran on the pinned release (the job log said "overridden by
       # rust-toolchain.toml"). An explicit `+1.88.0` outranks the file. The commands are also
       # `mise run msrv`'s, byte for byte.
       - uses: dtolnay/rust-toolchain@1.88.0
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       # The version is `[tools]`'s in mise.toml: `@cargo-hack` as the ref would install the newest
       # release instead (`ci_installs_exactly_the_tool_versions_mise_pins`).
@@ -106,8 +106,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The one floating toolchain, a named exception in CLAUDE.md: `-Z direct-minimal-versions`
+      # needs a nightly cargo, and the proof only resolves the lockfile with it.
       - uses: dtolnay/rust-toolchain@nightly
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
           targets: wasm32-unknown-unknown
@@ -119,7 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       # Packages + runs an isolated verify build. Guards that the published .crate stays
       # self-contained — the runtime sources reached via src/support/runtime/ symlinks must ship
@@ -143,7 +145,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       - run: mkdir -p target/corpus-smoke
       - run: cargo run -q -p spargen --features cli -- check corpus/github-api-3-0/api.github.com.json --format json > target/corpus-smoke/github-30.json || test $? -eq 1
@@ -179,7 +181,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           lfs: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
         with:
           components: clippy
           targets: wasm32-unknown-unknown
@@ -192,7 +194,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
@@ -219,7 +221,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       # The version is `[tools]`'s in mise.toml (`ci_installs_exactly_the_tool_versions_mise_pins`).
       # `--locked` alone pins only mdBook's own dependencies, so without `--version` every run
@@ -242,7 +244,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       # The cargo-deny version `[tools]` pins in mise.toml, not the copy an action bundles: the
       # action's version moved with its `@v2` ref and nothing held it to the pin (#228), and its
       # inputs composed an argv this repository could only partly state (#229).

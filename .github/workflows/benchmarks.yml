@@ -21,7 +21,7 @@ jobs:
         with:
           # The `ollama` benchmark input lives in the LFS-backed corpus.
           lfs: true
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
       - uses: Swatinem/rust-cache@v2
       # Bounded warm-up / measurement times keep the run practical on a shared runner while still
       # giving criterion enough samples for stable-ish statistics. Full output is captured verbatim.

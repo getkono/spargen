@@ -551,11 +551,13 @@ const fn provision(step: &'static str) -> CiOnly {
 
 const CHECKOUT: CiOnly = provision("uses: actions/checkout@v4");
 const CHECKOUT_LFS: CiOnly = provision("uses: actions/checkout@v4\nwith:\n  lfs: true");
-const STABLE: CiOnly = provision("uses: dtolnay/rust-toolchain@stable");
+// These name `rust-toolchain.toml`'s `channel`, a concrete release, so a toolchain bump changes
+// them together with the workflows (`ci_installs_the_rust_toolchain_this_file_pins`).
+const STABLE: CiOnly = provision("uses: dtolnay/rust-toolchain@1.98.1");
 const STABLE_CLIPPY: CiOnly =
-    provision("uses: dtolnay/rust-toolchain@stable\nwith:\n  components: clippy");
+    provision("uses: dtolnay/rust-toolchain@1.98.1\nwith:\n  components: clippy");
 const STABLE_CLIPPY_WASM: CiOnly = provision(
-    "uses: dtolnay/rust-toolchain@stable\nwith:\n  components: clippy\n  targets: wasm32-unknown-unknown",
+    "uses: dtolnay/rust-toolchain@1.98.1\nwith:\n  components: clippy\n  targets: wasm32-unknown-unknown",
 );
 const CACHE: CiOnly = provision("uses: Swatinem/rust-cache@v2");
 
@@ -635,7 +637,7 @@ const PAIRINGS: &[Pairing] = &[
         tasks: &["fmt-check"],
         ci_only: &[
             CHECKOUT,
-            provision("uses: dtolnay/rust-toolchain@stable\nwith:\n  components: rustfmt"),
+            provision("uses: dtolnay/rust-toolchain@1.98.1\nwith:\n  components: rustfmt"),
         ],
         ..PAIR
     }),
@@ -1133,24 +1135,30 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
     }
 }
 
-#[test]
-fn the_msrv_gate_runs_on_the_declared_rust_version() {
-    // `rust-toolchain.toml` pins `channel = "stable"`, and a toolchain file overrides rustup's
-    // default toolchain. `dtolnay/rust-toolchain@1.88.0` only sets that default, so CI's msrv job
-    // ran a bare `cargo check` on stable: the master log said the stable toolchain "is currently
-    // in use (overridden by '.../rust-toolchain.toml')". Only an explicit `cargo +<toolchain>`
-    // outranks the file. The pairing test holds the two sides to each other, so reverting both
-    // to a bare `cargo check` passed it; this holds both to the manifest's `rust-version`.
+/// The workspace `rust-version`, spelled as the rustup toolchain that installs it.
+fn msrv_toolchain() -> String {
     let manifest: toml::Table = toml::from_str(&read("Cargo.toml")).expect("Cargo.toml parses");
     let declared = manifest["workspace"]["package"]["rust-version"]
         .as_str()
         .expect("the workspace declares `rust-version`");
     // Cargo accepts `1.88`; rustup's toolchain spelling is the full `1.88.0`.
-    let toolchain = match declared.split('.').count() {
+    match declared.split('.').count() {
         2 => format!("{declared}.0"),
         3 => declared.to_owned(),
         _ => panic!("`rust-version = {declared:?}` is not `major.minor[.patch]`"),
-    };
+    }
+}
+
+#[test]
+fn the_msrv_gate_runs_on_the_declared_rust_version() {
+    // A toolchain file overrides rustup's default toolchain, and `rust-toolchain.toml` pins a
+    // newer release than `rust-version`. `dtolnay/rust-toolchain@1.88.0` only sets that default,
+    // so CI's msrv job ran a bare `cargo check` on the file's toolchain (then `stable`): the
+    // master log said the stable toolchain "is currently in use (overridden by
+    // '.../rust-toolchain.toml')". Only an explicit `cargo +<toolchain>` outranks the file. The
+    // pairing test holds the two sides to each other, so reverting both to a bare `cargo check`
+    // passed it; this holds both to the manifest's `rust-version`.
+    let toolchain = msrv_toolchain();
     let prefix = format!("cargo +{toolchain} ");
     // A prefix check alone passes `cargo +1.88.0 fetch && cargo check …` or a `run: |` block
     // whose later lines are bare `cargo check`, both of which check on stable. So each command
@@ -1170,7 +1178,7 @@ fn the_msrv_gate_runs_on_the_declared_rust_version() {
             pinned(command),
             "`mise run msrv` runs `{command}`, which is not a single `{prefix}…` invocation (one \
              line, no shell operators); without an explicit toolchain on every cargo call \
-             `rust-toolchain.toml` selects stable, not `rust-version`"
+             `rust-toolchain.toml` selects its pinned release, not `rust-version`"
         );
     }
 
@@ -1186,7 +1194,7 @@ fn the_msrv_gate_runs_on_the_declared_rust_version() {
             pinned(run),
             "CI's `msrv` job runs `{run}`, which is not a single `{prefix}…` invocation (one \
              line, no shell operators); without an explicit toolchain on every cargo call \
-             `rust-toolchain.toml` selects stable, not `rust-version`"
+             `rust-toolchain.toml` selects its pinned release, not `rust-version`"
         );
     }
     let toolchains: Vec<&str> = steps
@@ -1199,6 +1207,108 @@ fn the_msrv_gate_runs_on_the_declared_rust_version() {
         [toolchain.as_str()],
         "CI's `msrv` job must install exactly the `rust-version` toolchain its commands name"
     );
+}
+
+/// The `dtolnay/rust-toolchain@` refs a workflow job may install instead of
+/// `rust-toolchain.toml`'s `channel`, as (file, job, ref, why). [`MSRV_REF`] stands for the
+/// workspace `rust-version` toolchain, which `the_msrv_gate_runs_on_the_declared_rust_version`
+/// holds the job's commands to.
+const TOOLCHAIN_EXCEPTIONS: [(&str, &str, &str, &str); 2] = [
+    (
+        "ci.yml",
+        "msrv",
+        MSRV_REF,
+        "the declared `rust-version` floor, a published contract separate from the development \
+         toolchain",
+    ),
+    (
+        "ci.yml",
+        "runtime-dependencies",
+        "nightly",
+        "`-Z direct-minimal-versions` exists only on nightly; the one floating toolchain, named \
+         in CLAUDE.md",
+    ),
+];
+
+/// Placeholder in [`TOOLCHAIN_EXCEPTIONS`] for the `rust-version` toolchain.
+const MSRV_REF: &str = "<rust-version>";
+
+#[test]
+fn ci_installs_the_rust_toolchain_this_file_pins() {
+    // `rust-toolchain.toml` selects the toolchain for every local `cargo` call, so for every
+    // `mise run` gate. CI's toolchain steps install the release that file names, so a gate and
+    // its CI job compile, lint and format with the same rustc. When both named the moving
+    // `stable` channel, a local toolchain was as new as its last `rustup update` and CI's as new
+    // as the day it ran, so a new clippy lint could fail one side and not the other. A bump is a
+    // PR of its own that changes the file and every workflow step together; this test fails on
+    // any one changed alone.
+    let file: toml::Table =
+        toml::from_str(&read("rust-toolchain.toml")).expect("rust-toolchain.toml parses");
+    let channel = file["toolchain"]["channel"]
+        .as_str()
+        .expect("`rust-toolchain.toml` sets `[toolchain] channel`");
+    assert!(
+        channel.split('.').count() == 3 && channel.split('.').all(|p| p.parse::<u64>().is_ok()),
+        "`rust-toolchain.toml` sets `channel = {channel:?}`, which is not a concrete `1.x.y` \
+         release: a channel name moves without a commit, so local gates and CI drift apart"
+    );
+    let msrv = msrv_toolchain();
+
+    let mut used = BTreeSet::new();
+    let mut seen = 0usize;
+    for file in workflow_files() {
+        let workflow = workflow(&file);
+        let Some(jobs) = workflow["jobs"].as_hash() else {
+            continue;
+        };
+        for (job, body) in jobs {
+            let job = job.as_str().unwrap_or_default();
+            for step in body["steps"].as_vec().into_iter().flatten() {
+                let Some(uses) = step["uses"].as_str() else {
+                    continue;
+                };
+                let lowered = uses.to_ascii_lowercase();
+                let Some(reference) = lowered.strip_prefix("dtolnay/rust-toolchain@") else {
+                    continue;
+                };
+                seen += 1;
+                assert!(
+                    step["with"]["toolchain"].is_badvalue(),
+                    "`{file}`'s `{job}` job passes `with: {{ toolchain: … }}` to `{uses}`, which \
+                     overrides the ref; name the toolchain in the ref alone"
+                );
+                if reference == channel {
+                    continue;
+                }
+                let exception = TOOLCHAIN_EXCEPTIONS.iter().position(|(f, j, r, _)| {
+                    *f == file
+                        && *j == job
+                        && (*r == reference || (*r == MSRV_REF && msrv == reference))
+                });
+                let Some(exception) = exception else {
+                    panic!(
+                        "`{file}`'s `{job}` job installs `{uses}`, and `rust-toolchain.toml` pins \
+                         `{channel}`; a local gate and its CI job must run the same rustc. \
+                         Change both together, or name a deliberate exception in \
+                         TOOLCHAIN_EXCEPTIONS"
+                    )
+                };
+                used.insert(exception);
+            }
+        }
+    }
+    assert!(
+        seen > 0,
+        "no workflow installs a Rust toolchain; this test reads nothing"
+    );
+    for (index, (file, job, reference, why)) in TOOLCHAIN_EXCEPTIONS.iter().enumerate() {
+        assert!(!why.is_empty(), "a toolchain exception must say why");
+        assert!(
+            used.contains(&index),
+            "TOOLCHAIN_EXCEPTIONS names `{reference}` for `{file}`'s `{job}` job, which installs no \
+             such toolchain; drop the stale exception"
+        );
+    }
 }
 
 /// `mise.toml` `[tools]` entries CI has no counterpart for, each with why. Every other pinned tool
