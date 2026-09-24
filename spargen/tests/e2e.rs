@@ -3205,6 +3205,8 @@ components:
           $ref: "#/components/schemas/Category"
         dict:
           $ref: "#/components/schemas/Dict"
+        alias_node:
+          $ref: "#/components/schemas/AliasNode"
         priority:
           $ref: "#/components/schemas/Priority"
         # Discriminated union: an internally-tagged enum over object `$ref` variants.
@@ -3306,6 +3308,27 @@ components:
           type: string
         category:
           $ref: "#/components/schemas/Category"
+    # Mutual recursion through a nullable **alias** component: `AliasNode.parent` refers to
+    # `MaybeAliasNode`, whose whole body is "`AliasNode`, or null" and which therefore names no
+    # shape of its own. The alias resolves to its target's still-open reservation, so the back-edge
+    # must be BOXED — `Option<Box<AliasNode>>`. `Option<AliasNode>` is an infinitely sized type and
+    # does not compile, and this suite is the only one in the repository that compiles generated
+    # output: a `frontend.rs` string assertion over the emitted source cannot be relied on to notice
+    # the difference, because the embedded runtime supplies `Option<Box<…>>` of its own. Two
+    # separate mistakes in the alias's target selection each emitted that type with every other
+    # suite green, which is why the shape lives here rather than only there.
+    AliasNode:
+      type: object
+      required: [value]
+      properties:
+        value:
+          type: string
+        parent:
+          $ref: "#/components/schemas/MaybeAliasNode"
+    MaybeAliasNode:
+      oneOf:
+        - $ref: "#/components/schemas/AliasNode"
+        - type: "null"
     # Self-recursive through additionalProperties (→ BTreeMap<String, Dict>; the map supplies
     # the indirection).
     Dict:
