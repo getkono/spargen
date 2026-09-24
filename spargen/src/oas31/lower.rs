@@ -2698,10 +2698,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // that accepts objects — emitted with no diagnostic, which is the standing invariant's
         // fourth, silent behaviour.
         //
-        // Returning `None` here routes to each caller's own rejection instead. This is what makes
-        // the class unreachable rather than one spelling of it: any future guard that misses a
-        // reservation lands on a rejection, never on generated code.
-        if matches!(a_kind, TypeKind::Reserved) || matches!(b_kind, TypeKind::Reserved) {
+        // Returning `None` here hands the refusal to the caller. It is a backstop, not a guarantee
+        // of rejection: most callers report `None` as an irreconcilable composition, but two treat
+        // it as "provably empty" — the `Array` arm of `intersect_non_null` types the items as
+        // `Never`, and `intersect_structs` keeps an optional conflicting property as `Never` — so a
+        // reservation that reaches either through a missed caller-side guard is still emitted as an
+        // uninhabited type rather than rejected. The caller-side guards are what reject; this arm
+        // only keeps the null-collapse rescue below from turning the refusal into `()`.
+        //
+        // A reservation intersected with ITSELF is exempt: `X ∩ X = X` needs no knowledge of the
+        // body, and it is how every ordinary recursive schema composes when two `allOf` members
+        // repeat one construct. Refusing it rejected those documents with a false "conflicting
+        // types" message, and at the two `Never` callers above emitted a `kids` array that decodes
+        // only `[]`. `intersect_non_null` answers it by its identity short-circuit.
+        if a.id != b.id
+            && (matches!(a_kind, TypeKind::Reserved) || matches!(b_kind, TypeKind::Reserved))
+        {
             return None;
         }
 

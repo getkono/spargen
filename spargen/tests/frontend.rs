@@ -65,7 +65,13 @@ fn messages_for(report: &Report, code: Code) -> Vec<&str> {
         .collect()
 }
 
-/// The generated `types` module, with the provenance header stripped.
+/// Everything from the generated `types` module to the end of the file, with the provenance header
+/// and the embedded runtime before it stripped.
+///
+/// It is **not** bounded at the module's closing brace: the returned text also carries the
+/// `Client` impl and the emitted scaffolding after `types`. A `.contains(…)` on it can therefore
+/// match client code rather than a lowered type; a fixture that must pin a lowered type should
+/// match a declaration (`pub struct X`, `pub type X =`) rather than a bare type name.
 ///
 /// Two generations of the *same* spec already differ as whole files: the header carries the output
 /// path and a per-run `input-sha256`/`content-sha256`. So a whole-file comparison between two
@@ -2043,6 +2049,24 @@ components:
                 "{spelling}/{entry}: a union member that closes a reference cycle cannot be \
                  intersected against the union's own siblings: {report:#?}"
             );
+            // The cause, not only the verdict: with the two union guards neutralised, the explicit
+            // spelling still rejects — as `E007` with a "sole non-null member" message, the wrong
+            // cause — so an outcome assertion alone cannot tell the guards are present. Both
+            // spellings must name the cycle, under the code the `$ref`-sibling spelling uses.
+            assert!(
+                has_code(report, Code::AllOfIrreconcilable),
+                "{spelling}/{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::NonDisjointUnion),
+                "{spelling}/{entry}: the cycle was reported as an empty union: {report:#?}"
+            );
+            assert!(
+                messages_for(report, Code::AllOfIrreconcilable)
+                    .iter()
+                    .any(|message| message.contains("closes a reference cycle")),
+                "{spelling}/{entry}: {report:#?}"
+            );
         }
         assert!(
             !code.contains("= ();"),
@@ -2050,6 +2074,97 @@ components:
              {code}"
         );
     }
+}
+
+/// A reservation intersected with **itself** is not unanswerable: `X ∩ X = X`, which is how every
+/// ordinary recursive schema composes when two `allOf` members repeat one construct.
+///
+/// `intersect_types` refuses to read a `TypeKind::Reserved` operand, and that refusal ran before
+/// `intersect_non_null`'s identity short-circuit, so two members naming the same recursive target
+/// failed to intersect. Most callers turn that `None` into a false `E013` ("conflicting types" for
+/// two operands that are the same type); the array-item and optional-property callers turn it into
+/// an uninhabited type, which is worse — a `kids` array whose item type is an empty enum decodes
+/// only `[]`, the one array the `minItems: 1` member forbids, with no diagnostic at all.
+#[test]
+fn a_recursive_target_repeated_across_all_of_members_intersects_as_itself() {
+    let spec = |members: &str| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /t:\n    \
+             get:\n      \
+             operationId: getT\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json:\n              \
+             schema: {{ $ref: '#/components/schemas/Tree' }}\n\
+             components:\n  \
+             schemas:\n    \
+             Tree:\n      \
+             allOf:\n{members}"
+        )
+    };
+    let array_items = spec(
+        "        - { type: object, properties: { kids: { type: array, items: { $ref: '#/components/schemas/Tree' } } } }\n\
+         \x20       - { type: object, properties: { kids: { type: array, minItems: 1, items: { $ref: '#/components/schemas/Tree' } } } }\n",
+    );
+    let property = spec(
+        "        - { type: object, properties: { kid: { $ref: '#/components/schemas/Tree' } } }\n\
+         \x20       - { type: object, properties: { kid: { $ref: '#/components/schemas/Tree' } } }\n",
+    );
+    let additional = spec(
+        "        - { type: object, additionalProperties: { $ref: '#/components/schemas/Tree' } }\n\
+         \x20       - { type: object, additionalProperties: { $ref: '#/components/schemas/Tree' } }\n",
+    );
+    let prefix_items = spec(
+        "        - { type: array, prefixItems: [{ $ref: '#/components/schemas/Tree' }], items: false }\n\
+         \x20       - { type: array, prefixItems: [{ $ref: '#/components/schemas/Tree' }], items: false }\n",
+    );
+
+    for (label, document) in [
+        ("array items", &array_items),
+        ("property", &property),
+        ("additionalProperties", &additional),
+        ("prefixItems", &prefix_items),
+    ] {
+        for (entry, report) in [("generate", generate(document)), ("check", check(document))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: two members naming the same recursive target were reported as \
+                 conflicting: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{label}/{entry}: {report:#?}"
+            );
+        }
+    }
+
+    // The silent half, asserted on what was emitted: the item type is `Tree`, not an empty enum.
+    let (_, code) = generate_with_code(&array_items);
+    let types = types_module(&code);
+    assert!(
+        types.contains("= Vec<Tree>;"),
+        "the repeated recursive item type must stay `Tree`: {types}"
+    );
+    assert!(
+        !types.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("pub enum ") && line.ends_with("{}")
+        }),
+        "an uninhabited item type was emitted for an item both members type as `Tree`: {types}"
+    );
+    let (_, code) = generate_with_code(&property);
+    assert_eq!(
+        field_type(&types_module(&code), "pub kid:").as_deref(),
+        Some("Option<Box<Tree>>"),
+        "{code}"
+    );
 }
 
 /// Decision 23's invariant, applied to the predicate that now answers the sub-file spelling.
