@@ -13948,9 +13948,10 @@ fn only_a_null_member_can_rescue_an_empty_union_intersection() {
     // fails at the per-case outcome assertion above, and with those assertions neutralised the
     // fixture PASSED. It was held up entirely by its neighbours.
     //
-    // A differential that varies only the null fact is not available here, because the null fact is
-    // exactly what decides whether a row generates at all: its partner rejects and emits nothing.
-    // So the pin is positive instead. A row only `null` satisfies must lower to the exact JSON null
+    // Among the rows above, varying only the null fact flips a row between generating and
+    // rejecting, so no pair of THEM is a differential. One that generates on both sides does
+    // exist, and is asserted after the control below. Here the pin is positive: a row only `null`
+    // satisfies must lower to the exact JSON null
     // type — not to `serde_json::Value`, not to `Option<T>` of anything — and that is a statement a
     // mutation can falsify without changing any outcome, which is what the removed assertion could
     // not manage.
@@ -13986,6 +13987,34 @@ fn only_a_null_member_can_rescue_an_empty_union_intersection() {
     assert!(
         code.contains("= i64;"),
         "the non-empty intersection must still lower to its narrowed type: {code}"
+    );
+
+    // The differential that varies ONLY the null fact and generates on both sides: the control,
+    // and the control with a `{type: 'null'}` member added. The member is what makes `null` a
+    // valid body, so it — and only it — must make the response optional. The null fact lives on
+    // the operation signature, not in the types module: `types_module` is nullability-blind here
+    // (both documents emit the same `= i64;` alias), which is why this reads the signature.
+    let with_null_member = format!(
+        "{HEAD}{}",
+        PATH.replace(
+            "BODY",
+            "type: [integer, 'null']\n                oneOf: [{ type: integer }, { type: 'null' }]"
+        )
+    );
+    let (partner_report, partner) = generate_with_code(&with_null_member);
+    assert_ne!(
+        partner_report.outcome(),
+        Outcome::Rejected,
+        "{partner_report:#?}"
+    );
+    assert!(
+        !code.contains("ResponseValue<Option<"),
+        "without a null member `null` matches no branch, so the response is not optional: {code}"
+    );
+    assert!(partner.contains("= i64;"), "{partner}");
+    assert!(
+        partner.contains("ResponseValue<Option<"),
+        "the null member is a branch `null` satisfies, so the response must be optional: {partner}"
     );
 }
 
