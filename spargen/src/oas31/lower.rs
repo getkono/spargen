@@ -1459,11 +1459,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // one, an ordinary recursive union boxes its back-edge and generates, which is what makes a
         // recursive `oneOf` usable at all.
         //
-        // This is the DOCUMENT half of the test and it is answered before lowering. It is asked only
-        // of the `#/components/schemas/…` spelling, although `ref_closes_a_cycle` now resolves every
-        // spelling. The reservation half is applied after each member is lowered, at the two sites
-        // below where the member's `Ty` exists; between them the three spellings of one conjunction
-        // give one verdict, which they did not before.
+        // This is the DOCUMENT half of the test and it is answered before lowering, for every
+        // spelling of the member's `$ref`. The reservation half is applied after each member is
+        // lowered, at the two sites below where the member's `Ty` exists; between them the three
+        // spellings of one conjunction give one verdict, which they did not before.
         if sibling.is_some() {
             for member in &real_members {
                 // A member that is this union's OWN reservation is not an intersection problem:
@@ -2788,6 +2787,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Whether a union member is a `$ref` that closes a reference cycle back through the component
     /// enclosing the union. Only a member that IS a reference counts: a member with recursive
     /// *fields* lowers fine, exactly as it does on the `allOf` path.
+    ///
+    /// Every spelling is asked. Asking only `#/components/schemas/…` left the explicit
+    /// `./lib.yaml#/…` spelling to the reservation checks after lowering, so with siblings on one
+    /// edge of a two-schema cycle it generated when lowering entered at one end and rejected when
+    /// it entered at the other.
     fn member_closes_a_cycle(&self, member: &SchemaOr, at: &crate::diag::Provenance) -> bool {
         let SchemaOr::Schema(member) = member else {
             return false;
@@ -2795,24 +2799,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         member
             .reference
             .as_deref()
-            .filter(|reference| reference.starts_with("#/components/schemas/"))
             .is_some_and(|reference| self.ref_closes_a_cycle(reference, at))
     }
 
-    /// Whether a union member is a `#/components/schemas/…` `$ref` to the very schema whose body
-    /// the union at `at` is — the reservation that schema occupies. Such a union resolves to
-    /// itself, which is `E007` rather than a sibling-intersection question.
+    /// Whether a union member is a `$ref` to the very schema the union at `at` is. Such a union
+    /// resolves to itself, which is `E007` rather than a sibling-intersection question.
+    ///
+    /// Answered by resolved identity, for every spelling, and also by the reservation the schema at
+    /// `at` occupies, which is how the `#/components/schemas/…` spelling was answered before the
+    /// document half of the union guard was asked of every spelling.
     fn member_is_this_union(&self, member: &SchemaOr, at: &crate::diag::Provenance) -> bool {
         let SchemaOr::Schema(member) = member else {
             return false;
         };
+        let Some(reference) = member.reference.as_deref() else {
+            return false;
+        };
+        let site_file = at
+            .span
+            .map_or_else(|| self.resolver.root_id(), |span| span.file);
+        if self
+            .schema_ref_identity(reference, site_file)
+            .is_some_and(|(file, pointer)| file == site_file && pointer == at.pointer)
+        {
+            return true;
+        }
         let Some(own) = self.reservation_at(at) else {
             return false;
         };
-        member
-            .reference
-            .as_deref()
-            .and_then(|reference| reference.strip_prefix("#/components/schemas/"))
+        reference
+            .strip_prefix("#/components/schemas/")
             .and_then(|name| self.in_progress.get(name))
             .is_some_and(|&(id, _)| id == own)
     }

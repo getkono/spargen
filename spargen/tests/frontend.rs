@@ -2289,6 +2289,10 @@ fn a_sub_file_cycle_verdict_does_not_depend_on_the_order_the_schemas_are_declare
 /// unchanged `lib.yaml` — `E013` from `B`, a clean generation from `A` — while the root-component
 /// spelling of the same schemas, asked of the document, rejected from both. The verdict is a
 /// property of the document, so all three spellings, from both ends, must give the same one.
+///
+/// The edge is written twice: as a `$ref` beside shape siblings, and as the sole `oneOf` member of a
+/// schema carrying them. The union spelling had the same fault in the explicit `./lib.yaml#/…`
+/// form, whose document-half guard was asked only of `#/components/schemas/…`.
 #[test]
 fn a_one_edge_cycle_rejects_whichever_end_lowering_enters() {
     const LIB: &str = r##"
@@ -2298,54 +2302,66 @@ components:
       type: object
       properties:
         b:
-          $ref: 'PREFIX#/components/schemas/B'
-          type: object
-          properties:
-            extra: { type: string }
+EDGE
     B:
       type: object
       properties:
         a: { $ref: 'PREFIX#/components/schemas/A' }
 "##;
+    const SIBLING: &str = "          $ref: 'PREFIX#/components/schemas/B'
+          type: object
+          properties:
+            extra: { type: string }";
+    const UNION: &str = "          type: object
+          properties:
+            extra: { type: string }
+          oneOf:
+            - $ref: 'PREFIX#/components/schemas/B'";
 
-    let mut diagnoses = Vec::new();
-    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
-        for entry in ["A", "B"] {
-            let (generated, checked, _) = split(
-                &format!("./lib.yaml#/components/schemas/{entry}"),
-                &LIB.replace("PREFIX", prefix),
-            );
-            for (run, report) in [("generate", &generated), ("check", &checked)] {
-                assert_eq!(
-                    report.outcome(),
-                    Outcome::Rejected,
-                    "{spelling}/{entry}/{run}: {report:#?}"
+    for (shape, edge) in [("sibling", SIBLING), ("union", UNION)] {
+        let lib = LIB.replace("EDGE", edge);
+        let mut diagnoses = Vec::new();
+        for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+            for entry in ["A", "B"] {
+                let (generated, checked, _) = split(
+                    &format!("./lib.yaml#/components/schemas/{entry}"),
+                    &lib.replace("PREFIX", prefix),
                 );
-                let messages = messages_for(report, Code::AllOfIrreconcilable);
-                assert!(
-                    messages
+                for (run, report) in [("generate", &generated), ("check", &checked)] {
+                    assert_eq!(
+                        report.outcome(),
+                        Outcome::Rejected,
+                        "{shape}/{spelling}/{entry}/{run}: {report:#?}"
+                    );
+                    let messages = messages_for(report, Code::AllOfIrreconcilable);
+                    assert!(
+                        messages
+                            .iter()
+                            .any(|m| m.contains("closes a reference cycle")),
+                        "{shape}/{spelling}/{entry}/{run}: the rejection must name the \
+                         recursion: {messages:?}"
+                    );
+                }
+                diagnoses.push((
+                    format!("{spelling}/{entry}"),
+                    messages_for(&generated, Code::AllOfIrreconcilable)
                         .iter()
-                        .any(|m| m.contains("closes a reference cycle")),
-                    "{spelling}/{entry}/{run}: the rejection must name the recursion: \
-                     {messages:?}"
-                );
+                        .map(|m| (*m).to_owned())
+                        .collect::<Vec<_>>(),
+                ));
             }
-            diagnoses.push((
-                format!("{spelling}/{entry}"),
-                messages_for(&generated, Code::AllOfIrreconcilable)
-                    .iter()
-                    .map(|m| (*m).to_owned())
-                    .collect::<Vec<_>>(),
-            ));
         }
+        assert!(
+            diagnoses.iter().all(|(_, d)| *d == diagnoses[0].1),
+            "{shape}: the entry point or the spelling changed the diagnosis: {diagnoses:?}"
+        );
+        one_edge_root_control(shape, &lib);
     }
-    assert!(
-        diagnoses.iter().all(|(_, d)| *d == diagnoses[0].1),
-        "the entry point or the spelling changed the diagnosis: {diagnoses:?}"
-    );
+}
 
-    // The root-component spelling of the same two schemas, entered from each end: the control the
-    // sub-file spellings are held to.
+/// The root-component spelling of [`a_one_edge_cycle_rejects_whichever_end_lowering_enters`]'s two
+/// schemas, entered from each end: the control the sub-file spellings are held to.
+fn one_edge_root_control(shape: &str, lib: &str) {
     for entry in ["A", "B"] {
         let root = format!(
             r##"
@@ -2362,19 +2378,19 @@ paths:
           content:
             application/json: {{ schema: {{ $ref: '#/components/schemas/{entry}' }} }}
 {}"##,
-            LIB.replace("PREFIX", "")
+            lib.replace("PREFIX", "")
         );
         let report = generate(&root);
         assert_eq!(
             report.outcome(),
             Outcome::Rejected,
-            "root/{entry}: {report:#?}"
+            "{shape}/root/{entry}: {report:#?}"
         );
         assert!(
             messages_for(&report, Code::AllOfIrreconcilable)
                 .iter()
                 .any(|m| m.contains("closes a reference cycle")),
-            "root/{entry}: {report:#?}"
+            "{shape}/root/{entry}: {report:#?}"
         );
     }
 }
