@@ -64,8 +64,17 @@ mise run doc-links  # rustdoc over the workspace, warnings denied, private items
 keeping a second copy of a gate: `fmt` and `lint` fix the working tree on pre-commit;
 `fmt-check`, `lint`, `test`, and `commit-range` (Conventional Commits over the outgoing range)
 gate pre-push; `commit-msg` validates each message as it is written. CI runs the same gates but
-spells the commands out itself rather than calling `mise`, so the two are kept in step by hand —
-`ci.yml` says so where it pins `mdbook` and `convco`. The rest — `check`, `powerset`,
+spells the commands out itself rather than calling `mise`. The policy is that a `mise` task and
+its CI counterpart are **identical** — the same commands with the same flags, in the same order,
+under the same environment — and neither may be stricter or narrower than the other; change both
+sides together. `spargen/tests/corpus_manifest.rs` enforces it:
+`every_mise_task_runs_exactly_what_its_ci_job_runs` pairs every CI job with every task and compares
+them byte for byte (`deny`, an action rather than `run:` steps, is held by
+`the_mise_deny_task_audits_the_graph_ci_audits`), and rejects task keys such as `dir` that would
+change what a task resolves without appearing in its command. Pairs that are not yet identical
+(`test`, `commit-range`, `bench`) and CI jobs with no task (`msrv`, `package`) are listed there as
+pending a maintainer decision. Tool versions are still kept in step by hand — `ci.yml` says so
+where it pins `mdbook` and `convco`. The rest — `check`, `powerset`,
 `corpus-smoke`, `example`, `github-api`, `deny`, `docs`, and the rustdoc link check `doc-links`
 runs (a step inside the `docs` job, not a job of its own) — never run in a hook; they are too
 slow, so a green pre-push is not a green CI. Run `mise run hooks` once to install them.
