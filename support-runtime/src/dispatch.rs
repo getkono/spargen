@@ -198,7 +198,9 @@ async fn apply_credential(
 ) -> Result<RequestBuilder, Error<Infallible>> {
     // A provider yields a single secret, usable anywhere a bearer token or apiKey fits. Only a kind
     // that takes a token asks it for one, so a provider registered under a scheme that takes none
-    // is the same mismatch whether or not a refresh would have succeeded.
+    // is the same mismatch whether or not a refresh would have succeeded. `attach_auth` skips
+    // `MutualTls` before calling this, so the `MutualTls` term below is never evaluated from there;
+    // it is deliberate defence, so a caller that bypasses the skip still never fetches a token.
     let takes_token = !matches!(scheme.kind, AuthKind::Basic | AuthKind::MutualTls);
     let token: Option<SecretString> = match credential {
         Credential::Bearer(secret) | Credential::ApiKey(secret) => Some(secret.clone()),
@@ -1135,12 +1137,12 @@ mod tests {
 
     #[test]
     fn a_credential_registered_under_a_mutual_tls_scheme_never_reaches_a_token_provider() {
-        // `apply_credential` picks its token by matching on the *credential* alone, so it would
-        // await a `Provider` whatever the scheme's kind — and then discard the token, because the
-        // `MutualTls` arm returns the request untouched. `set_credential` takes an untyped `&str`,
-        // so a consumer can register a provider under a `mutualTLS` scheme's name. The filter in
-        // `attach_auth` is what keeps that from becoming a live token fetch whose result is thrown
-        // away; drop the filter and this counter reaches 1.
+        // `set_credential` takes an untyped `&str`, so a consumer can register a provider under a
+        // `mutualTLS` scheme's name. Awaiting it would be a live token fetch whose result the
+        // `MutualTls` arm then throws away. Two guards keep that from happening: `attach_auth`
+        // skips a `mutualTLS` scheme before `apply_credential` is called, and `takes_token` excludes
+        // `MutualTls` should anything reach `apply_credential` another way. This pins the
+        // behaviour they jointly hold rather than either line; drop both and the counter reaches 1.
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let calls = Arc::new(AtomicUsize::new(0));
