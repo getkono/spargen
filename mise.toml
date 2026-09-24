@@ -48,7 +48,8 @@ run = [
 # gate reports a graph the CI gate never audits: rustls, for one, enters only under
 # `--all-features`, so an advisory against it is clean here and failing there (#141).
 # `the_mise_deny_task_audits_the_graph_ci_audits` (spargen/tests/corpus_manifest.rs) holds this
-# command to CI's flags.
+# command identical to the one CI's step composes: the same flags, no more and no fewer, and no
+# `dir` or `env` on the task to change the graph it resolves.
 description = "Supply-chain audit (licenses, advisories, bans)"
 run = "cargo deny --all-features check"
 

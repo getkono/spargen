@@ -15,7 +15,7 @@
 //! reproduces it, so verifying it would mean inventing a rule and calling the result a guarantee.
 //! Every case's `sha256` — the per-file pin the support documents cite — is verified below.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use camino::Utf8PathBuf;
 use sha2::{Digest, Sha256};
@@ -411,28 +411,143 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
     );
 }
 
+/// The keys a `mise.toml` task may carry. Every other key changes what the task executes or where:
+/// `dir` moves the working directory (`dir = "support-runtime"` shrinks `cargo deny`'s graph from
+/// the workspace's 211 crates to that crate's 102), `depends` runs other tasks first, `shell`
+/// swaps the interpreter, `file` replaces `run`, `tools` swaps the binaries on `PATH`. None of
+/// them has a CI counterpart to be held identical to, so none is accepted. `env` is accepted
+/// because it has one -- a job's or step's `env:` -- and is compared against it.
+const MISE_TASK_KEYS: [&str; 3] = ["description", "run", "env"];
+
+/// The top-level tables `mise.toml` may carry. `[env]` and `[task_config]` would reach every task
+/// without appearing on any of them, `[vars]` feeds `{{vars.…}}` templates in `run`, and
+/// `[settings]` can change the shell tasks run under.
+const MISE_TOP_LEVEL_KEYS: [&str; 2] = ["tools", "tasks"];
+
+/// Committed configuration mise would merge into `mise.toml`, or task directories it would read
+/// tasks from, beside `mise.toml` itself. Any of these could set a task's environment or
+/// directory, or shadow a task, where nothing below reads it. `mise.local.toml` is deliberately
+/// absent: it is a contributor's own untracked override, not the repository's gate.
+const MISE_SHADOW_CONFIGS: [&str; 9] = [
+    ".mise.toml",
+    ".config/mise.toml",
+    ".config/mise/config.toml",
+    "mise/config.toml",
+    ".mise/config.toml",
+    "mise-tasks",
+    ".mise-tasks",
+    "mise/tasks",
+    ".mise/tasks",
+];
+
+/// `mise.toml`'s `[tasks]`, once nothing outside a task's own `run` and `env` could change what
+/// the task executes.
+fn mise_tasks() -> toml::Table {
+    let root = workspace_root();
+    for shadow in MISE_SHADOW_CONFIGS {
+        assert!(
+            !root.join(shadow).exists(),
+            "`{shadow}` exists beside `mise.toml`; mise merges it into the tasks it runs, so the \
+             tasks this suite reads are no longer the tasks `mise run` executes"
+        );
+    }
+    let mut mise: toml::Table = toml::from_str(&read("mise.toml")).expect("mise.toml must parse");
+    for key in mise.keys() {
+        assert!(
+            MISE_TOP_LEVEL_KEYS.contains(&key.as_str()),
+            "`mise.toml` carries a top-level `[{key}]`, which reaches every task without appearing \
+             on any of them; CI has no counterpart for it to be held identical to"
+        );
+    }
+    let Some(toml::Value::Table(tasks)) = mise.remove("tasks") else {
+        panic!("`mise.toml` must carry a `[tasks]` table");
+    };
+    for (name, task) in &tasks {
+        let task = task
+            .as_table()
+            .unwrap_or_else(|| panic!("`[tasks.{name}]` must be a table"));
+        for key in task.keys() {
+            assert!(
+                MISE_TASK_KEYS.contains(&key.as_str()),
+                "`[tasks.{name}]` sets `{key}`, which changes what the task executes or where it \
+                 executes it, and has no CI counterpart to be held identical to"
+            );
+        }
+    }
+    tasks
+}
+
+/// The commands a mise task's `run` executes, in order.
+fn mise_commands(tasks: &toml::Table, name: &str) -> Vec<String> {
+    match &tasks[name]["run"] {
+        toml::Value::String(command) => vec![command.clone()],
+        toml::Value::Array(commands) => commands
+            .iter()
+            .map(|command| {
+                command
+                    .as_str()
+                    .unwrap_or_else(|| {
+                        panic!("every `[tasks.{name}] run` entry must be a command string")
+                    })
+                    .to_owned()
+            })
+            .collect(),
+        other => {
+            panic!("`[tasks.{name}] run` must be a string or an array of strings, not {other}")
+        }
+    }
+}
+
+/// A mise task's `env`, empty when it states none.
+fn mise_env(tasks: &toml::Table, name: &str) -> BTreeMap<String, String> {
+    tasks[name].get("env").map_or_else(BTreeMap::new, |env| {
+        env.as_table()
+            .unwrap_or_else(|| panic!("`[tasks.{name}] env` must be a table"))
+            .iter()
+            .map(|(key, value)| {
+                let value = value.as_str().unwrap_or_else(|| {
+                    panic!("`[tasks.{name}] env.{key}` must be a string, as CI's `env:` values are")
+                });
+                (key.clone(), value.to_owned())
+            })
+            .collect()
+    })
+}
+
+fn ci_workflow() -> yaml_rust2::Yaml {
+    let ci = read(".github/workflows/ci.yml");
+    let mut documents = yaml_rust2::YamlLoader::load_from_str(&ci)
+        .expect("`.github/workflows/ci.yml` must parse as YAML");
+    assert!(
+        !documents.is_empty(),
+        "`.github/workflows/ci.yml` must carry a YAML document"
+    );
+    documents.swap_remove(0)
+}
+
 #[test]
 fn the_mise_deny_task_audits_the_graph_ci_audits() {
     // `mise run deny` is the supply-chain gate CLAUDE.md hands a contributor, and CI spells its
-    // own copy out rather than calling it, so the two are kept in step by hand. They were not:
-    // the task ran a bare `cargo deny check`, which resolves default features only and so has no
-    // `rustls` in its graph, and reported `advisories ok` on the very lockfile CI failed with
-    // RUSTSEC-2026-0285 (#141). The flag later arrived in an unrelated commit with nothing
-    // holding it there.
+    // own copy out rather than calling it. The two had drifted: the task ran a bare `cargo deny
+    // check`, which resolves default features only and so has no `rustls` in its graph, and
+    // reported `advisories ok` on the very lockfile CI failed with RUSTSEC-2026-0285 (#141). The
+    // flag later arrived in an unrelated commit with nothing holding it there.
     //
-    // Held to CI rather than to a literal: every word CI's root-manifest cargo-deny-action step
-    // passes as `arguments` must also be a global flag of the task, so tightening CI (say,
-    // `--all-features --locked`, #146) reds here until the local gate follows. The task is also
-    // held to the rules the CI step is held to -- `--all-features`, no graph-narrowing flag, a
-    // bare `check` with no `[WHICH]...` narrowing it, and no `--manifest-path` pointing away from
-    // the workspace root.
-    let ci = read(".github/workflows/ci.yml");
-    let documents = yaml_rust2::YamlLoader::load_from_str(&ci)
-        .expect("`.github/workflows/ci.yml` must parse as YAML");
-    let workflow = documents
-        .first()
-        .expect("`.github/workflows/ci.yml` must carry a YAML document");
-    let ci_arguments: BTreeSet<String> = workflow["jobs"]["deny"]["steps"]
+    // The policy is identity: a mise task runs exactly what its CI job runs, neither stricter nor
+    // narrower. `every_mise_task_runs_exactly_what_its_ci_job_runs` holds the tasks whose CI job
+    // is `run:` steps; CI's deny job is a cargo-deny-action step instead, whose argv the action
+    // composes as `cargo-deny --log-level warn --manifest-path ./Cargo.toml <arguments> check
+    // <command-arguments>`, so this test holds the task to that composition. The task's global
+    // flags must be exactly the words CI passes as `arguments` -- tightening either side (say,
+    // `--locked`, #146) reds here until the other follows. `--log-level warn` and
+    // `--manifest-path ./Cargo.toml` are cargo-deny's own defaults when run from the workspace
+    // root, so the task states neither, and may not: a `--manifest-path`, or a `dir`/`env` on the
+    // task (`mise_tasks` rejects the first; the assertion below the second), changes the graph --
+    // `dir = "support-runtime"` audits 102 crates rather than the workspace's 211. The task is
+    // also held to the rules the CI step is held to: `--all-features`, no graph-narrowing flag,
+    // and a bare `check`.
+    let workflow = ci_workflow();
+    let ci_arguments: Vec<String> = workflow["jobs"]["deny"]["steps"]
         .as_vec()
         .expect("the `deny` job must carry a list of steps")
         .iter()
@@ -449,24 +564,21 @@ fn the_mise_deny_task_audits_the_graph_ci_audits() {
         .map(str::to_owned)
         .collect();
     assert!(
-        ci_arguments.contains("--all-features"),
+        ci_arguments
+            .iter()
+            .any(|argument| argument == "--all-features"),
         "CI's root-manifest cargo-deny-action step passes no `--all-features`, so there is no \
          CI feature scope for `mise run deny` to be held to"
     );
 
-    let mise: toml::Value = toml::from_str(&read("mise.toml")).expect("mise.toml must parse");
-    let commands: Vec<&str> = match &mise["tasks"]["deny"]["run"] {
-        toml::Value::String(command) => vec![command.as_str()],
-        toml::Value::Array(commands) => commands
-            .iter()
-            .map(|command| {
-                command
-                    .as_str()
-                    .expect("every `[tasks.deny] run` entry must be a command string")
-            })
-            .collect(),
-        other => panic!("`[tasks.deny] run` must be a string or an array of strings, not {other}"),
-    };
+    let tasks = mise_tasks();
+    assert!(
+        mise_env(&tasks, "deny").is_empty(),
+        "`[tasks.deny]` sets an `env`, and CI's cargo-deny-action step sets none; an environment \
+         variable such as `CARGO_TARGET_DIR` or `CARGO_NET_OFFLINE` changes what cargo-deny \
+         resolves"
+    );
+    let commands = mise_commands(&tasks, "deny");
 
     let audits: Vec<Vec<&str>> = commands
         .iter()
@@ -479,6 +591,12 @@ fn the_mise_deny_task_audits_the_graph_ci_audits() {
         !audits.is_empty(),
         "`mise run deny` runs no `cargo deny` command, so the local gate audits nothing"
     );
+    assert_eq!(
+        audits.len(),
+        commands.len(),
+        "`mise run deny` runs {commands:?}, which is more than cargo-deny audits; CI's deny job \
+         runs nothing else, and the two must run the same thing"
+    );
 
     for words in audits {
         let command = words.join(" ");
@@ -490,14 +608,16 @@ fn the_mise_deny_task_audits_the_graph_ci_audits() {
         let globals = &words[skip..check];
         let which = &words[check + 1..];
 
-        for argument in &ci_arguments {
-            assert!(
-                globals.contains(&argument.as_str()),
-                "`mise run deny` runs `{command}` but CI's cargo-deny-action step passes \
-                 `{argument}`, so the local gate audits a different graph from CI's and can \
-                 pass on a lockfile CI fails"
-            );
-        }
+        let mut local = globals.to_vec();
+        local.sort_unstable();
+        let mut remote: Vec<&str> = ci_arguments.iter().map(String::as_str).collect();
+        remote.sort_unstable();
+        assert_eq!(
+            local, remote,
+            "`mise run deny` runs `{command}`, whose global flags are not the words CI's \
+             cargo-deny-action step passes as `arguments`; the two gates must run the same audit, \
+             or one can pass on a lockfile the other fails"
+        );
         for word in globals {
             let flag = flag_of(word);
             assert!(
@@ -517,6 +637,374 @@ fn the_mise_deny_task_audits_the_graph_ci_audits() {
              bare `check`, so every check it runs must run locally too"
         );
     }
+}
+
+/// How a CI job and the mise tasks relate. Every job in `ci.yml` and every task in `mise.toml`
+/// is named by exactly one row of [`PAIRINGS`], so a new job or task cannot arrive unclassified.
+enum Pairing {
+    /// The job's `run:` steps, in order and with their `env:`, are exactly the tasks' `run`
+    /// entries in the order listed, with each task's `env`. The job's other steps may only be
+    /// [`PROVISIONING_ACTIONS`] or a `run:` step named here, which installs a tool rather than
+    /// gating anything.
+    Identical {
+        job: &'static str,
+        tasks: &'static [&'static str],
+        provisioning: &'static [&'static str],
+    },
+    /// Held identical by another test, because the job's gate is an action rather than `run:`.
+    HeldBy {
+        job: &'static str,
+        task: &'static str,
+        test: &'static str,
+    },
+    /// Not identical, and making them so is a maintainer decision this suite does not take.
+    /// Listed so the gap is visible, and so the pairing cannot silently disappear.
+    Pending {
+        job: Option<&'static str>,
+        tasks: &'static [&'static str],
+        why: &'static str,
+    },
+    /// A task with no CI counterpart by nature: it rewrites the tree or installs hooks.
+    LocalOnly {
+        task: &'static str,
+        why: &'static str,
+    },
+}
+
+const PAIRINGS: &[Pairing] = &[
+    Pairing::Identical {
+        job: "fmt",
+        tasks: &["fmt-check"],
+        provisioning: &[],
+    },
+    Pairing::Identical {
+        job: "clippy",
+        tasks: &["lint"],
+        provisioning: &[],
+    },
+    Pairing::Identical {
+        job: "check",
+        tasks: &["check"],
+        provisioning: &[],
+    },
+    Pairing::Identical {
+        job: "powerset",
+        tasks: &["powerset"],
+        provisioning: &[],
+    },
+    Pairing::Identical {
+        job: "runtime-dependencies",
+        tasks: &["runtime-dependencies"],
+        provisioning: &[],
+    },
+    Pairing::Identical {
+        job: "corpus-smoke",
+        tasks: &["corpus-smoke"],
+        provisioning: &[],
+    },
+    Pairing::Identical {
+        job: "github-api",
+        tasks: &["github-api"],
+        provisioning: &[],
+    },
+    Pairing::Identical {
+        job: "example",
+        tasks: &["example"],
+        provisioning: &[],
+    },
+    Pairing::Identical {
+        job: "docs",
+        tasks: &["docs", "doc-links"],
+        provisioning: &["Install mdBook"],
+    },
+    Pairing::HeldBy {
+        job: "deny",
+        task: "deny",
+        test: "the_mise_deny_task_audits_the_graph_ci_audits",
+    },
+    Pairing::Pending {
+        job: Some("test"),
+        tasks: &["test"],
+        why: "CI also runs `cargo bench --no-run --workspace`; `mise run test` is the pre-push \
+              hook, so adding it there slows every push",
+    },
+    Pairing::Pending {
+        job: Some("commits"),
+        tasks: &["commit-range"],
+        why: "CI checks `base.sha..head.sha` of the pull request, the task `origin/master..HEAD`",
+    },
+    Pairing::Pending {
+        job: Some("msrv"),
+        tasks: &[],
+        why: "no mise task; it needs the 1.88.0 toolchain installed",
+    },
+    Pairing::Pending {
+        job: Some("package"),
+        tasks: &[],
+        why: "no mise task; one step is conditional on the pull request not being a release PR",
+    },
+    Pairing::Pending {
+        job: None,
+        tasks: &["bench"],
+        why: "the counterpart is `benchmarks.yml`, which passes shortened criterion timings",
+    },
+    Pairing::LocalOnly {
+        task: "fmt",
+        why: "rewrites the tree; `fmt-check` is the gate CI mirrors",
+    },
+    Pairing::LocalOnly {
+        task: "lint-fix",
+        why: "rewrites the tree; `lint` is the gate CI mirrors",
+    },
+    Pairing::LocalOnly {
+        task: "commit-msg",
+        why: "validates one message as it is written; CI checks the range",
+    },
+    Pairing::LocalOnly {
+        task: "hooks",
+        why: "installs the git hooks",
+    },
+];
+
+/// Actions a paired job may use besides its gate steps. Each provisions a checkout, a toolchain,
+/// a cache, or a binary; none runs a gate. An action outside this list may be a gate of its own
+/// (cargo-deny-action is), which a `run:`-step comparison would never see.
+const PROVISIONING_ACTIONS: [&str; 4] = [
+    "actions/checkout@",
+    "dtolnay/rust-toolchain@",
+    "swatinem/rust-cache@",
+    "taiki-e/install-action@",
+];
+
+/// Workflow-level `env:` entries that reach every job but change only how cargo prints, not what
+/// it resolves or checks.
+const COSMETIC_WORKFLOW_ENV: [&str; 1] = ["CARGO_TERM_COLOR"];
+
+/// A YAML `env:` mapping as strings.
+fn yaml_env(env: &yaml_rust2::Yaml, whose: &str) -> BTreeMap<String, String> {
+    if env.is_badvalue() {
+        return BTreeMap::new();
+    }
+    env.as_hash()
+        .unwrap_or_else(|| panic!("{whose} `env:` must be a mapping"))
+        .iter()
+        .map(|(key, value)| {
+            let key = key
+                .as_str()
+                .unwrap_or_else(|| panic!("{whose} `env:` keys must be strings"));
+            let value = value.as_str().map(str::to_owned).unwrap_or_else(|| {
+                panic!("{whose} `env.{key}` must be a string, as a mise task's `env` values are")
+            });
+            (key.to_owned(), value)
+        })
+        .collect()
+}
+
+#[test]
+fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
+    // CI spells each gate out rather than calling `mise run`, so every gate exists twice. The
+    // policy is that the two copies are identical -- the same commands with the same flags, in
+    // the same order, under the same environment -- and neither is stricter or narrower than the
+    // other. #141 was the deny gate auditing a smaller graph locally than in CI; the same audit
+    // found `corpus-smoke` letting a crashed `check` through to its `grep` locally, and
+    // `example`'s leak check discarding a failing `cargo tree` locally, where CI failed on both.
+    //
+    // Commands are compared as strings after trimming, so an identical gate means byte-identical
+    // commands. mise runs each `run` entry under `sh -c -o errexit` and CI each step under
+    // `bash -e`, so a command that is byte-identical also fails the same way in both.
+    let workflow = ci_workflow();
+    let tasks = mise_tasks();
+
+    let workflow_env = yaml_env(&workflow["env"], "the workflow's");
+    for key in workflow_env.keys() {
+        assert!(
+            COSMETIC_WORKFLOW_ENV.contains(&key.as_str()),
+            "`ci.yml` sets `{key}` for every job, which no mise task sets; either set it on each \
+             task too or, if it only changes how output looks, list it in COSMETIC_WORKFLOW_ENV"
+        );
+    }
+    assert!(
+        workflow["defaults"].is_badvalue(),
+        "`ci.yml` sets workflow `defaults:`, which can change the shell or directory of every \
+         `run:` step without appearing on any of them"
+    );
+
+    let jobs = workflow["jobs"]
+        .as_hash()
+        .expect("`ci.yml` must carry a `jobs:` mapping");
+    let ci_jobs: BTreeSet<&str> = jobs
+        .keys()
+        .map(|job| job.as_str().expect("job ids are strings"))
+        .collect();
+    let mut paired_jobs = BTreeSet::new();
+    let mut paired_tasks = BTreeSet::new();
+    let mut claim = |jobs: &[&'static str], tasks: &[&'static str]| {
+        for job in jobs {
+            assert!(paired_jobs.insert(*job), "job `{job}` is paired twice");
+        }
+        for task in tasks {
+            assert!(paired_tasks.insert(*task), "task `{task}` is paired twice");
+        }
+    };
+    for pairing in PAIRINGS {
+        match pairing {
+            Pairing::Identical { job, tasks, .. } => claim(&[*job], tasks),
+            Pairing::HeldBy { job, task, test } => {
+                assert!(
+                    read("spargen/tests/corpus_manifest.rs").contains(&format!("fn {test}()")),
+                    "`{job}` is held by `{test}`, which does not exist"
+                );
+                claim(&[*job], &[*task]);
+            }
+            Pairing::Pending { job, tasks, why } => {
+                assert!(!why.is_empty(), "a pending pairing must say why");
+                claim(job.as_slice(), tasks);
+            }
+            Pairing::LocalOnly { task, why } => {
+                assert!(!why.is_empty(), "a local-only task must say why");
+                claim(&[], &[*task]);
+            }
+        }
+    }
+    let mise_tasks: BTreeSet<&str> = tasks.keys().map(String::as_str).collect();
+    assert_eq!(
+        ci_jobs, paired_jobs,
+        "every CI job must be named by one PAIRINGS row, and every row's job must exist"
+    );
+    assert_eq!(
+        mise_tasks, paired_tasks,
+        "every mise task must be named by one PAIRINGS row, and every row's task must exist"
+    );
+
+    for pairing in PAIRINGS {
+        let Pairing::Identical {
+            job: name,
+            tasks: task_names,
+            provisioning,
+        } = pairing
+        else {
+            continue;
+        };
+        let job = &workflow["jobs"][*name];
+        for key in [
+            "if",
+            "continue-on-error",
+            "defaults",
+            "strategy",
+            "container",
+        ] {
+            assert!(
+                job[key].is_badvalue(),
+                "the `{name}` job sets `{key}:`, which changes whether or how its steps run; \
+                 its mise counterpart has nothing to match it with"
+            );
+        }
+        let job_env = yaml_env(&job["env"], &format!("the `{name}` job's"));
+
+        let mut ci = Vec::new();
+        let mut provisioned = BTreeSet::new();
+        for step in job["steps"]
+            .as_vec()
+            .unwrap_or_else(|| panic!("the `{name}` job must carry a list of steps"))
+        {
+            if let Some(uses) = step["uses"].as_str() {
+                let uses = uses.to_ascii_lowercase();
+                assert!(
+                    PROVISIONING_ACTIONS
+                        .iter()
+                        .any(|action| uses.starts_with(action)),
+                    "the `{name}` job uses `{uses}`, which is not a provisioning action; if it \
+                     gates anything, the mise task never runs it"
+                );
+                continue;
+            }
+            let run = step["run"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a `{name}` step has neither `uses:` nor `run:`"));
+            if let Some(step_name) = step["name"]
+                .as_str()
+                .filter(|step_name| provisioning.contains(step_name))
+            {
+                provisioned.insert(step_name);
+                continue;
+            }
+            let step_map = step
+                .as_hash()
+                .unwrap_or_else(|| panic!("a `{name}` step must be a mapping"));
+            for key in step_map.keys() {
+                let key = key.as_str().unwrap_or_default();
+                assert!(
+                    ["name", "run", "env"].contains(&key),
+                    "the `{name}` job's `{run}` step sets `{key}:`, which changes whether, where, \
+                     or how it runs; its mise counterpart has nothing to match it with"
+                );
+            }
+            let mut env = job_env.clone();
+            env.extend(yaml_env(&step["env"], &format!("a `{name}` step's")));
+            ci.push((env, run.trim().to_owned()));
+        }
+        for step_name in *provisioning {
+            assert!(
+                provisioned.contains(step_name),
+                "the `{name}` job has no `{step_name}` step to skip as provisioning"
+            );
+        }
+
+        let local: Vec<(BTreeMap<String, String>, String)> = task_names
+            .iter()
+            .flat_map(|task| {
+                let env = mise_env(&tasks, task);
+                mise_commands(&tasks, task)
+                    .into_iter()
+                    .map(move |command| (env.clone(), command.trim().to_owned()))
+            })
+            .collect();
+
+        assert_eq!(
+            local,
+            ci,
+            "`mise run {}` does not run exactly what CI's `{name}` job runs (left: mise, right: \
+             CI; each entry is its environment and its command). The two must be identical -- \
+             change whichever side is wrong, not only one of them",
+            task_names.join("` + `mise run ")
+        );
+    }
+}
+
+#[test]
+fn the_quality_list_quotes_its_tasks_verbatim() {
+    // CLAUDE.md's Quality block glosses some tasks with the command they run. A gloss that is a
+    // command is a claim about the task, so it must be the task's command exactly.
+    let tasks = mise_tasks();
+    let claude = read("CLAUDE.md");
+    let mut quoted = 0usize;
+    for line in claude.lines() {
+        let Some(rest) = line.strip_prefix("mise run ") else {
+            continue;
+        };
+        let Some((task, gloss)) = rest.split_once('#') else {
+            continue;
+        };
+        let (task, gloss) = (task.trim(), gloss.trim());
+        // `cargo hack: every feature combination…` is prose about a command, not a command.
+        if !gloss.starts_with("cargo ") || gloss.contains(':') {
+            continue;
+        }
+        assert!(
+            tasks.contains_key(task),
+            "CLAUDE.md lists `mise run {task}`, which mise.toml does not define"
+        );
+        assert_eq!(
+            mise_commands(&tasks, task),
+            [gloss],
+            "CLAUDE.md glosses `mise run {task}` as `{gloss}`, which is not what it runs"
+        );
+        quoted += 1;
+    }
+    assert!(
+        quoted > 0,
+        "CLAUDE.md's Quality block glosses no task with its command; this test reads nothing"
+    );
 }
 
 #[test]
