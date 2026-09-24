@@ -1161,7 +1161,8 @@ fn the_msrv_gate_runs_on_the_declared_rust_version() {
     let toolchain = msrv_toolchain();
     let prefix = format!("cargo +{toolchain} ");
     // A prefix check alone passes `cargo +1.88.0 fetch && cargo check …` or a `run: |` block
-    // whose later lines are bare `cargo check`, both of which check on stable. So each command
+    // whose later lines are bare `cargo check`, both of which check on the toolchain
+    // `rust-toolchain.toml` pins rather than on `rust-version`. So each command
     // must be one line with no shell control operator or substitution: one pinned cargo call.
     let pinned = |command: &str| {
         let command = command.trim();
@@ -1486,6 +1487,11 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
     // tool is caught by the second half: the tool is then pinned but never installed. And since
     // jobs share no runner, a job that runs a pinned tool must install it itself, before running
     // it; an install in another job proves nothing about this one.
+    /// One thing a step does to a pinned tool: install `(name, version)`, or run it.
+    enum Event {
+        Install((String, Option<String>)),
+        Run(String),
+    }
     let pins = mise_tool_pins();
     let mut installed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for file in workflow_files() {
@@ -1500,8 +1506,10 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
             // pass a workflow-wide check while this job ran whatever the runner image carries.
             let mut in_job = BTreeSet::new();
             for step in body["steps"].as_vec().into_iter().flatten() {
-                let mut found = Vec::new();
-                let mut runs = BTreeSet::new();
+                // The step's installs and runs in the order the step performs them, so a `run: |`
+                // block that runs a tool on one line and installs it on a later one is caught:
+                // only an install on an earlier command, line, or step precedes a run.
+                let mut events = Vec::new();
                 if let Some(uses) = step["uses"].as_str() {
                     let lowered = uses.to_ascii_lowercase();
                     if lowered.starts_with("taiki-e/install-action@") {
@@ -1519,22 +1527,40 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
                             if tool.is_empty() {
                                 continue;
                             }
-                            found.push(match tool.split_once('@') {
+                            events.push(Event::Install(match tool.split_once('@') {
                                 Some((name, version)) => {
                                     (name.to_owned(), Some(version.to_owned()))
                                 }
                                 None => (tool.to_owned(), None),
-                            });
+                            }));
                         }
                     }
                 }
                 if let Some(run) = step["run"].as_str() {
                     for line in run.lines() {
-                        found.extend(cargo_installs(line));
-                        runs.extend(tools_run(line, &pins));
+                        for command in shell_commands(line) {
+                            // One simple command re-joined parses back to itself alone.
+                            let command = command.join(" ");
+                            events.extend(cargo_installs(&command).into_iter().map(Event::Install));
+                            events.extend(tools_run(&command, &pins).into_iter().map(Event::Run));
+                        }
                     }
                 }
-                for (tool, version) in found {
+                for event in events {
+                    let (tool, version) = match event {
+                        Event::Install(install) => install,
+                        Event::Run(tool) => {
+                            assert!(
+                                in_job.contains(&tool),
+                                "`{file}`'s `{job}` job runs `{tool}` without installing it \
+                                 earlier in the same job; jobs share no runner, so it would run \
+                                 whatever binary the runner carries rather than the {} `[tools]` \
+                                 in mise.toml pins",
+                                pins[&tool]
+                            );
+                            continue;
+                        }
+                    };
                     let pinned = pins.get(&tool).unwrap_or_else(|| {
                         panic!(
                             "`{file}`'s `{job}` job installs `{tool}`, which `[tools]` in \
@@ -1553,15 +1579,6 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
                         .or_default()
                         .insert(job.to_owned());
                     in_job.insert(tool);
-                }
-                for tool in runs {
-                    assert!(
-                        in_job.contains(&tool),
-                        "`{file}`'s `{job}` job runs `{tool}` without installing it earlier in the \
-                         same job; jobs share no runner, so it would run whatever binary the \
-                         runner carries rather than the {} `[tools]` in mise.toml pins",
-                        pins[&tool]
-                    );
                 }
             }
         }
