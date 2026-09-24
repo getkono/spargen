@@ -49,8 +49,13 @@ Validate changes:
 ```bash
 mise run check      # cargo check --workspace --all-features
 mise run fmt        # cargo fmt --all
+mise run fmt-check  # cargo fmt --all --check
 mise run lint       # cargo clippy --workspace --all-targets --all-features -- -D warnings
 mise run test       # cargo test --workspace --all-features
+mise run bench-build  # cargo bench --no-run --workspace
+mise run msrv       # the declared rust-version floor (+1.88.0): workspace + petstore example
+mise run package    # cargo publish --dry-run: the published crates stay self-contained
+mise run runtime-dependencies  # the ignored minimal-versions proof in e2e.rs
 mise run powerset   # cargo hack: every feature combination, not just --all-features
 mise run corpus-smoke  # pinned real-world specs
 mise run example    # both petstore examples over a local mock server
@@ -70,20 +75,24 @@ under the same environment — and neither may be stricter or narrower than the 
 sides together. `spargen/tests/corpus_manifest.rs` enforces it:
 `every_mise_task_runs_exactly_what_its_ci_job_runs` pairs every CI job with every task and compares
 them byte for byte (`deny`, an action rather than `run:` steps, is held by
-`the_mise_deny_task_audits_the_graph_ci_audits`), and rejects task keys such as `dir` that would
-change what a task resolves without appearing in its command. Pairs that are not yet identical
-(`test`, `commit-range`, `bench`) and CI jobs with no task (`msrv`, `package`) are listed there as
-pending a maintainer decision. Tool versions are still kept in step by hand — `ci.yml` says so
-where it pins `mdbook` and `convco`. The rest — `check`, `powerset`,
-`corpus-smoke`, `example`, `github-api`, `deny`, `docs`, and the rustdoc link check `doc-links`
-runs (a step inside the `docs` job, not a job of its own) — never run in a hook; they are too
-slow, so a green pre-push is not a green CI. Run `mise run hooks` once to install them.
+`the_mise_deny_task_audits_the_graph_ci_audits`), pins every other step of each job (checkout,
+toolchain, cache, tool install) as literal YAML, and rejects task keys such as `dir` and mise
+config files beside `mise.toml` that would change what a task runs without appearing in its
+command. CI's `test` job is `mise run test` followed by `mise run bench-build`; `bench` is held to
+`benchmarks.yml`. The only differences are named exceptions in that test's `PAIRINGS` table, each
+pinned literally on both sides: `commits` checks the pull request's `base.sha..head.sha` where
+`commit-range` checks `origin/master..HEAD` (only the range is rewritten; the rest must match), the
+`package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only,
+`benchmarks.yml` adds `set -o pipefail` and `| tee bench-results.txt` to capture the artifact, and
+CI installs `mdbook` and `convco` itself where mise's `[tools]` does. Those tool versions are still
+kept in step by hand — `ci.yml` says so where it pins them. The rest — `check`, `bench-build`,
+`msrv`, `package`, `runtime-dependencies`, `powerset`, `corpus-smoke`, `example`, `github-api`,
+`deny`, `docs`, and the rustdoc link check `doc-links` runs (a step inside the `docs` job, not a
+job of its own) — never run in a hook; they are too slow, so a green pre-push is not a green CI.
+`msrv` needs `rustup toolchain install 1.88.0`, and `package` a clean tree. Run `mise run hooks`
+once to install them.
 
-CI additionally gates five things the list above does not name: `msrv` (the declared
-`rust-version` floor still compiles), `package` (`cargo publish --dry-run`, which is what keeps the
-runtime symlinks shipping inside the `.crate`), `runtime-dependencies` (the `#[ignore]`d
-minimal-versions proof in `e2e.rs`), `commits` (Conventional Commits over the outgoing range), and
-`cargo bench --no-run` inside the `test` job — so `mise run test` alone is weaker than CI's.
+CI additionally gates what no local task can: `commits` checks exactly the pull request's range.
 
 Standing invariants:
 

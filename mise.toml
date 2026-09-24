@@ -55,11 +55,40 @@ run = "cargo deny --all-features check"
 
 [tasks.bench]
 description = "Run the generation benchmarks (criterion). CI uploads these as a release artifact."
-run = "cargo bench --bench generate"
+# The same bounded warm-up and measurement times `benchmarks.yml` records with, so a local run
+# measures what the published artifact measured.
+run = "cargo bench --bench generate -- --warm-up-time 1 --measurement-time 3"
 
 [tasks.test]
 description = "Run the full workspace test suite, including generated-code E2E checks"
 run = "cargo test --workspace --all-features"
+
+[tasks.bench-build]
+description = "Compile (do not run) the benchmarks, as CI's test job does"
+# A task of its own rather than part of `test`: `test` is the pre-push hook, and this is the
+# second half of CI's `test` job (`every_mise_task_runs_exactly_what_its_ci_job_runs` holds the
+# job to `test` followed by `bench-build`).
+run = "cargo bench --no-run --workspace"
+
+[tasks.msrv]
+description = "Check the workspace and the generated petstore client on the declared rust-version"
+# `+1.88.0` rather than a toolchain installed as the default: `rust-toolchain.toml` overrides the
+# default toolchain but not an explicit `+toolchain`. Needs `rustup toolchain install 1.88.0`.
+run = [
+  "cargo +1.88.0 check --workspace --all-features --locked",
+  "cargo +1.88.0 check --manifest-path examples/petstore/Cargo.toml",
+]
+
+[tasks.package]
+description = "Verify the published crates stay self-contained"
+# CI's `package` job also runs `cargo publish --dry-run -p spargen-macro` against the workspace
+# `spargen`, but only outside release-plz PRs; that step stays CI-only (see the `package` row of
+# `PAIRINGS` in spargen/tests/corpus_manifest.rs). `cargo publish --dry-run` refuses a dirty tree,
+# as it would in CI's fresh checkout.
+run = [
+  "cargo publish --dry-run -p spargen",
+  "cargo package --list -p spargen-macro > /dev/null",
+]
 
 [tasks.corpus-smoke]
 description = "Run fast corpus smoke checks"
@@ -146,7 +175,10 @@ run = "if git rev-parse --verify --quiet MERGE_HEAD >/dev/null; then exit 0; fi;
 
 [tasks.commit-range]
 description = "Validate the outgoing commit range against Conventional Commits"
-# convco skips merge commits by default for revwalks (do not add --merges).
+# convco skips merge commits by default for revwalks (do not add --merges). CI's `commits` job
+# runs this command with the pull request's `base.sha..head.sha` in place of `origin/master..HEAD`;
+# that range is the one named difference `every_mise_task_runs_exactly_what_its_ci_job_runs`
+# allows, and it holds everything else in the command identical.
 run = "convco check origin/master..HEAD"
 
 [tasks.hooks]

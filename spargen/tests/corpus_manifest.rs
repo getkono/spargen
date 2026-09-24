@@ -424,32 +424,67 @@ const MISE_TASK_KEYS: [&str; 3] = ["description", "run", "env"];
 /// `[settings]` can change the shell tasks run under.
 const MISE_TOP_LEVEL_KEYS: [&str; 2] = ["tools", "tasks"];
 
-/// Committed configuration mise would merge into `mise.toml`, or task directories it would read
-/// tasks from, beside `mise.toml` itself. Any of these could set a task's environment or
-/// directory, or shadow a task, where nothing below reads it. `mise.local.toml` is deliberately
-/// absent: it is a contributor's own untracked override, not the repository's gate.
-const MISE_SHADOW_CONFIGS: [&str; 9] = [
-    ".mise.toml",
-    ".config/mise.toml",
-    ".config/mise/config.toml",
-    "mise/config.toml",
-    ".mise/config.toml",
-    "mise-tasks",
-    ".mise-tasks",
-    "mise/tasks",
-    ".mise/tasks",
-];
+/// Directories mise reads configuration or tasks from beside `mise.toml`. Each is mise's own, so
+/// each is rejected whole: `.config/mise/`, `mise/` and `.mise/` hold `config.toml`,
+/// `config.<env>.toml`, `conf.d/*.toml` (whose `[env]` reaches every task) and a `tasks/`
+/// directory of file tasks (a file task shadows a same-named `mise.toml` task), and `mise-tasks/`
+/// and `.mise-tasks/` are file-task directories. Measured against mise 2026.8.14 by planting each
+/// candidate in a scratch project and reading `mise config ls`, `mise tasks ls` and `mise env`.
+const MISE_SHADOW_DIRS: [&str; 5] = [".config/mise", "mise", ".mise", "mise-tasks", ".mise-tasks"];
+
+/// Single files mise reads beside `mise.toml`, measured the same way: `.rtx.toml` is the legacy
+/// config name, `.tool-versions` swaps tool versions, and `.miserc.toml` can set `MISE_ENV`, which
+/// loads `mise.<env>.toml` into every task.
+const MISE_SHADOW_FILES: [&str; 3] = [".rtx.toml", ".tool-versions", ".miserc.toml"];
+
+/// Whether `name`, a file in the workspace root (`in_config` false) or in `.config/` (true), is a
+/// mise config file other than `mise.toml` itself: `[.]mise[.<env>].toml` at the root,
+/// `mise[.<env>].toml` in `.config/`. A `.local` variant (`mise.local.toml`,
+/// `mise.<env>.local.toml`) is a contributor's own uncommitted override rather than the
+/// repository's gate, so it is let through.
+fn is_shadow_mise_config(name: &str, in_config: bool) -> bool {
+    let bare = if in_config {
+        name
+    } else {
+        name.strip_prefix('.').unwrap_or(name)
+    };
+    let Some(profile) = bare
+        .strip_prefix("mise")
+        .and_then(|rest| rest.strip_suffix(".toml"))
+    else {
+        return false;
+    };
+    if !(profile.is_empty() || profile.starts_with('.')) || profile.ends_with(".local") {
+        return false;
+    }
+    in_config || name != "mise.toml"
+}
 
 /// `mise.toml`'s `[tasks]`, once nothing outside a task's own `run` and `env` could change what
 /// the task executes.
 fn mise_tasks() -> toml::Table {
     let root = workspace_root();
-    for shadow in MISE_SHADOW_CONFIGS {
+    for shadow in MISE_SHADOW_DIRS.iter().chain(&MISE_SHADOW_FILES) {
         assert!(
             !root.join(shadow).exists(),
             "`{shadow}` exists beside `mise.toml`; mise merges it into the tasks it runs, so the \
              tasks this suite reads are no longer the tasks `mise run` executes"
         );
+    }
+    for (dir, in_config) in [(root.clone(), false), (root.join(".config"), true)] {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let name = entry.expect("a directory entry").file_name();
+            let name = name.to_string_lossy();
+            assert!(
+                !is_shadow_mise_config(&name, in_config),
+                "`{dir}/{name}` is a mise config file beside `mise.toml`; mise merges it into the \
+                 tasks it runs (a `mise.<env>.toml` once `MISE_ENV` names it), so the tasks this \
+                 suite reads are no longer the tasks `mise run` executes"
+            );
+        }
     }
     let mut mise: toml::Table = toml::from_str(&read("mise.toml")).expect("mise.toml must parse");
     for key in mise.keys() {
@@ -514,15 +549,22 @@ fn mise_env(tasks: &toml::Table, name: &str) -> BTreeMap<String, String> {
     })
 }
 
-fn ci_workflow() -> yaml_rust2::Yaml {
-    let ci = read(".github/workflows/ci.yml");
-    let mut documents = yaml_rust2::YamlLoader::load_from_str(&ci)
-        .expect("`.github/workflows/ci.yml` must parse as YAML");
-    assert!(
-        !documents.is_empty(),
-        "`.github/workflows/ci.yml` must carry a YAML document"
-    );
+/// The first YAML document of `text`, which `whose` names in a failure.
+fn yaml_document(text: &str, whose: &str) -> yaml_rust2::Yaml {
+    let mut documents = yaml_rust2::YamlLoader::load_from_str(text)
+        .unwrap_or_else(|error| panic!("{whose} must parse as YAML: {error}"));
+    assert!(!documents.is_empty(), "{whose} must carry a YAML document");
     documents.swap_remove(0)
+}
+
+/// `.github/workflows/<file>`, parsed.
+fn workflow(file: &str) -> yaml_rust2::Yaml {
+    let path = format!(".github/workflows/{file}");
+    yaml_document(&read(&path), &format!("`{path}`"))
+}
+
+fn ci_workflow() -> yaml_rust2::Yaml {
+    workflow("ci.yml")
 }
 
 #[test]
@@ -639,30 +681,22 @@ fn the_mise_deny_task_audits_the_graph_ci_audits() {
     }
 }
 
-/// How a CI job and the mise tasks relate. Every job in `ci.yml` and every task in `mise.toml`
-/// is named by exactly one row of [`PAIRINGS`], so a new job or task cannot arrive unclassified.
+/// How a CI job and the mise tasks relate. Every job in the [`GATE_WORKFLOWS`] and every task in
+/// `mise.toml` is named by exactly one row of [`PAIRINGS`], so a new job or task cannot arrive
+/// unclassified. There is no "not yet identical" row: every job is held to its tasks, and every
+/// difference between the two is a named, literal exception inside a row.
 enum Pairing {
-    /// The job's `run:` steps, in order and with their `env:`, are exactly the tasks' `run`
-    /// entries in the order listed, with each task's `env`. The job's other steps may only be
-    /// [`PROVISIONING_ACTIONS`] or a `run:` step named here, which installs a tool rather than
-    /// gating anything.
-    Identical {
-        job: &'static str,
-        tasks: &'static [&'static str],
-        provisioning: &'static [&'static str],
-    },
-    /// Held identical by another test, because the job's gate is an action rather than `run:`.
+    /// The job runs exactly what the tasks run; see [`Pair`].
+    Identical(Pair),
+    /// Held identical by another test, because the job's gate is an action rather than `run:`
+    /// steps. The job's steps other than that action are still pinned literally.
     HeldBy {
         job: &'static str,
         task: &'static str,
         test: &'static str,
-    },
-    /// Not identical, and making them so is a maintainer decision this suite does not take.
-    /// Listed so the gap is visible, and so the pairing cannot silently disappear.
-    Pending {
-        job: Option<&'static str>,
-        tasks: &'static [&'static str],
-        why: &'static str,
+        /// The `uses:` prefix (lowercase) of the gate action `test` holds.
+        action: &'static str,
+        ci_only: &'static [CiOnly],
     },
     /// A task with no CI counterpart by nature: it rewrites the tree or installs hooks.
     LocalOnly {
@@ -671,83 +705,237 @@ enum Pairing {
     },
 }
 
+/// A job held to its tasks. The job's `run:` gate steps, in order and with their `env:`, are
+/// exactly the tasks' `run` entries in the order listed, with each task's `env`, once each
+/// [`Rewrite`] is applied to CI's side. Every other step is one of `ci_only`, in order, byte for
+/// byte as parsed YAML.
+struct Pair {
+    /// The file under `.github/workflows/`.
+    workflow: &'static str,
+    job: &'static str,
+    tasks: &'static [&'static str],
+    ci_only: &'static [CiOnly],
+    /// The job's `if:`, pinned literally, where the job has one.
+    job_if: Option<&'static str>,
+    rewrites: &'static [Rewrite],
+}
+
+const PAIR: Pair = Pair {
+    workflow: "ci.yml",
+    job: "",
+    tasks: &[],
+    ci_only: &[],
+    job_if: None,
+    rewrites: &[],
+};
+
+/// A step a job runs that its tasks do not, as the literal YAML of the step. Pinned whole, so
+/// appending `&& cargo test` to a `run:`, adding `continue-on-error:` or `if:`, or moving a
+/// toolchain's `@ref` all fail.
+struct CiOnly {
+    step: &'static str,
+    /// Empty for provisioning: a `uses:` of one of [`PROVISIONING_ACTIONS`], with at most a
+    /// `with:`. Otherwise this step is a named exception, and this says why mise has no
+    /// counterpart for it.
+    why: &'static str,
+}
+
+const fn provision(step: &'static str) -> CiOnly {
+    CiOnly { step, why: "" }
+}
+
+const CHECKOUT: CiOnly = provision("uses: actions/checkout@v4");
+const CHECKOUT_LFS: CiOnly = provision("uses: actions/checkout@v4\nwith:\n  lfs: true");
+const STABLE: CiOnly = provision("uses: dtolnay/rust-toolchain@stable");
+const STABLE_CLIPPY: CiOnly =
+    provision("uses: dtolnay/rust-toolchain@stable\nwith:\n  components: clippy");
+const STABLE_CLIPPY_WASM: CiOnly = provision(
+    "uses: dtolnay/rust-toolchain@stable\nwith:\n  components: clippy\n  targets: wasm32-unknown-unknown",
+);
+const CACHE: CiOnly = provision("uses: Swatinem/rust-cache@v2");
+
+/// A named difference between CI's command and the task's: `ci` is replaced by `mise` in CI's
+/// commands before they are compared, and `ci` must occur exactly once in them. Everything
+/// outside `ci` is still compared byte for byte, and `ci` itself is pinned literally.
+struct Rewrite {
+    ci: &'static str,
+    mise: &'static str,
+    why: &'static str,
+}
+
+/// The workflows whose every job must be named by a [`PAIRINGS`] row. `release-plz.yml` is
+/// absent: it publishes, and gates nothing a contributor could run first.
+const GATE_WORKFLOWS: [&str; 2] = ["ci.yml", "benchmarks.yml"];
+
 const PAIRINGS: &[Pairing] = &[
-    Pairing::Identical {
+    Pairing::Identical(Pair {
         job: "fmt",
         tasks: &["fmt-check"],
-        provisioning: &[],
-    },
-    Pairing::Identical {
+        ci_only: &[
+            CHECKOUT,
+            provision("uses: dtolnay/rust-toolchain@stable\nwith:\n  components: rustfmt"),
+        ],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
         job: "clippy",
         tasks: &["lint"],
-        provisioning: &[],
-    },
-    Pairing::Identical {
+        ci_only: &[CHECKOUT, STABLE_CLIPPY, CACHE],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
+        job: "test",
+        tasks: &["test", "bench-build"],
+        ci_only: &[CHECKOUT_LFS, STABLE_CLIPPY, CACHE],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
         job: "check",
         tasks: &["check"],
-        provisioning: &[],
-    },
-    Pairing::Identical {
+        ci_only: &[CHECKOUT, STABLE, CACHE],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
+        job: "msrv",
+        tasks: &["msrv"],
+        ci_only: &[
+            CHECKOUT,
+            provision("uses: dtolnay/rust-toolchain@1.88.0"),
+            CACHE,
+        ],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
         job: "powerset",
         tasks: &["powerset"],
-        provisioning: &[],
-    },
-    Pairing::Identical {
+        ci_only: &[
+            CHECKOUT,
+            STABLE,
+            CACHE,
+            provision("uses: taiki-e/install-action@cargo-hack"),
+        ],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
         job: "runtime-dependencies",
         tasks: &["runtime-dependencies"],
-        provisioning: &[],
-    },
-    Pairing::Identical {
+        ci_only: &[
+            CHECKOUT,
+            provision("uses: dtolnay/rust-toolchain@nightly"),
+            STABLE_CLIPPY_WASM,
+            CACHE,
+        ],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
+        job: "package",
+        tasks: &["package"],
+        ci_only: &[
+            CHECKOUT,
+            STABLE,
+            CACHE,
+            CiOnly {
+                step: "if: >-\n  (github.event_name == 'pull_request' && !startsWith(github.head_ref, 'release-plz-')) ||\n  (github.event_name == 'push' && !contains(github.event.head_commit.message, 'release-plz-'))\nrun: cargo publish --dry-run -p spargen-macro --config 'patch.crates-io.spargen.path=\"spargen\"'",
+                why: "runs only outside release-plz PRs, a condition that exists only in CI; on a \
+                      release PR the macro's registry dependency is not published yet",
+            },
+        ],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
         job: "corpus-smoke",
         tasks: &["corpus-smoke"],
-        provisioning: &[],
-    },
-    Pairing::Identical {
+        ci_only: &[CHECKOUT_LFS, STABLE, CACHE],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
         job: "github-api",
         tasks: &["github-api"],
-        provisioning: &[],
-    },
-    Pairing::Identical {
+        ci_only: &[CHECKOUT_LFS, STABLE_CLIPPY_WASM, CACHE],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
         job: "example",
         tasks: &["example"],
-        provisioning: &[],
-    },
-    Pairing::Identical {
+        ci_only: &[
+            CHECKOUT,
+            STABLE,
+            provision(
+                "uses: Swatinem/rust-cache@v2\nwith:\n  workspaces: |\n    examples/petstore\n    examples/petstore-macro",
+            ),
+        ],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
         job: "docs",
         tasks: &["docs", "doc-links"],
-        provisioning: &["Install mdBook"],
-    },
+        ci_only: &[
+            CHECKOUT,
+            STABLE,
+            CACHE,
+            CiOnly {
+                step: "name: Install mdBook\nrun: cargo install mdbook --version 0.5.4 --locked",
+                why: "installs the mdBook that `[tools]` in mise.toml provisions locally",
+            },
+        ],
+        ..PAIR
+    }),
     Pairing::HeldBy {
         job: "deny",
         task: "deny",
         test: "the_mise_deny_task_audits_the_graph_ci_audits",
+        action: "embarkstudios/cargo-deny-action@",
+        ci_only: &[CHECKOUT],
     },
-    Pairing::Pending {
-        job: Some("test"),
-        tasks: &["test"],
-        why: "CI also runs `cargo bench --no-run --workspace`; `mise run test` is the pre-push \
-              hook, so adding it there slows every push",
-    },
-    Pairing::Pending {
-        job: Some("commits"),
+    Pairing::Identical(Pair {
+        job: "commits",
         tasks: &["commit-range"],
-        why: "CI checks `base.sha..head.sha` of the pull request, the task `origin/master..HEAD`",
-    },
-    Pairing::Pending {
-        job: Some("msrv"),
-        tasks: &[],
-        why: "no mise task; it needs the 1.88.0 toolchain installed",
-    },
-    Pairing::Pending {
-        job: Some("package"),
-        tasks: &[],
-        why: "no mise task; one step is conditional on the pull request not being a release PR",
-    },
-    Pairing::Pending {
-        job: None,
+        ci_only: &[
+            provision("uses: actions/checkout@v4\nwith:\n  fetch-depth: 0"),
+            CiOnly {
+                step: "name: Install convco\nrun: cargo install convco --version 0.7.1 --locked",
+                why: "installs the convco that `[tools]` in mise.toml provisions locally",
+            },
+        ],
+        job_if: Some("github.event_name == 'pull_request'"),
+        rewrites: &[Rewrite {
+            ci: "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}",
+            mise: "origin/master..HEAD",
+            why: "the outgoing range comes from the pull request event in CI and from the \
+                  remote-tracking branch locally; the job runs only on pull requests for the \
+                  same reason",
+        }],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
+        workflow: "benchmarks.yml",
+        job: "bench",
         tasks: &["bench"],
-        why: "the counterpart is `benchmarks.yml`, which passes shortened criterion timings",
-    },
+        ci_only: &[
+            CHECKOUT_LFS,
+            STABLE,
+            CACHE,
+            CiOnly {
+                step: "name: Upload benchmark results\nuses: actions/upload-artifact@v4\nwith:\n  name: benchmarks-${{ github.ref_name }}\n  path: |\n    bench-results.txt\n    target/criterion/**\n  if-no-files-found: error",
+                why: "publishes the recorded results as the release artifact",
+            },
+        ],
+        rewrites: &[
+            Rewrite {
+                ci: "set -o pipefail\n",
+                mise: "",
+                why: "a step's default `bash -e` has no `pipefail`, so without it a failing \
+                      `cargo bench` would exit through `tee` with status 0; mise's command has \
+                      no pipe to need it",
+            },
+            Rewrite {
+                ci: " | tee bench-results.txt",
+                mise: "",
+                why: "captures the output for the artifact without changing what runs",
+            },
+        ],
+        ..PAIR
+    }),
     Pairing::LocalOnly {
         task: "fmt",
         why: "rewrites the tree; `fmt-check` is the gate CI mirrors",
@@ -766,8 +954,8 @@ const PAIRINGS: &[Pairing] = &[
     },
 ];
 
-/// Actions a paired job may use besides its gate steps. Each provisions a checkout, a toolchain,
-/// a cache, or a binary; none runs a gate. An action outside this list may be a gate of its own
+/// Actions a [`provision`] step may use. Each provisions a checkout, a toolchain, a cache, or a
+/// binary; none runs a gate. An action outside this list may be a gate of its own
 /// (cargo-deny-action is), which a `run:`-step comparison would never see.
 const PROVISIONING_ACTIONS: [&str; 4] = [
     "actions/checkout@",
@@ -779,6 +967,13 @@ const PROVISIONING_ACTIONS: [&str; 4] = [
 /// Workflow-level `env:` entries that reach every job but change only how cargo prints, not what
 /// it resolves or checks.
 const COSMETIC_WORKFLOW_ENV: [&str; 1] = ["CARGO_TERM_COLOR"];
+
+/// The keys a paired job may carry besides an `if:` its row pins. `runs-on` is held to
+/// `ubuntu-latest` below. `timeout-minutes` is allowed unpinned: it bounds the runner's wall clock
+/// and can only turn a run red, never green, so it cannot make CI narrower than the task. Every
+/// other key (`needs`, `strategy`, `container`, `services`, `defaults`, `continue-on-error`, ...)
+/// changes whether or how the steps run, and mise has nothing to match it with.
+const JOB_KEYS: [&str; 5] = ["name", "runs-on", "steps", "env", "timeout-minutes"];
 
 /// A YAML `env:` mapping as strings.
 fn yaml_env(env: &yaml_rust2::Yaml, whose: &str) -> BTreeMap<String, String> {
@@ -800,6 +995,139 @@ fn yaml_env(env: &yaml_rust2::Yaml, whose: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
+/// The keys of a YAML mapping, as strings.
+fn yaml_keys<'a>(map: &'a yaml_rust2::Yaml, whose: &str) -> Vec<&'a str> {
+    map.as_hash()
+        .unwrap_or_else(|| panic!("{whose} must be a mapping"))
+        .keys()
+        .map(|key| key.as_str().unwrap_or_default())
+        .collect()
+}
+
+/// Holds a workflow's top level to what no task can see, and returns its `jobs:`.
+fn gate_workflow(file: &str) -> yaml_rust2::Yaml {
+    let workflow = workflow(file);
+    for key in yaml_env(&workflow["env"], &format!("`{file}`'s")).keys() {
+        assert!(
+            COSMETIC_WORKFLOW_ENV.contains(&key.as_str()),
+            "`{file}` sets `{key}` for every job, which no mise task sets; either set it on each \
+             task too or, if it only changes how output looks, list it in COSMETIC_WORKFLOW_ENV"
+        );
+    }
+    assert!(
+        workflow["defaults"].is_badvalue(),
+        "`{file}` sets workflow `defaults:`, which can change the shell or directory of every \
+         `run:` step without appearing on any of them"
+    );
+    workflow["jobs"].clone()
+}
+
+/// Checks `job`'s own keys and walks its steps: each is the next of `ci_only` (literally), a step
+/// using `held_action` (held by another test), or a gate `run:` step. Returns the gate steps as
+/// (environment, trimmed command).
+fn gate_steps(
+    file: &str,
+    name: &str,
+    job: &yaml_rust2::Yaml,
+    job_if: Option<&str>,
+    ci_only: &[CiOnly],
+    held_action: Option<&str>,
+) -> Vec<(BTreeMap<String, String>, String)> {
+    assert!(!job.is_badvalue(), "`{file}` has no `{name}` job");
+    for key in yaml_keys(job, &format!("the `{name}` job")) {
+        assert!(
+            JOB_KEYS.contains(&key) || (key == "if" && job_if.is_some()),
+            "the `{name}` job in `{file}` sets `{key}:`, which changes whether or how its steps \
+             run; its mise counterpart has nothing to match it with"
+        );
+    }
+    assert_eq!(
+        job["if"].as_str(),
+        job_if,
+        "the `{name}` job's `if:` is not the one its PAIRINGS row pins"
+    );
+    assert_eq!(
+        job["runs-on"].as_str(),
+        Some("ubuntu-latest"),
+        "the `{name}` job must run on `ubuntu-latest`, the platform its tasks are held on"
+    );
+    let job_env = yaml_env(&job["env"], &format!("the `{name}` job's"));
+
+    let mut expected = ci_only
+        .iter()
+        .map(|pinned| {
+            let step = yaml_document(pinned.step, &format!("a `{name}` CI-only step"));
+            if pinned.why.is_empty() {
+                let keys = yaml_keys(&step, &format!("a `{name}` provisioning step"));
+                assert!(
+                    keys.iter().all(|key| ["uses", "with"].contains(key)),
+                    "the `{name}` provisioning step `{}` carries more than `uses:` and `with:`; \
+                     give it a `why` as a named exception",
+                    pinned.step
+                );
+                let uses = step["uses"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                assert!(
+                    PROVISIONING_ACTIONS
+                        .iter()
+                        .any(|action| uses.starts_with(action)),
+                    "the `{name}` provisioning step uses `{uses}`, which is not a provisioning \
+                     action; if it gates anything, the mise task never runs it"
+                );
+            }
+            (pinned.step, step)
+        })
+        .peekable();
+
+    let mut gates = Vec::new();
+    for step in job["steps"]
+        .as_vec()
+        .unwrap_or_else(|| panic!("the `{name}` job must carry a list of steps"))
+    {
+        if expected.peek().is_some_and(|(_, pinned)| pinned == step) {
+            expected.next();
+            continue;
+        }
+        let keys = yaml_keys(step, &format!("a `{name}` step"));
+        if let Some(uses) = step["uses"].as_str() {
+            let uses = uses.to_ascii_lowercase();
+            assert!(
+                held_action.is_some_and(|action| uses.starts_with(action)),
+                "the `{name}` job uses `{uses}` in a step no CI-only row pins literally; pin it \
+                 in the job's PAIRINGS row (its `@ref` and `with:` included)"
+            );
+            assert!(
+                keys.iter()
+                    .all(|key| ["name", "uses", "with"].contains(key)),
+                "the `{name}` job's `{uses}` step sets more than `name:`, `uses:` and `with:`"
+            );
+            continue;
+        }
+        let run = step["run"]
+            .as_str()
+            .unwrap_or_else(|| panic!("a `{name}` step has neither `uses:` nor `run:`"));
+        for key in keys {
+            assert!(
+                ["name", "run", "env"].contains(&key),
+                "the `{name}` job's `{run}` step sets `{key}:`, which changes whether, where, or \
+                 how it runs; its mise counterpart has nothing to match it with"
+            );
+        }
+        let mut env = job_env.clone();
+        env.extend(yaml_env(&step["env"], &format!("a `{name}` step's")));
+        gates.push((env, run.trim().to_owned()));
+    }
+    if let Some((pinned, _)) = expected.next() {
+        panic!(
+            "the `{name}` job has no step `{pinned}` where its PAIRINGS row pins one (the pinned \
+             steps must appear in order, byte for byte)"
+        );
+    }
+    gates
+}
+
 #[test]
 fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
     // CI spells each gate out rather than calling `mise run`, so every gate exists twice. The
@@ -811,36 +1139,16 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
     //
     // Commands are compared as strings after trimming, so an identical gate means byte-identical
     // commands. mise runs each `run` entry under `sh -c -o errexit` and CI each step under
-    // `bash -e`, so a command that is byte-identical also fails the same way in both.
-    let workflow = ci_workflow();
+    // `bash -e`, so a command that is byte-identical also fails the same way in both. Every step
+    // that is not compared -- checkouts, toolchains, caches, tool installs, and the few named
+    // exceptions -- is pinned as literal YAML in its row, so none of them can grow a gate, a
+    // condition, or a different toolchain unseen.
     let tasks = mise_tasks();
-
-    let workflow_env = yaml_env(&workflow["env"], "the workflow's");
-    for key in workflow_env.keys() {
-        assert!(
-            COSMETIC_WORKFLOW_ENV.contains(&key.as_str()),
-            "`ci.yml` sets `{key}` for every job, which no mise task sets; either set it on each \
-             task too or, if it only changes how output looks, list it in COSMETIC_WORKFLOW_ENV"
-        );
-    }
-    assert!(
-        workflow["defaults"].is_badvalue(),
-        "`ci.yml` sets workflow `defaults:`, which can change the shell or directory of every \
-         `run:` step without appearing on any of them"
-    );
-
-    let jobs = workflow["jobs"]
-        .as_hash()
-        .expect("`ci.yml` must carry a `jobs:` mapping");
-    let ci_jobs: BTreeSet<&str> = jobs
-        .keys()
-        .map(|job| job.as_str().expect("job ids are strings"))
-        .collect();
     let mut paired_jobs = BTreeSet::new();
     let mut paired_tasks = BTreeSet::new();
-    let mut claim = |jobs: &[&'static str], tasks: &[&'static str]| {
+    let mut claim = |jobs: &[(&'static str, &'static str)], tasks: &[&'static str]| {
         for job in jobs {
-            assert!(paired_jobs.insert(*job), "job `{job}` is paired twice");
+            assert!(paired_jobs.insert(*job), "job {job:?} is paired twice");
         }
         for task in tasks {
             assert!(paired_tasks.insert(*task), "task `{task}` is paired twice");
@@ -848,28 +1156,36 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
     };
     for pairing in PAIRINGS {
         match pairing {
-            Pairing::Identical { job, tasks, .. } => claim(&[*job], tasks),
-            Pairing::HeldBy { job, task, test } => {
-                assert!(
-                    read("spargen/tests/corpus_manifest.rs").contains(&format!("fn {test}()")),
-                    "`{job}` is held by `{test}`, which does not exist"
-                );
-                claim(&[*job], &[*task]);
-            }
-            Pairing::Pending { job, tasks, why } => {
-                assert!(!why.is_empty(), "a pending pairing must say why");
-                claim(job.as_slice(), tasks);
-            }
+            Pairing::Identical(pair) => claim(&[(pair.workflow, pair.job)], pair.tasks),
+            Pairing::HeldBy { job, task, .. } => claim(&[("ci.yml", *job)], &[*task]),
             Pairing::LocalOnly { task, why } => {
                 assert!(!why.is_empty(), "a local-only task must say why");
                 claim(&[], &[*task]);
             }
         }
     }
+    let mut workflow_jobs = BTreeMap::new();
+    let mut ci_jobs = BTreeSet::new();
+    for file in GATE_WORKFLOWS {
+        let jobs = gate_workflow(file);
+        for job in jobs
+            .as_hash()
+            .unwrap_or_else(|| panic!("`{file}` must carry a `jobs:` mapping"))
+            .keys()
+        {
+            ci_jobs.insert((file, job.as_str().expect("job ids are strings").to_owned()));
+        }
+        workflow_jobs.insert(file, jobs);
+    }
     let mise_tasks: BTreeSet<&str> = tasks.keys().map(String::as_str).collect();
+    let paired_jobs: BTreeSet<(&str, String)> = paired_jobs
+        .into_iter()
+        .map(|(file, job)| (file, job.to_owned()))
+        .collect();
     assert_eq!(
         ci_jobs, paired_jobs,
-        "every CI job must be named by one PAIRINGS row, and every row's job must exist"
+        "every job in {GATE_WORKFLOWS:?} must be named by one PAIRINGS row, and every row's job \
+         must exist"
     );
     assert_eq!(
         mise_tasks, paired_tasks,
@@ -877,80 +1193,64 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
     );
 
     for pairing in PAIRINGS {
-        let Pairing::Identical {
-            job: name,
-            tasks: task_names,
-            provisioning,
-        } = pairing
-        else {
-            continue;
+        let pair = match pairing {
+            Pairing::Identical(pair) => pair,
+            Pairing::HeldBy {
+                job,
+                test,
+                action,
+                ci_only,
+                ..
+            } => {
+                assert!(
+                    read("spargen/tests/corpus_manifest.rs").contains(&format!("fn {test}()")),
+                    "`{job}` is held by `{test}`, which does not exist"
+                );
+                let steps = gate_steps(
+                    "ci.yml",
+                    job,
+                    &workflow_jobs["ci.yml"][*job],
+                    None,
+                    ci_only,
+                    Some(action),
+                );
+                assert!(
+                    steps.is_empty(),
+                    "the `{job}` job runs {steps:?} besides the action `{test}` holds; its task \
+                     never runs them"
+                );
+                continue;
+            }
+            Pairing::LocalOnly { .. } => continue,
         };
-        let job = &workflow["jobs"][*name];
-        for key in [
-            "if",
-            "continue-on-error",
-            "defaults",
-            "strategy",
-            "container",
-        ] {
-            assert!(
-                job[key].is_badvalue(),
-                "the `{name}` job sets `{key}:`, which changes whether or how its steps run; \
-                 its mise counterpart has nothing to match it with"
+        let name = pair.job;
+        let mut ci = gate_steps(
+            pair.workflow,
+            name,
+            &workflow_jobs[pair.workflow][name],
+            pair.job_if,
+            pair.ci_only,
+            None,
+        );
+        for rewrite in pair.rewrites {
+            assert!(!rewrite.why.is_empty(), "a rewrite must say why");
+            let found: usize = ci
+                .iter()
+                .map(|(_, command)| command.matches(rewrite.ci).count())
+                .sum();
+            assert_eq!(
+                found, 1,
+                "the `{name}` job's commands carry `{}` {found} times; its PAIRINGS row rewrites \
+                 it exactly once, so CI's side of that exception has changed",
+                rewrite.ci
             );
-        }
-        let job_env = yaml_env(&job["env"], &format!("the `{name}` job's"));
-
-        let mut ci = Vec::new();
-        let mut provisioned = BTreeSet::new();
-        for step in job["steps"]
-            .as_vec()
-            .unwrap_or_else(|| panic!("the `{name}` job must carry a list of steps"))
-        {
-            if let Some(uses) = step["uses"].as_str() {
-                let uses = uses.to_ascii_lowercase();
-                assert!(
-                    PROVISIONING_ACTIONS
-                        .iter()
-                        .any(|action| uses.starts_with(action)),
-                    "the `{name}` job uses `{uses}`, which is not a provisioning action; if it \
-                     gates anything, the mise task never runs it"
-                );
-                continue;
+            for (_, command) in &mut ci {
+                *command = command.replace(rewrite.ci, rewrite.mise).trim().to_owned();
             }
-            let run = step["run"]
-                .as_str()
-                .unwrap_or_else(|| panic!("a `{name}` step has neither `uses:` nor `run:`"));
-            if let Some(step_name) = step["name"]
-                .as_str()
-                .filter(|step_name| provisioning.contains(step_name))
-            {
-                provisioned.insert(step_name);
-                continue;
-            }
-            let step_map = step
-                .as_hash()
-                .unwrap_or_else(|| panic!("a `{name}` step must be a mapping"));
-            for key in step_map.keys() {
-                let key = key.as_str().unwrap_or_default();
-                assert!(
-                    ["name", "run", "env"].contains(&key),
-                    "the `{name}` job's `{run}` step sets `{key}:`, which changes whether, where, \
-                     or how it runs; its mise counterpart has nothing to match it with"
-                );
-            }
-            let mut env = job_env.clone();
-            env.extend(yaml_env(&step["env"], &format!("a `{name}` step's")));
-            ci.push((env, run.trim().to_owned()));
-        }
-        for step_name in *provisioning {
-            assert!(
-                provisioned.contains(step_name),
-                "the `{name}` job has no `{step_name}` step to skip as provisioning"
-            );
         }
 
-        let local: Vec<(BTreeMap<String, String>, String)> = task_names
+        let local: Vec<(BTreeMap<String, String>, String)> = pair
+            .tasks
             .iter()
             .flat_map(|task| {
                 let env = mise_env(&tasks, task);
@@ -963,10 +1263,11 @@ fn every_mise_task_runs_exactly_what_its_ci_job_runs() {
         assert_eq!(
             local,
             ci,
-            "`mise run {}` does not run exactly what CI's `{name}` job runs (left: mise, right: \
-             CI; each entry is its environment and its command). The two must be identical -- \
-             change whichever side is wrong, not only one of them",
-            task_names.join("` + `mise run ")
+            "`mise run {}` does not run exactly what `{}`'s `{name}` job runs (left: mise, right: \
+             CI after its row's named rewrites; each entry is its environment and its command). \
+             The two must be identical -- change whichever side is wrong, not only one of them",
+            pair.tasks.join("` + `mise run "),
+            pair.workflow,
         );
     }
 }
