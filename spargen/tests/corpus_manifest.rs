@@ -1344,8 +1344,8 @@ fn mise_tool_pins() -> BTreeMap<String, String> {
         .collect()
 }
 
-/// The `(tool, version)` pairs a `cargo install` / `cargo binstall` line installs, with `None`
-/// for a tool installed without a version (which is whatever is newest at run time).
+/// The `(tool, version)` pairs a line's `cargo [+<toolchain>] install` / `binstall` commands
+/// install, with `None` for a tool installed without a version (whatever is newest at run time).
 fn cargo_installs(line: &str) -> Vec<(String, Option<String>)> {
     // Flags of `cargo install` that take a value, so the value is not read as a crate name.
     const VALUED: [&str; 16] = [
@@ -1366,41 +1366,112 @@ fn cargo_installs(line: &str) -> Vec<(String, Option<String>)> {
         "--jobs",
         "-j",
     ];
-    let words: Vec<&str> = line.split_whitespace().collect();
-    let Some(start) = words
-        .windows(2)
-        .position(|pair| pair[0] == "cargo" && ["install", "binstall"].contains(&pair[1]))
-    else {
-        return Vec::new();
-    };
-    let mut version = None;
-    let mut crates = Vec::new();
-    let mut rest = words[start + 2..].iter();
-    while let Some(word) = rest.next() {
-        if ["&&", "||", ";", "|"].contains(word) {
-            break;
-        }
-        if let Some((flag, value)) = word.split_once('=') {
-            if flag == "--version" || flag == "--vers" {
-                version = Some(value.to_owned());
-            }
+    let mut found = Vec::new();
+    for command in shell_commands(line) {
+        // `cargo install`, and `cargo +<toolchain> install`: a toolchain override between the two
+        // words changes which cargo runs, not what it installs.
+        let Some(sub) = cargo_subcommand(&command) else {
+            continue;
+        };
+        if !["install", "binstall"].contains(&command[sub]) {
             continue;
         }
-        if *word == "--version" || *word == "--vers" {
-            version = rest.next().map(|value| (*value).to_owned());
-        } else if VALUED.contains(word) {
-            rest.next();
-        } else if !word.starts_with('-') {
-            crates.push(*word);
+        let mut version = None;
+        let mut crates = Vec::new();
+        let mut rest = command[sub + 1..].iter();
+        while let Some(word) = rest.next() {
+            if let Some((flag, value)) = word.split_once('=') {
+                if flag == "--version" || flag == "--vers" {
+                    version = Some(value.to_owned());
+                }
+                continue;
+            }
+            if *word == "--version" || *word == "--vers" {
+                version = rest.next().map(|value| (*value).to_owned());
+            } else if VALUED.contains(word) {
+                rest.next();
+            } else if !word.starts_with('-') {
+                crates.push(*word);
+            }
         }
-    }
-    crates
-        .into_iter()
-        .map(|krate| match krate.split_once('@') {
+        found.extend(crates.into_iter().map(|krate| match krate.split_once('@') {
             Some((name, pinned)) => (name.to_owned(), Some(pinned.to_owned())),
             None => (krate.to_owned(), version.clone()),
-        })
-        .collect()
+        }));
+    }
+    found
+}
+
+/// A shell line split into its simple commands (at `&&`, `||`, `;`, `|`), each as its words
+/// with leading `VAR=value` assignments and shell keywords (`if`, `then`, `!`, ...) dropped, so
+/// the first word is the program that runs.
+fn shell_commands(line: &str) -> Vec<Vec<&str>> {
+    let mut commands = vec![Vec::new()];
+    for word in line.split_whitespace() {
+        // A separator glued to a word (`check;`) still ends the command.
+        let (word, ends) = match word.strip_suffix(';') {
+            Some(stripped) => (stripped, true),
+            None => (word, false),
+        };
+        if ["&&", "||", ";", "|"].contains(&word) {
+            commands.push(Vec::new());
+            continue;
+        }
+        let current = commands.last_mut().expect("never empty");
+        let leading = current.is_empty();
+        let keyword = [
+            "if", "then", "else", "elif", "do", "while", "until", "!", "exec",
+        ];
+        let assignment = word
+            .split_once('=')
+            .is_some_and(|(name, _)| !name.is_empty() && !name.starts_with('-'));
+        if !(leading && (keyword.contains(&word) || assignment || word.is_empty())) {
+            current.push(word);
+        }
+        if ends {
+            commands.push(Vec::new());
+        }
+    }
+    commands.retain(|command| !command.is_empty());
+    commands
+}
+
+/// The index of `cargo`'s subcommand in a simple command, past an optional `+<toolchain>`.
+/// `cargo` is looked for anywhere in the command, not only first, so a wrapper (`time cargo
+/// install …`) cannot hide it; a false match fails loudly rather than passing silently.
+fn cargo_subcommand(command: &[&str]) -> Option<usize> {
+    let cargo = command
+        .iter()
+        .position(|word| *word == "cargo" || word.ends_with("/cargo"))?;
+    let sub = if command
+        .get(cargo + 1)
+        .is_some_and(|word| word.starts_with('+'))
+    {
+        cargo + 2
+    } else {
+        cargo + 1
+    };
+    (sub < command.len()).then_some(sub)
+}
+
+/// The `[tools]`-pinned tools a shell line runs: `cargo [+<toolchain>] <sub>` runs `cargo-<sub>`
+/// where that is pinned, and a pinned tool's name anywhere in any other command runs it
+/// (`mdbook build`, `convco check`). Installing a tool is not running it.
+fn tools_run(line: &str, pins: &BTreeMap<String, String>) -> BTreeSet<String> {
+    let mut tools = BTreeSet::new();
+    for command in shell_commands(line) {
+        if let Some(sub) = cargo_subcommand(&command) {
+            if ["install", "binstall"].contains(&command[sub]) {
+                continue;
+            }
+            tools.insert(format!("cargo-{}", command[sub]));
+        }
+        for word in command {
+            tools.insert(word.rsplit('/').next().unwrap_or(word).to_owned());
+        }
+    }
+    tools.retain(|tool| pins.contains_key(tool));
+    tools
 }
 
 #[test]
@@ -1412,7 +1483,9 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
     // cargo-hack, which CI installed at whatever was newest. So every tool CI installs must be one
     // `[tools]` pins, at exactly that version, and every pinned tool must be installed by CI
     // unless LOCAL_ONLY_TOOLS says why not. A gate action that carries its own copy of a pinned
-    // tool is caught by the second half: the tool is then pinned but never installed.
+    // tool is caught by the second half: the tool is then pinned but never installed. And since
+    // jobs share no runner, a job that runs a pinned tool must install it itself, before running
+    // it; an install in another job proves nothing about this one.
     let pins = mise_tool_pins();
     let mut installed: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for file in workflow_files() {
@@ -1422,8 +1495,13 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
         };
         for (job, body) in jobs {
             let job = job.as_str().unwrap_or_default();
+            // What this job has installed so far: a tool a job runs must be installed by that
+            // job, earlier, since jobs share no runner. A pin installed by some other job would
+            // pass a workflow-wide check while this job ran whatever the runner image carries.
+            let mut in_job = BTreeSet::new();
             for step in body["steps"].as_vec().into_iter().flatten() {
                 let mut found = Vec::new();
+                let mut runs = BTreeSet::new();
                 if let Some(uses) = step["uses"].as_str() {
                     let lowered = uses.to_ascii_lowercase();
                     if lowered.starts_with("taiki-e/install-action@") {
@@ -1451,7 +1529,10 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
                     }
                 }
                 if let Some(run) = step["run"].as_str() {
-                    found.extend(run.lines().flat_map(cargo_installs));
+                    for line in run.lines() {
+                        found.extend(cargo_installs(line));
+                        runs.extend(tools_run(line, &pins));
+                    }
                 }
                 for (tool, version) in found {
                     let pinned = pins.get(&tool).unwrap_or_else(|| {
@@ -1467,7 +1548,20 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
                         "`{file}`'s `{job}` job installs `{tool}` at {version:?}, and `[tools]` in \
                          mise.toml pins {pinned}; the two gates must run the same binary"
                     );
-                    installed.entry(tool).or_default().insert(job.to_owned());
+                    installed
+                        .entry(tool.clone())
+                        .or_default()
+                        .insert(job.to_owned());
+                    in_job.insert(tool);
+                }
+                for tool in runs {
+                    assert!(
+                        in_job.contains(&tool),
+                        "`{file}`'s `{job}` job runs `{tool}` without installing it earlier in the \
+                         same job; jobs share no runner, so it would run whatever binary the \
+                         runner carries rather than the {} `[tools]` in mise.toml pins",
+                        pins[&tool]
+                    );
                 }
             }
         }

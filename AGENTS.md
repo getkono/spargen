@@ -76,7 +76,7 @@ sides together. `spargen/tests/corpus_manifest.rs` enforces it:
 `every_mise_task_runs_exactly_what_its_ci_job_runs` pairs every CI job with every task and compares
 them byte for byte, and `ci_installs_exactly_the_tool_versions_mise_pins` holds every tool CI
 installs to the exact version mise's `[tools]` pins (and every pin but `hk`, which CI never runs,
-to being installed by CI) — so
+to being installed by CI, and every job that runs a pinned tool to installing it itself) — so
 `deny` runs mise's cargo-deny rather than one an action bundles, and `the_deny_gate_states_the_feature_scope_it_audits` holds the shared command to
 `--all-features` and a bare `check`. "Every CI job" is every job of every workflow
 under `.github/workflows/`: each file is either a gate workflow whose jobs are all paired or a
