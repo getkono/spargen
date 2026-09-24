@@ -1115,54 +1115,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         if let Some(reference) = &schema.reference {
-            // Whether this `$ref` closes a reference cycle back through the component that
-            // encloses it — a property of the DOCUMENT, asked of `components.schemas` rather than
-            // of what happens to be mid-flight. Keying it on `in_progress` instead made the verdict
-            // depend on `components.schemas` iteration order, so for mutual recursion the guard
-            // fired on whichever entry the document declared first and re-ordering two map entries
-            // flipped a working client into a hard rejection.
-            //
-            // It matters below because a target inside the cycle cannot be composed with: its
-            // definition depends on the very result being computed, so `intersect_non_null`'s
-            // `(Any, _)` arm would return the sibling and silently discard the target.
-            // Each arm answers the back-edge question with the predicate that arm can actually
-            // answer, and both are resolved-identity questions rather than questions about how the
-            // reference was spelled.
-            //
-            // `#/components/schemas/…` is answered from the DOCUMENT, before lowering: the walk
-            // through `components.schemas` gives the same verdict however the map is ordered.
-            //
-            // Every other spelling has no such map to walk — `ref_closes_a_cycle` consults the ROOT
-            // document's components only, so a sub-file or remote target is invisible to it — and is
-            // answered from the reservation the `ensure_*` call just returned. That call is what
-            // resolves the spelling to an identity, so the test has to come after it.
-            //
-            // It used to come before it, keyed on `remote_in_progress` alone. A sub-file target's
-            // reservation lives in `resolved_in_progress`, so the explicit `./lib.yaml#/…` spelling
-            // of a cycle-closing reference answered `false` unconditionally and fell through to the
-            // intersection below, against a placeholder. `is_in_progress_root` chains all three
-            // maps, which is the same shape `gather_member` already applies after its own `ensure_*`
-            // calls.
-            let (referenced, back_edge) =
-                if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                    let back_edge = self.ref_closes_a_cycle(name, &schema.provenance);
-                    (
-                        self.ensure_component(name, Some(reference), &schema.provenance)?,
-                        back_edge,
-                    )
-                    // Remote refs go through the cycle-safe, deduped remote path (keyed by
-                    // `url#fragment`), mirroring `ensure_component`; a bare relative/other ref falls
-                    // through to `resolve`, which reports it (E003/E004).
-                } else if is_remote_ref(reference) {
-                    let ty = self.ensure_remote(reference)?;
-                    (ty, self.is_in_progress_root(ty.id))
-                } else {
-                    // Bundle refs go through the cycle-safe, deduped path too, keyed by the resolved
-                    // `file#pointer`. That key is why the ordinary spelling and the explicit
-                    // `./lib.yaml#/…` spelling of one target now share one type rather than two.
-                    let ty = self.ensure_resolved(reference, &schema.provenance, hint)?;
-                    (ty, self.is_in_progress_root(ty.id))
-                };
+            let referenced = if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                self.ensure_component(name, Some(reference), &schema.provenance)?
+                // Remote refs go through the cycle-safe, deduped remote path (keyed by
+                // `url#fragment`), mirroring `ensure_component`; a bare relative/other ref falls
+                // through to `resolve`, which reports it (E003/E004).
+            } else if is_remote_ref(reference) {
+                self.ensure_remote(reference)?
+            } else {
+                // Bundle refs go through the cycle-safe, deduped path too, keyed by the resolved
+                // `file#pointer`. That key is why the ordinary spelling and the explicit
+                // `./lib.yaml#/…` spelling of one target now share one type rather than two.
+                self.ensure_resolved(reference, &schema.provenance, hint)?
+            };
 
             // In JSON Schema 2020-12 `$ref` is an applicator, not a replacement for the containing
             // schema. Intersect every shape-bearing sibling instead of silently discarding it.
@@ -1173,12 +1138,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // schema: it boxes and generates. Only the intersection below needs a real target.
                 return Some(referenced);
             }
-            // Both lanes wrote this guard independently. The parent keyed it on
-            // `is_in_progress_root(referenced.id)` — a lowering-order test, which decision 23
-            // established gives two byte-identical documents opposite verdicts when only the order
-            // of two `components.schemas` entries differs. `back_edge` above asks the document
-            // instead, so the parent's condition is superseded rather than merged beside it; its
-            // reservation work (`TypeKind::Reserved`) is what the placeholder now is, and is kept.
+            // Whether this `$ref` closes a reference cycle back through a schema whose lowering
+            // encloses it. A target inside the cycle cannot be composed with: its definition
+            // depends on the very result being computed, so `intersect_non_null`'s `(Any, _)` arm
+            // would return the sibling and silently discard the target.
+            //
+            // It is asked of the DOCUMENT, for every spelling alike. A lowering-order test — "is the
+            // target mid-flight" — gives two byte-identical documents opposite verdicts when only
+            // the order of two map entries differs (decision 23), and so does a document test that
+            // only one spelling can reach: the sub-file spelling used to fall back to
+            // `is_in_progress_root`, so with siblings on one edge of a two-schema cycle the verdict
+            // followed which end lowering happened to enter first. `ref_closes_a_cycle` walks
+            // resolved identities across every file instead.
+            //
+            // `is_in_progress_root` stays as a backstop and adds no rejection of its own: a target
+            // still being lowered is one whose lowering reached this site, which is a cycle the walk
+            // finds. Kept so that a walk which ever missed one reports the recursion, rather than
+            // leaving `intersect_types`' fail-closed arm to report it as an empty intersection.
+            let back_edge = self.ref_closes_a_cycle(reference, &schema.provenance)
+                || self.is_in_progress_root(referenced.id);
             if back_edge {
                 // The siblings have nothing yet to intersect with. The `allOf` spelling of the same
                 // conjunction has always rejected this rather than composing against a placeholder,
@@ -1481,9 +1459,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // one, an ordinary recursive union boxes its back-edge and generates, which is what makes a
         // recursive `oneOf` usable at all.
         //
-        // This is the DOCUMENT half of the test and it is answered before lowering, so it covers
-        // only the `#/components/schemas/…` spelling — `ref_closes_a_cycle` has no map to walk for
-        // any other. The reservation half is applied after each member is lowered, at the two sites
+        // This is the DOCUMENT half of the test and it is answered before lowering. It is asked only
+        // of the `#/components/schemas/…` spelling, although `ref_closes_a_cycle` now resolves every
+        // spelling. The reservation half is applied after each member is lowered, at the two sites
         // below where the member's `Ty` exists; between them the three spellings of one conjunction
         // give one verdict, which they did not before.
         if sibling.is_some() {
@@ -2740,35 +2718,71 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
-    /// Whether a `$ref` to `target`, written at `at`, closes a reference cycle back through the
-    /// component that encloses it.
+    /// Whether `reference`, written at `at`, closes a reference cycle back through a schema whose
+    /// lowering encloses `at`.
     ///
-    /// This is a property of the DOCUMENT, not of the lowering: it asks whether `target` reaches
-    /// the enclosing component through `components.schemas`, which is the same answer however the
-    /// schemas map happens to be ordered. The predicate it replaced — membership of `in_progress` —
-    /// was a property of *when* lowering happened, and since components are pre-lowered in map
-    /// iteration order, mutual recursion rejected or generated according to which entry the
-    /// document happened to declare first. Re-ordering a YAML map is a no-op in OpenAPI.
-    fn ref_closes_a_cycle(&self, target: &str, at: &crate::diag::Provenance) -> bool {
-        let Some(enclosing) = enclosing_component(at) else {
-            // Not inside a component at all — a body, parameter or response schema. No cycle can
-            // pass through this position, so `ensure_component` will have lowered the target fully.
+    /// This is a property of the DOCUMENT, not of the lowering: it asks whether the target reaches,
+    /// through `$ref`s, a schema that contains `at` along the keywords lowering descends into. That
+    /// is the same answer however any map is ordered and whichever end of a cycle lowering entered
+    /// first. The predicate it replaced — membership of an in-progress map — was a property of
+    /// *when* lowering happened, so mutual recursion rejected or generated according to which entry
+    /// the document happened to declare, or which operation happened to reach it, first. Re-ordering
+    /// a YAML map is a no-op in OpenAPI.
+    ///
+    /// Every schema is named by its resolved `(file, pointer)`, for every spelling alike, which is
+    /// what makes the answer spelling-independent. An earlier form walked the root document's
+    /// `components.schemas` by name, so it could not see a sub-file or remote target at all, and it
+    /// matched a sub-file component's name against the root's map — a sub-file `Item` sharing its
+    /// name with a root `Item` in a cycle was reported as closing that cycle.
+    fn ref_closes_a_cycle(&self, reference: &str, at: &Provenance) -> bool {
+        let site_file = at
+            .span
+            .map_or_else(|| self.resolver.root_id(), |span| span.file);
+        let Some(start) = self.schema_ref_identity(reference, site_file) else {
+            // Not a target this bundle knows; the lowering reports it in its own words.
             return false;
         };
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut stack = vec![target.to_owned()];
-        while let Some(name) = stack.pop() {
-            if name == enclosing {
+        let mut seen: HashSet<(crate::diag::FileId, crate::diag::JsonPointer)> = HashSet::new();
+        let mut stack = vec![start];
+        while let Some((file, pointer)) = stack.pop() {
+            if file == site_file && lowering_encloses(&pointer, &at.pointer) {
                 return true;
             }
-            if !seen.insert(name.clone()) {
+            if !seen.insert((file, pointer.clone())) {
                 continue;
             }
-            if let Some(component) = self.document.components.schemas.get(&name) {
-                collect_component_refs(component, &mut stack);
-            }
+            let Some(node) = self.resolver.node_at(file, &pointer) else {
+                continue;
+            };
+            let mut references = Vec::new();
+            collect_node_refs(node, &mut references);
+            stack.extend(
+                references
+                    .into_iter()
+                    .filter_map(|reference| self.schema_ref_identity(reference, file)),
+            );
         }
         false
+    }
+
+    /// The `(file, pointer)` a schema `$ref` written in `from` lowers to, with the lowering's own
+    /// precedence: `#/components/schemas/<name>` is the ROOT document's component whenever the root
+    /// declares `name`, from whichever file it is written in (see [`Self::ensure_component`]), and
+    /// every other reference resolves against the file it is written in.
+    fn schema_ref_identity(
+        &self,
+        reference: &str,
+        from: crate::diag::FileId,
+    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+            if self.document.components.schemas.contains_key(name) {
+                return Some((
+                    self.resolver.root_id(),
+                    crate::diag::JsonPointer::from(format!("/components/schemas/{name}")),
+                ));
+            }
+        }
+        self.resolver.reference_identity_from(reference, from)
     }
 
     /// Whether a union member is a `$ref` that closes a reference cycle back through the component
@@ -2781,8 +2795,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         member
             .reference
             .as_deref()
-            .and_then(|reference| reference.strip_prefix("#/components/schemas/"))
-            .is_some_and(|name| self.ref_closes_a_cycle(name, at))
+            .filter(|reference| reference.starts_with("#/components/schemas/"))
+            .is_some_and(|reference| self.ref_closes_a_cycle(reference, at))
     }
 
     /// Whether a union member is a `#/components/schemas/…` `$ref` to the very schema whose body
@@ -5050,25 +5064,44 @@ fn parameter_shape_supported_inner(
     supported
 }
 
-/// The `components.schemas` entry a pointer lies inside, if any.
+/// Whether lowering the schema at `frame` descends into the schema at `site`, both pointers into
+/// one file: `site` is `frame` itself, or lies below it along only the keywords
+/// [`collect_node_refs`] walks.
 ///
-/// `/components/schemas/Node/properties/next` yields `Node`. A pointer anywhere else — a request
-/// body, a response, a parameter — yields `None`, because no `components.schemas` cycle passes
-/// through such a position.
-fn enclosing_component(at: &crate::diag::Provenance) -> Option<String> {
-    let mut tokens = at.pointer.as_str().split('/').skip(1);
-    if tokens.next()? != "components" || tokens.next()? != "schemas" {
-        return None;
+/// Lexical containment alone is not enough. A whole-file target (`./lib.yaml`, pointer `""`)
+/// contains every pointer in that file, but lowering it as a schema never enters its `components`,
+/// so a `$ref` there is not inside that frame and cannot be handed its placeholder.
+fn lowering_encloses(frame: &crate::diag::JsonPointer, site: &crate::diag::JsonPointer) -> bool {
+    let Some(rest) = site.as_str().strip_prefix(frame.as_str()) else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
     }
-    // Component names are matched by name only, and a literal `/` in a key is spelled `~1`, so the
-    // next token is the whole name.
-    Some(tokens.next()?.replace("~1", "/").replace("~0", "~"))
+    let Some(rest) = rest.strip_prefix('/') else {
+        // `/components/schemas/Ab` is not below `/components/schemas/A`.
+        return false;
+    };
+    let mut tokens = rest.split('/');
+    while let Some(keyword) = tokens.next() {
+        match keyword {
+            // Each of these is followed by a member name or an index.
+            "properties" | "patternProperties" | "prefixItems" | "allOf" | "oneOf" | "anyOf" => {
+                if tokens.next().is_none() {
+                    return false;
+                }
+            }
+            "additionalProperties" | "items" | "contentSchema" => {}
+            _ => return false,
+        }
+    }
+    true
 }
 
-/// Push every local `components.schemas` name this schema subtree references onto `out`.
+/// Push every `$ref` string this raw schema subtree carries onto `out`, its own included.
 ///
-/// Only the local component form matters: the cycle predicate asks about `components.schemas`
-/// reachability, and a remote or relative-file target is not a member of that map.
+/// Every spelling counts — a root component, a sub-file pointer, a whole file, a remote URL — since
+/// the cycle predicate resolves each to its `(file, pointer)` identity before comparing anything.
 ///
 /// The keywords walked here are exactly the ones `lower_schema_inner` descends into. `$defs` and
 /// the validation-only applicators — `not`, `if`/`then`/`else`, `contains`, `propertyNames`,
@@ -5076,57 +5109,34 @@ fn enclosing_component(at: &crate::diag::Provenance) -> Option<String> {
 /// a `$ref` reachable only that way can never put a component mid-flight and can never yield the
 /// placeholder this predicate exists to detect. Counting them made an unreferenced `$defs` entry —
 /// zero emitted bytes, not one instance added or removed — flip a document into a hard rejection
-/// whose message asserted a dependence that does not exist.
-fn collect_component_refs(schema: &RefOr<Schema>, out: &mut Vec<String>) {
-    match schema {
-        RefOr::Ref(reference) => {
-            if let Some(name) = reference
-                .reference
-                .strip_prefix("#/components/schemas/")
-                .filter(|name| !name.contains('/'))
-            {
-                out.push(name.to_owned());
+/// whose message asserted a dependence that does not exist. [`lowering_encloses`] accepts exactly
+/// the same keywords, so the two halves of the predicate agree on what "inside" means.
+fn collect_node_refs<'v>(node: &'v SpannedValue, out: &mut Vec<&'v str>) {
+    // A boolean schema, or anything that is not a schema object, carries no reference.
+    let Some(object) = node.as_object() else {
+        return;
+    };
+    if let Some(reference) = object.get("$ref").and_then(SpannedValue::as_str) {
+        out.push(reference);
+    }
+    for keyword in ["properties", "patternProperties"] {
+        if let Some(members) = object.get(keyword).and_then(SpannedValue::as_object) {
+            for (_, child) in members.iter() {
+                collect_node_refs(child, out);
             }
         }
-        RefOr::Item(schema) => collect_schema_refs(schema, out),
     }
-}
-
-fn collect_schema_or_refs(schema: &SchemaOr, out: &mut Vec<String>) {
-    if let SchemaOr::Schema(schema) = schema {
-        collect_schema_refs(schema, out);
-    }
-}
-
-fn collect_schema_refs(schema: &Schema, out: &mut Vec<String>) {
-    if let Some(reference) = &schema.reference {
-        if let Some(name) = reference
-            .strip_prefix("#/components/schemas/")
-            .filter(|name| !name.contains('/'))
-        {
-            out.push(name.to_owned());
+    for keyword in ["prefixItems", "allOf", "oneOf", "anyOf"] {
+        if let Some(members) = object.get(keyword).and_then(SpannedValue::as_array) {
+            for child in members {
+                collect_node_refs(child, out);
+            }
         }
     }
-    let nested = schema
-        .properties
-        .values()
-        .chain(schema.pattern_properties.values())
-        .chain(schema.prefix_items.iter())
-        .chain(schema.all_of.iter())
-        .chain(schema.one_of.iter())
-        .chain(schema.any_of.iter());
-    for child in nested {
-        collect_schema_or_refs(child, out);
-    }
-    for child in [
-        &schema.additional_properties,
-        &schema.items,
-        &schema.content_schema,
-    ]
-    .into_iter()
-    .flatten()
-    {
-        collect_schema_or_refs(child, out);
+    for keyword in ["additionalProperties", "items", "contentSchema"] {
+        if let Some(child) = object.get(keyword) {
+            collect_node_refs(child, out);
+        }
     }
 }
 

@@ -2200,17 +2200,15 @@ fn a_recursive_target_repeated_across_all_of_members_intersects_as_itself() {
     );
 }
 
-/// Decision 23's invariant, applied to the predicate that now answers the sub-file spelling.
+/// Decision 23's invariant, applied to the sub-file spelling.
 ///
-/// The `#/components/schemas/…` arm asks the DOCUMENT, so it is order-independent by construction.
-/// Every other spelling asks `is_in_progress_root`, which is a question about lowering state — the
-/// exact shape decision 23 removed from the component arm because it gave two byte-identical
-/// documents opposite verdicts when only the order of two `components.schemas` entries differed.
-///
-/// It is order-independent here for a reason worth pinning rather than assuming: the reservation is
-/// made *before* the body is lowered, so whichever of a mutually recursive pair is lowered first,
-/// the re-entrant edge still meets an open reservation. Both orders must therefore give one
-/// verdict. This fixture writes the same two schemas in both orders and requires it.
+/// Every spelling now asks the DOCUMENT whether a `$ref` closes a cycle through a schema enclosing
+/// it, so the verdict is order-independent by construction. With siblings on both edges it was
+/// order-independent even when the sub-file spelling still asked `is_in_progress_root`: the
+/// reservation is made *before* the body is lowered, so whichever of a mutually recursive pair is
+/// lowered first, the re-entrant edge meets an open reservation. This fixture writes the same two
+/// schemas in both orders and requires one verdict; the one-edge fixture below is the case that
+/// lowering-state question got wrong.
 #[test]
 fn a_sub_file_cycle_verdict_does_not_depend_on_the_order_the_schemas_are_declared() {
     const A: &str = r##"    A:
@@ -2222,11 +2220,9 @@ fn a_sub_file_cycle_verdict_does_not_depend_on_the_order_the_schemas_are_declare
           properties:
             extra: { type: string }
 "##;
-    // Siblings on BOTH back-edges, so the conjunction genuinely closes a cycle whichever schema is
-    // entered first. With siblings on one edge only, the other edge boxes, the first schema is
-    // fully lowered by the time the conjunction is reached, and the intersection is an ordinary one
-    // against a real type — which generates, correctly, and would make this fixture assert the
-    // wrong thing.
+    // Siblings on BOTH back-edges, so the conjunction meets an open reservation whichever schema is
+    // entered first. Siblings on one edge only are the harder case — whether the conjunction meets
+    // one then depends on the entry point — and are pinned separately below.
     const B: &str = r##"    B:
       type: [object, 'null']
       properties:
@@ -2282,6 +2278,194 @@ fn a_sub_file_cycle_verdict_does_not_depend_on_the_order_the_schemas_are_declare
         verdicts[0].1, verdicts[1].1,
         "reordering two sub-file schemas changed the diagnosis: {verdicts:?}"
     );
+}
+
+/// A two-schema cycle with shape siblings on ONE edge only, entered from each end.
+///
+/// `A.b` carries siblings beside its `$ref` to `B`; `B.a` is a plain `$ref` back to `A`. Entered at
+/// `B`, lowering reaches `A.b` while `B` is still open, so the conjunction meets a placeholder.
+/// Entered at `A`, `B` is lowered in full before the conjunction is reached. A back-edge test that
+/// asks which reservations are open therefore answered differently for the two entry points of one
+/// unchanged `lib.yaml` — `E013` from `B`, a clean generation from `A` — while the root-component
+/// spelling of the same schemas, asked of the document, rejected from both. The verdict is a
+/// property of the document, so all three spellings, from both ends, must give the same one.
+#[test]
+fn a_one_edge_cycle_rejects_whichever_end_lowering_enters() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    A:
+      type: object
+      properties:
+        b:
+          $ref: 'PREFIX#/components/schemas/B'
+          type: object
+          properties:
+            extra: { type: string }
+    B:
+      type: object
+      properties:
+        a: { $ref: 'PREFIX#/components/schemas/A' }
+"##;
+
+    let mut diagnoses = Vec::new();
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        for entry in ["A", "B"] {
+            let (generated, checked, _) = split(
+                &format!("./lib.yaml#/components/schemas/{entry}"),
+                &LIB.replace("PREFIX", prefix),
+            );
+            for (run, report) in [("generate", &generated), ("check", &checked)] {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{spelling}/{entry}/{run}: {report:#?}"
+                );
+                let messages = messages_for(report, Code::AllOfIrreconcilable);
+                assert!(
+                    messages
+                        .iter()
+                        .any(|m| m.contains("closes a reference cycle")),
+                    "{spelling}/{entry}/{run}: the rejection must name the recursion: \
+                     {messages:?}"
+                );
+            }
+            diagnoses.push((
+                format!("{spelling}/{entry}"),
+                messages_for(&generated, Code::AllOfIrreconcilable)
+                    .iter()
+                    .map(|m| (*m).to_owned())
+                    .collect::<Vec<_>>(),
+            ));
+        }
+    }
+    assert!(
+        diagnoses.iter().all(|(_, d)| *d == diagnoses[0].1),
+        "the entry point or the spelling changed the diagnosis: {diagnoses:?}"
+    );
+
+    // The root-component spelling of the same two schemas, entered from each end: the control the
+    // sub-file spellings are held to.
+    for entry in ["A", "B"] {
+        let root = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/{entry}' }} }}
+{}"##,
+            LIB.replace("PREFIX", "")
+        );
+        let report = generate(&root);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "root/{entry}: {report:#?}"
+        );
+        assert!(
+            messages_for(&report, Code::AllOfIrreconcilable)
+                .iter()
+                .any(|m| m.contains("closes a reference cycle")),
+            "root/{entry}: {report:#?}"
+        );
+    }
+}
+
+/// A sub-file component that shares its NAME with a root component in a cycle is not in that cycle.
+///
+/// The root declares `Item` and `Other`, each referring to the other. `lib.yaml` declares its own
+/// `Item`, whose property carries siblings beside a `$ref` to the root's `Other`. Nothing reaches
+/// `lib.yaml`'s `Item` from `Other`, so there is no cycle through it and the intersection is an
+/// ordinary one. The back-edge test used to take the enclosing name from the sub-file pointer and
+/// look it up in the ROOT document's map, where `Other` does reach an `Item` — the root's — and so
+/// it rejected with `E013`. Renaming the sub-file component is the control: the document means the
+/// same thing under either name and must get the same verdict.
+#[test]
+fn a_sub_file_component_named_like_a_root_cycle_member_is_not_a_back_edge() {
+    for name in ["Item", "Leaf"] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: './lib.yaml#/components/schemas/{name}' }} }}
+  /r:
+    get:
+      operationId: getR
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Item' }} }}
+components:
+  schemas:
+    Item:
+      type: object
+      properties:
+        other: {{ $ref: '#/components/schemas/Other' }}
+    Other:
+      type: object
+      properties:
+        item: {{ $ref: '#/components/schemas/Item' }}
+"##
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lib.yaml"),
+            format!(
+                r##"
+components:
+  schemas:
+    {name}:
+      type: object
+      properties:
+        o:
+          $ref: '#/components/schemas/Other'
+          type: object
+          properties:
+            extra: {{ type: string }}
+"##
+            ),
+        )
+        .unwrap();
+        let out = dir.join("client.rs");
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        for (run, report) in [("generate", &generated), ("check", &checked)] {
+            assert!(
+                !has_code(report, Code::AllOfIrreconcilable),
+                "{name}/{run}: no cycle passes through the sub-file component: {report:#?}"
+            );
+            assert!(report.outcome().is_success(), "{name}/{run}: {report:#?}");
+        }
+        assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+        let code = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            code.contains("pub extra:"),
+            "{name}: the sibling's property must survive the intersection: {code}"
+        );
+    }
 }
 
 /// A sub-file schema that reaches a **root document** component twice, by explicit file reference.
