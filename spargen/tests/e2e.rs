@@ -1617,6 +1617,134 @@ fn a_generated_error_boxes_and_renders() -> Result<(), Box<dyn std::error::Error
     Ok(())
 }
 
+// A missing credential is the one request-construction cause an application routes on, so it is
+// a typed variant reachable from generated output — and it fails before anything is sent, so one
+// poll with a no-op waker is enough: no server, no runtime.
+#[test]
+fn a_missing_credential_is_a_typed_request_construction_error() {
+    use std::future::Future;
+    // The opaque cause of every other request-construction failure is nameable too.
+    let _: Option<basic_client::RequestCause> = None;
+    let client = basic_client::Client::new("http://127.0.0.1:1").unwrap();
+    let mut call = std::pin::pin!(client.get_user("1", None));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("a missing credential must fail before anything is sent");
+    };
+    match result {
+        Err(basic_client::Error::RequestConstruction(
+            basic_client::RequestError::MissingCredential { alternatives },
+        )) => assert_eq!(alternatives, [vec!["bearer"], vec!["apiKey"]]),
+        other => panic!("expected MissingCredential, got {other:?}"),
+    }
+}
+
+// The reason the payload is `Vec<Vec<&str>>` and not the flat `Vec<&str>` the issue proposed: an
+// alternative is a conjunction, and flattening loses which schemes must be presented *together*.
+// This is the only place a generated client is driven to produce that shape. It also pins the two
+// properties the grouping exists for, which only a generated requirement can witness: spargen emits
+// a conjunction into the requirement slice in declaration order, and a `mutualTLS` member is left
+// out of the report entirely, because the transport satisfies it and the caller cannot register it.
+#[test]
+fn a_generated_conjunction_reports_each_alternative_grouped() {
+    fn outstanding(client: &basic_client::Client) -> Vec<Vec<&'static str>> {
+        use std::future::Future;
+        let mut call = std::pin::pin!(client.get_conjunction());
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+            panic!("a missing credential must fail before anything is sent");
+        };
+        match result {
+            Err(basic_client::Error::RequestConstruction(
+                basic_client::RequestError::MissingCredential { alternatives },
+            )) => alternatives,
+            other => panic!("expected MissingCredential, got {other:?}"),
+        }
+    }
+
+    let bare = basic_client::Client::new("http://127.0.0.1:1").unwrap();
+    assert_eq!(
+        outstanding(&bare),
+        [
+            // A TWO-SCHEME CONJUNCTION, in declaration order. This inner list having length 2 is
+            // the whole reason the payload is not a flat `Vec<&str>`: a caller told "tenant,
+            // bearer, apiKey" cannot tell that the first two must be presented together.
+            vec!["tenant", "bearer"],
+            vec!["apiKey"],
+            // `mtls` is absent. mutualTLS is satisfied by the transport's client certificate, so
+            // it is never a credential the caller can register and must never be reported as one.
+            vec!["tenant"],
+        ]
+    );
+    // The grouping survives rendering: `+` joins a conjunction, `or` separates alternatives.
+    let rendered = basic_client::Error::<std::convert::Infallible>::RequestConstruction(
+        basic_client::RequestError::MissingCredential {
+            alternatives: outstanding(&bare),
+        },
+    );
+    let rendered = std::error::Error::source(&rendered).unwrap().to_string();
+    assert!(
+        rendered.ends_with("(missing: tenant + bearer or apiKey or tenant)"),
+        "{rendered}"
+    );
+
+    // Registering one member of a conjunction does not satisfy the alternative it appears in: that
+    // alternative goes on reporting the members still unregistered. `bearer` is in exactly one of
+    // the three alternatives here, so only that one's report changes — and all three stay
+    // outstanding.
+    let partial = basic_client::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_credential(
+            "bearer",
+            basic_client::Credential::Bearer(basic_client::SecretString::from("t0k")),
+        );
+    assert_eq!(
+        outstanding(&partial),
+        [vec!["tenant"], vec!["apiKey"], vec!["tenant"]]
+    );
+}
+
+// The other credential state an application routes on: a credential *is* registered, but the
+// provider behind it could not refresh it. That is still "unauthenticated", and it is still raised
+// before anything is sent — so the same poll-once shape reaches it, with no server and no runtime.
+#[test]
+fn a_failed_token_provider_is_a_typed_request_construction_error() {
+    use std::future::Future;
+    let client = basic_client::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_credential(
+            "bearer",
+            basic_client::Credential::Provider(std::sync::Arc::new(|| {
+                Box::pin(async { Err(basic_client::AuthError::new("refresh rejected")) })
+                    as basic_client::TokenFuture
+            })),
+        );
+    let mut call = std::pin::pin!(client.get_user("1", None));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("a failed token provider must fail before anything is sent");
+    };
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a failed token provider cannot produce a response"),
+    };
+    match &error {
+        basic_client::Error::RequestConstruction(
+            basic_client::RequestError::CredentialProvider { scheme, source },
+        ) => {
+            assert_eq!(*scheme, "bearer");
+            assert_eq!(source.to_string(), "refresh rejected");
+        }
+        other => panic!("expected CredentialProvider, got {other:?}"),
+    }
+    // Nothing was sent, so there is nothing to retry — and the provider's own error stays reachable
+    // through the chain, which is how an application reports *why* the refresh failed.
+    assert!(!error.is_transient());
+    let cause = std::error::Error::source(&error).unwrap();
+    let provider = std::error::Error::source(cause).unwrap();
+    assert!(provider.downcast_ref::<basic_client::AuthError>().is_some());
+}
+
 #[test]
 fn the_single_error_body_stays_one_deref_away() {
     let wrapped = basic_client::GetTextErrorError("nope".to_owned());
@@ -2415,6 +2543,23 @@ paths:
             items: { type: string }
       responses:
         "204": { description: No Content }
+  # The payload shape `MissingCredential` carries is `Vec<Vec<&str>>` rather than a flat list
+  # because OpenAPI `security` is a disjunction of conjunctions: "A and B, or C" and "A, B, or C"
+  # flatten to the same three names while demanding different credentials. This operation is the
+  # only place in the repository where a *generated* client is asked to produce that shape — a
+  # two-scheme conjunction, a single-scheme alternative, and an alternative whose other member is
+  # `mutualTLS` and so must be omitted from the report.
+  /conjunction:
+    get:
+      operationId: getConjunction
+      security:
+        - tenant: []
+          bearer: []
+        - apiKey: []
+        - mtls: []
+          tenant: []
+      responses:
+        "204": { description: No Content }
   /users/{id}:
     get:
       operationId: getUser
@@ -2922,6 +3067,12 @@ components:
       type: apiKey
       in: header
       name: X-Api-Key
+    tenant:
+      type: apiKey
+      in: header
+      name: X-Tenant
+    mtls:
+      type: mutualTLS
   schemas:
     # A flat object, so `deepObject` is defined for it (the specification leaves nested objects
     # and arrays inside a deepObject value undefined, and spargen rejects those).
@@ -3744,6 +3895,111 @@ components:
     assert!(messages.contains("requires `time`"), "{messages}");
     assert!(!messages.contains("multipart"), "{messages}");
     assert!(!messages.contains("tokio"), "{messages}");
+}
+
+/// The report behind #71, end to end: a workspace root declaring `futures-core` and `uuid` under
+/// `[workspace.dependencies]`, a member inheriting them with `{ workspace = true }`, and a 3.2
+/// document with one `text/event-stream` operation and a `format: uuid` field. The report said
+/// both came back as `E023` "generated client requires …"; the layout resolves, and this pins the
+/// whole chain — spec, derived requirement set, manifest audit — as passing.
+#[test]
+fn macro_manifest_audit_follows_workspace_inherited_dependencies() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("Cargo.toml");
+    let member_dir = temp.path().join("client");
+    std::fs::create_dir(&member_dir).unwrap();
+    let manifest = member_dir.join("Cargo.toml");
+    std::fs::write(
+        &root,
+        r#"[workspace]
+members = ["client"]
+
+[workspace.dependencies]
+bytes = "1.12.1"
+reqwest = { version = "0.12.28", default-features = false, features = ["stream"] }
+secrecy = "0.10.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+futures-core = "0.3.32"
+uuid = { version = "1.26.0", features = ["v4", "serde"] }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &manifest,
+        r#"[package]
+name = "audit-consumer"
+version = "0.0.0"
+
+[dependencies]
+bytes = { workspace = true }
+reqwest = { workspace = true }
+secrecy = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+futures-core = { workspace = true }
+uuid = { workspace = true }
+"#,
+    )
+    .unwrap();
+    let spec = Utf8PathBuf::from_path_buf(member_dir.join("openapi.yaml")).unwrap();
+    std::fs::write(
+        &spec,
+        r##"openapi: 3.2.0
+info: { title: Inherited, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      operationId: streamEvents
+      responses:
+        "200":
+          description: events
+          content:
+            text/event-stream:
+              itemSchema: { $ref: "#/components/schemas/Event" }
+components:
+  schemas:
+    Event:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string, format: uuid }
+"##,
+    )
+    .unwrap();
+
+    let preview =
+        spargen::__private::preview_for_macro(&Spec::new(spec), manifest.to_str().unwrap());
+    assert_eq!(
+        preview.report.outcome(),
+        Outcome::Generated,
+        "{:#?}",
+        preview.report
+    );
+    assert!(
+        !preview
+            .report
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.code == Code::RuntimeDependencyContract),
+        "{:#?}",
+        preview.report
+    );
+    // The requirement set really did include both crates: the module uses them. `mod stream` is
+    // embedded only for a sequential response (the word `EventStream` alone rides in doc comments
+    // every module carries), and `Uuid` appears only through the `format: uuid` mapping.
+    let generated = preview.contents.expect("generated module");
+    assert!(generated.contains("mod stream"), "{generated}");
+    assert!(generated.contains("Uuid"), "{generated}");
+    // The root is part of the input set — an edit there changes what the audit sees.
+    assert!(
+        preview
+            .source_files
+            .iter()
+            .any(|path| path.as_std_path() == root),
+        "{:#?}",
+        preview.source_files
+    );
 }
 
 /// A preview of a spec that uses an unsupported construct rejects loudly (matching `generate`) and
