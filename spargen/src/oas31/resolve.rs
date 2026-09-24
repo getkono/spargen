@@ -26,6 +26,69 @@ impl<'doc> Resolver<'doc> {
         Self { document, bundle }
     }
 
+    /// The root document's file id, which is the bundle's own authority on the question.
+    ///
+    /// `lower` needs it to tell a reference written in the root document from one written in a
+    /// referenced sub-file, and the two branches that distinction gates both retarget a `$ref`
+    /// silently when it is wrong. It re-derived the answer as a hardcoded `FileId(0)`, correct only
+    /// because `InputBundle::load` happens to load the root before anything else; a constructor that
+    /// ever pre-loads a file — an in-memory bundle, a vendored preload, a test harness — would make
+    /// it wrong with no test to notice. The authority is one call away, so ask it.
+    pub(super) fn root_id(&self) -> crate::diag::FileId {
+        self.bundle.root_id()
+    }
+
+    /// The `(file, pointer)` pair a `$ref` written at `at` denotes, independent of how it is spelled.
+    ///
+    /// `lower` keeps three separate in-progress maps, each keyed by a different spelling of the
+    /// same kind of fact — a root component's name, a remote document's absolute URL, a resolved
+    /// target's `file#pointer`. A question about *which target* a reference names therefore cannot
+    /// be answered by comparing reference strings: `#/components/schemas/Node`,
+    /// `./openapi.yaml#/components/schemas/Node`, `./lib.yaml#/components/schemas/Node` and a
+    /// whole-file `./node.yaml` can all name one schema. This is the spelling-independent answer,
+    /// and it is the same one [`Self::resolve`] would reach.
+    ///
+    /// Resolution *without* parsing: no node is read, no schema is built and no diagnostic is
+    /// emitted, so a caller may ask speculatively about a reference it has not committed to
+    /// lowering. A miss here is never an error — it means "not a target this bundle knows", which
+    /// the ordinary lowering path will report in its own words when it gets there.
+    pub(super) fn reference_identity(
+        &self,
+        reference: &str,
+        at: &Provenance,
+    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+        let from = at
+            .span
+            .map(|span| span.file)
+            .unwrap_or_else(|| self.bundle.root_id());
+        self.bundle.reference_target(reference, from)
+    }
+
+    /// The path of `file`, when `file` declares a schema component called `name` of its own.
+    ///
+    /// A JSON Pointer fragment addresses the document it appears in, so a sub-file's own
+    /// `#/components/schemas/<name>` is a reference to that file's declaration. spargen consults the
+    /// root document's component map first, which means a name both documents declare resolves to
+    /// the root's and the sub-file's is never read. That precedence is deliberate, but it is a
+    /// decision about the *document*, and the reader has to be told which of the two declarations
+    /// was used. This answers the second half — the path is returned rather than a bare `bool`
+    /// because a diagnostic that says only "shadowed" names neither namespace.
+    pub(super) fn declares_locally(
+        &self,
+        file: crate::diag::FileId,
+        name: &str,
+    ) -> Option<&camino::Utf8Path> {
+        let reference = format!("#/components/schemas/{name}");
+        let (target, pointer) = self.bundle.reference_target(&reference, file)?;
+        // An in-document fragment always resolves to the file it is written in; anything else is
+        // not a local declaration and is not what this asks about.
+        if target != file {
+            return None;
+        }
+        self.bundle.value_at(file).pointer(&pointer)?;
+        Some(self.bundle.file(file)?.path.as_path())
+    }
+
     /// Resolve a `$ref` string that appears at `at`, reporting an unresolved/unpinned ref through
     /// `diags`. Remote (`http`/`https`) refs are resolved hermetically from the vendored, hash-
     /// pinned copy already loaded into the bundle — no network access.

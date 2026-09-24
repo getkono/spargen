@@ -6,7 +6,7 @@
 //! warnings and clean runs so it cannot pass vacuously.
 
 use camino::Utf8PathBuf;
-use spargen::{Build, CargoIntegration, Code, Outcome, Report, Spec};
+use spargen::{Build, CargoIntegration, Code, Outcome, Report, Severity, Spec};
 
 /// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
 /// tempdir (and any written output) is discarded once the report — which owns its data — is built.
@@ -98,6 +98,59 @@ fn field_owner(code: &str, field: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The declared type of the first field line starting with `field`, trimmed of its trailing comma.
+///
+/// [`field_owner`] says which type *declares* a field; this says which type the field *is*. Asking
+/// only whether a type name appears somewhere in the module cannot tell two same-named schemas
+/// apart, because both are emitted — so a fixture that must pin *which* of them a reference bound
+/// has to read the field's own right-hand side.
+fn field_type(code: &str, field: &str) -> Option<String> {
+    code.lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with(field))
+        .and_then(|line| line.split_once(':'))
+        .map(|(_, ty)| ty.trim().trim_end_matches(',').to_owned())
+}
+
+/// The field names `pub struct ty` declares, in source order.
+///
+/// The inverse of [`field_owner`], and the answer to "which schema is this type", which a name
+/// alone cannot give when two declarations share a name and the emitter disambiguates one of them —
+/// or when the alias path re-emits a target's *kind* under a third name.
+fn declared_fields(code: &str, ty: &str) -> Vec<String> {
+    let mut lines = code
+        .lines()
+        .map(str::trim_start)
+        .skip_while(|line| !line.starts_with(&format!("pub struct {ty} ")));
+    lines.next();
+    lines
+        .take_while(|line| !line.starts_with('}'))
+        .filter_map(|line| line.strip_prefix("pub "))
+        .filter_map(|rest| rest.split_once(':'))
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
+/// The variant declarations `pub enum ty` carries, in source order, each trimmed of its trailing
+/// comma.
+///
+/// The union counterpart of [`declared_fields`], and the only way to see a union *member* go
+/// missing. Binding the enum's name says the union was represented; it does not say how many
+/// branches survived, and a collapse that erases one member leaves a type with the right name and
+/// the wrong contents.
+fn enum_variants(code: &str, ty: &str) -> Vec<String> {
+    let mut lines = code
+        .lines()
+        .map(str::trim_start)
+        .skip_while(|line| !line.starts_with(&format!("pub enum {ty} ")));
+    lines.next();
+    lines
+        .take_while(|line| !line.starts_with('}'))
+        .filter(|line| !line.is_empty() && !line.starts_with("#[") && !line.starts_with("///"))
+        .map(|line| line.trim_end_matches(',').to_owned())
+        .collect()
 }
 
 /// The names of `pub struct`s in generated source that begin with `prefix` and whose remainder
@@ -2394,6 +2447,1495 @@ components:
     }
 }
 
+/// The canonical OpenAPI 3.1 spelling of a nullable recursive reference: `oneOf`/`anyOf` over the
+/// enclosing component and `{type: "null"}`.
+///
+/// 3.1 removed `nullable: true`, so this *is* how a description says "optionally another `Node`".
+/// `lower_union`'s single-real-member collapse re-emits the member's kind as this position's own
+/// def by cloning `graph.get(inner.id).kind`. For a cycle-closing `$ref` that kind is
+/// `TypeKind::Reserved`, so the clone inserted a **second** reservation that nothing would ever
+/// `fill`; `Api::check_invariants` then rejected the whole document with `E011`, whose shipped
+/// explain text asserts the input is malformed JSON — which this document is not.
+///
+/// The guard written for exactly this class sits inside the multi-member loop, which the
+/// `real_members.len() == 1` early return jumps straight over.
+///
+/// Restoring the merge base's behaviour is **not** the fix. At `2aa5ada` a reservation's kind was
+/// `TypeKind::Any`, so the clone emitted `Option<serde_json::Value>` — the silent degradation of a
+/// typed schema the standing invariants forbid outright. The answer `docs/support-matrix.md` and
+/// the direct `{$ref: Node}` spelling both already promise is `Option<Box<Node>>`, so that is what
+/// is asserted here: "did not reject" would pass on either wrong answer.
+#[test]
+fn a_nullable_recursive_ref_collapses_to_an_optional_box() {
+    let archetype = |applicator: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Node' }} }}
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: {{ type: string }}
+        parent:
+          {applicator}:
+            - {{ $ref: '#/components/schemas/Node' }}
+            - {{ type: "null" }}
+"##
+        )
+    };
+
+    for applicator in ["oneOf", "anyOf"] {
+        let spec = archetype(applicator);
+        let (generated, code) = generate_with_code(&spec);
+        let checked = check(&spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{applicator}/{entry}: a nullable recursive `$ref` is the matrix's own example of a \
+                 supported construct: {report:#?}"
+            );
+            // The internal-invariant code must not be how a user learns about this document.
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{applicator}/{entry}: {report:#?}"
+            );
+        }
+        // Boxed, because the cycle needs a finite size; `Option`, because the `null` member is what
+        // the union collapsed away. Both halves are the matrix's promise.
+        assert!(code.contains("Option<Box<Node>>"), "{applicator}: {code}");
+        // And never the merge base's answer.
+        assert!(!code.contains("serde_json::Value>"), "{applicator}: {code}");
+    }
+}
+
+/// The same idiom under **mutual** recursion, which is the commoner spelling in real descriptions:
+/// `A.b` references `B`, and `B` is nothing but "an `A`, or null".
+///
+/// Here the union *is* `B`'s whole body, so the collapse has no def of its own to insert as the
+/// component root — cloning the reservation's kind inserts a second reservation (`E011`), and
+/// returning the reservation itself breaks the last-insert invariant `ensure_component` asserts.
+/// `B` is a nullable **alias**, and naming it as one is what lets the document generate.
+///
+/// Both key orders are driven, because root components are pre-lowered in map order and a
+/// re-ordered YAML map is a no-op in OpenAPI: only one of the two orders reaches the collapse at
+/// all, and the other already generated, so a fixture on one order proves nothing about the idiom.
+#[test]
+fn a_nullable_alias_under_mutual_recursion_generates() {
+    let mutual = |first: &str, second: &str| {
+        let bodies = |name: &str| {
+            if name == "A" {
+                "      type: object\n      required: [b]\n      properties:\n        b: { $ref: '#/components/schemas/B' }\n"
+            } else {
+                "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        - { type: \"null\" }\n"
+            }
+        };
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /u:\n    \
+             get:\n      \
+             operationId: getU\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json: {{ schema: {{ $ref: '#/components/schemas/A' }} }}\n\
+             components:\n  \
+             schemas:\n    \
+             {first}:\n{}    {second}:\n{}",
+            bodies(first),
+            bodies(second)
+        )
+    };
+
+    for (first, second) in [("A", "B"), ("B", "A")] {
+        let spec = mutual(first, second);
+        let (generated, code) = generate_with_code(&spec);
+        let checked = check(&spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{first} before {second}/{entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{first} before {second}/{entry}: {report:#?}"
+            );
+        }
+        // The recursion is closed by boxing whichever way round the map is written — read off
+        // `b`'s own declaration, not searched for in the file. `code.contains("Box<")` is true of
+        // *any* successful generation (the embedded runtime alone supplies ten occurrences:
+        // `Pin<Box<..>>` in `transport.rs`/`auth.rs`/`retry.rs`/`wasm.rs` and
+        // `source: Option<Box<dyn Error + Send + Sync>>` in `error.rs`), so the assertion that
+        // stood here pinned nothing: under the mutation that unboxes the alias back-edge it stayed
+        // green while five of its neighbours went red.
+        //
+        // The two orders emit different types because they take different paths, and this is the
+        // only fixture that drives both. Declaring the target first lowers `A` first, so `B`'s body
+        // meets an open `A`, is recognised as a nullable alias, and `b` binds `A` itself — optional
+        // because of the `"null"` member, boxed because the cycle must have a finite size.
+        //
+        // Declaring the alias first lowers `B` first, so `A` is not open when `B`'s body is read,
+        // the alias recogniser does not fire, and `b` binds `B` as an ordinary in-progress
+        // back-edge. The `Option` is then missing, and that is WRONG: `B`'s `"null"` member makes
+        // `B` nullable, so `{"b": null}` is legal against this document and will not decode. It is
+        // pinned as it is emitted rather than as it ought to be, because fixing it is issue #222 —
+        // `ensure_component` overwrites a body's computed nullability with the value
+        // `schema_is_nullable` produced at reserve time, and that function inspects `type`, `enum`
+        // and `const` only, never a union's members. It reproduces on master with a document that
+        // has no recursion in it at all, so it is not this change's to fix; when #222 lands this
+        // expectation becomes `Option<Box<B>>`. Until then this assertion is the only thing
+        // anywhere in the repository standing over what that order emits.
+        // One message per order. The two orders are pinned for opposite reasons — one is the
+        // correct type, one is the knowingly-wrong one — and a single format string over both
+        // hands a reader of the first iteration a paragraph written about the second, 3,000
+        // output lines above the `left`/`right` that would correct it.
+        let (expected, why) = if first == "A" {
+            (
+                "Option<Box<A>>",
+                "this order takes the nullable-alias path, so `b` binds `A` itself — optional \
+                 because of the `\"null\"` member, boxed because the cycle must have a finite \
+                 size. This is the correct type and is NOT issue #222: a red here is a \
+                 regression in the alias path, not a pin that needs updating",
+            )
+        } else {
+            (
+                "Box<B>",
+                "this order's expectation is the knowingly-wrong `Box<B>` that issue #222 \
+                 exists to fix, pinned as emitted rather than as it ought to be — if this went \
+                 red while fixing #222, the expectation becomes `Option<Box<B>>`",
+            )
+        };
+        assert_eq!(
+            field_type(&code, "pub b").as_deref(),
+            Some(expected),
+            "{first} before {second}: {why}; the comment above this assertion says why: {code}"
+        );
+        assert!(
+            !code.contains("serde_json::Value>"),
+            "{first} before {second}: {code}"
+        );
+    }
+}
+
+/// The `A`/`B` mutual-recursion skeleton of `a_nullable_alias_under_mutual_recursion_generates`,
+/// with `B`'s body substituted — the shape the four narrowness fixtures below vary.
+///
+/// `A` is always declared first, because that is the order that reaches `nullable_alias_back_edge`
+/// at all: lowering `A` first leaves it open when `B`'s body is read. Declared the other way round
+/// the recogniser never runs, so that order cannot observe a guard inside it and driving it would
+/// weaken these fixtures rather than widen them.
+fn alias_shaped_mutual_recursion(b_body: &str) -> String {
+    format!(
+        "openapi: 3.1.0\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\n\
+         paths:\n  \
+         /u:\n    \
+         get:\n      \
+         operationId: getU\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json: {{ schema: {{ $ref: '#/components/schemas/A' }} }}\n\
+         components:\n  \
+         schemas:\n    \
+         A:\n      \
+         type: object\n      \
+         required: [b]\n      \
+         properties:\n        \
+         b: {{ $ref: '#/components/schemas/B' }}\n    \
+         B:\n{b_body}"
+    )
+}
+
+/// A component carrying a `discriminator` or a `default` beside its union is **not** a nullable
+/// alias, however alias-shaped the union itself looks.
+///
+/// `nullable_alias_back_edge` answers with the target's own id and inserts no def, so everything
+/// the component said apart from the union has nowhere left to go.
+/// `schema_has_shape_constraint`, which holds the rest of that narrowness, checks neither `default`
+/// nor `discriminator`, so the early return at the head of the function is the only thing refusing
+/// these two — and nothing held that early return. Deleting it left
+/// `cargo test --workspace --all-features` entirely green while this document, with
+/// `discriminator: {propertyName: kind}` on `B`, went from `E007` to a clean `Generated` emitting
+/// `Option<Box<A>>`, the discriminator gone and nothing said: the fourth, silent behaviour the
+/// standing invariants forbid.
+///
+/// What is pinned is the verdict as it stands, not an endorsement of it. Both are refused and the
+/// refusal is reported; a change that chooses to represent either one has to move this fixture
+/// deliberately.
+#[test]
+fn a_union_carrying_a_discriminator_or_a_default_is_not_an_alias() {
+    let cases = [
+        (
+            "discriminator",
+            "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        \
+             - { type: \"null\" }\n      discriminator: { propertyName: kind }\n",
+        ),
+        (
+            "default",
+            "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        \
+             - { type: \"null\" }\n      default: null\n",
+        ),
+    ];
+    for (label, body) in cases {
+        let spec = alias_shaped_mutual_recursion(body);
+        let generated = generate(&spec);
+        let checked = check(&spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: a `{label}` beside the union has nowhere to go, so the document \
+                 must be refused rather than have it dropped: {report:#?}\n{spec}"
+            );
+            assert!(
+                has_code(report, Code::NonDisjointUnion),
+                "{label}/{entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A union with a **second** non-null member is a union, not an alias — even when one of its
+/// members is the cycle-closing `$ref` that would otherwise make it one.
+///
+/// The sharpest of the four. The recogniser answers with the *target's* type, so every member
+/// beside the one `$ref` is erased. Deleting the `if real.next().is_some()` arity check survives
+/// the whole workspace, and on this document it turns `pub b: B` — a two-variant enum — into
+/// `pub b: Box<A>`: the `string` branch disappears from the generated API with a clean report and
+/// no diagnostic at all. A dropped union member is worse than the `serde_json::Value` degradation
+/// the invariants name, because nothing in the output records that the branch ever existed.
+#[test]
+fn a_union_with_a_second_real_member_beside_the_back_edge_stays_a_union() {
+    let spec = alias_shaped_mutual_recursion(
+        "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        - { type: string }\n",
+    );
+    let (generated, code) = generate_with_code(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    // `b` binds `B` itself rather than the target of `B`'s `$ref` member: the union is represented,
+    // so it has a type of its own.
+    assert_eq!(
+        field_type(&code, "pub b").as_deref(),
+        Some("B"),
+        "the second union member was collapsed away: {code}"
+    );
+    // And that type is an enum holding both branches. Asserted separately, because binding `B`
+    // alone would still be satisfied by a `B` that had quietly become a newtype over `A`.
+    let variants = enum_variants(&code, "B");
+    assert_eq!(
+        variants.len(),
+        2,
+        "`B` must keep one variant per union member, got {variants:?}: {code}"
+    );
+    assert!(
+        variants.iter().any(|variant| variant.starts_with("A(")),
+        "the `$ref` member lost its variant, got {variants:?}: {code}"
+    );
+}
+
+/// A member spelled `{$ref: A, properties: {...}}` is a `$ref` with shape-bearing siblings — an
+/// intersection — and an intersection is not an alias.
+///
+/// Reading it as one answers with `A` and discards the siblings, which is the silent-sibling
+/// discard the `allOf` path refuses under `E013`. Deleting the member-side
+/// `schema_has_shape_constraint` guard survives the whole workspace and flips this document from
+/// `Rejected`/`E013` to a clean `Generated` with `pub b: Option<Box<A>>` and the declared `x` gone.
+#[test]
+fn an_alias_member_with_shape_bearing_siblings_is_not_an_alias() {
+    let spec = alias_shaped_mutual_recursion(
+        "      oneOf:\n        \
+         - { $ref: '#/components/schemas/A', properties: { x: { type: string } } }\n        \
+         - { type: \"null\" }\n",
+    );
+    let generated = generate(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{entry}: the member's sibling `properties` must not be dropped in silence: \
+             {report:#?}\n{spec}"
+        );
+        assert!(
+            has_code(report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
+/// A component that declares a shape of its own beside the union is not another name for its
+/// target: an alias carries no shape, and this one does.
+///
+/// This is the guard that makes that sentence true, and nothing held it. Deleting it survives the
+/// whole workspace, and this document — whose `B` declares `type: object` and an `extra` property
+/// beside the union — goes from `Rejected`/`E013` to a clean `Generated` with
+/// `pub b: Option<Box<A>>`, `extra` absent from the generated API and nothing said about it.
+#[test]
+fn an_alias_shaped_component_that_declares_its_own_shape_is_not_an_alias() {
+    let spec = alias_shaped_mutual_recursion(
+        "      type: object\n      properties: { extra: { type: string } }\n      oneOf:\n        \
+         - { $ref: '#/components/schemas/A' }\n        - { type: \"null\" }\n",
+    );
+    let generated = generate(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{entry}: the component's own `extra` must not be dropped in silence: \
+             {report:#?}\n{spec}"
+        );
+        assert!(
+            has_code(report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
+/// The same alias spelled `anyOf` rather than `oneOf` is still one.
+///
+/// `nullable_alias_back_edge` picks its members from whichever of the two applicators the
+/// component carries, and only the `oneOf` arm of that selection was driven by anything: every
+/// alias fixture in this file, including the four narrowness fixtures above, spells the union
+/// `oneOf`. Replacing the `anyOf` arm with `return None` left
+/// `cargo test --workspace --all-features` entirely green, while this document went from a clean
+/// `Generated` emitting `Option<Box<A>>` to `Rejected`/`E007` — one of the two spellings the
+/// specification gives the same meaning here stops reaching the recogniser, and nothing said so.
+///
+/// The four above pin what the recogniser refuses once it runs. This one pins *whether it runs*.
+#[test]
+fn a_nullable_alias_spelled_any_of_is_recognised_as_one() {
+    let spec = alias_shaped_mutual_recursion(
+        "      anyOf:\n        - { $ref: '#/components/schemas/A' }\n        \
+         - { type: \"null\" }\n",
+    );
+    let (generated, code) = generate_with_code(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{entry}: an `anyOf`-spelled nullable alias is the same shape as the `oneOf` one and \
+             must generate: {report:#?}\n{spec}"
+        );
+    }
+    // The pair the mutation destroys: the alias binds its *target*, optional for the `"null"`
+    // member and boxed for the cycle. Refusing the spelling gives `Rejected`/`E007` instead, so
+    // both halves of this are what stand over the arm.
+    assert_eq!(
+        field_type(&code, "pub b").as_deref(),
+        Some("Option<Box<A>>"),
+        "the `anyOf` spelling did not reach the alias recogniser: {code}"
+    );
+}
+
+/// The same alias, spelled the other three ways one target can be written.
+///
+/// A `$ref` is not identified by its spelling. `#/components/schemas/Node`, the root's own
+/// `./openapi.yaml#/components/schemas/Node`, a split description's
+/// `./lib.yaml#/components/schemas/Node` and a whole-file `./node.yaml` can all name one schema —
+/// `ensure_resolved`'s own contract says the last two "resolve to the same file and pointer and
+/// share one type". The alias recognition keyed on the literal `#/components/schemas/` prefix and
+/// on the root component map alone, so only the first spelling was an alias and the other three
+/// fell through to a rejection whose sentence — "names no shape of its own and cannot be given a
+/// generated type" — the same binary disproves by generating `Option<Box<Node>>` for spelling one.
+///
+/// The split-description spelling is the case issue #107 exists to make resolve, so it is the one
+/// that must not reject.
+#[test]
+fn a_nullable_alias_is_recognised_however_its_target_is_spelled() {
+    // (1) The root document referring to its own components by relative file path.
+    let self_file = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      required: [parent]
+      properties:
+        name: { type: string }
+        parent: { $ref: '#/components/schemas/MaybeNode' }
+    MaybeNode:
+      oneOf:
+        - { $ref: './openapi.yaml#/components/schemas/Node' }
+        - { type: "null" }
+"##;
+    let (generated, code) = generate_with_code(self_file);
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    assert_ne!(check(self_file).outcome(), Outcome::Rejected);
+    // Named, and read off `parent`'s own declaration rather than searched for in the file. The
+    // embedded runtime emits `source: Option<Box<dyn std::error::Error + Send + Sync>>` into every
+    // generated module, so `code.contains("Option<Box<")` is unconditionally true of any successful
+    // generation and pins nothing beyond the `assert_ne!` above it. What must hold here is that the
+    // alias resolved to `Node` — optional, and boxed so the recursion has a finite size.
+    //
+    // `parent` is **required** precisely so the `Option` can only have come from the alias: every
+    // other fixture leaves the field absent from `required`, which makes it optional for a reason
+    // that has nothing to do with the union's `"null"` member, so none of them could see that half
+    // of the alias's nullability being dropped. `Box<Node>` here would make `{"parent": null}`
+    // undecodable against a document that declares it legal.
+    assert_eq!(
+        field_type(&code, "pub parent").as_deref(),
+        Some("Option<Box<Node>>"),
+        "{code}"
+    );
+
+    // (2) The split description: every schema in the sub-file, the alias member spelled as that
+    //     file's own sibling reference. This is #107's namespace case.
+    let lib = r##"
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        name: { type: string }
+        parent: { $ref: '#/components/schemas/MaybeNode' }
+    MaybeNode:
+      oneOf:
+        - { $ref: '#/components/schemas/Node' }
+        - { type: "null" }
+"##;
+    let (generated, checked, code) = split("./lib.yaml#/components/schemas/Node", lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::InvalidInput),
+            "{entry}: {report:#?}"
+        );
+    }
+    assert_eq!(
+        field_type(&code, "pub parent").as_deref(),
+        Some("Option<Box<Node>>"),
+        "{code}"
+    );
+
+    // (3) Whole-file references, which carry no pointer at all — the spelling whose rejection had
+    //     no `at` to point the reader at.
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        "openapi: 3.1.0\n\
+         info: { title: T, version: 1.0.0 }\n\
+         servers: [{ url: 'https://e.com' }]\n\
+         paths:\n  \
+         /u:\n    \
+         get:\n      \
+         operationId: getU\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json: { schema: { $ref: './node.yaml' } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("node.yaml"),
+        "type: object\nproperties:\n  name: { type: string }\n  parent: { $ref: './maybe.yaml' }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("maybe.yaml"),
+        "oneOf:\n  - { $ref: './node.yaml' }\n  - { type: \"null\" }\n",
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::InvalidInput),
+            "{entry}: {report:#?}"
+        );
+    }
+    // The whole-file spelling has no component name to take, so the target is named for the
+    // position that reached it — but it is still one boxed optional reference to one type.
+    assert_eq!(
+        field_type(&code, "pub parent").as_deref(),
+        Some("Option<Box<ResponseBody>>"),
+        "{code}"
+    );
+}
+
+/// A nullable alias whose member is a name the **root** declares reads the root's component, and
+/// says so — exactly as the direct `$ref` spelling of that same member already does.
+///
+/// `ensure_component`'s precedence is root first, file second: the root's component map is
+/// consulted before anything else, and only a name the root does **not** declare is handed to
+/// `ensure_resolved` against the referring file. `open_reservation_for_ref` answered the
+/// `#/components/schemas/` arm only on an *open reservation* and otherwise fell through to
+/// `reference_identity`, whose `from` is the **referring file** — so a name the root declares but
+/// is not currently lowering missed the arm, fell through, and bound the sub-file's declaration
+/// that the root shadows. The alias was recognised for a target `lower_schema` would never have
+/// chosen, and `W011` — raised inside `ensure_component`, which the alias never reached — did not
+/// fire, so the document was neither supported as documented nor warned nor rejected.
+///
+/// The two files here are the matched pair: `next` spelled `{$ref: MaybeShared}` against `next`
+/// spelled `{$ref: Shared}` directly, one reference string, one binary, and before this fixture two
+/// different answers. `docs/support-matrix.md`'s References row states the precedence this pins.
+///
+/// The existing spelling fixture cannot catch it: its sub-file names collide with nothing in the
+/// root, so the fall-through and the root map agree there by accident.
+#[test]
+fn a_nullable_alias_member_the_root_shadows_binds_the_roots_component_and_warns() {
+    // The sub-file's `Shared` is reached by the *explicit file* spelling, so it is genuinely the
+    // open reservation when its own `next` property asks for `#/components/schemas/Shared` — which
+    // is the only way the shadowed declaration is a live candidate at all.
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Shared' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      properties:
+        root_only: { type: string }
+      required: [root_only]
+"##;
+    let lib = |member: &str| {
+        format!(
+            r##"
+components:
+  schemas:
+    Shared:
+      type: object
+      properties:
+        lib_only: {{ type: string }}
+        next: {{ $ref: '#/components/schemas/{member}' }}
+    MaybeShared:
+      oneOf:
+        - {{ $ref: '#/components/schemas/Shared' }}
+        - {{ type: "null" }}
+"##
+        )
+    };
+
+    for spelling in ["MaybeShared", "Shared"] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), root).unwrap();
+        std::fs::write(dir.join("lib.yaml"), lib(spelling)).unwrap();
+        let out = dir.join("client.rs");
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: {report:#?}"
+            );
+            // Half one: the shadowing is *said*. Both entry points raise it, or `check` is no
+            // longer reporting what `generate` reports.
+            assert!(
+                has_code(report, Code::DeclarationHasNoEffect),
+                "{spelling}/{entry}: the root shadows `Shared`, so W011 must fire: {report:#?}"
+            );
+        }
+
+        // Half two: the shadowing is *done*. Read on the bound type's own fields rather than on its
+        // name: the emitter disambiguates the collision by *suffixing* the sub-file's copy, so
+        // `Option<Box<Shared2f46d127>>` contains `Shared` and a substring test would pass on the
+        // wrong answer — and the alias spelling reaches its target through `MaybeShared`, a third
+        // name again. `root_only` is declared only by the root's `Shared` and `lib_only` only by
+        // the sub-file's, so the fields say which declaration was read whatever it got called.
+        let next = field_type(&code, "pub next")
+            .unwrap_or_else(|| panic!("{spelling}: no `next` field at all: {code}"));
+        let bound = next
+            .rsplit_once('<')
+            .map_or(next.as_str(), |(_, tail)| tail)
+            .trim_end_matches('>');
+        let fields = declared_fields(&code, bound);
+        assert!(
+            fields.iter().any(|field| field == "root_only"),
+            "{spelling}: `next` bound `{next}`, whose fields are {fields:?} — not the root's \
+             `Shared`: {code}"
+        );
+        assert!(
+            !fields.iter().any(|field| field == "lib_only"),
+            "{spelling}: `next` bound the sub-file's shadowed `Shared` as `{next}`: {code}"
+        );
+    }
+}
+
+/// The other half of the same promise: when the shadowed name's root component *is* open, the
+/// alias binds it — correctly — and must still say that it shadowed something.
+///
+/// This is the one case in which the alias path answers the reference itself rather than handing it
+/// back to `ensure_component`, and `ensure_component` is where `W011` is raised. So the type was
+/// right and the acknowledgement was missing: a sub-file's `Shared` silently had no effect on a
+/// reference that reads it by that name, which is exactly what the References row of
+/// `docs/support-matrix.md` promises will be reported.
+///
+/// The root's `Shared` is open here because it reaches the sub-file and the sub-file comes back to
+/// it — mutual recursion across the file boundary, which is the only way a root component is
+/// mid-lowering while a sub-file schema is being read.
+#[test]
+fn a_nullable_alias_that_binds_an_open_root_component_still_reports_the_shadowing() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Shared' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      properties:
+        root_only: { type: string }
+        holder: { $ref: './lib.yaml#/components/schemas/Holder' }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        next: { $ref: '#/components/schemas/Maybe' }
+    Shared:
+      type: object
+      properties:
+        lib_only: { type: string }
+    Maybe:
+      oneOf:
+        - { $ref: '#/components/schemas/Shared' }
+        - { type: "null" }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(report, Code::DeclarationHasNoEffect),
+            "{entry}: the sub-file's `Shared` is shadowed and read past in silence: {report:#?}"
+        );
+    }
+    // And the binding itself is the root's, boxed because it closes the cycle back to it.
+    assert_eq!(
+        field_type(&code, "pub next").as_deref(),
+        Some("Option<Box<Shared>>"),
+        "{code}"
+    );
+    assert_eq!(
+        declared_fields(&code, "Shared"),
+        vec!["root_only".to_owned(), "holder".to_owned()],
+        "{code}"
+    );
+}
+
+/// The aliased spelling of [`a_nullable_alias_carries_its_targets_own_nullability`]'s document,
+/// hoisted so [`PARITY_FIXTURES`] can drive it through `check` as well as `generate`.
+///
+/// That fixture reads emitted source, so it can only call `generate`; `PARITY_FIXTURES` is where a
+/// spec is held to reporting the same thing through both entry points, and it is a hand-maintained
+/// list, so an omission costs nothing and warns nobody. The fixture asserts this constant equals
+/// what its own builder produces, so the two cannot drift apart.
+const NULLABLE_ALIAS_CARRY_SPEC: &str = "openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/A' } }
+components:
+  schemas:
+    A:
+      type: [object, 'null']
+      required: [b]
+      properties:
+        x: { type: string }
+        b: { $ref: '#/components/schemas/B' }
+    B:
+      oneOf:
+        - { $ref: '#/components/schemas/A' }
+";
+
+/// A nullable alias whose target is itself nullable is exactly as optional as the direct `$ref`.
+///
+/// `B: {oneOf: [{$ref: A}]}` with `A: {type: [object, "null"]}` carries no `{"type": "null"}`
+/// member of its own, and the alias read its nullability from the members alone — discarding the
+/// reserve-time flag that `ensure_component` records precisely so "every `$ref` consumer … agrees
+/// on it". So a field spelled `{$ref: B}` emitted `Box<A>` where the same field spelled `{$ref: A}`
+/// emitted `Option<Box<A>>`: one schema, two optionalities, chosen by which name was written.
+#[test]
+fn a_nullable_alias_carries_its_targets_own_nullability() {
+    let spec = |field: &str| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /u:\n    \
+             get:\n      \
+             operationId: getU\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json: {{ schema: {{ $ref: '#/components/schemas/A' }} }}\n\
+             components:\n  \
+             schemas:\n    \
+             A:\n      \
+             type: [object, 'null']\n      \
+             required: [b]\n      \
+             properties:\n        \
+             x: {{ type: string }}\n        \
+             b: {{ $ref: '#/components/schemas/{field}' }}\n    \
+             B:\n      \
+             oneOf:\n        \
+             - {{ $ref: '#/components/schemas/A' }}\n"
+        )
+    };
+    // The direct spelling is the control: `A` is nullable, so the field is optional.
+    let (direct, direct_code) = generate_with_code(&spec("A"));
+    assert_ne!(direct.outcome(), Outcome::Rejected, "{direct:#?}");
+    assert!(
+        direct_code.contains("pub b: Option<Box<A>>"),
+        "{direct_code}"
+    );
+
+    // The alias spelling must agree with it. Held to the constant `PARITY_FIXTURES` drives, so the
+    // spec this fixture asserts on and the spec `check` is run against stay the same document.
+    assert_eq!(spec("B"), NULLABLE_ALIAS_CARRY_SPEC);
+    let (aliased, aliased_code) = generate_with_code(&spec("B"));
+    assert_ne!(aliased.outcome(), Outcome::Rejected, "{aliased:#?}");
+    assert!(
+        aliased_code.contains("pub b: Option<Box<A>>"),
+        "the aliased field lost its target's nullability: {aliased_code}"
+    );
+}
+
+/// The one shape in this family that must **not** generate: a union that is a component's whole
+/// body and whose only non-null member is a `$ref` back to that same component.
+///
+/// `Selfy = Selfy | null` describes no instance a decoder can ever terminate on — the generated
+/// `Deserialize` opens by re-entering itself on the same value with no base case. The multi-member
+/// path already refuses exactly this with `E007`; the single-member collapse jumped over that guard
+/// and produced `E011` instead, so one shape drew two different codes according to how many members
+/// were written beside it.
+///
+/// Both spellings are driven: the bare union, and the union carrying its own sibling keywords.
+#[test]
+fn a_union_whose_sole_member_is_its_own_reservation_is_rejected() {
+    let bare = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Selfy' } }
+components:
+  schemas:
+    Selfy:
+      oneOf:
+        - { $ref: '#/components/schemas/Selfy' }
+        - { type: "null" }
+"##;
+    let with_siblings = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Selfy' } }
+components:
+  schemas:
+    Selfy:
+      type: object
+      properties:
+        x: { type: string }
+      oneOf:
+        - { $ref: '#/components/schemas/Selfy' }
+        - { type: "null" }
+"##;
+
+    for (label, spec) in [("bare", bare), ("with siblings", with_siblings)] {
+        let generated = generate(spec);
+        let checked = check(spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: {report:#?}"
+            );
+            // A spec-facing code with a matrix cell, an `errors.md` row and this fixture — never
+            // the internal invariant's `E011`, whose explain text claims malformed input.
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{label}/{entry}: {report:#?}"
+            );
+            // `E007`, and **only** `E007` — not a disjunction with `E013`. The two guards this
+            // shape passes through are ordered deliberately, the cycle question before the
+            // sibling-intersection question, and `lower.rs` records at that site that a reordering
+            // turns this fixture red. A disjunction would not: it is satisfied by either verdict,
+            // so the ordering it claims to protect would be free to flip in silence. The `with
+            // siblings` spelling is the one that carries the difference, because it is the only one
+            // the sibling guard can answer at all.
+            let codes: Vec<Code> = report
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                .map(|diagnostic| diagnostic.code)
+                .collect();
+            assert_eq!(
+                codes,
+                vec![Code::NonDisjointUnion],
+                "{label}/{entry}: {report:#?}"
+            );
+            // The remedy is the sentence the author acts on, and the one this rejecter carries has
+            // to serve its cycle situations as well as its overlap ones — neither of which a
+            // discriminator answers. Nothing else in the suite reads a remedy on this path, so
+            // without this the whole text was free to be replaced by advice that contradicts the
+            // fix.
+            let remedy = report
+                .diagnostics()
+                .iter()
+                .find(|diagnostic| diagnostic.code == Code::NonDisjointUnion)
+                .and_then(|diagnostic| diagnostic.remedy.as_deref())
+                .unwrap_or_default();
+            assert!(
+                remedy.contains("break the reference cycle"),
+                "{label}/{entry}: the remedy must name what an author with a self-referential \
+                 union actually has to change: {remedy:?}"
+            );
+        }
+    }
+}
+
+/// A union that collapses to its sole non-null member, whose intersection with the enclosing
+/// schema's own sibling keywords is irreconcilable (`type: object` against `type: string`), leaves
+/// the union with no variant. Before the rejection existed, the collapse `?`-propagated the failed
+/// intersection with no diagnostic, so the run came back clean with the response body silently
+/// dropped — the fourth behaviour. It must be refused with `E007` at the schema that carries the
+/// union, through both entry points.
+#[test]
+fn a_sole_union_member_irreconcilable_with_its_siblings_is_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  a: { type: string }
+                oneOf:
+                  - { type: string }
+                  - { type: "null" }
+"##;
+    let pointer = "/paths/~1u/get/responses/200/content/application~1json/schema";
+    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let e007: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::NonDisjointUnion)
+            .collect();
+        assert!(
+            e007.iter().any(
+                |d| d.pointer.as_str() == pointer && d.message.contains("sole non-null member")
+            ),
+            "{entry}: E007 for the empty sole-member intersection must point at `{pointer}`, \
+             not at {:?}\n{report:#?}",
+            e007.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// A union whose sibling keywords would have to be intersected against a target that is still being
+/// lowered. Nothing true can be said about that intersection, so it must be refused — not guessed
+/// at, and not quietly dropped.
+///
+/// Three positions, all of which the merge base accepted by guessing: the sole member of a nested
+/// property's union, the sole member of an array `items` union, and one member of a multi-member
+/// union. At `2aa5ada` `intersect_non_null`'s `TypeKind::Any` arm absorbed the placeholder and
+/// returned the *sibling*, silently retyping the recursive branch to the inline object beside it.
+/// At this head the multi-member case instead drops the variant with a `W011` whose message —
+/// "cannot satisfy the enclosing schema's own constraints" — is false about the document: the
+/// member can satisfy them perfectly well, it simply has not been lowered yet.
+#[test]
+fn a_union_sibling_over_an_open_reservation_is_rejected() {
+    let sole_member_in_a_property = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        next:
+          type: object
+          properties:
+            inner: { type: string }
+          anyOf:
+            - { $ref: '#/components/schemas/Node' }
+            - { type: "null" }
+"##;
+    let sole_member_in_array_items = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Tree' } }
+components:
+  schemas:
+    Tree:
+      type: object
+      required: [kids]
+      properties:
+        kids:
+          type: array
+          items:
+            type: object
+            properties:
+              tag: { type: string }
+            oneOf:
+              - { $ref: '#/components/schemas/Tree' }
+              - { type: "null" }
+"##;
+    let one_of_several_members = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        child:
+          type: object
+          properties:
+            tag: { type: string }
+          oneOf:
+            - { $ref: '#/components/schemas/Node' }
+            - type: object
+              properties:
+                other: { type: string }
+"##;
+
+    for (label, spec) in [
+        ("sole member in a property", sole_member_in_a_property),
+        ("sole member in array items", sole_member_in_array_items),
+        ("one of several members", one_of_several_members),
+    ] {
+        let (generated, code) = generate_with_code(spec);
+        let checked = check(spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{label}/{entry}: {report:#?}"
+            );
+            assert!(
+                has_code(report, Code::AllOfIrreconcilable)
+                    || has_code(report, Code::NonDisjointUnion),
+                "{label}/{entry}: {report:#?}"
+            );
+            // The false acknowledgement must be gone: the member is not a branch the sibling made
+            // impossible, it is one nothing could yet be said about.
+            assert!(
+                !has_code(report, Code::DeclarationHasNoEffect),
+                "{label}/{entry}: {report:#?}"
+            );
+        }
+        assert!(
+            code.is_empty(),
+            "{label}: rejected runs emit nothing: {code}"
+        );
+    }
+}
+
+/// The narrowness of the nullable-alias rule, stated as a fixture rather than as a comment.
+///
+/// `B: {oneOf: [{$ref: C}, {type: "null"}]}` where `C` is an ordinary, fully lowered component is
+/// the *same spelling* as the mutual-recursion case above, and it already generates: `B` is
+/// re-emitted as a type of its own carrying `C`'s shape. Recognising every nullable alias — rather
+/// than only one whose target is still being lowered — would delete `B` from the generated API,
+/// which is a breaking change to output that has nothing wrong with it.
+#[test]
+fn a_nullable_ref_alias_to_a_finished_component_keeps_its_own_type() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/A' } }
+components:
+  schemas:
+    A:
+      type: object
+      required: [b]
+      properties:
+        b: { $ref: '#/components/schemas/B' }
+    B:
+      oneOf:
+        - { $ref: '#/components/schemas/C' }
+        - { type: "null" }
+    C:
+      type: object
+      required: [v]
+      properties:
+        v: { type: string }
+"##;
+    let (generated, code) = generate_with_code(spec);
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    assert_ne!(
+        check(spec).outcome(),
+        Outcome::Rejected,
+        "{:#?}",
+        check(spec)
+    );
+    // `B` is a public type of the generated API and must stay one.
+    assert!(code.contains("pub struct B "), "{code}");
+    assert!(code.contains("pub struct C "), "{code}");
+}
+
+/// An `allOf` whose members disagree about `additionalProperties`, where one of the two value
+/// schemas is a `$ref` back to the type being lowered.
+///
+/// `merge_additional` intersects the two value types and its caller reports the failure as
+/// "`allOf` members declare conflicting `additionalProperties`". That is a true sentence about a
+/// genuine conflict and a false one here: nothing conflicts, the target's body simply has not been
+/// computed yet. The code is right — the same `E013` either way — and the message is what has to
+/// tell the two apart, because "conflicting" sends the author looking for a disagreement that is
+/// not in the document.
+#[test]
+fn an_all_of_additional_properties_back_edge_says_why_it_cannot_merge() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/A' } }
+components:
+  schemas:
+    A:
+      allOf:
+        - type: object
+          additionalProperties: { $ref: '#/components/schemas/A' }
+        - type: object
+          additionalProperties: { type: string }
+"##;
+    for (entry, report) in [("generate", &generate(spec)), ("check", &check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let message = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::AllOfIrreconcilable)
+            .map(|d| d.message.clone())
+            .unwrap_or_default();
+        assert!(
+            !message.contains("conflicting"),
+            "{entry}: the members do not conflict; the target is unlowered: {message}"
+        );
+        assert!(
+            message.contains("additionalProperties"),
+            "{entry}: {message}"
+        );
+    }
+}
+
+/// A sub-file's own `#/components/schemas/<name>` when the **root** document declares that name
+/// too. The root wins, and that is now said out loud.
+///
+/// Before this change the unshadowed branch did not resolve at all — it was issue #107's silent
+/// drop — so only one of the two branches existed and no precedence had to be chosen. Making the
+/// sub-file reference resolve makes both live, and therefore chooses. Measured: with the root
+/// declaring `Shared`, `lib.yaml`'s own `$ref: '#/components/schemas/Shared'` yields the **root's**
+/// `Shared`; delete that one unrelated root component and the same unchanged `$ref` yields the
+/// sub-file's. So adding a component to the root retargets a reference written in another file.
+///
+/// Root-wins is kept — changing it is a generated-API break — but "silently" is the fourth
+/// behaviour the standing invariants forbid, and prose in a comment does not remove silence. `W011`
+/// (a declaration that has no effect) is exactly what the sub-file's own `Shared` is here, and it
+/// already has a code, a matrix cell and an `errors.md` row, so no ordinal moves.
+#[test]
+fn a_sub_file_component_shadowed_by_the_root_is_acknowledged() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Wrapper' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      required: [from_root]
+      properties: { from_root: { type: string } }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      required: [inner]
+      properties:
+        inner: { $ref: '#/components/schemas/Shared' }
+    Shared:
+      type: object
+      required: [from_sub_file]
+      properties: { from_sub_file: { type: string } }
+"##,
+    )
+    .unwrap();
+
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let shadow = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .map(|d| d.message.clone())
+            .find(|message| message.contains("Shared"));
+        let shadow = shadow.unwrap_or_else(|| {
+            panic!("{entry}: the shadowed declaration is not acknowledged: {report:#?}")
+        });
+        // Naming one namespace is not enough: the reader has to be told which declaration was read
+        // and which one was not.
+        assert!(
+            shadow.contains("lib.yaml"),
+            "{entry}: the message must name the file whose declaration lost: {shadow}"
+        );
+    }
+    // Root-wins is the behaviour being documented, not changed.
+    assert!(code.contains("from_root"), "{code}");
+    assert!(!code.contains("from_sub_file"), "{code}");
+}
+
+/// The matched pair for the warning above: a reference that **names its own document** shadowed
+/// nothing, and must not be told that it did.
+///
+/// Only the bare-fragment spelling can be shadowed. `#/components/schemas/Shared` addresses the
+/// file it is written in, so writing it inside `lib.yaml` asks for `lib.yaml`'s `Shared` and is
+/// given the root's — the whole of `W011`, and what `W011`'s own explain text scopes it to.
+/// `./openapi.yaml#/components/schemas/Shared` asks for exactly one declaration and gets that one.
+///
+/// It warned on both. `ensure_resolved` routes any target that lands in the root's component map
+/// back to `ensure_component` carrying the *referring site's* provenance, and the warning was
+/// raised there on the strength of three facts that never included how the reference was written.
+/// So a deliberately disambiguated reference drew a message quoting a `$ref` string absent from
+/// that site, and a remedy — "address the file-local one explicitly with a relative-file
+/// reference" — naming the form already in use. Worse, the same string through the nullable-alias
+/// path correctly did *not* warn, so one reference got two answers depending only on whether the
+/// root's component happened to be open at the time.
+///
+/// Two further cases vary the **sub-file's body** rather than the spelling, because varying the
+/// spelling cannot reach every answer the warning gives.
+///
+/// The third drops `Shared` from `lib.yaml` altogether: a sub-file referring to a root component
+/// it does not redeclare, which is the commonest shape a multi-file description has. Nothing is
+/// shadowed, so nothing may be reported. That negative is decided in `Resolver::declares_locally`,
+/// by the one line that asks whether the node the local address names actually exists —
+/// `Bundle::reference_target` computes an address and never checks, so for an in-document fragment
+/// it answers `Some` unconditionally. Without the third case that line is unheld: deleting it
+/// leaves the whole workspace suite green while every such description gains a warning naming a
+/// declaration it does not contain. The spelling cases cannot cover it, because their `shadows:
+/// false` half is turned away by the bare-fragment gate in `warn_if_root_shadows_the_referring_file`
+/// and never reaches `declares_locally` at all.
+///
+/// The fourth drives `W011`'s **own remedy**: "address the file-local one explicitly with a
+/// relative-file reference". The explicit spelling driven above is `./openapi.yaml#…`, the *root's*
+/// — the one the remedy does not recommend. `./lib.yaml#/components/schemas/Shared` is the one it
+/// does, and it must both silence the warning and change the answer, binding the sub-file's
+/// `Shared` rather than the root's. Otherwise a precedence change could leave spargen printing a
+/// remedy that no longer works, with the suite green.
+///
+/// All four are driven against one pair of files so the fixture cannot pass by the warning having
+/// gone dead: the bare-over-a-local-declaration case must still fire, in the same run.
+#[test]
+fn an_explicit_relative_file_reference_to_the_roots_component_is_not_a_shadowing() {
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Wrapper' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      required: [from_root]
+      properties: { from_root: { type: string } }
+"##;
+    let lib = |spelling: &str, declares_shared: bool| {
+        let shared = if declares_shared {
+            "\n    Shared:\n      type: object\n      required: [from_sub_file]\n      \
+             properties: { from_sub_file: { type: string } }"
+        } else {
+            ""
+        };
+        format!(
+            r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      required: [inner]
+      properties:
+        inner: {{ $ref: '{spelling}' }}{shared}
+"##
+        )
+    };
+
+    for (case, spelling, declares_shared, shadows, from) in [
+        (
+            "the bare fragment, redeclared locally",
+            "#/components/schemas/Shared",
+            true,
+            true,
+            "from_root",
+        ),
+        (
+            "the root addressed explicitly",
+            "./openapi.yaml#/components/schemas/Shared",
+            true,
+            false,
+            "from_root",
+        ),
+        (
+            "the bare fragment, nothing local to shadow",
+            "#/components/schemas/Shared",
+            false,
+            false,
+            "from_root",
+        ),
+        (
+            "the remedy's own spelling",
+            "./lib.yaml#/components/schemas/Shared",
+            true,
+            false,
+            "from_sub_file",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), root).unwrap();
+        std::fs::write(dir.join("lib.yaml"), lib(spelling, declares_shared)).unwrap();
+        let out = dir.join("client.rs");
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{case}/{entry}: {report:#?}"
+            );
+            let raised = report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::DeclarationHasNoEffect && d.message.contains("Shared"));
+            assert_eq!(
+                raised,
+                shadows,
+                "{case} ({spelling}, lib.yaml {} `Shared`)/{entry}: W011 must fire when the bare \
+                 fragment is written over a declaration the referring file makes itself, and in \
+                 no other case — every other case has one declaration in play, so nothing of the \
+                 author's is without effect and the remedy would ask for a spelling that is \
+                 already written or would change which declaration is read: {report:#?}",
+                if declares_shared {
+                    "declares"
+                } else {
+                    "does not declare"
+                }
+            );
+        }
+
+        // Which declaration was actually read. The first three cases all reach the root's, by
+        // precedence or because it is the only one; the fourth is the remedy W011 prints, and the
+        // point of driving it is that it does something different — it binds the sub-file's own
+        // `Shared`. Read on the bound type's fields rather than its name, because the emitter
+        // suffixes the sub-file's colliding copy and a substring test would pass on the wrong
+        // answer.
+        let absent = if from == "from_root" {
+            "from_sub_file"
+        } else {
+            "from_root"
+        };
+        let inner = field_type(&code, "pub inner")
+            .unwrap_or_else(|| panic!("{case}: no `inner` field at all: {code}"));
+        let bound = inner
+            .rsplit_once('<')
+            .map_or(inner.as_str(), |(_, tail)| tail)
+            .trim_end_matches('>');
+        let fields = declared_fields(&code, bound);
+        assert!(
+            fields.iter().any(|field| field == from) && !fields.iter().any(|field| field == absent),
+            "{case}: `inner` bound `{inner}`, whose fields are {fields:?}, expected `{from}`: \
+             {code}"
+        );
+    }
+}
+
 /// `type_specificity`'s reservation arm is **live**, and its value is emitted into the client.
 ///
 /// The arm carried a comment justifying itself by saying a union holding a reservation is rejected
@@ -2803,6 +4345,186 @@ mod remote {
         // The degradation itself, so the guard's removal fails on the emitted output and not only
         // on the verdict.
         assert!(!code.contains("= serde_json::Value;"), "{code}");
+    }
+
+    /// Two vendored remote schemas in mutual recursion through a nullable alias — the remote
+    /// spelling of the commonest recursive idiom there is, and the one frame of the three whose
+    /// open reservations no guard could see.
+    ///
+    /// `node.yaml` has a `parent` of `maybe.yaml`; `maybe.yaml` is nothing but "a `node.yaml`, or
+    /// null". Both are hash-pinned, so the document is legal and hermetic. The union collapse's
+    /// escape hatch asked `reservation_at`, which consults the root component map and
+    /// `resolved_in_progress` and **not** `remote_in_progress`, so the collapse handed
+    /// `ensure_remote` a foreign id and inserted no def — and `pop_last()` then popped a def that
+    /// was not this frame's root into an `assert_eq!` that is live in release builds too. The
+    /// failure was a **process abort**, not a diagnostic: inside a consumer's `build.rs` it is a
+    /// panicking build script with no code, no pointer and no `--carve` escape, which is the
+    /// prohibited fourth behaviour in its worst form. A panic is not an `Outcome`, so nothing in
+    /// this suite could have observed it; this fixture is what observes it.
+    #[test]
+    fn a_nullable_alias_between_two_vendored_remote_schemas_generates() {
+        const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
+        const MAYBE_URL: &str = "https://api.example.com/schemas/maybe.yaml";
+        const NODE_YAML: &str =
+            "type: object\nproperties:\n  name: { type: string }\n  parent: { $ref: 'maybe.yaml' }\n";
+        const MAYBE_YAML: &str = "oneOf:\n  - $ref: 'node.yaml'\n  - type: 'null'\n";
+        const NODE_SHA: &str = "b0b0741c3519d771b634a8cee182500b35efbfb9e20e84dd3b4dd62497174569";
+        const MAYBE_SHA: &str = "33b37680c6082b1e81bb769383543219f1d1477bca2e9838f7da314631eac815";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \
+             \"api.example.com/schemas/node.yaml\"\n\n[[remote]]\nurl = \"{MAYBE_URL}\"\nsha256 = \
+             \"{MAYBE_SHA}\"\npath = \"api.example.com/schemas/maybe.yaml\"\n"
+        );
+        let vendor = [
+            ("api.example.com/schemas/node.yaml", NODE_YAML),
+            ("api.example.com/schemas/maybe.yaml", MAYBE_YAML),
+        ];
+
+        let (generated, _temp, out) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            // The pins are live, so the document really reaches lowering.
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::AbsoluteRefUnsupported),
+                "{entry}: {report:#?}"
+            );
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{entry}: a hermetically pinned, legal description: {report:#?}"
+            );
+            // The reservation must not survive into the finished graph either.
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{entry}: {report:#?}"
+            );
+        }
+        // The alias is the target, optional and boxed — what the direct `{$ref: T}` spelling of the
+        // same construct already produces and what the support matrix promises for it. Named, and
+        // read off `parent`'s own declaration: the embedded runtime supplies an `Option<Box<…>>` of
+        // its own to every generated module, so a bare `contains("Option<Box<")` would hold even if
+        // this reference had been emitted unboxed.
+        assert_eq!(
+            field_type(&code, "pub parent").as_deref(),
+            Some("Option<Box<HttpsApiExampleComSchemasNodeYaml>>"),
+            "{code}"
+        );
+        assert!(!code.contains("serde_json::Value>"), "{code}");
+    }
+
+    /// A vendored remote schema that refers to **itself** directly, with no alias in between: the
+    /// plainest recursion there is, and the one that reaches `ensure_remote`'s own in-progress arm.
+    ///
+    /// The root-component and resolved-file frames each have a fixture that pins their back-edge is
+    /// boxed; the remote frame did not. Flipping that arm to `boxed: false` left the entire
+    /// workspace green while emitting `pub parent: Option<…NodeYaml>` inside the struct it names —
+    /// an infinitely sized type. The two remote fixtures beside this one both reach their back-edge
+    /// through the *alias* path, which boxes at a different site, so neither could see it.
+    #[test]
+    fn a_self_recursive_vendored_remote_schema_is_boxed() {
+        const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
+        const NODE_YAML: &str =
+            "type: object\nproperties:\n  name: { type: string }\n  parent: { $ref: 'node.yaml' }\n";
+        const NODE_SHA: &str = "119cdb35650ee7b837b855d28d5e3eef2f0b622aba52b5721817ae313aa19300";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \
+             \"api.example.com/schemas/node.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/node.yaml", NODE_YAML)];
+
+        let (generated, _temp, out) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{entry}: {report:#?}"
+            );
+        }
+        // Boxed, or the generated struct has no finite size and does not compile.
+        assert_eq!(
+            field_type(&code, "pub parent").as_deref(),
+            Some("Option<Box<HttpsApiExampleComSchemasNodeYaml>>"),
+            "{code}"
+        );
+    }
+
+    /// The remote spelling of `Selfy = Selfy | null`: a vendored document whose **whole body** is a
+    /// union over a `$ref` back to itself plus `null`.
+    ///
+    /// This is the one document that reaches `reservation_at`'s `remote_in_progress`
+    /// canonicalisation, and the only way to reach it. That loop exists because a remote frame is
+    /// keyed by the URL it was reached through while a provenance canonicalises to a
+    /// `file#pointer`, so a string comparison between the two can never match; the frame is only
+    /// *omitted* — rather than merely spelled differently — when the schema being asked about is a
+    /// remote document's root, which is exactly this shape and nothing else. Every other remote
+    /// recursion sits at a property or an `allOf` member, whose pointer is not the frame's.
+    ///
+    /// Without the canonicalisation this document does not reject. The collapse hands
+    /// `ensure_remote` a foreign id and reserves nothing, and `TypeDefs::fill` is then called on an
+    /// id that was never reserved — `fill of an unreserved id`, a **process abort** from inside a
+    /// consumer's `build.rs` with no code, no pointer and no `--carve` escape. A panic is not an
+    /// `Outcome`, so nothing in this suite could have observed it. That assertion is a
+    /// `debug_assert!`, so a build with debug assertions off does not abort: it fills the
+    /// unreserved id and carries on, which is worse and not better.
+    ///
+    /// The loop had zero iterations across the whole workspace before this fixture, while carrying
+    /// a paragraph crediting it with a fix the two-file remote fixture passes without. It is this
+    /// document that the paragraph is true of.
+    #[test]
+    fn a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected() {
+        const SELFY_URL: &str = "https://api.example.com/schemas/selfy.yaml";
+        const SELFY_YAML: &str = "oneOf:\n  - $ref: 'selfy.yaml'\n  - type: 'null'\n";
+        const SELFY_SHA: &str = "a85d6698c240a7a1bc9f53f18466c179a2f8fcc01492d822aa913b7a7f4e009a";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{SELFY_URL}\"\nsha256 = \"{SELFY_SHA}\"\npath = \
+             \"api.example.com/schemas/selfy.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/selfy.yaml", SELFY_YAML)];
+
+        let (generated, _temp, _out) =
+            run_layout(&responds_with(SELFY_URL), Some(&lock), &vendor, false);
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(SELFY_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            // The pin is live, so the document really reaches lowering rather than stopping at the
+            // lock.
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+            // A spec-facing code, the same one the root-document spelling of this shape draws —
+            // never the internal invariant's `E011`, and never a process abort.
+            assert!(
+                has_code(report, Code::NonDisjointUnion),
+                "{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{entry}: {report:#?}"
+            );
+        }
     }
 
     fn responds_with(url: &str) -> String {
@@ -6143,7 +7865,11 @@ components:
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let messages = messages_for(&report, Code::NonDisjointUnion);
     assert_eq!(messages.len(), 1, "{report:#?}");
-    assert!(messages[0].contains("sole member"), "{:?}", messages[0]);
+    assert!(
+        messages[0].contains("sole non-null member"),
+        "{:?}",
+        messages[0]
+    );
     assert!(
         messages[0].contains("empty or unrepresentable"),
         "{:?}",
@@ -11621,6 +13347,10 @@ const PARITY_FIXTURES: &[(&str, &str)] = &[
         "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n  /a:\n    get:\n      operationId: getA\n      security: [{ nope: [] }]\n      responses: { '204': { description: ok } }\n",
     ),
     ("E013 irreconcilable allOf", ALL_OF_CONFLICT_SPEC),
+    // A nullable alias that generates cleanly. The suite's clean cases are all trivial documents;
+    // this one drives the lowering path this branch reworked, where `check` and `generate` take the
+    // same code and could silently stop agreeing.
+    ("nullable alias carries its target", NULLABLE_ALIAS_CARRY_SPEC),
     ("W005 schema default", W005_SPEC),
     (
         "W001 validation-only keyword",
