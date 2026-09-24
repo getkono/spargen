@@ -44,8 +44,11 @@ run = [
 ]
 
 [tasks.deny]
+# `--all-features` matches what CI's cargo-deny-action passes by default. Without it the local gate
+# reports a graph the CI gate never audits: rustls, for one, enters only under `--all-features`, so
+# an advisory against it is clean here and failing there.
 description = "Supply-chain audit (licenses, advisories, bans)"
-run = "cargo deny check"
+run = "cargo deny --all-features check"
 
 [tasks.bench]
 description = "Run the generation benchmarks (criterion). CI uploads these as a release artifact."

@@ -6,7 +6,7 @@
 //! warnings and clean runs so it cannot pass vacuously.
 
 use camino::Utf8PathBuf;
-use spargen::{Build, CargoIntegration, Code, Outcome, Report, Spec};
+use spargen::{Build, CargoIntegration, Code, Outcome, Report, Severity, Spec};
 
 /// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
 /// tempdir (and any written output) is discarded once the report — which owns its data — is built.
@@ -51,6 +51,131 @@ fn generate_with_code(spec: &str) -> (Report, String) {
 
 fn has_code(report: &Report, code: Code) -> bool {
     report.diagnostics().iter().any(|d| d.code == code)
+}
+
+/// Every message a report carries for one code. A code being right is not the same as its message
+/// being true — a diagnostic that fires on the correct construct while asserting something false
+/// about it is still a defect — so the fixtures that pin wording assert on this, not on the code.
+fn messages_for(report: &Report, code: Code) -> Vec<&str> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == code)
+        .map(|d| d.message.as_str())
+        .collect()
+}
+
+/// Everything from the generated `types` module to the end of the file, with the provenance header
+/// and the embedded runtime before it stripped.
+///
+/// It is **not** bounded at the module's closing brace: the returned text also carries the
+/// `Client` impl and the emitted scaffolding after `types`. A `.contains(…)` on it can therefore
+/// match client code rather than a lowered type; a fixture that must pin a lowered type should
+/// match a declaration (`pub struct X`, `pub type X =`) rather than a bare type name.
+///
+/// Two generations of the *same* spec already differ as whole files: the header carries the output
+/// path and a per-run `input-sha256`/`content-sha256`. So a whole-file comparison between two
+/// generated clients is unconditionally true and proves nothing. Comparing from `pub mod types {`
+/// onward compares what the two documents actually lowered to.
+fn types_module(code: &str) -> String {
+    code.find("pub mod types {")
+        .map(|start| code[start..].to_owned())
+        .unwrap_or_default()
+}
+
+/// The name of the `pub struct` that declares the first field line starting with `field`.
+///
+/// A type count plus "both fields exist somewhere" is satisfied by either assignment of two names to
+/// two schemas, so it cannot see a swap. This answers the question the count cannot: which generated
+/// type a given field belongs to.
+fn field_owner(code: &str, field: &str) -> Option<String> {
+    let mut current: Option<String> = None;
+    for line in code.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("pub struct ") {
+            current = rest
+                .split([' ', '<', '{', '(', ';'])
+                .next()
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned);
+        }
+        if trimmed.starts_with(field) {
+            return current;
+        }
+    }
+    None
+}
+
+/// The declared type of the first field line starting with `field`, trimmed of its trailing comma.
+///
+/// [`field_owner`] says which type *declares* a field; this says which type the field *is*. Asking
+/// only whether a type name appears somewhere in the module cannot tell two same-named schemas
+/// apart, because both are emitted — so a fixture that must pin *which* of them a reference bound
+/// has to read the field's own right-hand side.
+fn field_type(code: &str, field: &str) -> Option<String> {
+    code.lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with(field))
+        .and_then(|line| line.split_once(':'))
+        .map(|(_, ty)| ty.trim().trim_end_matches(',').to_owned())
+}
+
+/// The field names `pub struct ty` declares, in source order.
+///
+/// The inverse of [`field_owner`], and the answer to "which schema is this type", which a name
+/// alone cannot give when two declarations share a name and the emitter disambiguates one of them —
+/// or when the alias path re-emits a target's *kind* under a third name.
+fn declared_fields(code: &str, ty: &str) -> Vec<String> {
+    let mut lines = code
+        .lines()
+        .map(str::trim_start)
+        .skip_while(|line| !line.starts_with(&format!("pub struct {ty} ")));
+    lines.next();
+    lines
+        .take_while(|line| !line.starts_with('}'))
+        .filter_map(|line| line.strip_prefix("pub "))
+        .filter_map(|rest| rest.split_once(':'))
+        .map(|(name, _)| name.to_owned())
+        .collect()
+}
+
+/// The variant declarations `pub enum ty` carries, in source order, each trimmed of its trailing
+/// comma.
+///
+/// The union counterpart of [`declared_fields`], and the only way to see a union *member* go
+/// missing. Binding the enum's name says the union was represented; it does not say how many
+/// branches survived, and a collapse that erases one member leaves a type with the right name and
+/// the wrong contents.
+fn enum_variants(code: &str, ty: &str) -> Vec<String> {
+    let mut lines = code
+        .lines()
+        .map(str::trim_start)
+        .skip_while(|line| !line.starts_with(&format!("pub enum {ty} ")));
+    lines.next();
+    lines
+        .take_while(|line| !line.starts_with('}'))
+        .filter(|line| !line.is_empty() && !line.starts_with("#[") && !line.starts_with("///"))
+        .map(|line| line.trim_end_matches(',').to_owned())
+        .collect()
+}
+
+/// The names of `pub struct`s in generated source that begin with `prefix` and whose remainder
+/// satisfies `suffix_ok`, in source order.
+///
+/// Counting `code.matches("pub struct Foo")` is the obvious thing and is wrong twice over: the
+/// generated module embeds the runtime, whose own items can share a prefix (`pub struct L` also
+/// matches `LinkPaginator`), and a count alone cannot say *which* types were emitted when it
+/// disagrees. Returning the names makes a failure legible and makes an off-by-a-constant bound
+/// impossible to mistake for a bound.
+fn declared_types(code: &str, prefix: &str, suffix_ok: impl Fn(&str) -> bool) -> Vec<String> {
+    code.lines()
+        .filter_map(|line| line.trim_start().strip_prefix("pub struct "))
+        .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
+        .filter(|name| !name.is_empty())
+        .filter_map(|name| name.strip_prefix(prefix).map(|tail| (name, tail)))
+        .filter(|(_, tail)| suffix_ok(tail))
+        .map(|(name, _)| name.to_owned())
+        .collect()
 }
 
 #[test]
@@ -188,6 +313,4083 @@ components:
     let report = generate(&cycle);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+}
+
+/// A `$ref` to a component schema that was never declared is an error, not a construct to drop
+/// quietly. Every construct that reaches `LowerCtx::ensure_component` must report `E004`: before
+/// this was pinned, an `application/octet-stream` request body whose schema `$ref`ed a missing
+/// component reported `clean` and generated an `upload` method with no body argument at all — a
+/// silent degradation with no diagnostic, which the taxonomy forbids. `check` and `generate` must
+/// agree on every one of these, and each must point at its own `$ref` site.
+#[test]
+fn e004_fires_for_a_ref_to_a_component_schema_that_is_not_declared() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+
+    // One spec per construct that reaches `ensure_component`. These are NOT one per call site: the
+    // four operation-level cases (both request bodies, the response and the parameter) all arrive
+    // through `lower_schema_ref`, and the two request bodies are the same path under two media
+    // types — the octet-stream one is kept because it is the issue's own reproduction. The cases
+    // that do reach distinct sites are the `oneOf` member, the `allOf` member, the component alias,
+    // and the `$ref`-with-shape-siblings case, which is the only one that reaches
+    // `lower_schema_inner`. The pointers below are what keep the four same-site cases from
+    // collapsing into one another.
+    let request_body_json = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/Missing' } }
+      responses: { '204': { description: ok } }
+"##
+    );
+    // The issue's exact reproduction: this binary request body vanished entirely.
+    let request_body_octets = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          application/octet-stream: { schema: { $ref: '#/components/schemas/Missing' } }
+      responses: { '204': { description: ok } }
+"##
+    );
+    let response_body = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Missing' } }
+"##
+    );
+    let parameter = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      parameters:
+        - { name: q, in: query, schema: { $ref: '#/components/schemas/Missing' } }
+      responses: { '204': { description: ok } }
+"##
+    );
+    let union_variant = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Union' } }
+components:
+  schemas:
+    Union:
+      oneOf:
+        - { $ref: '#/components/schemas/Present' }
+        - { $ref: '#/components/schemas/Missing' }
+    Present:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##
+    );
+    let all_of_member = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Merged' } }
+components:
+  schemas:
+    Merged:
+      allOf:
+        - { $ref: '#/components/schemas/Present' }
+        - { $ref: '#/components/schemas/Missing' }
+    Present:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##
+    );
+    // A `$ref` carrying shape siblings is an intersection, not an alias, so it is lowered by
+    // `lower_schema_inner` rather than by the `RefOr::Ref` arm every other case above takes. It is
+    // the only one of these that reaches that site.
+    let ref_with_siblings = format!(
+        "{HEAD}{}",
+        r##"paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Ext' } }
+components:
+  schemas:
+    Ext:
+      $ref: '#/components/schemas/Missing'
+      type: object
+      properties: { extra: { type: string } }
+"##
+    );
+    // A declared component that is itself a bare `$ref` to a missing one: reached from the
+    // component-alias arm rather than from any operation.
+    let component_alias = format!(
+        "{HEAD}{}",
+        r##"paths: {}
+components:
+  schemas:
+    Alias: { $ref: '#/components/schemas/Missing' }
+"##
+    );
+
+    // Each case pairs its spec with the RFC 6901 pointer the diagnostic must carry. The pointer is
+    // the assertion that matters: the code alone would still pass if `ensure_component` emitted
+    // against the document root, and a root pointer is what makes the rejection un-carvable (see
+    // the cascade in `carve.rs`). Pointing at the `$ref` site is the contract, so it is pinned per
+    // site rather than left to one coarse outcome elsewhere.
+    let cases = [
+        (
+            "request body (application/json)",
+            &request_body_json,
+            "/paths/~1u/post/requestBody/content/application~1json/schema",
+        ),
+        (
+            "request body (application/octet-stream)",
+            &request_body_octets,
+            "/paths/~1u/post/requestBody/content/application~1octet-stream/schema",
+        ),
+        (
+            "response body",
+            &response_body,
+            "/paths/~1u/get/responses/200/content/application~1json/schema",
+        ),
+        (
+            "parameter schema",
+            &parameter,
+            "/paths/~1u/get/parameters/0/schema",
+        ),
+        (
+            "oneOf member",
+            &union_variant,
+            "/components/schemas/Union/oneOf/1",
+        ),
+        (
+            "allOf member",
+            &all_of_member,
+            "/components/schemas/Merged/allOf/1",
+        ),
+        (
+            "component alias",
+            &component_alias,
+            "/components/schemas/Alias",
+        ),
+        (
+            "$ref with shape siblings",
+            &ref_with_siblings,
+            "/components/schemas/Ext",
+        ),
+    ];
+
+    for (what, spec, pointer) in cases {
+        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: a `$ref` to an undeclared component must reject\n{report:#?}"
+            );
+            let e004: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::UnresolvedRef)
+                .collect();
+            assert!(
+                !e004.is_empty(),
+                "{what} via {entry}: the rejection must carry E004\n{report:#?}"
+            );
+            assert!(
+                e004.iter().any(|d| d.pointer.as_str() == pointer),
+                "{what} via {entry}: E004 must point at the `$ref` site `{pointer}`, not at \
+                 {:?}\n{report:#?}",
+                e004.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+/// The negative control for the rejection above: this change turns a previously-silent success
+/// into a rejection, so what it must NOT do is reject a `$ref` that resolves. A `$ref` carrying
+/// shape siblings is the narrow case — it is the one construct that reaches `ensure_component`
+/// through `lower_schema_inner`, and it is an intersection, so its target contributes fields rather
+/// than replacing it. Both sides must survive into the generated type.
+#[test]
+fn a_ref_with_shape_siblings_that_resolves_is_not_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Ext' } }
+components:
+  schemas:
+    Ext:
+      $ref: '#/components/schemas/Base'
+      type: object
+      properties: { extra: { type: string } }
+    Base:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    // The reference was genuinely followed, not merely tolerated: the sibling's own property and
+    // the referenced component's property are both present.
+    assert!(code.contains("pub extra"), "{code}");
+    assert!(code.contains("pub id"), "{code}");
+
+    // check/generate parity on the clean path too.
+    let checked = check(spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
+}
+
+/// A same-file `#/components/schemas/…` fragment that addresses a *subschema* rather than a
+/// top-level component name. spargen matches these by name only, so this is rejected — but the
+/// component it starts from is declared, and the identical pointer written against a relative file
+/// resolves through the resolver, so the message must not claim the target does not exist.
+///
+/// This pins a deliberate decision that nothing else constrains: the whole test tree contains no
+/// other `$ref` with a `/` inside the component name, so routing these to the resolver instead
+/// would flip a user-visible verdict with no test noticing.
+#[test]
+fn a_same_file_ref_into_a_component_subschema_is_rejected_as_not_a_component_name() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Envelope/properties/payload' }
+components:
+  schemas:
+    Envelope:
+      type: object
+      properties:
+        payload:
+          type: object
+          properties: { id: { type: string } }
+          required: [id]
+"##;
+    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let subschema: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .collect();
+        assert!(!subschema.is_empty(), "{entry}: {report:#?}");
+        // `Envelope` IS declared, so the diagnostic must say the fragment is not a component name
+        // rather than that the target could not be found.
+        assert!(
+            subschema
+                .iter()
+                .any(|d| d.message.contains("addresses a subschema")),
+            "{entry}: the message must not claim the target is missing — `Envelope` is declared: \
+             {report:#?}"
+        );
+        assert!(
+            !subschema.iter().any(|d| d.message.contains("unresolved")),
+            "{entry}: {report:#?}"
+        );
+        // This arm threads the `$ref` site's provenance exactly as the plain-name arm does, and for
+        // the same reason: a root pointer is one `omittable_enclosing` maps to `None`, which turns
+        // `--carve` on this document from clean into an un-carvable rejection.
+        assert!(
+            subschema.iter().any(|d| d.pointer.as_str()
+                == "/paths/~1u/get/responses/200/content/application~1json/schema"),
+            "{entry}: the subschema rejection must point at the `$ref` site, not at {:?}: \
+             {report:#?}",
+            subschema
+                .iter()
+                .map(|d| d.pointer.as_str())
+                .collect::<Vec<_>>()
+        );
+        // The message makes two separate claims — which reference could not be followed, and which
+        // component it was found to address a subschema of — and it interpolates `Envelope` for
+        // both. `contains("Envelope")` is therefore satisfied by either half alone, so it pins
+        // neither; both mutations survived it. Assert the two independently.
+        assert!(
+            subschema.iter().any(|d| d
+                .message
+                .contains("`#/components/schemas/Envelope/properties/payload`")),
+            "{entry}: the message must name the whole reference that could not be followed, not \
+             only the component it starts from: {report:#?}"
+        );
+        assert!(
+            subschema
+                .iter()
+                .any(|d| d.message.contains("component `Envelope`")),
+            "{entry}: the message must name the component it did find, not merely describe the \
+             shape: {report:#?}"
+        );
+        // And carry the remedy, as the other rejections in this file do.
+        assert!(
+            subschema.iter().any(|d| d
+                .remedy
+                .as_deref()
+                .is_some_and(|remedy| remedy.contains("declare the subschema"))),
+            "{entry}: the rejection must carry its remedy: {report:#?}"
+        );
+    }
+
+    // A deep pointer whose ROOT SEGMENT is not declared is a different fault and must not borrow
+    // this message. `Envelop` is a typo for `Envelope`; the document declares nothing by that name,
+    // so "addresses a subschema" would assert by implication that it is there, and the remedy
+    // "declare the subschema as its own entry" would send the reader to promote a subschema of a
+    // component that does not exist. The `/` in the fragment is not what is wrong with it.
+    let typo = spec.replace(
+        "#/components/schemas/Envelope/properties/payload",
+        "#/components/schemas/Envelop/properties/payload",
+    );
+    for (entry, report) in [("generate", generate(&typo)), ("check", check(&typo))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let e004: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .collect();
+        assert!(
+            e004.iter()
+                .any(|d| d.message.contains("unresolved schema reference")),
+            "{entry}: an undeclared root segment is an unresolved reference, not a fragment-shape \
+             problem: {report:#?}"
+        );
+        assert!(
+            !e004
+                .iter()
+                .any(|d| d.message.contains("addresses a subschema")),
+            "{entry}: `Envelop` is not declared, so nothing was addressed inside it: {report:#?}"
+        );
+    }
+
+    // A trailing slash is a real subschema fragment: `Foo` IS declared and the pointer's final
+    // empty reference token addresses its `""`-keyed member, so this keeps the subschema wording.
+    let trailing = spec.replace(
+        "#/components/schemas/Envelope/properties/payload",
+        "#/components/schemas/Envelope/",
+    );
+    let report = generate(&trailing);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef && d.message.contains("addresses a subschema")),
+        "{report:#?}"
+    );
+
+    // Control: the plain undeclared-name case keeps the "unresolved" wording, so the branch above
+    // is a genuine split rather than a blanket rewording.
+    let plain = spec.replace(
+        "#/components/schemas/Envelope/properties/payload",
+        "#/components/schemas/Missing",
+    );
+    let report = generate(&plain);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    // The whole reference, so the message identifies WHICH component is missing — a pointer says
+    // where the `$ref` is, not what it named.
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef
+                && d.message
+                    .contains("unresolved schema reference `#/components/schemas/Missing`")),
+        "{report:#?}"
+    );
+}
+
+/// A `$ref` inside a referenced sub-file spells that file's own components the ordinary way —
+/// `#/components/schemas/<name>` — and it must resolve against the file it is written in. This is
+/// the standard layout for a split description: the root references `./lib.yaml#/components/schemas/
+/// Wrapper`, and `Wrapper`'s own properties reference its siblings by plain component name.
+///
+/// `Resolver::resolve` already implements exactly this, keying on the provenance's file and
+/// shortcutting to the parsed component map only for the root document. `ensure_component` bypassed
+/// the resolver for anything carrying the `#/components/schemas/` prefix and looked every such name
+/// up in the ROOT document's map whatever file it sat in, so the sibling reference missed. Before
+/// E004 fired that miss was a silent drop — the property simply vanished — which is the same bug
+/// this branch is about, just reached from a sub-file.
+///
+/// `corpus-smoke` cannot see this: the one multi-file corpus case uses whole-file `$ref`s, and the
+/// other relative-file fixture here uses a non-component fragment (`#/Pet`), which never enters
+/// `ensure_component`. This fixture is the only evidence.
+#[test]
+fn a_sub_file_resolves_its_own_component_refs_rather_than_the_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: './lib.yaml#/components/schemas/Wrapper' }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      properties:
+        inner: { $ref: '#/components/schemas/Inner' }
+      required: [inner]
+    Inner:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##,
+    )
+    .unwrap();
+
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    let code = std::fs::read_to_string(&out).unwrap();
+    // The sibling was genuinely followed: `Inner`'s own field reached the generated type, so the
+    // property is typed rather than dropped.
+    assert!(code.contains("pub inner"), "{code}");
+    assert!(code.contains("pub id"), "{code}");
+
+    // `check` must agree — it runs the same lowering.
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
+}
+
+/// Build a two-file description in a throwaway tempdir and run it through both entry points.
+///
+/// The root document is fixed — one operation whose `200` body `$ref`s `target` — and `lib` is
+/// written beside it as `lib.yaml`. Every shape below differs only in that sub-file, so what a
+/// fixture pins is the sub-file's own reference behaviour and nothing else. The tempdir is dropped
+/// on return; the report owns its data and the emitted source is read out first.
+fn split(target: &str, lib: &str) -> (Report, Report, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /u:\n    \
+             get:\n      \
+             operationId: getU\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json:\n              \
+             schema: {{ $ref: '{target}' }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(dir.join("lib.yaml"), lib).unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    (generated, checked, code)
+}
+
+/// A sub-file sibling reference that names nothing. The root document's component map is consulted
+/// first and misses, and the sub-file's own map misses too — so the reference is unresolvable and
+/// must be reported, not dropped. This is the sub-file spelling of the very bug issue #107 exists
+/// to remove: before the reference reached the resolver at all it was silently discarded, taking
+/// the property with it.
+#[test]
+fn a_sub_file_ref_to_a_component_its_own_file_does_not_declare_is_rejected() {
+    let (generated, checked, _) = split(
+        "./lib.yaml#/components/schemas/Wrapper",
+        r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      properties:
+        inner: { $ref: '#/components/schemas/Missing' }
+      required: [inner]
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let e004: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .collect();
+        assert!(!e004.is_empty(), "{entry}: {report:#?}");
+        // The message must name the reference that could not be followed: a pointer says where the
+        // `$ref` sits, not what it asked for, and `Missing` is the only thing wrong here.
+        assert!(
+            e004.iter()
+                .any(|d| d.message.contains("#/components/schemas/Missing")),
+            "{entry}: the rejection must name the reference: {report:#?}"
+        );
+    }
+}
+
+/// A self-recursive schema declared in a sub-file and referencing itself by plain component name.
+///
+/// `docs/support-matrix.md` lists recursive `$ref` cycles as supported and boxes the cycle-closing
+/// reference; the root document has always done that. The sub-file spelling must reach the same
+/// place. It did not: without an in-progress reservation keyed on the resolved target, every
+/// re-entry re-resolved and re-lowered the schema afresh, so a 9-line document walked to
+/// `MAX_SCHEMA_DEPTH` and rejected with `E014` — a cap whose own text says no real description
+/// reaches it, on a `$ref` chain of length one. Neither remedy it offered applied: a recursive type
+/// cannot be flattened, and the omit route ends in `E019` (pinned in `carve.rs`).
+#[test]
+fn a_self_recursive_sub_file_schema_is_boxed_rather_than_rejected() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Node",
+        r##"
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        next: { $ref: '#/components/schemas/Node' }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: a self-reference is a cycle to box, not a chain to reject: {report:#?}"
+        );
+        assert!(
+            !has_code(report, Code::UnresolvedRef),
+            "{entry}: {report:#?}"
+        );
+    }
+    // Boxed, and boxed against the type itself — not against a second copy of it under another
+    // name, which is what an unmemoized re-entry would have produced had it terminated.
+    assert!(code.contains("Option<Box<Node>>"), "{code}");
+    assert_eq!(
+        declared_types(&code, "Node", |tail| tail.trim().is_empty()).len(),
+        1,
+        "one declared schema, one generated type: {code}"
+    );
+
+    // The identical shape written in the ROOT document is the control: it has always generated, so
+    // what this fixture pins is the file the schema sits in, not the shape.
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        next: { $ref: '#/components/schemas/Node' }
+"##;
+    let (report, root_code) = generate_with_code(root);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(root_code.contains("Option<Box<Node>>"), "{root_code}");
+}
+
+/// Mutual recursion across two sub-file components, `A -> B -> A`, both referencing by plain
+/// component name. One of the two edges is boxed, exactly as the root document's `Category`/`Item`
+/// pair is. Separate from the self-reference above because it closes the cycle through a *second*
+/// reservation rather than re-entering the one already on the stack.
+#[test]
+fn a_mutually_recursive_sub_file_pair_is_boxed_rather_than_rejected() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/A",
+        r##"
+components:
+  schemas:
+    A:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        b: { $ref: '#/components/schemas/B' }
+    B:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        a: { $ref: '#/components/schemas/A' }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: {report:#?}"
+        );
+    }
+    assert_eq!(
+        declared_types(&code, "A", |tail| tail.is_empty()).len(),
+        1,
+        "{code}"
+    );
+    assert_eq!(
+        declared_types(&code, "B", |tail| tail.is_empty()).len(),
+        1,
+        "{code}"
+    );
+    // Exactly one of the two edges carries the indirection; both would be redundant and neither
+    // would compile.
+    let boxed =
+        usize::from(code.contains("Option<Box<A>>")) + usize::from(code.contains("Option<Box<B>>"));
+    assert_eq!(boxed, 1, "exactly one edge in the cycle is boxed: {code}");
+}
+
+/// A cycle of sub-file component *aliases* — each component is a bare `$ref` to the next, so there
+/// is no schema body to reserve a root against and the reserve/box machinery never engages. This is
+/// the shape `remote_alias_stack` exists for on the remote path; the sub-file path needs its own
+/// guard or the cycle only stops at the depth cap.
+///
+/// It is a genuine document error either way, so what this pins is *which* error: an alias cycle
+/// named as one, not `E014`, whose message would blame chain length and offer a flattening remedy
+/// for a document that has no chain to flatten.
+#[test]
+fn a_sub_file_component_alias_cycle_is_reported_as_a_cycle_not_as_excessive_depth() {
+    let (generated, checked, _) = split(
+        "./lib.yaml#/components/schemas/A",
+        r##"
+components:
+  schemas:
+    A: { $ref: '#/components/schemas/B' }
+    B: { $ref: '#/components/schemas/A' }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::UnresolvedRef && d.message.contains("cycle")),
+            "{entry}: the rejection must name the cycle: {report:#?}"
+        );
+        assert!(
+            !has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: a two-component loop is a cycle, not a deep chain: {report:#?}"
+        );
+    }
+}
+
+/// A sub-file component that is not an object. Deduplicating sub-file components lifts the lowered
+/// root into a reserved id and asserts the root was the last definition its own body inserted — an
+/// invariant a scalar (one insert, no children) and a union (a wrapper over boxed members) exercise
+/// differently from the object every other fixture here uses.
+#[test]
+fn a_non_object_sub_file_component_lowers_to_its_own_shared_type() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Wrapper",
+        r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      required: [name, either]
+      properties:
+        name: { $ref: '#/components/schemas/Name' }
+        either: { $ref: '#/components/schemas/Either' }
+    Name: { type: string }
+    Either:
+      oneOf:
+        - type: string
+        - type: integer
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::UnresolvedRef),
+            "{entry}: {report:#?}"
+        );
+    }
+    // Each reached the field as its own named type — not as an untyped value, and not dropped.
+    assert!(code.contains("pub type Name = String;"), "{code}");
+    assert!(code.contains("pub name: Name"), "{code}");
+    assert!(code.contains("pub enum Either"), "{code}");
+    assert!(code.contains("pub either: Either"), "{code}");
+}
+
+/// One sub-file component, referenced twice. This is the shape nothing could have caught: it is
+/// `Generated` and `Clean` whichever way it behaves, so a fixture that pins only rejections is
+/// blind to it.
+///
+/// Re-resolving per reference site produced one fresh type per *use* rather than per *declaration*
+/// — `Inner` and `InnerD5129632` for a single declared schema — which is not one bug but three:
+/// the two are not interchangeable in Rust, each is a separate item in the `spargen diff` semver
+/// surface, and the duplication compounds multiplicatively down a reuse graph (a 17-schema,
+/// 40-line description reached 2^16 lowerings and produced no output at all).
+#[test]
+fn a_sub_file_component_used_twice_generates_one_type() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Node",
+        r##"
+components:
+  schemas:
+    Node:
+      type: object
+      required: [first, second]
+      properties:
+        first: { $ref: '#/components/schemas/Inner' }
+        second: { $ref: '#/components/schemas/Inner' }
+    Inner:
+      type: object
+      required: [id]
+      properties: { id: { type: string } }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    // One declaration, one type. `pub struct Inner` is a prefix of every hash-suffixed duplicate
+    // (`pub struct InnerD5129632`), so this count catches them too.
+    assert_eq!(
+        declared_types(&code, "Inner", |_| true).len(),
+        1,
+        "one declared schema must generate one type: {:?}",
+        declared_types(&code, "Inner", |_| true)
+    );
+    // And both uses reached that one type, rather than one of them reaching a copy.
+    assert!(code.contains("pub first: Inner"), "{code}");
+    assert!(code.contains("pub second: Inner"), "{code}");
+}
+
+/// The control for the three fixtures above: sharing one type per sub-file component must not
+/// disarm the depth cap. A genuinely long chain — each sub-file component `$ref`ing the next, no
+/// reuse and no cycle, so nothing is ever a repeat visit — still exceeds `MAX_SCHEMA_DEPTH` and
+/// still rejects with `E014`. Without this, removing the cap entirely would leave the suite green.
+#[test]
+fn a_long_sub_file_ref_chain_still_exceeds_the_depth_cap() {
+    let depth = 200;
+    let mut lib = String::from("components:\n  schemas:\n");
+    for level in 0..depth {
+        lib.push_str(&format!(
+            "    L{level}:\n      type: object\n      required: [next]\n      properties:\n        next: {{ $ref: '#/components/schemas/L{}' }}\n",
+            level + 1
+        ));
+    }
+    lib.push_str(&format!(
+        "    L{depth}:\n      type: object\n      properties: {{ id: {{ type: string }} }}\n"
+    ));
+    let (generated, checked, _) = split("./lib.yaml#/components/schemas/L0", &lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
+/// An `allOf` member that is a direct `$ref` back to the sub-file schema currently being lowered.
+///
+/// `push_ref_member` decides a member's contribution by reading `graph.get(ty.id).kind`. For a
+/// back-edge against an in-progress reservation that kind is the placeholder `TypeKind::Any` the
+/// reservation was created with — **the id is right, the kind is not, and only the kind is read** —
+/// so the member was classified `Contribution::Scalar` and the whole property collapsed to
+/// `serde_json::Value` with **no diagnostic at all**. `CLAUDE.md` names that exact outcome: generated
+/// code "never silently degrades a typed schema to `serde_json::Value`", and every construct is
+/// "supported, warned, or rejected — no fourth, silent behavior".
+///
+/// The root document has always refused to read an in-progress member and rejected with `E013`.
+/// The remote path had the same pre-check but not the same coverage, and its id-keyed guard is this
+/// branch's own addition — see `remote::a_direct_recursive_all_of_member_in_a_vendored_document_is_rejected`,
+/// which is the fixture that guard did not have. All three spellings here must reach that same
+/// rejection: the bare sub-file name, the explicit file reference, and the root-document control.
+#[test]
+fn a_direct_recursive_all_of_member_in_a_sub_file_is_rejected_as_the_root_document_is() {
+    // One shape, two spellings of the same target. `PREFIX` is empty for the sub-file's own
+    // component name and `./lib.yaml` for the explicit file reference; both address `Tree`.
+    const TREE: &str = r##"
+components:
+  schemas:
+    Tree:
+      type: object
+      properties:
+        label: { type: string }
+        child:
+          description: the child node
+          allOf:
+            - { $ref: 'PREFIX#/components/schemas/Tree' }
+"##;
+    let body = |prefix: &str| TREE.replace("PREFIX", prefix);
+
+    for (spelling, lib) in [("bare", body("")), ("explicit", body("./lib.yaml"))] {
+        let (generated, checked, code) = split("./lib.yaml#/components/schemas/Tree", &lib);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: a direct recursive `allOf` member must be rejected, not \
+                 silently retyped: {report:#?}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable
+                        && d.message.contains("direct recursive")),
+                "{spelling}/{entry}: it is a direct recursive member, and must be named as one: \
+                 {report:#?}"
+            );
+        }
+        // The silent degradation itself, asserted directly: nothing may type this property as an
+        // untyped value, whatever the verdict.
+        assert!(
+            !code.contains("pub type Treechild = serde_json::Value;"),
+            "{spelling}: the recursive member was silently retyped: {code}"
+        );
+    }
+
+    // The root-document control: the same shape, always rejected, and the message the sub-file
+    // spellings must now match.
+    let root = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Tree' }} }}
+{}"##,
+        body("")
+    );
+    let report = generate(&root);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::AllOfIrreconcilable && d.message.contains("direct recursive")),
+        "{report:#?}"
+    );
+}
+
+/// The one-member form of the same fault, which has no sibling to disguise it: a sub-file component
+/// whose entire body is `allOf: [$ref to itself]`. The placeholder read made the component itself
+/// `serde_json::Value`, so the operation's whole response body was untyped — `clean`.
+#[test]
+fn a_sub_file_component_that_is_an_all_of_of_itself_is_rejected() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Loop",
+        r##"
+components:
+  schemas:
+    Loop:
+      allOf:
+        - { $ref: '#/components/schemas/Loop' }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
+        );
+    }
+    assert!(!code.contains("= serde_json::Value;"), "{code}");
+}
+
+/// The message a mixed recursive `allOf` carries. Reading the reservation's placeholder made the
+/// recursive member look scalar, so a composition of **two object members** was reported as one that
+/// "mixes object and scalar members" — naming a member class the document does not contain and
+/// sending the reader to remove something that is not there. The root document reports the true
+/// fault, and the sub-file spelling must say the same thing.
+#[test]
+fn a_recursive_all_of_member_beside_an_object_is_not_reported_as_a_scalar_mix() {
+    let lib = r##"
+components:
+  schemas:
+    Tree:
+      type: object
+      properties:
+        label: { type: string }
+        child:
+          allOf:
+            - { $ref: '#/components/schemas/Tree' }
+            - type: object
+              properties: { extra: { type: string } }
+"##;
+    let (generated, checked, _) = split("./lib.yaml#/components/schemas/Tree", lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let all_of: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::AllOfIrreconcilable)
+            .collect();
+        assert!(
+            all_of
+                .iter()
+                .any(|d| d.message.contains("direct recursive")),
+            "{entry}: {report:#?}"
+        );
+        assert!(
+            !all_of
+                .iter()
+                .any(|d| d.message.contains("mixes object and scalar")),
+            "{entry}: both members are objects; naming a scalar member sends the reader to remove \
+             something the document does not contain: {report:#?}"
+        );
+    }
+}
+
+/// An untyped (`{}`) sub-file component used as an `application/octet-stream` body by one operation
+/// and an `application/json` body by another.
+///
+/// `opaque_octets` retypes an untyped body to `bytes::Bytes`. When the type it is about to retype is
+/// the last definition inserted it rewrites it *in place*, which is right for a use-site type and
+/// catastrophic for a shared one — every other reference to that component silently becomes `Bytes`
+/// too. `is_component_root` exists to stop exactly that, and it consulted the root-component and
+/// remote memos but not the resolved-reference memo the preceding round added, so a sub-file
+/// component was not recognised as a named root.
+///
+/// The result was a JSON operation returning `bytes::Bytes` for a schema that is `serde_json::Value`
+/// — the wrong Rust type on a typed API, with no diagnostic. The root-document control below is the
+/// same shape and has always been correct, so what this pins is the memo the check reads, not the
+/// policy.
+#[test]
+fn an_untyped_sub_file_component_is_not_retyped_in_place_by_an_octet_use() {
+    let split_layout = |prefix: &str| {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /raw:
+    get:
+      operationId: getRaw
+      responses:
+        '200':
+          description: ok
+          content:
+            application/octet-stream: {{ schema: {{ $ref: '{prefix}#/components/schemas/Opaque' }} }}
+  /json:
+    get:
+      operationId: getJson
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '{prefix}#/components/schemas/Opaque' }} }}
+"##
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lib.yaml"),
+            "components:\n  schemas:\n    Opaque: {}\n",
+        )
+        .unwrap();
+        let out = dir.join("client.rs");
+        let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        (report, code)
+    };
+
+    let (report, code) = split_layout("./lib.yaml");
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    // The shared component keeps the type its own schema declares. The octet use site gets its own
+    // `Bytes` type; it does not get to rewrite everyone else's.
+    assert!(
+        !code.contains("pub type Opaque = bytes::Bytes;"),
+        "an octet use retyped the shared component for every other reference: {code}"
+    );
+    assert!(
+        code.contains("pub type Opaque = serde_json::Value;"),
+        "{code}"
+    );
+
+    // The root-document control: identical shape, always correct, because `is_component_root`
+    // already consulted the map a root component lives in.
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /raw:
+    get:
+      operationId: getRaw
+      responses:
+        '200':
+          description: ok
+          content:
+            application/octet-stream: { schema: { $ref: '#/components/schemas/Opaque' } }
+  /json:
+    get:
+      operationId: getJson
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Opaque' } }
+components:
+  schemas:
+    Opaque: {}
+"##;
+    let (report, code) = generate_with_code(root);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("pub type Opaque = serde_json::Value;"),
+        "{code}"
+    );
+}
+
+/// One sub-file schema carrying `xml.name`/`xml.attribute`, used as the **XML** body of one
+/// operation and the **JSON** body of another.
+///
+/// A serde `rename` applies to every format, so `gate_xml_field_renames` suppresses XML hints on any
+/// type that is not used exclusively as an XML body. That policy is right and pre-dates this branch.
+/// What changed is what it sees: before the resolved-reference memo, the two operations lowered the
+/// sub-file schema to two types — the XML one dedicated and keeping `#[serde(rename = "@Ident")]`,
+/// the JSON one suppressed — and now they share one type, which is reachable from both and is
+/// therefore suppressed for both. **The XML on the wire moved**, and the `W006` count did not change,
+/// so an upgrading consumer had nothing to compare.
+///
+/// The verdict is not being reversed here: giving an XML use its own type would reintroduce two
+/// types for one target, which is the defect this branch exists to remove. What is being fixed is
+/// that the warning must say which of its two quite different situations it is in, so a consumer can
+/// tell "your hint was inert" from "your XML body's field names just changed".
+#[test]
+fn a_schema_shared_between_an_xml_and_a_non_xml_body_says_so() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /xml:
+    get:
+      operationId: getXml
+      responses:
+        '200':
+          description: ok
+          content:
+            application/xml: { schema: { $ref: './lib.yaml#/components/schemas/Item' } }
+  /json:
+    get:
+      operationId: getJson
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Item' } }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          xml: { name: Ident, attribute: true }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap();
+
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    // One target, one type — the repair this branch exists for, unchanged.
+    assert_eq!(
+        declared_types(&code, "Item", |tail| tail.is_empty()).len(),
+        1,
+        "{code}"
+    );
+    // And the warning names the situation it is actually in.
+    let shared: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::XmlHintIgnored)
+        .collect();
+    assert!(!shared.is_empty(), "{report:#?}");
+    assert!(
+        shared.iter().any(|d| d
+            .message
+            .contains("shared between an XML body and a non-XML")),
+        "the schema IS used as an XML body, so the warning must say the XML body's own field \
+         names are affected rather than that the hint was never reachable: {report:#?}"
+    );
+
+    // The control, and the other half of the same `W006`: a schema carrying XML hints that is never
+    // used as an XML body at all. Its hint is inert, nothing on any wire moved, and it must NOT
+    // borrow the shared wording — otherwise one message covers both and pins neither.
+    let inert = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /json:
+    get:
+      operationId: getJson
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Item' } }
+components:
+  schemas:
+    Item:
+      type: object
+      required: [id]
+      properties:
+        id:
+          type: string
+          xml: { name: Ident, attribute: true }
+"##;
+    let report = generate(inert);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let inert_warnings: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::XmlHintIgnored)
+        .collect();
+    assert!(!inert_warnings.is_empty(), "{report:#?}");
+    assert!(
+        inert_warnings.iter().all(|d| !d
+            .message
+            .contains("shared between an XML body and a non-XML")),
+        "this schema is never an XML body, so nothing was shared: {report:#?}"
+    );
+    assert!(
+        inert_warnings
+            .iter()
+            .any(|d| d.message.contains("never used as an XML body")),
+        "{report:#?}"
+    );
+}
+
+/// The fan-out bound, discriminated deeper than one nesting level.
+///
+/// A two-level reuse graph distinguishes 2 types from 1, which any memo that fires *somewhere*
+/// satisfies — a memo that inserted only at depth 1 and skipped deeper insertions passed the
+/// duplicate-type fixture above while restoring 4097 types from a 14-schema description. Depth is
+/// what the bound is about, so depth is what this measures: 12 declared schemas must generate 12
+/// `L*` types and not 4095.
+///
+/// The control below is the same graph written in the root document, which has always been linear,
+/// so the assertion is anchored to a number the repository already produces rather than to one this
+/// fixture invents.
+#[test]
+fn a_deep_sub_file_reuse_graph_generates_one_type_per_declaration() {
+    const DEPTH: usize = 11;
+    let mut lib = String::from("components:\n  schemas:\n");
+    for level in 0..DEPTH {
+        lib.push_str(&format!(
+            "    L{level}:\n      type: object\n      properties:\n        a: {{ $ref: \
+             '#/components/schemas/L{next}' }}\n        b: {{ $ref: \
+             '#/components/schemas/L{next}' }}\n",
+            next = level + 1
+        ));
+    }
+    lib.push_str(&format!(
+        "    L{DEPTH}:\n      type: object\n      properties: {{ id: {{ type: string }} }}\n"
+    ));
+
+    let (generated, checked, code) = split("./lib.yaml#/components/schemas/L0", &lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    // One declaration, one type — at every level, not merely at the first. Without the bound this
+    // is 2^(DEPTH+1) - 1. Counted on `L<digits>` exactly: a bare `pub struct L` prefix also matches
+    // the embedded runtime's own `LinkPaginator`, and a bound that is off by a constant is not one.
+    // Every `L`-prefixed type whose name continues with a digit: `L1` and any disambiguated
+    // duplicate of it (`L1a1b2c3`) alike, so a suffixed copy is counted rather than filtered out.
+    // Excluding non-digit tails drops the embedded runtime's `LinkPaginator` and nothing else.
+    let declared = declared_types(&code, "L", |tail| {
+        tail.starts_with(|character: char| character.is_ascii_digit())
+    });
+    assert_eq!(
+        declared.len(),
+        DEPTH + 1,
+        "{} declared schemas generated {} types: {declared:?}",
+        DEPTH + 1,
+        declared.len()
+    );
+    // And every level is present by name, so the count cannot be met by collapsing distinct schemas.
+    for level in 0..=DEPTH {
+        assert!(
+            code.contains(&format!("pub struct L{level} ")),
+            "L{level} is missing: {code}"
+        );
+    }
+}
+
+/// The explicit file spelling of a shared sub-file component — the row the key's design exists for,
+/// and the one with no fixture of its own.
+///
+/// The identity is the resolved target's `file#pointer`, not the `$ref` spelling, precisely so that
+/// `./lib.yaml#/components/schemas/Inner` and the sub-file's own `#/components/schemas/Inner` are
+/// one target. Keying on `(FileId, name)` would close only the bare spelling and leave this one
+/// duplicating per reference site, which is the state the preceding round measured at 43 MB.
+#[test]
+fn the_explicit_file_spelling_of_one_component_also_generates_one_type() {
+    let lib = r##"
+components:
+  schemas:
+    Node:
+      type: object
+      required: [first, second]
+      properties:
+        first: { $ref: './lib.yaml#/components/schemas/Inner' }
+        second: { $ref: './lib.yaml#/components/schemas/Inner' }
+    Inner:
+      type: object
+      required: [id]
+      properties: { id: { type: string } }
+"##;
+    let (generated, checked, code) = split("./lib.yaml#/components/schemas/Node", lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_eq!(declared_types(&code, "Inner", |_| true).len(), 1, "{code}");
+    assert!(code.contains("pub first: Inner"), "{code}");
+    assert!(code.contains("pub second: Inner"), "{code}");
+
+    // Mixing the two spellings of one target in one document must still give one type: that is the
+    // whole claim the resolved-pointer key makes, and neither spelling alone can test it.
+    let mixed = lib.replace(
+        "second: { $ref: './lib.yaml#/components/schemas/Inner' }",
+        "second: { $ref: '#/components/schemas/Inner' }",
+    );
+    let (_, _, code) = split("./lib.yaml#/components/schemas/Node", &mixed);
+    assert_eq!(
+        declared_types(&code, "Inner", |_| true).len(),
+        1,
+        "the two spellings of one target must share one type: {:?}",
+        declared_types(&code, "Inner", |_| true)
+    );
+}
+
+/// The *file* half of the identity key. Two different files each declaring a schema by the same name
+/// must stay two types: the key is `file#pointer`, and dropping the file component would collapse
+/// them onto one — which is a wrongly *shared* type, the failure `ensure_resolved`'s own fallback
+/// comment calls worse than a duplicated one.
+///
+/// Nothing pinned this but an incidental corpus snapshot, which would report the collapse as a type
+/// count and not as a wrong type.
+#[test]
+fn two_files_declaring_the_same_component_name_stay_two_types() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /a:
+    get:
+      operationId: getA
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './a.yaml#/components/schemas/Shape' } }
+  /b:
+    get:
+      operationId: getB
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './b.yaml#/components/schemas/Shape' } }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("a.yaml"),
+        "components:\n  schemas:\n    Shape:\n      type: object\n      required: [alpha]\n      \
+         properties: { alpha: { type: string } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.yaml"),
+        "components:\n  schemas:\n    Shape:\n      type: object\n      required: [beta]\n      \
+         properties: { beta: { type: integer } }\n",
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let code = std::fs::read_to_string(&out).unwrap();
+
+    // Two declarations in two files: two types, and each keeps its own field. A collapse would take
+    // one of these fields with it.
+    let shapes = declared_types(&code, "Shape", |_| true);
+    assert_eq!(
+        shapes.len(),
+        2,
+        "two files declare `Shape`; they are different schemas and must stay two types: {shapes:?}"
+    );
+    // Each kept its own field. A collapse onto one key would have taken one of these with it, which
+    // is the wrongly-*shared* type `ensure_resolved`'s fallback comment calls worse than a
+    // duplicated one.
+    assert!(code.contains("pub alpha:"), "{code}");
+    assert!(code.contains("pub beta:"), "{code}");
+
+    // *Which* struct owns which field, not merely that both exist somewhere. Counting types and
+    // checking for both fields passes under either assignment of the two names, so on its own it
+    // says nothing about what `types::Shape` denotes — and what `types::Shape` denotes is a public
+    // API fact a consumer writes into their own code.
+    //
+    // This pins one ordering. It does **not** pin that the assignment survives reordering the
+    // document: `Scope::alloc` hands the un-suffixed name to whichever schema is allocated first,
+    // before it reads provenance at all, so swapping these two `paths` entries swaps which schema
+    // is called `Shape`. That is disclosed rather than repaired — see this pull request's
+    // `## Unresolved review notes`.
+    assert_eq!(
+        field_owner(&code, "pub alpha:").as_deref(),
+        Some("Shape"),
+        "the first-allocated schema owns the un-suffixed name: {code}"
+    );
+    assert_eq!(
+        field_owner(&code, "pub beta:").as_deref(),
+        Some("Shape93360b5f"),
+        "and the second carries the pointer-seeded disambiguator: {code}"
+    );
+}
+
+/// The nullability half of the memo entry. A shared sub-file component whose own schema admits
+/// `null` must reach every use site as `Option<T>`; the memo stores nullability beside the id
+/// precisely so a cache hit and a first use agree on it.
+///
+/// Forcing it false emits `pub maybe: Maybe` where `Option<Maybe>` is correct — a field that rejects
+/// a payload the schema declares as valid — and nothing else in the suite is red.
+#[test]
+fn a_nullable_sub_file_component_reaches_every_use_as_an_option() {
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Holder",
+        r##"
+components:
+  schemas:
+    Holder:
+      type: object
+      required: [first, second]
+      properties:
+        first: { $ref: '#/components/schemas/Maybe' }
+        second: { $ref: '#/components/schemas/Maybe' }
+    Maybe:
+      type: [string, 'null']
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    // `required` on both, so the `Option` can only come from the component's own nullability — and
+    // it must come through on the second use (a memo hit) exactly as on the first.
+    assert!(
+        code.contains("pub first: Option<Maybe>"),
+        "the first use must carry the component's nullability: {code}"
+    );
+    assert!(
+        code.contains("pub second: Option<Maybe>"),
+        "and so must the memo hit: {code}"
+    );
+}
+
+/// A recursive schema whose back-edge `$ref` carries **shape siblings**.
+///
+/// In JSON Schema 2020-12 `$ref` is an applicator, not a replacement, so the reference and its
+/// siblings intersect — `lower_schema_inner` says exactly that four lines above the site. When the
+/// reference is a cycle-closing back-edge, the `Ty` it returns points at a *reservation* whose body
+/// has not been lowered yet. Intersecting against it read the reservation's placeholder kind, and an
+/// intersection with an untyped value is the sibling alone, so **the `$ref` applicator was silently
+/// discarded**: `Node`'s own `label` and `child` vanish from the child's type, and the matching
+/// subtree of a conforming payload deserialises into nothing.
+///
+/// The fields are not merely absent from the Rust type — there is no diagnostic, which is the
+/// standing invariant verbatim. `is_in_progress_root`'s own documentation states the rule this site
+/// broke: the only safe thing to do with a reservation is refuse to read it.
+///
+/// All three spellings are pinned because all three reach it. The root-document form is **not** a
+/// control here: it reproduces byte-identically on `2aa5ada`, so this is a pre-existing defect that
+/// the resolved-reference memo widened the reach of rather than one the memo introduced.
+#[test]
+fn a_recursive_ref_with_shape_siblings_is_rejected_rather_than_silently_dropped() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        child:
+          $ref: 'PREFIX#/components/schemas/Node'
+          type: object
+          properties:
+            extra: { type: string }
+"##;
+
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        let (generated, checked, code) = split(
+            "./lib.yaml#/components/schemas/Node",
+            &LIB.replace("PREFIX", prefix),
+        );
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: the `$ref` applicator cannot be intersected against a schema \
+                 whose fields are not yet known, and dropping it silently is the degradation the \
+                 taxonomy forbids: {report:#?}"
+            );
+            assert!(
+                has_code(report, Code::AllOfIrreconcilable),
+                "{spelling}/{entry}: {report:#?}"
+            );
+            // The code being right is not the same as the message being true. Both spellings name
+            // one document, so both must name the same cause — decision 23's rule applied to the
+            // wording rather than only to the verdict. The explicit spelling reported the generic
+            // empty-intersection message, which is FALSE here: the intersection is inhabited and
+            // representable, and the reader who goes looking for a contradiction will not find one.
+            // Asserting only the code cannot see that; asserting per spelling can.
+            let messages = messages_for(report, Code::AllOfIrreconcilable);
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| m.contains("closes a reference cycle")),
+                "{spelling}/{entry}: the rejection must name the recursion as the cause, not the \
+                 generic empty-intersection wording: {messages:?}"
+            );
+        }
+        // The observable damage, asserted directly rather than through the verdict: whatever is
+        // emitted, no type may carry the sibling's field while having silently lost the
+        // reference's.
+        assert!(
+            !code.contains("pub extra:") || code.contains("pub label:"),
+            "{spelling}: the sibling survived and the referenced component's fields did not: \
+             {code}"
+        );
+    }
+
+    // The same shape in the root document. It is pinned for the same reason and not as a control:
+    // it reproduces identically on the merge base, so the fault is older than this branch.
+    let root = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Node' }} }}
+{}"##,
+        LIB.replace("PREFIX", "")
+    );
+    let report = generate(&root);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+}
+
+/// A `oneOf` one of whose members is the union itself.
+///
+/// The member is a cycle-closing back-edge, so its `Ty` points at the union's own reservation. The
+/// emitted `Deserialize` therefore opens with `serde_json::from_value::<Box<Loop>>(value.clone())`
+/// — **the same impl, on the same value, with no base case** — so every decode recurses until the
+/// stack is exhausted. It compiles, and the `e2e` gate compiles generated output rather than
+/// decoding through every type, so nothing could have caught it.
+///
+/// A variant that *is* the whole union constrains nothing and cannot be decoded, so the right answer
+/// is a rejection. Both spellings and the root document are pinned; as with the sibling case above,
+/// the root form reproduces byte-identically on `2aa5ada`.
+#[test]
+fn a_union_variant_that_is_the_union_itself_is_rejected() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Loop:
+      oneOf:
+        - { $ref: 'PREFIX#/components/schemas/Loop' }
+        - { type: string }
+"##;
+
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        let (generated, checked, code) = split(
+            "./lib.yaml#/components/schemas/Loop",
+            &LIB.replace("PREFIX", prefix),
+        );
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: a variant that is the whole union decodes by re-entering its \
+                 own `Deserialize` on the same value: {report:#?}"
+            );
+            assert!(
+                has_code(report, Code::NonDisjointUnion),
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+        // The runtime shape itself: nothing may emit a `Deserialize` arm that calls back into the
+        // same type on the same value. That is what makes this a hang rather than a wrong type.
+        assert!(
+            !code.contains("from_value::<Box<Loop>>"),
+            "{spelling}: the emitted decoder re-enters itself with no base case: {code}"
+        );
+    }
+
+    let root = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Loop' }} }}
+{}"##,
+        LIB.replace("PREFIX", "")
+    );
+    let report = generate(&root);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+}
+
+/// A cycle-closing `$ref` carrying shape siblings, in the explicit `file#pointer` spelling, where
+/// **both sides accept `null`**.
+///
+/// This is the conjunction `a_recursive_ref_with_shape_siblings_is_rejected_rather_than_silently_dropped`
+/// already pins, with one thing added: the target and the sibling are both nullable. That addition
+/// turns a wrong rejection into wrong *code*. `back_edge` consulted `remote_in_progress` for every
+/// spelling that is not `#/components/schemas/…`, and a sub-file target's reservation lives in
+/// `resolved_in_progress`, so the explicit spelling was never recognised as a back-edge. The
+/// `TypeKind::Reserved` placeholder then reached `intersect_types`, `intersect_non_null` has no
+/// `Reserved` arm and returned `None`, and the null-collapse rescue swallowed that `None` into
+/// `TypeKind::Null` because both operands accept null — emitting `pub type Treekid = ();` with no
+/// diagnostic at all.
+///
+/// `()` is not a degraded type, it is the *wrong* type: the description accepts
+/// `{"kid": {"x": "a"}}` and the generated client rejects it at runtime with
+/// `invalid type: map, expected unit`. Only `null` decodes. Output is byte-stable across two
+/// generations, so `determinism.rs` cannot see it, and `check` reports clean.
+///
+/// Both spellings are pinned together because the verdict is a property of the DOCUMENT — decision
+/// 23's rule — and these two documents are the same document.
+#[test]
+fn a_nullable_cycle_closing_ref_with_nullable_siblings_is_rejected_in_every_spelling() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Tree:
+      type: [object, 'null']
+      properties:
+        kid:
+          $ref: 'PREFIX#/components/schemas/Tree'
+          type: [object, 'null']
+          properties:
+            extra: { type: string }
+"##;
+
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        let (generated, checked, code) = split(
+            "./lib.yaml#/components/schemas/Tree",
+            &LIB.replace("PREFIX", prefix),
+        );
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: a reservation cannot be intersected against, and collapsing \
+                 the failed intersection to the JSON null type emits a client that decodes only \
+                 `null` for a schema that accepts objects: {report:#?}"
+            );
+            assert!(
+                has_code(report, Code::AllOfIrreconcilable),
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+        // The observable damage, asserted directly rather than through the verdict: `()` accepts
+        // exactly one JSON value, and this schema accepts objects.
+        assert!(
+            !code.contains("= ();"),
+            "{spelling}: the failed intersection collapsed to the exact JSON null type, so the \
+             generated client decodes only `null`: {code}"
+        );
+    }
+}
+
+/// The same conjunction again, written as a **union member** — the third spelling.
+///
+/// `member_closes_a_cycle` stripped only `#/components/schemas/` and answered `false` for anything
+/// else, so a sub-file or remote member reference was never recognised as a back-edge. The single
+/// real member then collapsed through `intersect_types` against the union's own sibling, hit the
+/// same `Reserved`/`None`/null-rescue path, and emitted `pub type Treekid = ();`.
+///
+/// Three spellings of one conjunction must give one verdict. They gave two silent generations and
+/// one rejection.
+#[test]
+fn a_nullable_cycle_closing_union_member_is_rejected_in_every_spelling() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Tree:
+      type: [object, 'null']
+      properties:
+        kid:
+          type: [object, 'null']
+          properties:
+            extra: { type: string }
+          oneOf:
+            - { $ref: 'PREFIX#/components/schemas/Tree' }
+"##;
+
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        let (generated, checked, code) = split(
+            "./lib.yaml#/components/schemas/Tree",
+            &LIB.replace("PREFIX", prefix),
+        );
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: a union member that closes a reference cycle cannot be \
+                 intersected against the union's own siblings: {report:#?}"
+            );
+            // The cause, not only the verdict: with the two union guards neutralised, the explicit
+            // spelling still rejects — as `E007` with a "sole non-null member" message, the wrong
+            // cause — so an outcome assertion alone cannot tell the guards are present. Both
+            // spellings must name the cycle, under the code the `$ref`-sibling spelling uses.
+            assert!(
+                has_code(report, Code::AllOfIrreconcilable),
+                "{spelling}/{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::NonDisjointUnion),
+                "{spelling}/{entry}: the cycle was reported as an empty union: {report:#?}"
+            );
+            assert!(
+                messages_for(report, Code::AllOfIrreconcilable)
+                    .iter()
+                    .any(|message| message.contains("closes a reference cycle")),
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+        assert!(
+            !code.contains("= ();"),
+            "{spelling}: the failed member intersection collapsed to the exact JSON null type: \
+             {code}"
+        );
+    }
+}
+
+/// A cycle-closing `$ref` with shape siblings whose target is a local schema that is **not a
+/// component** — `./lib.yaml#/bag/Tree`, in a sub-file with no `components` key at all.
+///
+/// The guard's local message used to say the reference closed a cycle back to "the component that
+/// encloses it", naming a construct this document does not contain.
+#[test]
+fn a_cycle_closing_ref_to_a_non_component_schema_names_no_component() {
+    const LIB: &str = r##"
+bag:
+  Tree:
+    type: object
+    properties:
+      kid:
+        $ref: './lib.yaml#/bag/Tree'
+        type: object
+        properties:
+          extra: { type: string }
+"##;
+    let (generated, checked, _) = split("./lib.yaml#/bag/Tree", LIB);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let messages = messages_for(report, Code::AllOfIrreconcilable);
+        assert!(
+            messages.iter().any(|message| {
+                message.contains("closes a reference cycle back to the schema that encloses it")
+                    && !message.contains("component")
+                    && !message.contains("remote")
+            }),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
+/// A reservation intersected with **itself** is not unanswerable: `X ∩ X = X`, which is how every
+/// ordinary recursive schema composes when two `allOf` members repeat one construct.
+///
+/// `intersect_types` refuses to read a `TypeKind::Reserved` operand, and that refusal ran before
+/// `intersect_non_null`'s identity short-circuit, so two members naming the same recursive target
+/// failed to intersect. Most callers turn that `None` into a false `E013` ("conflicting types" for
+/// two operands that are the same type); the array-item and optional-property callers turn it into
+/// an uninhabited type, which is worse — a `kids` array whose item type is an empty enum decodes
+/// only `[]`, the one array the `minItems: 1` member forbids, with no diagnostic at all.
+#[test]
+fn a_recursive_target_repeated_across_all_of_members_intersects_as_itself() {
+    let spec = |members: &str| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /t:\n    \
+             get:\n      \
+             operationId: getT\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json:\n              \
+             schema: {{ $ref: '#/components/schemas/Tree' }}\n\
+             components:\n  \
+             schemas:\n    \
+             Tree:\n      \
+             allOf:\n{members}"
+        )
+    };
+    let array_items = spec(
+        "        - { type: object, properties: { kids: { type: array, items: { $ref: '#/components/schemas/Tree' } } } }\n\
+         \x20       - { type: object, properties: { kids: { type: array, minItems: 1, items: { $ref: '#/components/schemas/Tree' } } } }\n",
+    );
+    let property = spec(
+        "        - { type: object, properties: { kid: { $ref: '#/components/schemas/Tree' } } }\n\
+         \x20       - { type: object, properties: { kid: { $ref: '#/components/schemas/Tree' } } }\n",
+    );
+    let additional = spec(
+        "        - { type: object, additionalProperties: { $ref: '#/components/schemas/Tree' } }\n\
+         \x20       - { type: object, additionalProperties: { $ref: '#/components/schemas/Tree' } }\n",
+    );
+    let prefix_items = spec(
+        "        - { type: array, prefixItems: [{ $ref: '#/components/schemas/Tree' }], items: false }\n\
+         \x20       - { type: array, prefixItems: [{ $ref: '#/components/schemas/Tree' }], items: false }\n",
+    );
+
+    for (label, document) in [
+        ("array items", &array_items),
+        ("property", &property),
+        ("additionalProperties", &additional),
+        ("prefixItems", &prefix_items),
+    ] {
+        for (entry, report) in [("generate", generate(document)), ("check", check(document))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: two members naming the same recursive target were reported as \
+                 conflicting: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{label}/{entry}: {report:#?}"
+            );
+        }
+    }
+
+    // The silent half, asserted on what was emitted: the item type is `Tree`, not an empty enum.
+    let (_, code) = generate_with_code(&array_items);
+    let types = types_module(&code);
+    assert!(
+        types.contains("= Vec<Tree>;"),
+        "the repeated recursive item type must stay `Tree`: {types}"
+    );
+    assert!(
+        !types.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with("pub enum ") && line.ends_with("{}")
+        }),
+        "an uninhabited item type was emitted for an item both members type as `Tree`: {types}"
+    );
+    let (_, code) = generate_with_code(&property);
+    assert_eq!(
+        field_type(&types_module(&code), "pub kid:").as_deref(),
+        Some("Option<Box<Tree>>"),
+        "{code}"
+    );
+}
+
+/// Decision 23's invariant, applied to the sub-file spelling.
+///
+/// Every spelling now asks the DOCUMENT whether a `$ref` closes a cycle through a schema enclosing
+/// it, so the verdict is order-independent by construction. With siblings on both edges it was
+/// order-independent even when the sub-file spelling still asked `is_in_progress_root`: the
+/// reservation is made *before* the body is lowered, so whichever of a mutually recursive pair is
+/// lowered first, the re-entrant edge meets an open reservation. This fixture writes the same two
+/// schemas in both orders and requires one verdict; the one-edge fixture below is the case that
+/// lowering-state question got wrong.
+#[test]
+fn a_sub_file_cycle_verdict_does_not_depend_on_the_order_the_schemas_are_declared() {
+    const A: &str = r##"    A:
+      type: [object, 'null']
+      properties:
+        b:
+          $ref: './lib.yaml#/components/schemas/B'
+          type: [object, 'null']
+          properties:
+            extra: { type: string }
+"##;
+    // Siblings on BOTH back-edges, so the conjunction meets an open reservation whichever schema is
+    // entered first. Siblings on one edge only are the harder case — whether the conjunction meets
+    // one then depends on the entry point — and are pinned separately below.
+    const B: &str = r##"    B:
+      type: [object, 'null']
+      properties:
+        a:
+          $ref: './lib.yaml#/components/schemas/A'
+          type: [object, 'null']
+          properties:
+            extra: { type: string }
+"##;
+
+    let mut verdicts = Vec::new();
+    for (order, lib) in [
+        ("A first", format!("components:\n  schemas:\n{A}{B}")),
+        ("B first", format!("components:\n  schemas:\n{B}{A}")),
+    ] {
+        let (generated, checked, code) = split("./lib.yaml#/components/schemas/A", &lib);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{order}/{entry}: {report:#?}"
+            );
+            assert!(
+                has_code(report, Code::AllOfIrreconcilable),
+                "{order}/{entry}: {report:#?}"
+            );
+        }
+        assert!(
+            !code.contains("= ();"),
+            "{order}: the failed intersection collapsed to the exact JSON null type: {code}"
+        );
+        // The outcome alone is held up by `intersect_types`' fail-closed arm, which rejects with
+        // the generic empty-intersection wording whatever the back-edge predicate answered. Naming
+        // the cause is what requires the predicate itself to be right, so it is asserted here too.
+        let messages = messages_for(&generated, Code::AllOfIrreconcilable);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("closes a reference cycle")),
+            "{order}: the rejection must name the recursion as the cause: {messages:?}"
+        );
+        verdicts.push((
+            order,
+            messages_for(&generated, Code::AllOfIrreconcilable)
+                .iter()
+                .map(|m| (*m).to_owned())
+                .collect::<Vec<_>>(),
+        ));
+    }
+    // Not merely the same outcome — the same diagnosis. Reordering a YAML map is a no-op in
+    // OpenAPI, so it may not change what the tool says about the document either.
+    assert_eq!(
+        verdicts[0].1, verdicts[1].1,
+        "reordering two sub-file schemas changed the diagnosis: {verdicts:?}"
+    );
+}
+
+/// A two-schema cycle with shape siblings on ONE edge only, entered from each end.
+///
+/// `A.b` carries siblings beside its `$ref` to `B`; `B.a` is a plain `$ref` back to `A`. Entered at
+/// `B`, lowering reaches `A.b` while `B` is still open, so the conjunction meets a placeholder.
+/// Entered at `A`, `B` is lowered in full before the conjunction is reached. A back-edge test that
+/// asks which reservations are open therefore answered differently for the two entry points of one
+/// unchanged `lib.yaml` — `E013` from `B`, a clean generation from `A` — while the root-component
+/// spelling of the same schemas, asked of the document, rejected from both. The verdict is a
+/// property of the document, so all three spellings, from both ends, must give the same one.
+///
+/// The edge is written twice: as a `$ref` beside shape siblings, and as the sole `oneOf` member of a
+/// schema carrying them. The union spelling had the same fault in the explicit `./lib.yaml#/…`
+/// form, whose document-half guard was asked only of `#/components/schemas/…`.
+#[test]
+fn a_one_edge_cycle_rejects_whichever_end_lowering_enters() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    A:
+      type: object
+      properties:
+        b:
+EDGE
+    B:
+      type: object
+      properties:
+        a: { $ref: 'PREFIX#/components/schemas/A' }
+"##;
+    const SIBLING: &str = "          $ref: 'PREFIX#/components/schemas/B'
+          type: object
+          properties:
+            extra: { type: string }";
+    const UNION: &str = "          type: object
+          properties:
+            extra: { type: string }
+          oneOf:
+            - $ref: 'PREFIX#/components/schemas/B'";
+
+    for (shape, edge) in [("sibling", SIBLING), ("union", UNION)] {
+        let lib = LIB.replace("EDGE", edge);
+        let mut diagnoses = Vec::new();
+        for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+            for entry in ["A", "B"] {
+                let (generated, checked, _) = split(
+                    &format!("./lib.yaml#/components/schemas/{entry}"),
+                    &lib.replace("PREFIX", prefix),
+                );
+                for (run, report) in [("generate", &generated), ("check", &checked)] {
+                    assert_eq!(
+                        report.outcome(),
+                        Outcome::Rejected,
+                        "{shape}/{spelling}/{entry}/{run}: {report:#?}"
+                    );
+                    let messages = messages_for(report, Code::AllOfIrreconcilable);
+                    assert!(
+                        messages
+                            .iter()
+                            .any(|m| m.contains("closes a reference cycle")),
+                        "{shape}/{spelling}/{entry}/{run}: the rejection must name the \
+                         recursion: {messages:?}"
+                    );
+                }
+                diagnoses.push((
+                    format!("{spelling}/{entry}"),
+                    messages_for(&generated, Code::AllOfIrreconcilable)
+                        .iter()
+                        .map(|m| (*m).to_owned())
+                        .collect::<Vec<_>>(),
+                ));
+            }
+        }
+        assert!(
+            diagnoses.iter().all(|(_, d)| *d == diagnoses[0].1),
+            "{shape}: the entry point or the spelling changed the diagnosis: {diagnoses:?}"
+        );
+        one_edge_root_control(shape, &lib);
+    }
+}
+
+/// The root-component spelling of [`a_one_edge_cycle_rejects_whichever_end_lowering_enters`]'s two
+/// schemas, entered from each end: the control the sub-file spellings are held to.
+fn one_edge_root_control(shape: &str, lib: &str) {
+    for entry in ["A", "B"] {
+        let root = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/{entry}' }} }}
+{}"##,
+            lib.replace("PREFIX", "")
+        );
+        let report = generate(&root);
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{shape}/root/{entry}: {report:#?}"
+        );
+        assert!(
+            messages_for(&report, Code::AllOfIrreconcilable)
+                .iter()
+                .any(|m| m.contains("closes a reference cycle")),
+            "{shape}/root/{entry}: {report:#?}"
+        );
+    }
+}
+
+/// A sub-file component that shares its NAME with a root component in a cycle is not in that cycle.
+///
+/// The root declares `Item` and `Other`, each referring to the other. `lib.yaml` declares its own
+/// `Item`, whose property carries siblings beside a `$ref` to the root's `Other`. Nothing reaches
+/// `lib.yaml`'s `Item` from `Other`, so there is no cycle through it and the intersection is an
+/// ordinary one. The back-edge test used to take the enclosing name from the sub-file pointer and
+/// look it up in the ROOT document's map, where `Other` does reach an `Item` — the root's — and so
+/// it rejected with `E013`. Renaming the sub-file component is the control: the document means the
+/// same thing under either name and must get the same verdict.
+#[test]
+fn a_sub_file_component_named_like_a_root_cycle_member_is_not_a_back_edge() {
+    for name in ["Item", "Leaf"] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: './lib.yaml#/components/schemas/{name}' }} }}
+  /r:
+    get:
+      operationId: getR
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Item' }} }}
+components:
+  schemas:
+    Item:
+      type: object
+      properties:
+        other: {{ $ref: '#/components/schemas/Other' }}
+    Other:
+      type: object
+      properties:
+        item: {{ $ref: '#/components/schemas/Item' }}
+"##
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("lib.yaml"),
+            format!(
+                r##"
+components:
+  schemas:
+    {name}:
+      type: object
+      properties:
+        o:
+          $ref: '#/components/schemas/Other'
+          type: object
+          properties:
+            extra: {{ type: string }}
+"##
+            ),
+        )
+        .unwrap();
+        let out = dir.join("client.rs");
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        for (run, report) in [("generate", &generated), ("check", &checked)] {
+            assert!(
+                !has_code(report, Code::AllOfIrreconcilable),
+                "{name}/{run}: no cycle passes through the sub-file component: {report:#?}"
+            );
+            assert!(report.outcome().is_success(), "{name}/{run}: {report:#?}");
+        }
+        assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+        let code = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            code.contains("pub extra:"),
+            "{name}: the sibling's property must survive the intersection: {code}"
+        );
+    }
+}
+
+/// A sub-file schema that reaches a **root document** component twice, by explicit file reference.
+///
+/// `ensure_resolved` routes a resolved target that lands inside the root document's own component
+/// map back through `ensure_component`, so `components` stays that target's single identity. Round 4
+/// filed this branch as "executes but constrains nothing". That reading was wrong: disabling the
+/// branch leaves every suite green and gives **`["RootOne", "RootOne55e60dbe"]`** — two public types
+/// for one declared component, which is the precise defect this change exists to remove, in a shape
+/// it wrote a dedicated branch for.
+///
+/// The reason a second memo is not harmless is that it is a second *identity*: `resolved_components`
+/// would key the same schema by `file#pointer` while `components` keys it by name, and neither would
+/// see the other's entry.
+#[test]
+fn a_root_component_reached_by_file_reference_keeps_the_root_map_as_its_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Holder' } }
+components:
+  schemas:
+    RootOne:
+      type: object
+      required: [id]
+      properties: { id: { type: string } }
+"##,
+    )
+    .unwrap();
+    // Both properties address the root document's `RootOne` from inside the sub-file, spelled as a
+    // file reference — the only spelling that reaches the routing branch.
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Holder:
+      type: object
+      required: [first, second]
+      properties:
+        first: { $ref: './openapi.yaml#/components/schemas/RootOne' }
+        second: { $ref: './openapi.yaml#/components/schemas/RootOne' }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let code = std::fs::read_to_string(&out).unwrap();
+
+    let roots = declared_types(&code, "RootOne", |_| true);
+    assert_eq!(
+        roots.len(),
+        1,
+        "one declared component, one generated type — a resolved reference that lands on a root \
+         component must not take a second identity beside the root map: {roots:?}"
+    );
+    // Both uses reached it, so the count is not met by losing one of them.
+    assert!(code.contains("pub first: RootOne"), "{code}");
+    assert!(code.contains("pub second: RootOne"), "{code}");
+}
+
+/// A **root-only** document — no sub-files, no remote refs — whose `allOf` member reaches the
+/// component being lowered through a component **alias**.
+///
+/// This is the shape the breaking-change footer's scope statement missed. `gather_member`'s
+/// pre-existing guard keys on the member's own *name*: `Alias` is not in `in_progress`, so it never
+/// fired. `ensure_component("Alias")` then chains to `Node`, which **is** in progress, and hands
+/// back a back-edge against `Node`'s reservation, whose placeholder `push_ref_member` read as a
+/// scalar.
+///
+/// So this document is `clean` on `2aa5ada` and rejected here, verified by building the merge base
+/// and running it. The rejection is right — base emitted `serde_json::Value` for a typed schema with
+/// no diagnostic — but "regenerating from an unchanged description is otherwise unaffected" was not,
+/// and this is a description that uses none of the multi-file machinery the change is about.
+#[test]
+fn a_recursive_all_of_member_reached_through_a_root_alias_is_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        child:
+          allOf:
+            - { $ref: '#/components/schemas/Alias' }
+    Alias:
+      $ref: '#/components/schemas/Node'
+"##;
+    let (generated, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::AllOfIrreconcilable
+                    && d.message.contains("direct recursive")),
+            "{entry}: {report:#?}"
+        );
+        // Not an alias *cycle*: `Alias` is entered once. Reporting one would blame the alias for a
+        // loop it does not form and send the reader to break a chain of length one.
+        assert!(
+            !report
+                .diagnostics()
+                .iter()
+                .any(|d| d.message.contains("alias cycle")
+                    || d.message.contains("forms a reference cycle")),
+            "{entry}: {report:#?}"
+        );
+    }
+    assert!(!code.contains("= serde_json::Value;"), "{code}");
+}
+
+/// The archetypal recursive schema: a tree whose `child` is a `oneOf` of itself and something else.
+///
+/// This is the most common recursive construct in real descriptions, `docs/support-matrix.md` lists
+/// recursive `$ref` cycles as supported, and it generates on `2aa5ada`. Round 6's union guard
+/// rejected it, because it asked `is_in_progress_root(ty.id)` — "is the member **any** open
+/// reservation" — when the question it needed was "is the member **this union's own** reservation".
+/// Those coincide only when the union *is* the component's whole body, which is D8's shape and not
+/// this one: here the union is `Nodechild` and the member is `Node`, a different type, so the
+/// generated decoder calls into another impl and terminates on any finite document.
+///
+/// The rejection's message was also false about the document — it said the member was the union
+/// itself when the two are different types — and the fault had two properties worth stating: it
+/// depended on the order `components.schemas` keys were written in, because root components are
+/// pre-lowered in key order, and a description that generated in one file stopped generating when
+/// split, because sub-file components are never pre-lowered.
+///
+/// Every row below was measured against a build of the merge base. The D8 rows are the ones that
+/// must still reject; everything else must still generate.
+#[test]
+fn a_union_member_that_is_a_different_recursive_type_still_generates() {
+    // The union sits in a property, so it is not the component's own reservation.
+    let archetype = |applicator: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Node' }} }}
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: {{ type: string }}
+        child:
+          {applicator}:
+            - {{ $ref: '#/components/schemas/Node' }}
+            - {{ type: string }}
+"##
+        )
+    };
+
+    for applicator in ["oneOf", "anyOf"] {
+        let spec = archetype(applicator);
+        let (generated, code) = generate_with_code(&spec);
+        let checked = check(&spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{applicator}/{entry}: the member is `Node` and the union is `Nodechild` — two \
+                 different types, so the decoder terminates: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::NonDisjointUnion),
+                "{applicator}/{entry}: {report:#?}"
+            );
+        }
+        // The recursion is closed by boxing, as the matrix promises, rather than refused.
+        assert!(code.contains("Box<Node>"), "{applicator}: {code}");
+    }
+
+    // Nested one level deeper — the union inside an array's items — and mutual recursion in both
+    // key orders, because the guard's fault was sensitive to pre-lowering order.
+    let nested = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        kids:
+          type: array
+          items:
+            oneOf:
+              - { $ref: '#/components/schemas/Node' }
+              - { type: string }
+"##;
+    assert_ne!(generate(nested).outcome(), Outcome::Rejected, "{nested}");
+
+    let mutual = |first: &str, second: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/{first}' }} }}
+components:
+  schemas:
+    {first}:
+      type: object
+      required: [one]
+      properties:
+        one: {{ type: string }}
+        via: {{ oneOf: [{{ $ref: '#/components/schemas/{second}' }}, {{ type: string }}] }}
+    {second}:
+      type: object
+      required: [two]
+      properties:
+        two: {{ type: string }}
+        via: {{ oneOf: [{{ $ref: '#/components/schemas/{first}' }}, {{ type: string }}] }}
+"##
+        )
+    };
+    // Both key orders: the guard's fault made acceptance depend on which component was pre-lowered
+    // first, so one order passed and the other did not.
+    for (first, second) in [("A", "B"), ("B", "A")] {
+        let spec = mutual(first, second);
+        assert_ne!(
+            generate(&spec).outcome(),
+            Outcome::Rejected,
+            "{first} before {second}: {spec}"
+        );
+    }
+
+    // And the same archetype split across files, which never pre-lowers its components at all.
+    let (generated, checked, _) = split(
+        "./lib.yaml#/components/schemas/Node",
+        r##"
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        child:
+          oneOf:
+            - { $ref: '#/components/schemas/Node' }
+            - { type: string }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "split/{entry}: {report:#?}"
+        );
+    }
+}
+
+/// The canonical OpenAPI 3.1 spelling of a nullable recursive reference: `oneOf`/`anyOf` over the
+/// enclosing component and `{type: "null"}`.
+///
+/// 3.1 removed `nullable: true`, so this *is* how a description says "optionally another `Node`".
+/// `lower_union`'s single-real-member collapse re-emits the member's kind as this position's own
+/// def by cloning `graph.get(inner.id).kind`. For a cycle-closing `$ref` that kind is
+/// `TypeKind::Reserved`, so the clone inserted a **second** reservation that nothing would ever
+/// `fill`; `Api::check_invariants` then rejected the whole document with `E011`, whose shipped
+/// explain text asserts the input is malformed JSON — which this document is not.
+///
+/// The guard written for exactly this class sits inside the multi-member loop, which the
+/// `real_members.len() == 1` early return jumps straight over.
+///
+/// Restoring the merge base's behaviour is **not** the fix. At `2aa5ada` a reservation's kind was
+/// `TypeKind::Any`, so the clone emitted `Option<serde_json::Value>` — the silent degradation of a
+/// typed schema the standing invariants forbid outright. The answer `docs/support-matrix.md` and
+/// the direct `{$ref: Node}` spelling both already promise is `Option<Box<Node>>`, so that is what
+/// is asserted here: "did not reject" would pass on either wrong answer.
+#[test]
+fn a_nullable_recursive_ref_collapses_to_an_optional_box() {
+    let archetype = |applicator: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Node' }} }}
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: {{ type: string }}
+        parent:
+          {applicator}:
+            - {{ $ref: '#/components/schemas/Node' }}
+            - {{ type: "null" }}
+"##
+        )
+    };
+
+    for applicator in ["oneOf", "anyOf"] {
+        let spec = archetype(applicator);
+        let (generated, code) = generate_with_code(&spec);
+        let checked = check(&spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{applicator}/{entry}: a nullable recursive `$ref` is the matrix's own example of a \
+                 supported construct: {report:#?}"
+            );
+            // The internal-invariant code must not be how a user learns about this document.
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{applicator}/{entry}: {report:#?}"
+            );
+        }
+        // Boxed, because the cycle needs a finite size; `Option`, because the `null` member is what
+        // the union collapsed away. Both halves are the matrix's promise.
+        assert!(code.contains("Option<Box<Node>>"), "{applicator}: {code}");
+        // And never the merge base's answer.
+        assert!(!code.contains("serde_json::Value>"), "{applicator}: {code}");
+    }
+}
+
+/// The same idiom under **mutual** recursion, which is the commoner spelling in real descriptions:
+/// `A.b` references `B`, and `B` is nothing but "an `A`, or null".
+///
+/// Here the union *is* `B`'s whole body, so the collapse has no def of its own to insert as the
+/// component root — cloning the reservation's kind inserts a second reservation (`E011`), and
+/// returning the reservation itself breaks the last-insert invariant `ensure_component` asserts.
+/// `B` is a nullable **alias**, and naming it as one is what lets the document generate.
+///
+/// Both key orders are driven, because root components are pre-lowered in map order and a
+/// re-ordered YAML map is a no-op in OpenAPI: only one of the two orders reaches the collapse at
+/// all, and the other already generated, so a fixture on one order proves nothing about the idiom.
+#[test]
+fn a_nullable_alias_under_mutual_recursion_generates() {
+    let mutual = |first: &str, second: &str| {
+        let bodies = |name: &str| {
+            if name == "A" {
+                "      type: object\n      required: [b]\n      properties:\n        b: { $ref: '#/components/schemas/B' }\n"
+            } else {
+                "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        - { type: \"null\" }\n"
+            }
+        };
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /u:\n    \
+             get:\n      \
+             operationId: getU\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json: {{ schema: {{ $ref: '#/components/schemas/A' }} }}\n\
+             components:\n  \
+             schemas:\n    \
+             {first}:\n{}    {second}:\n{}",
+            bodies(first),
+            bodies(second)
+        )
+    };
+
+    for (first, second) in [("A", "B"), ("B", "A")] {
+        let spec = mutual(first, second);
+        let (generated, code) = generate_with_code(&spec);
+        let checked = check(&spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{first} before {second}/{entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{first} before {second}/{entry}: {report:#?}"
+            );
+        }
+        // The recursion is closed by boxing whichever way round the map is written — read off
+        // `b`'s own declaration, not searched for in the file. `code.contains("Box<")` is true of
+        // *any* successful generation (the embedded runtime alone supplies ten occurrences:
+        // `Pin<Box<..>>` in `transport.rs`/`auth.rs`/`retry.rs`/`wasm.rs` and
+        // `source: Option<Box<dyn Error + Send + Sync>>` in `error.rs`), so the assertion that
+        // stood here pinned nothing: under the mutation that unboxes the alias back-edge it stayed
+        // green while five of its neighbours went red.
+        //
+        // The two orders emit different types because they take different paths, and this is the
+        // only fixture that drives both. Declaring the target first lowers `A` first, so `B`'s body
+        // meets an open `A`, is recognised as a nullable alias, and `b` binds `A` itself — optional
+        // because of the `"null"` member, boxed because the cycle must have a finite size.
+        //
+        // Declaring the alias first lowers `B` first, so `A` is not open when `B`'s body is read,
+        // the alias recogniser does not fire, and `b` binds `B` as an ordinary in-progress
+        // back-edge. The `Option` is then missing, and that is WRONG: `B`'s `"null"` member makes
+        // `B` nullable, so `{"b": null}` is legal against this document and will not decode. It is
+        // pinned as it is emitted rather than as it ought to be, because fixing it is issue #222 —
+        // `ensure_component` overwrites a body's computed nullability with the value
+        // `schema_is_nullable` produced at reserve time, and that function inspects `type`, `enum`
+        // and `const` only, never a union's members. It reproduces on master with a document that
+        // has no recursion in it at all, so it is not this change's to fix; when #222 lands this
+        // expectation becomes `Option<Box<B>>`. Until then this assertion is the only thing
+        // anywhere in the repository standing over what that order emits.
+        // One message per order. The two orders are pinned for opposite reasons — one is the
+        // correct type, one is the knowingly-wrong one — and a single format string over both
+        // hands a reader of the first iteration a paragraph written about the second, 3,000
+        // output lines above the `left`/`right` that would correct it.
+        let (expected, why) = if first == "A" {
+            (
+                "Option<Box<A>>",
+                "this order takes the nullable-alias path, so `b` binds `A` itself — optional \
+                 because of the `\"null\"` member, boxed because the cycle must have a finite \
+                 size. This is the correct type and is NOT issue #222: a red here is a \
+                 regression in the alias path, not a pin that needs updating",
+            )
+        } else {
+            (
+                "Box<B>",
+                "this order's expectation is the knowingly-wrong `Box<B>` that issue #222 \
+                 exists to fix, pinned as emitted rather than as it ought to be — if this went \
+                 red while fixing #222, the expectation becomes `Option<Box<B>>`",
+            )
+        };
+        assert_eq!(
+            field_type(&code, "pub b").as_deref(),
+            Some(expected),
+            "{first} before {second}: {why}; the comment above this assertion says why: {code}"
+        );
+        assert!(
+            !code.contains("serde_json::Value>"),
+            "{first} before {second}: {code}"
+        );
+    }
+}
+
+/// The `A`/`B` mutual-recursion skeleton of `a_nullable_alias_under_mutual_recursion_generates`,
+/// with `B`'s body substituted — the shape the four narrowness fixtures below vary.
+///
+/// `A` is always declared first, because that is the order that reaches `nullable_alias_back_edge`
+/// at all: lowering `A` first leaves it open when `B`'s body is read. Declared the other way round
+/// the recogniser never runs, so that order cannot observe a guard inside it and driving it would
+/// weaken these fixtures rather than widen them.
+fn alias_shaped_mutual_recursion(b_body: &str) -> String {
+    format!(
+        "openapi: 3.1.0\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\n\
+         paths:\n  \
+         /u:\n    \
+         get:\n      \
+         operationId: getU\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json: {{ schema: {{ $ref: '#/components/schemas/A' }} }}\n\
+         components:\n  \
+         schemas:\n    \
+         A:\n      \
+         type: object\n      \
+         required: [b]\n      \
+         properties:\n        \
+         b: {{ $ref: '#/components/schemas/B' }}\n    \
+         B:\n{b_body}"
+    )
+}
+
+/// A component carrying a `discriminator` or a `default` beside its union is **not** a nullable
+/// alias, however alias-shaped the union itself looks.
+///
+/// `nullable_alias_back_edge` answers with the target's own id and inserts no def, so everything
+/// the component said apart from the union has nowhere left to go.
+/// `schema_has_shape_constraint`, which holds the rest of that narrowness, checks neither `default`
+/// nor `discriminator`, so the early return at the head of the function is the only thing refusing
+/// these two — and nothing held that early return. Deleting it left
+/// `cargo test --workspace --all-features` entirely green while this document, with
+/// `discriminator: {propertyName: kind}` on `B`, went from `E007` to a clean `Generated` emitting
+/// `Option<Box<A>>`, the discriminator gone and nothing said: the fourth, silent behaviour the
+/// standing invariants forbid.
+///
+/// What is pinned is the verdict as it stands, not an endorsement of it. Both are refused and the
+/// refusal is reported; a change that chooses to represent either one has to move this fixture
+/// deliberately.
+#[test]
+fn a_union_carrying_a_discriminator_or_a_default_is_not_an_alias() {
+    let cases = [
+        (
+            "discriminator",
+            "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        \
+             - { type: \"null\" }\n      discriminator: { propertyName: kind }\n",
+        ),
+        (
+            "default",
+            "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        \
+             - { type: \"null\" }\n      default: null\n",
+        ),
+    ];
+    for (label, body) in cases {
+        let spec = alias_shaped_mutual_recursion(body);
+        let generated = generate(&spec);
+        let checked = check(&spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: a `{label}` beside the union has nowhere to go, so the document \
+                 must be refused rather than have it dropped: {report:#?}\n{spec}"
+            );
+            assert!(
+                has_code(report, Code::NonDisjointUnion),
+                "{label}/{entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A union with a **second** non-null member is a union, not an alias — even when one of its
+/// members is the cycle-closing `$ref` that would otherwise make it one.
+///
+/// The sharpest of the four. The recogniser answers with the *target's* type, so every member
+/// beside the one `$ref` is erased. Deleting the `if real.next().is_some()` arity check survives
+/// the whole workspace, and on this document it turns `pub b: B` — a two-variant enum — into
+/// `pub b: Box<A>`: the `string` branch disappears from the generated API with a clean report and
+/// no diagnostic at all. A dropped union member is worse than the `serde_json::Value` degradation
+/// the invariants name, because nothing in the output records that the branch ever existed.
+#[test]
+fn a_union_with_a_second_real_member_beside_the_back_edge_stays_a_union() {
+    let spec = alias_shaped_mutual_recursion(
+        "      oneOf:\n        - { $ref: '#/components/schemas/A' }\n        - { type: string }\n",
+    );
+    let (generated, code) = generate_with_code(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    // `b` binds `B` itself rather than the target of `B`'s `$ref` member: the union is represented,
+    // so it has a type of its own.
+    assert_eq!(
+        field_type(&code, "pub b").as_deref(),
+        Some("B"),
+        "the second union member was collapsed away: {code}"
+    );
+    // And that type is an enum holding both branches. Asserted separately, because binding `B`
+    // alone would still be satisfied by a `B` that had quietly become a newtype over `A`.
+    let variants = enum_variants(&code, "B");
+    assert_eq!(
+        variants.len(),
+        2,
+        "`B` must keep one variant per union member, got {variants:?}: {code}"
+    );
+    assert!(
+        variants.iter().any(|variant| variant.starts_with("A(")),
+        "the `$ref` member lost its variant, got {variants:?}: {code}"
+    );
+}
+
+/// A member spelled `{$ref: A, properties: {...}}` is a `$ref` with shape-bearing siblings — an
+/// intersection — and an intersection is not an alias.
+///
+/// Reading it as one answers with `A` and discards the siblings, which is the silent-sibling
+/// discard the `allOf` path refuses under `E013`. Deleting the member-side
+/// `schema_has_shape_constraint` guard survives the whole workspace and flips this document from
+/// `Rejected`/`E013` to a clean `Generated` with `pub b: Option<Box<A>>` and the declared `x` gone.
+#[test]
+fn an_alias_member_with_shape_bearing_siblings_is_not_an_alias() {
+    let spec = alias_shaped_mutual_recursion(
+        "      oneOf:\n        \
+         - { $ref: '#/components/schemas/A', properties: { x: { type: string } } }\n        \
+         - { type: \"null\" }\n",
+    );
+    let generated = generate(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{entry}: the member's sibling `properties` must not be dropped in silence: \
+             {report:#?}\n{spec}"
+        );
+        assert!(
+            has_code(report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
+/// A component that declares a shape of its own beside the union is not another name for its
+/// target: an alias carries no shape, and this one does.
+///
+/// This is the guard that makes that sentence true, and nothing held it. Deleting it survives the
+/// whole workspace, and this document — whose `B` declares `type: object` and an `extra` property
+/// beside the union — goes from `Rejected`/`E013` to a clean `Generated` with
+/// `pub b: Option<Box<A>>`, `extra` absent from the generated API and nothing said about it.
+#[test]
+fn an_alias_shaped_component_that_declares_its_own_shape_is_not_an_alias() {
+    let spec = alias_shaped_mutual_recursion(
+        "      type: object\n      properties: { extra: { type: string } }\n      oneOf:\n        \
+         - { $ref: '#/components/schemas/A' }\n        - { type: \"null\" }\n",
+    );
+    let generated = generate(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{entry}: the component's own `extra` must not be dropped in silence: \
+             {report:#?}\n{spec}"
+        );
+        assert!(
+            has_code(report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
+/// The same alias spelled `anyOf` rather than `oneOf` is still one.
+///
+/// `nullable_alias_back_edge` picks its members from whichever of the two applicators the
+/// component carries, and only the `oneOf` arm of that selection was driven by anything: every
+/// alias fixture in this file, including the four narrowness fixtures above, spells the union
+/// `oneOf`. Replacing the `anyOf` arm with `return None` left
+/// `cargo test --workspace --all-features` entirely green, while this document went from a clean
+/// `Generated` emitting `Option<Box<A>>` to `Rejected`/`E007` — one of the two spellings the
+/// specification gives the same meaning here stops reaching the recogniser, and nothing said so.
+///
+/// The four above pin what the recogniser refuses once it runs. This one pins *whether it runs*.
+#[test]
+fn a_nullable_alias_spelled_any_of_is_recognised_as_one() {
+    let spec = alias_shaped_mutual_recursion(
+        "      anyOf:\n        - { $ref: '#/components/schemas/A' }\n        \
+         - { type: \"null\" }\n",
+    );
+    let (generated, code) = generate_with_code(&spec);
+    let checked = check(&spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{entry}: an `anyOf`-spelled nullable alias is the same shape as the `oneOf` one and \
+             must generate: {report:#?}\n{spec}"
+        );
+    }
+    // The pair the mutation destroys: the alias binds its *target*, optional for the `"null"`
+    // member and boxed for the cycle. Refusing the spelling gives `Rejected`/`E007` instead, so
+    // both halves of this are what stand over the arm.
+    assert_eq!(
+        field_type(&code, "pub b").as_deref(),
+        Some("Option<Box<A>>"),
+        "the `anyOf` spelling did not reach the alias recogniser: {code}"
+    );
+}
+
+/// The same alias, spelled the other three ways one target can be written.
+///
+/// A `$ref` is not identified by its spelling. `#/components/schemas/Node`, the root's own
+/// `./openapi.yaml#/components/schemas/Node`, a split description's
+/// `./lib.yaml#/components/schemas/Node` and a whole-file `./node.yaml` can all name one schema —
+/// `ensure_resolved`'s own contract says the last two "resolve to the same file and pointer and
+/// share one type". The alias recognition keyed on the literal `#/components/schemas/` prefix and
+/// on the root component map alone, so only the first spelling was an alias and the other three
+/// fell through to a rejection whose sentence — "names no shape of its own and cannot be given a
+/// generated type" — the same binary disproves by generating `Option<Box<Node>>` for spelling one.
+///
+/// The split-description spelling is the case issue #107 exists to make resolve, so it is the one
+/// that must not reject.
+#[test]
+fn a_nullable_alias_is_recognised_however_its_target_is_spelled() {
+    // (1) The root document referring to its own components by relative file path.
+    let self_file = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      required: [parent]
+      properties:
+        name: { type: string }
+        parent: { $ref: '#/components/schemas/MaybeNode' }
+    MaybeNode:
+      oneOf:
+        - { $ref: './openapi.yaml#/components/schemas/Node' }
+        - { type: "null" }
+"##;
+    let (generated, code) = generate_with_code(self_file);
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    assert_ne!(check(self_file).outcome(), Outcome::Rejected);
+    // Named, and read off `parent`'s own declaration rather than searched for in the file. The
+    // embedded runtime emits `source: Option<Box<dyn std::error::Error + Send + Sync>>` into every
+    // generated module, so `code.contains("Option<Box<")` is unconditionally true of any successful
+    // generation and pins nothing beyond the `assert_ne!` above it. What must hold here is that the
+    // alias resolved to `Node` — optional, and boxed so the recursion has a finite size.
+    //
+    // `parent` is **required** precisely so the `Option` can only have come from the alias: every
+    // other fixture leaves the field absent from `required`, which makes it optional for a reason
+    // that has nothing to do with the union's `"null"` member, so none of them could see that half
+    // of the alias's nullability being dropped. `Box<Node>` here would make `{"parent": null}`
+    // undecodable against a document that declares it legal.
+    assert_eq!(
+        field_type(&code, "pub parent").as_deref(),
+        Some("Option<Box<Node>>"),
+        "{code}"
+    );
+
+    // (2) The split description: every schema in the sub-file, the alias member spelled as that
+    //     file's own sibling reference. This is #107's namespace case.
+    let lib = r##"
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        name: { type: string }
+        parent: { $ref: '#/components/schemas/MaybeNode' }
+    MaybeNode:
+      oneOf:
+        - { $ref: '#/components/schemas/Node' }
+        - { type: "null" }
+"##;
+    let (generated, checked, code) = split("./lib.yaml#/components/schemas/Node", lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::InvalidInput),
+            "{entry}: {report:#?}"
+        );
+    }
+    assert_eq!(
+        field_type(&code, "pub parent").as_deref(),
+        Some("Option<Box<Node>>"),
+        "{code}"
+    );
+
+    // (3) Whole-file references, which carry no pointer at all — the spelling whose rejection had
+    //     no `at` to point the reader at.
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        "openapi: 3.1.0\n\
+         info: { title: T, version: 1.0.0 }\n\
+         servers: [{ url: 'https://e.com' }]\n\
+         paths:\n  \
+         /u:\n    \
+         get:\n      \
+         operationId: getU\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json: { schema: { $ref: './node.yaml' } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("node.yaml"),
+        "type: object\nproperties:\n  name: { type: string }\n  parent: { $ref: './maybe.yaml' }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("maybe.yaml"),
+        "oneOf:\n  - { $ref: './node.yaml' }\n  - { type: \"null\" }\n",
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::InvalidInput),
+            "{entry}: {report:#?}"
+        );
+    }
+    // The whole-file spelling has no component name to take, so the target is named for the
+    // position that reached it — but it is still one boxed optional reference to one type.
+    assert_eq!(
+        field_type(&code, "pub parent").as_deref(),
+        Some("Option<Box<ResponseBody>>"),
+        "{code}"
+    );
+}
+
+/// A nullable alias whose member is a name the **root** declares reads the root's component, and
+/// says so — exactly as the direct `$ref` spelling of that same member already does.
+///
+/// `ensure_component`'s precedence is root first, file second: the root's component map is
+/// consulted before anything else, and only a name the root does **not** declare is handed to
+/// `ensure_resolved` against the referring file. `open_reservation_for_ref` answered the
+/// `#/components/schemas/` arm only on an *open reservation* and otherwise fell through to
+/// `reference_identity`, whose `from` is the **referring file** — so a name the root declares but
+/// is not currently lowering missed the arm, fell through, and bound the sub-file's declaration
+/// that the root shadows. The alias was recognised for a target `lower_schema` would never have
+/// chosen, and `W011` — raised inside `ensure_component`, which the alias never reached — did not
+/// fire, so the document was neither supported as documented nor warned nor rejected.
+///
+/// The two files here are the matched pair: `next` spelled `{$ref: MaybeShared}` against `next`
+/// spelled `{$ref: Shared}` directly, one reference string, one binary, and before this fixture two
+/// different answers. `docs/support-matrix.md`'s References row states the precedence this pins.
+///
+/// The existing spelling fixture cannot catch it: its sub-file names collide with nothing in the
+/// root, so the fall-through and the root map agree there by accident.
+#[test]
+fn a_nullable_alias_member_the_root_shadows_binds_the_roots_component_and_warns() {
+    // The sub-file's `Shared` is reached by the *explicit file* spelling, so it is genuinely the
+    // open reservation when its own `next` property asks for `#/components/schemas/Shared` — which
+    // is the only way the shadowed declaration is a live candidate at all.
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Shared' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      properties:
+        root_only: { type: string }
+      required: [root_only]
+"##;
+    let lib = |member: &str| {
+        format!(
+            r##"
+components:
+  schemas:
+    Shared:
+      type: object
+      properties:
+        lib_only: {{ type: string }}
+        next: {{ $ref: '#/components/schemas/{member}' }}
+    MaybeShared:
+      oneOf:
+        - {{ $ref: '#/components/schemas/Shared' }}
+        - {{ type: "null" }}
+"##
+        )
+    };
+
+    for spelling in ["MaybeShared", "Shared"] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), root).unwrap();
+        std::fs::write(dir.join("lib.yaml"), lib(spelling)).unwrap();
+        let out = dir.join("client.rs");
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: {report:#?}"
+            );
+            // Half one: the shadowing is *said*. Both entry points raise it, or `check` is no
+            // longer reporting what `generate` reports.
+            assert!(
+                has_code(report, Code::DeclarationHasNoEffect),
+                "{spelling}/{entry}: the root shadows `Shared`, so W011 must fire: {report:#?}"
+            );
+        }
+
+        // Half two: the shadowing is *done*. Read on the bound type's own fields rather than on its
+        // name: the emitter disambiguates the collision by *suffixing* the sub-file's copy, so
+        // `Option<Box<Shared2f46d127>>` contains `Shared` and a substring test would pass on the
+        // wrong answer — and the alias spelling reaches its target through `MaybeShared`, a third
+        // name again. `root_only` is declared only by the root's `Shared` and `lib_only` only by
+        // the sub-file's, so the fields say which declaration was read whatever it got called.
+        let next = field_type(&code, "pub next")
+            .unwrap_or_else(|| panic!("{spelling}: no `next` field at all: {code}"));
+        let bound = next
+            .rsplit_once('<')
+            .map_or(next.as_str(), |(_, tail)| tail)
+            .trim_end_matches('>');
+        let fields = declared_fields(&code, bound);
+        assert!(
+            fields.iter().any(|field| field == "root_only"),
+            "{spelling}: `next` bound `{next}`, whose fields are {fields:?} — not the root's \
+             `Shared`: {code}"
+        );
+        assert!(
+            !fields.iter().any(|field| field == "lib_only"),
+            "{spelling}: `next` bound the sub-file's shadowed `Shared` as `{next}`: {code}"
+        );
+    }
+}
+
+/// The other half of the same promise: when the shadowed name's root component *is* open, the
+/// alias binds it — correctly — and must still say that it shadowed something.
+///
+/// This is the one case in which the alias path answers the reference itself rather than handing it
+/// back to `ensure_component`, and `ensure_component` is where `W011` is raised. So the type was
+/// right and the acknowledgement was missing: a sub-file's `Shared` silently had no effect on a
+/// reference that reads it by that name, which is exactly what the References row of
+/// `docs/support-matrix.md` promises will be reported.
+///
+/// The root's `Shared` is open here because it reaches the sub-file and the sub-file comes back to
+/// it — mutual recursion across the file boundary, which is the only way a root component is
+/// mid-lowering while a sub-file schema is being read.
+#[test]
+fn a_nullable_alias_that_binds_an_open_root_component_still_reports_the_shadowing() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Shared' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      properties:
+        root_only: { type: string }
+        holder: { $ref: './lib.yaml#/components/schemas/Holder' }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        next: { $ref: '#/components/schemas/Maybe' }
+    Shared:
+      type: object
+      properties:
+        lib_only: { type: string }
+    Maybe:
+      oneOf:
+        - { $ref: '#/components/schemas/Shared' }
+        - { type: "null" }
+"##,
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(report, Code::DeclarationHasNoEffect),
+            "{entry}: the sub-file's `Shared` is shadowed and read past in silence: {report:#?}"
+        );
+    }
+    // And the binding itself is the root's, boxed because it closes the cycle back to it.
+    assert_eq!(
+        field_type(&code, "pub next").as_deref(),
+        Some("Option<Box<Shared>>"),
+        "{code}"
+    );
+    assert_eq!(
+        declared_fields(&code, "Shared"),
+        vec!["root_only".to_owned(), "holder".to_owned()],
+        "{code}"
+    );
+}
+
+/// The aliased spelling of [`a_nullable_alias_carries_its_targets_own_nullability`]'s document,
+/// hoisted so [`PARITY_FIXTURES`] can drive it through `check` as well as `generate`.
+///
+/// That fixture reads emitted source, so it can only call `generate`; `PARITY_FIXTURES` is where a
+/// spec is held to reporting the same thing through both entry points, and it is a hand-maintained
+/// list, so an omission costs nothing and warns nobody. The fixture asserts this constant equals
+/// what its own builder produces, so the two cannot drift apart.
+const NULLABLE_ALIAS_CARRY_SPEC: &str = "openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/A' } }
+components:
+  schemas:
+    A:
+      type: [object, 'null']
+      required: [b]
+      properties:
+        x: { type: string }
+        b: { $ref: '#/components/schemas/B' }
+    B:
+      oneOf:
+        - { $ref: '#/components/schemas/A' }
+";
+
+/// A nullable alias whose target is itself nullable is exactly as optional as the direct `$ref`.
+///
+/// `B: {oneOf: [{$ref: A}]}` with `A: {type: [object, "null"]}` carries no `{"type": "null"}`
+/// member of its own, and the alias read its nullability from the members alone — discarding the
+/// reserve-time flag that `ensure_component` records precisely so "every `$ref` consumer … agrees
+/// on it". So a field spelled `{$ref: B}` emitted `Box<A>` where the same field spelled `{$ref: A}`
+/// emitted `Option<Box<A>>`: one schema, two optionalities, chosen by which name was written.
+#[test]
+fn a_nullable_alias_carries_its_targets_own_nullability() {
+    let spec = |field: &str| {
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /u:\n    \
+             get:\n      \
+             operationId: getU\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json: {{ schema: {{ $ref: '#/components/schemas/A' }} }}\n\
+             components:\n  \
+             schemas:\n    \
+             A:\n      \
+             type: [object, 'null']\n      \
+             required: [b]\n      \
+             properties:\n        \
+             x: {{ type: string }}\n        \
+             b: {{ $ref: '#/components/schemas/{field}' }}\n    \
+             B:\n      \
+             oneOf:\n        \
+             - {{ $ref: '#/components/schemas/A' }}\n"
+        )
+    };
+    // The direct spelling is the control: `A` is nullable, so the field is optional.
+    let (direct, direct_code) = generate_with_code(&spec("A"));
+    assert_ne!(direct.outcome(), Outcome::Rejected, "{direct:#?}");
+    assert!(
+        direct_code.contains("pub b: Option<Box<A>>"),
+        "{direct_code}"
+    );
+
+    // The alias spelling must agree with it. Held to the constant `PARITY_FIXTURES` drives, so the
+    // spec this fixture asserts on and the spec `check` is run against stay the same document.
+    assert_eq!(spec("B"), NULLABLE_ALIAS_CARRY_SPEC);
+    let (aliased, aliased_code) = generate_with_code(&spec("B"));
+    assert_ne!(aliased.outcome(), Outcome::Rejected, "{aliased:#?}");
+    assert!(
+        aliased_code.contains("pub b: Option<Box<A>>"),
+        "the aliased field lost its target's nullability: {aliased_code}"
+    );
+}
+
+/// The one shape in this family that must **not** generate: a union that is a component's whole
+/// body and whose only non-null member is a `$ref` back to that same component.
+///
+/// `Selfy = Selfy | null` describes no instance a decoder can ever terminate on — the generated
+/// `Deserialize` opens by re-entering itself on the same value with no base case. The multi-member
+/// path already refuses exactly this with `E007`; the single-member collapse jumped over that guard
+/// and produced `E011` instead, so one shape drew two different codes according to how many members
+/// were written beside it.
+///
+/// Both spellings are driven: the bare union, and the union carrying its own sibling keywords.
+#[test]
+fn a_union_whose_sole_member_is_its_own_reservation_is_rejected() {
+    let bare = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Selfy' } }
+components:
+  schemas:
+    Selfy:
+      oneOf:
+        - { $ref: '#/components/schemas/Selfy' }
+        - { type: "null" }
+"##;
+    let with_siblings = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Selfy' } }
+components:
+  schemas:
+    Selfy:
+      type: object
+      properties:
+        x: { type: string }
+      oneOf:
+        - { $ref: '#/components/schemas/Selfy' }
+        - { type: "null" }
+"##;
+
+    for (label, spec) in [("bare", bare), ("with siblings", with_siblings)] {
+        let generated = generate(spec);
+        let checked = check(spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: {report:#?}"
+            );
+            // A spec-facing code with a matrix cell, an `errors.md` row and this fixture — never
+            // the internal invariant's `E011`, whose explain text claims malformed input.
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{label}/{entry}: {report:#?}"
+            );
+            // `E007`, and **only** `E007` — not a disjunction with `E013`. The two guards this
+            // shape passes through are ordered deliberately, the cycle question before the
+            // sibling-intersection question, and `lower.rs` records at that site that a reordering
+            // turns this fixture red. A disjunction would not: it is satisfied by either verdict,
+            // so the ordering it claims to protect would be free to flip in silence. The `with
+            // siblings` spelling is the one that carries the difference, because it is the only one
+            // the sibling guard can answer at all.
+            let codes: Vec<Code> = report
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                .map(|diagnostic| diagnostic.code)
+                .collect();
+            assert_eq!(
+                codes,
+                vec![Code::NonDisjointUnion],
+                "{label}/{entry}: {report:#?}"
+            );
+            // The remedy is the sentence the author acts on, and the one this rejecter carries has
+            // to serve its cycle situations as well as its overlap ones — neither of which a
+            // discriminator answers. Nothing else in the suite reads a remedy on this path, so
+            // without this the whole text was free to be replaced by advice that contradicts the
+            // fix.
+            let remedy = report
+                .diagnostics()
+                .iter()
+                .find(|diagnostic| diagnostic.code == Code::NonDisjointUnion)
+                .and_then(|diagnostic| diagnostic.remedy.as_deref())
+                .unwrap_or_default();
+            assert!(
+                remedy.contains("break the reference cycle"),
+                "{label}/{entry}: the remedy must name what an author with a self-referential \
+                 union actually has to change: {remedy:?}"
+            );
+        }
+    }
+}
+
+/// The sub-file spellings of the sibling-bearing self-union above. The root spelling is answered by
+/// the reservation arm of `member_is_this_union`; a sub-file member — bare `#/components/schemas/…`
+/// resolved against `lib.yaml`, or the explicit `./lib.yaml#/…` — reaches no root reservation by
+/// name, and only the resolved-identity arm keeps the document-half cycle guard from answering
+/// `E013` for it. Both spellings must draw exactly `[E007]`, as the root spelling does.
+#[test]
+fn a_sibling_bearing_self_union_in_a_sub_file_is_rejected_as_e007_on_both_spellings() {
+    const SELFY: &str = r##"
+components:
+  schemas:
+    Selfy:
+      type: object
+      properties:
+        x: { type: string }
+      oneOf:
+        - { $ref: 'PREFIX#/components/schemas/Selfy' }
+        - { type: "null" }
+"##;
+    for (spelling, prefix) in [("bare", ""), ("explicit", "./lib.yaml")] {
+        let lib = SELFY.replace("PREFIX", prefix);
+        let (generated, checked, _) = split("./lib.yaml#/components/schemas/Selfy", &lib);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: {report:#?}"
+            );
+            let codes: Vec<Code> = report
+                .diagnostics()
+                .iter()
+                .filter(|diagnostic| diagnostic.severity == Severity::Error)
+                .map(|diagnostic| diagnostic.code)
+                .collect();
+            assert_eq!(
+                codes,
+                vec![Code::NonDisjointUnion],
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A union that collapses to its sole non-null member, whose intersection with the enclosing
+/// schema's own sibling keywords is irreconcilable (`type: object` against `type: string`), leaves
+/// the union with no variant. Before the rejection existed, the collapse `?`-propagated the failed
+/// intersection with no diagnostic, so the run came back clean with the response body silently
+/// dropped — the fourth behaviour. It must be refused with `E007` at the schema that carries the
+/// union, through both entry points.
+#[test]
+fn a_sole_union_member_irreconcilable_with_its_siblings_is_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  a: { type: string }
+                oneOf:
+                  - { type: string }
+                  - { type: "null" }
+"##;
+    let pointer = "/paths/~1u/get/responses/200/content/application~1json/schema";
+    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let e007: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::NonDisjointUnion)
+            .collect();
+        assert!(
+            e007.iter().any(
+                |d| d.pointer.as_str() == pointer && d.message.contains("sole non-null member")
+            ),
+            "{entry}: E007 for the empty sole-member intersection must point at `{pointer}`, \
+             not at {:?}\n{report:#?}",
+            e007.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// A union whose sibling keywords would have to be intersected against a target that is still being
+/// lowered. Nothing true can be said about that intersection, so it must be refused — not guessed
+/// at, and not quietly dropped.
+///
+/// Three positions, all of which the merge base accepted by guessing: the sole member of a nested
+/// property's union, the sole member of an array `items` union, and one member of a multi-member
+/// union. At `2aa5ada` `intersect_non_null`'s `TypeKind::Any` arm absorbed the placeholder and
+/// returned the *sibling*, silently retyping the recursive branch to the inline object beside it.
+/// At this head the multi-member case instead drops the variant with a `W011` whose message —
+/// "cannot satisfy the enclosing schema's own constraints" — is false about the document: the
+/// member can satisfy them perfectly well, it simply has not been lowered yet.
+#[test]
+fn a_union_sibling_over_an_open_reservation_is_rejected() {
+    let sole_member_in_a_property = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        next:
+          type: object
+          properties:
+            inner: { type: string }
+          anyOf:
+            - { $ref: '#/components/schemas/Node' }
+            - { type: "null" }
+"##;
+    let sole_member_in_array_items = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Tree' } }
+components:
+  schemas:
+    Tree:
+      type: object
+      required: [kids]
+      properties:
+        kids:
+          type: array
+          items:
+            type: object
+            properties:
+              tag: { type: string }
+            oneOf:
+              - { $ref: '#/components/schemas/Tree' }
+              - { type: "null" }
+"##;
+    let one_of_several_members = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Node' } }
+components:
+  schemas:
+    Node:
+      type: object
+      required: [label]
+      properties:
+        label: { type: string }
+        child:
+          type: object
+          properties:
+            tag: { type: string }
+          oneOf:
+            - { $ref: '#/components/schemas/Node' }
+            - type: object
+              properties:
+                other: { type: string }
+"##;
+
+    for (label, spec) in [
+        ("sole member in a property", sole_member_in_a_property),
+        ("sole member in array items", sole_member_in_array_items),
+        ("one of several members", one_of_several_members),
+    ] {
+        let (generated, code) = generate_with_code(spec);
+        let checked = check(spec);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{label}/{entry}: {report:#?}"
+            );
+            assert!(
+                has_code(report, Code::AllOfIrreconcilable)
+                    || has_code(report, Code::NonDisjointUnion),
+                "{label}/{entry}: {report:#?}"
+            );
+            // The false acknowledgement must be gone: the member is not a branch the sibling made
+            // impossible, it is one nothing could yet be said about.
+            assert!(
+                !has_code(report, Code::DeclarationHasNoEffect),
+                "{label}/{entry}: {report:#?}"
+            );
+        }
+        assert!(
+            code.is_empty(),
+            "{label}: rejected runs emit nothing: {code}"
+        );
+    }
+}
+
+/// The narrowness of the nullable-alias rule, stated as a fixture rather than as a comment.
+///
+/// `B: {oneOf: [{$ref: C}, {type: "null"}]}` where `C` is an ordinary, fully lowered component is
+/// the *same spelling* as the mutual-recursion case above, and it already generates: `B` is
+/// re-emitted as a type of its own carrying `C`'s shape. Recognising every nullable alias — rather
+/// than only one whose target is still being lowered — would delete `B` from the generated API,
+/// which is a breaking change to output that has nothing wrong with it.
+#[test]
+fn a_nullable_ref_alias_to_a_finished_component_keeps_its_own_type() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/A' } }
+components:
+  schemas:
+    A:
+      type: object
+      required: [b]
+      properties:
+        b: { $ref: '#/components/schemas/B' }
+    B:
+      oneOf:
+        - { $ref: '#/components/schemas/C' }
+        - { type: "null" }
+    C:
+      type: object
+      required: [v]
+      properties:
+        v: { type: string }
+"##;
+    let (generated, code) = generate_with_code(spec);
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    assert_ne!(
+        check(spec).outcome(),
+        Outcome::Rejected,
+        "{:#?}",
+        check(spec)
+    );
+    // `B` is a public type of the generated API and must stay one.
+    assert!(code.contains("pub struct B "), "{code}");
+    assert!(code.contains("pub struct C "), "{code}");
+}
+
+/// An `allOf` whose members disagree about `additionalProperties`, where one of the two value
+/// schemas is a `$ref` back to the type being lowered.
+///
+/// `merge_additional` intersects the two value types and its caller reports the failure as
+/// "`allOf` members declare conflicting `additionalProperties`". That is a true sentence about a
+/// genuine conflict and a false one here: nothing conflicts, the target's body simply has not been
+/// computed yet. The code is right — the same `E013` either way — and the message is what has to
+/// tell the two apart, because "conflicting" sends the author looking for a disagreement that is
+/// not in the document.
+#[test]
+fn an_all_of_additional_properties_back_edge_says_why_it_cannot_merge() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/A' } }
+components:
+  schemas:
+    A:
+      allOf:
+        - type: object
+          additionalProperties: { $ref: '#/components/schemas/A' }
+        - type: object
+          additionalProperties: { type: string }
+"##;
+    for (entry, report) in [("generate", &generate(spec)), ("check", &check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let message = report
+            .diagnostics()
+            .iter()
+            .find(|d| d.code == Code::AllOfIrreconcilable)
+            .map(|d| d.message.clone())
+            .unwrap_or_default();
+        assert!(
+            !message.contains("conflicting"),
+            "{entry}: the members do not conflict; the target is unlowered: {message}"
+        );
+        assert!(
+            message.contains("additionalProperties"),
+            "{entry}: {message}"
+        );
+    }
+}
+
+/// A sub-file's own `#/components/schemas/<name>` when the **root** document declares that name
+/// too. The root wins, and that is now said out loud.
+///
+/// Before this change the unshadowed branch did not resolve at all — it was issue #107's silent
+/// drop — so only one of the two branches existed and no precedence had to be chosen. Making the
+/// sub-file reference resolve makes both live, and therefore chooses. Measured: with the root
+/// declaring `Shared`, `lib.yaml`'s own `$ref: '#/components/schemas/Shared'` yields the **root's**
+/// `Shared`; delete that one unrelated root component and the same unchanged `$ref` yields the
+/// sub-file's. So adding a component to the root retargets a reference written in another file.
+///
+/// Root-wins is kept — changing it is a generated-API break — but "silently" is the fourth
+/// behaviour the standing invariants forbid, and prose in a comment does not remove silence. `W011`
+/// (a declaration that has no effect) is exactly what the sub-file's own `Shared` is here, and it
+/// already has a code, a matrix cell and an `errors.md` row, so no ordinal moves.
+#[test]
+fn a_sub_file_component_shadowed_by_the_root_is_acknowledged() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Wrapper' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      required: [from_root]
+      properties: { from_root: { type: string } }
+"##,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      required: [inner]
+      properties:
+        inner: { $ref: '#/components/schemas/Shared' }
+    Shared:
+      type: object
+      required: [from_sub_file]
+      properties: { from_sub_file: { type: string } }
+"##,
+    )
+    .unwrap();
+
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let shadow = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .map(|d| d.message.clone())
+            .find(|message| message.contains("Shared"));
+        let shadow = shadow.unwrap_or_else(|| {
+            panic!("{entry}: the shadowed declaration is not acknowledged: {report:#?}")
+        });
+        // Naming one namespace is not enough: the reader has to be told which declaration was read
+        // and which one was not.
+        assert!(
+            shadow.contains("lib.yaml"),
+            "{entry}: the message must name the file whose declaration lost: {shadow}"
+        );
+    }
+    // Root-wins is the behaviour being documented, not changed.
+    assert!(code.contains("from_root"), "{code}");
+    assert!(!code.contains("from_sub_file"), "{code}");
+}
+
+/// The matched pair for the warning above: a reference that **names its own document** shadowed
+/// nothing, and must not be told that it did.
+///
+/// Only the bare-fragment spelling can be shadowed. `#/components/schemas/Shared` addresses the
+/// file it is written in, so writing it inside `lib.yaml` asks for `lib.yaml`'s `Shared` and is
+/// given the root's — the whole of `W011`, and what `W011`'s own explain text scopes it to.
+/// `./openapi.yaml#/components/schemas/Shared` asks for exactly one declaration and gets that one.
+///
+/// It warned on both. `ensure_resolved` routes any target that lands in the root's component map
+/// back to `ensure_component` carrying the *referring site's* provenance, and the warning was
+/// raised there on the strength of three facts that never included how the reference was written.
+/// So a deliberately disambiguated reference drew a message quoting a `$ref` string absent from
+/// that site, and a remedy — "address the file-local one explicitly with a relative-file
+/// reference" — naming the form already in use. Worse, the same string through the nullable-alias
+/// path correctly did *not* warn, so one reference got two answers depending only on whether the
+/// root's component happened to be open at the time.
+///
+/// Two further cases vary the **sub-file's body** rather than the spelling, because varying the
+/// spelling cannot reach every answer the warning gives.
+///
+/// The third drops `Shared` from `lib.yaml` altogether: a sub-file referring to a root component
+/// it does not redeclare, which is the commonest shape a multi-file description has. Nothing is
+/// shadowed, so nothing may be reported. That negative is decided in `Resolver::declares_locally`,
+/// by the one line that asks whether the node the local address names actually exists —
+/// `Bundle::reference_target` computes an address and never checks, so for an in-document fragment
+/// it answers `Some` unconditionally. Without the third case that line is unheld: deleting it
+/// leaves the whole workspace suite green while every such description gains a warning naming a
+/// declaration it does not contain. The spelling cases cannot cover it, because their `shadows:
+/// false` half is turned away by the bare-fragment gate in `warn_if_root_shadows_the_referring_file`
+/// and never reaches `declares_locally` at all.
+///
+/// The fourth drives `W011`'s **own remedy**: "address the file-local one explicitly with a
+/// relative-file reference". The explicit spelling driven above is `./openapi.yaml#…`, the *root's*
+/// — the one the remedy does not recommend. `./lib.yaml#/components/schemas/Shared` is the one it
+/// does, and it must both silence the warning and change the answer, binding the sub-file's
+/// `Shared` rather than the root's. Otherwise a precedence change could leave spargen printing a
+/// remedy that no longer works, with the suite green.
+///
+/// All four are driven against one pair of files so the fixture cannot pass by the warning having
+/// gone dead: the bare-over-a-local-declaration case must still fire, in the same run.
+#[test]
+fn an_explicit_relative_file_reference_to_the_roots_component_is_not_a_shadowing() {
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: './lib.yaml#/components/schemas/Wrapper' } }
+components:
+  schemas:
+    Shared:
+      type: object
+      required: [from_root]
+      properties: { from_root: { type: string } }
+"##;
+    let lib = |spelling: &str, declares_shared: bool| {
+        let shared = if declares_shared {
+            "\n    Shared:\n      type: object\n      required: [from_sub_file]\n      \
+             properties: { from_sub_file: { type: string } }"
+        } else {
+            ""
+        };
+        format!(
+            r##"
+components:
+  schemas:
+    Wrapper:
+      type: object
+      required: [inner]
+      properties:
+        inner: {{ $ref: '{spelling}' }}{shared}
+"##
+        )
+    };
+
+    for (case, spelling, declares_shared, shadows, from) in [
+        (
+            "the bare fragment, redeclared locally",
+            "#/components/schemas/Shared",
+            true,
+            true,
+            "from_root",
+        ),
+        (
+            "the root addressed explicitly",
+            "./openapi.yaml#/components/schemas/Shared",
+            true,
+            false,
+            "from_root",
+        ),
+        (
+            "the bare fragment, nothing local to shadow",
+            "#/components/schemas/Shared",
+            false,
+            false,
+            "from_root",
+        ),
+        (
+            "the remedy's own spelling",
+            "./lib.yaml#/components/schemas/Shared",
+            true,
+            false,
+            "from_sub_file",
+        ),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), root).unwrap();
+        std::fs::write(dir.join("lib.yaml"), lib(spelling, declares_shared)).unwrap();
+        let out = dir.join("client.rs");
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{case}/{entry}: {report:#?}"
+            );
+            let raised = report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::DeclarationHasNoEffect && d.message.contains("Shared"));
+            assert_eq!(
+                raised,
+                shadows,
+                "{case} ({spelling}, lib.yaml {} `Shared`)/{entry}: W011 must fire when the bare \
+                 fragment is written over a declaration the referring file makes itself, and in \
+                 no other case — every other case has one declaration in play, so nothing of the \
+                 author's is without effect and the remedy would ask for a spelling that is \
+                 already written or would change which declaration is read: {report:#?}",
+                if declares_shared {
+                    "declares"
+                } else {
+                    "does not declare"
+                }
+            );
+        }
+
+        // Which declaration was actually read. The first three cases all reach the root's, by
+        // precedence or because it is the only one; the fourth is the remedy W011 prints, and the
+        // point of driving it is that it does something different — it binds the sub-file's own
+        // `Shared`. Read on the bound type's fields rather than its name, because the emitter
+        // suffixes the sub-file's colliding copy and a substring test would pass on the wrong
+        // answer.
+        let absent = if from == "from_root" {
+            "from_sub_file"
+        } else {
+            "from_root"
+        };
+        let inner = field_type(&code, "pub inner")
+            .unwrap_or_else(|| panic!("{case}: no `inner` field at all: {code}"));
+        let bound = inner
+            .rsplit_once('<')
+            .map_or(inner.as_str(), |(_, tail)| tail)
+            .trim_end_matches('>');
+        let fields = declared_fields(&code, bound);
+        assert!(
+            fields.iter().any(|field| field == from) && !fields.iter().any(|field| field == absent),
+            "{case}: `inner` bound `{inner}`, whose fields are {fields:?}, expected `{from}`: \
+             {code}"
+        );
+    }
+}
+
+/// `type_specificity`'s reservation arm is **live**, and its value is emitted into the client.
+///
+/// The arm carried a comment justifying itself by saying a union holding a reservation is rejected
+/// before ranking is reached, naming a function `reject_union_back_edge` that **has never existed
+/// anywhere in the repository**. Neither half was true. `lower_union`'s guard tests the *direct*
+/// member's id, while `type_specificity` recurses through `Array` and `Union` — so an array-wrapped
+/// back edge walks straight past it on a document that generates **Clean, zero diagnostics**.
+///
+/// What the arm returns is not inert: it becomes the trial-match priority of an `anyOf` branch in
+/// the generated `Deserialize`, which is a runtime dispatch decision in shipped code. Ranking a
+/// reservation least specific keeps the concrete branch ahead of it; mutating the arm to `4_000`
+/// raises the back-edge branch from 800 to 1200, past the string branch's 850, and **inverts which
+/// variant wins** — a change that survived the entire workspace suite when nothing pinned it.
+#[test]
+fn an_array_wrapped_union_back_edge_ranks_least_specific() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Wrap' } }
+components:
+  schemas:
+    Wrap:
+      anyOf:
+        - type: array
+          items: { $ref: '#/components/schemas/Wrap' }
+        - type: array
+          items: { type: string }
+"##;
+    let (report, code) = generate_with_code(spec);
+    // The document is accepted, which is what makes this arm reachable rather than defensive.
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+
+    // Pull each variant's emitted trial priority out of the generated `Deserialize`.
+    let priority = |variant: &str| -> u32 {
+        let needle = format!("Wrap::{variant}(inner)");
+        code.lines()
+            .find(|line| line.contains(&needle) && line.contains("u32,"))
+            .and_then(|line| {
+                let start = line.find("Some((")? + "Some((".len();
+                let end = line[start..].find("u32")? + start;
+                line[start..end].parse().ok()
+            })
+            .unwrap_or_else(|| panic!("no emitted priority for {variant}: {code}"))
+    };
+    let back_edge = priority("WrapVariant0");
+    let concrete = priority("WrapVariant1");
+
+    // The reservation contributes nothing to its array's specificity, so the branch whose items are
+    // a known type must outrank the branch whose items are not yet lowered. Raising the arm to
+    // `4_000` makes `back_edge` 1200 against `concrete` 850 and reverses this.
+    assert!(
+        back_edge < concrete,
+        "an array of a not-yet-lowered type must not outrank an array of a known one: \
+         back-edge {back_edge}, concrete {concrete}"
+    );
 }
 
 #[test]
@@ -464,6 +4666,257 @@ mod remote {
         (report, temp, out)
     }
 
+    /// The remote counterpart of the direct-recursive `allOf` member, reached through an **alias**,
+    /// which is the shape that needs the id-keyed guard rather than the spelling-keyed one.
+    ///
+    /// `gather_member`'s remote arm has two checks. The pre-existing one keys on the reference
+    /// *string* — `remote_in_progress.contains_key(reference)` — and this branch added a second
+    /// keyed on the returned `Ty`'s id. Only the second can see this case: `node.yaml` composes
+    /// `allOf: [alias.yaml]`, `alias.yaml` is a bare `$ref` back to `node.yaml`, so the member's own
+    /// spelling is never the in-progress key, and `ensure_remote` chains through the alias and hands
+    /// back a back-edge against `node.yaml`'s reservation.
+    ///
+    /// **Removing the id-keyed check leaves every other test in the workspace green.** Without it
+    /// this document generates, with zero diagnostics, and emits
+    /// `pub type …child = serde_json::Value;` — the same silent degradation the component path was
+    /// repaired for in this branch, on a path nothing exercised. The guard was added here; the
+    /// fixture was not.
+    #[test]
+    fn a_direct_recursive_remote_all_of_member_reached_through_an_alias_is_rejected() {
+        const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
+        const ALIAS_URL: &str = "https://api.example.com/schemas/alias.yaml";
+        const NODE_YAML: &str = "type: object\nrequired: [label]\nproperties:\n  label: { type: string }\n  child:\n    allOf:\n      - { $ref: \"alias.yaml\" }\n";
+        const ALIAS_YAML: &str = "$ref: \"node.yaml\"\n";
+        const NODE_SHA: &str = "09216246cfa803064f874532df513b6458892853137616dd83c386ee3c4a49bd";
+        const ALIAS_SHA: &str = "394e78d465e607843bb3b04078679cd2015aea58c67b79b9da1129591d8831a0";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \
+             \"api.example.com/schemas/node.yaml\"\n\n[[remote]]\nurl = \"{ALIAS_URL}\"\nsha256 = \
+             \"{ALIAS_SHA}\"\npath = \"api.example.com/schemas/alias.yaml\"\n"
+        );
+        let vendor = [
+            ("api.example.com/schemas/node.yaml", NODE_YAML),
+            ("api.example.com/schemas/alias.yaml", ALIAS_YAML),
+        ];
+
+        let (generated, _temp, out) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            // The pins are live, so the document really reaches lowering rather than being
+            // rejected for drift or for being unpinned.
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::AbsoluteRefUnsupported),
+                "{entry}: {report:#?}"
+            );
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{entry}: the member resolves to the schema being lowered, whose fields are not \
+                 yet known: {report:#?}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable
+                        && d.message.contains("direct recursive")),
+                "{entry}: {report:#?}"
+            );
+        }
+        // The degradation itself, so the guard's removal fails on the emitted output and not only
+        // on the verdict.
+        assert!(!code.contains("= serde_json::Value;"), "{code}");
+    }
+
+    /// Two vendored remote schemas in mutual recursion through a nullable alias — the remote
+    /// spelling of the commonest recursive idiom there is, and the one frame of the three whose
+    /// open reservations no guard could see.
+    ///
+    /// `node.yaml` has a `parent` of `maybe.yaml`; `maybe.yaml` is nothing but "a `node.yaml`, or
+    /// null". Both are hash-pinned, so the document is legal and hermetic. The union collapse's
+    /// escape hatch asked `reservation_at`, which consults the root component map and
+    /// `resolved_in_progress` and **not** `remote_in_progress`, so the collapse handed
+    /// `ensure_remote` a foreign id and inserted no def — and `pop_last()` then popped a def that
+    /// was not this frame's root into an `assert_eq!` that is live in release builds too. The
+    /// failure was a **process abort**, not a diagnostic: inside a consumer's `build.rs` it is a
+    /// panicking build script with no code, no pointer and no `--carve` escape, which is the
+    /// prohibited fourth behaviour in its worst form. A panic is not an `Outcome`, so nothing in
+    /// this suite could have observed it; this fixture is what observes it.
+    #[test]
+    fn a_nullable_alias_between_two_vendored_remote_schemas_generates() {
+        const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
+        const MAYBE_URL: &str = "https://api.example.com/schemas/maybe.yaml";
+        const NODE_YAML: &str =
+            "type: object\nproperties:\n  name: { type: string }\n  parent: { $ref: 'maybe.yaml' }\n";
+        const MAYBE_YAML: &str = "oneOf:\n  - $ref: 'node.yaml'\n  - type: 'null'\n";
+        const NODE_SHA: &str = "b0b0741c3519d771b634a8cee182500b35efbfb9e20e84dd3b4dd62497174569";
+        const MAYBE_SHA: &str = "33b37680c6082b1e81bb769383543219f1d1477bca2e9838f7da314631eac815";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \
+             \"api.example.com/schemas/node.yaml\"\n\n[[remote]]\nurl = \"{MAYBE_URL}\"\nsha256 = \
+             \"{MAYBE_SHA}\"\npath = \"api.example.com/schemas/maybe.yaml\"\n"
+        );
+        let vendor = [
+            ("api.example.com/schemas/node.yaml", NODE_YAML),
+            ("api.example.com/schemas/maybe.yaml", MAYBE_YAML),
+        ];
+
+        let (generated, _temp, out) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            // The pins are live, so the document really reaches lowering.
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::AbsoluteRefUnsupported),
+                "{entry}: {report:#?}"
+            );
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{entry}: a hermetically pinned, legal description: {report:#?}"
+            );
+            // The reservation must not survive into the finished graph either.
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{entry}: {report:#?}"
+            );
+        }
+        // The alias is the target, optional and boxed — what the direct `{$ref: T}` spelling of the
+        // same construct already produces and what the support matrix promises for it. Named, and
+        // read off `parent`'s own declaration: the embedded runtime supplies an `Option<Box<…>>` of
+        // its own to every generated module, so a bare `contains("Option<Box<")` would hold even if
+        // this reference had been emitted unboxed.
+        assert_eq!(
+            field_type(&code, "pub parent").as_deref(),
+            Some("Option<Box<HttpsApiExampleComSchemasNodeYaml>>"),
+            "{code}"
+        );
+        assert!(!code.contains("serde_json::Value>"), "{code}");
+    }
+
+    /// A vendored remote schema that refers to **itself** directly, with no alias in between: the
+    /// plainest recursion there is, and the one that reaches `ensure_remote`'s own in-progress arm.
+    ///
+    /// The root-component and resolved-file frames each have a fixture that pins their back-edge is
+    /// boxed; the remote frame did not. Flipping that arm to `boxed: false` left the entire
+    /// workspace green while emitting `pub parent: Option<…NodeYaml>` inside the struct it names —
+    /// an infinitely sized type. The two remote fixtures beside this one both reach their back-edge
+    /// through the *alias* path, which boxes at a different site, so neither could see it.
+    #[test]
+    fn a_self_recursive_vendored_remote_schema_is_boxed() {
+        const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
+        const NODE_YAML: &str =
+            "type: object\nproperties:\n  name: { type: string }\n  parent: { $ref: 'node.yaml' }\n";
+        const NODE_SHA: &str = "119cdb35650ee7b837b855d28d5e3eef2f0b622aba52b5721817ae313aa19300";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \
+             \"api.example.com/schemas/node.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/node.yaml", NODE_YAML)];
+
+        let (generated, _temp, out) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{entry}: {report:#?}"
+            );
+        }
+        // Boxed, or the generated struct has no finite size and does not compile.
+        assert_eq!(
+            field_type(&code, "pub parent").as_deref(),
+            Some("Option<Box<HttpsApiExampleComSchemasNodeYaml>>"),
+            "{code}"
+        );
+    }
+
+    /// The remote spelling of `Selfy = Selfy | null`: a vendored document whose **whole body** is a
+    /// union over a `$ref` back to itself plus `null`.
+    ///
+    /// This is the one document that reaches `reservation_at`'s `remote_in_progress`
+    /// canonicalisation, and the only way to reach it. That loop exists because a remote frame is
+    /// keyed by the URL it was reached through while a provenance canonicalises to a
+    /// `file#pointer`, so a string comparison between the two can never match; the frame is only
+    /// *omitted* — rather than merely spelled differently — when the schema being asked about is a
+    /// remote document's root, which is exactly this shape and nothing else. Every other remote
+    /// recursion sits at a property or an `allOf` member, whose pointer is not the frame's.
+    ///
+    /// Without the canonicalisation this document does not reject. The collapse hands
+    /// `ensure_remote` a foreign id and reserves nothing, and `TypeDefs::fill` is then called on an
+    /// id that was never reserved — `fill of an unreserved id`, a **process abort** from inside a
+    /// consumer's `build.rs` with no code, no pointer and no `--carve` escape. A panic is not an
+    /// `Outcome`, so nothing in this suite could have observed it. That assertion is a
+    /// `debug_assert!`, so a build with debug assertions off does not abort: it fills the
+    /// unreserved id and carries on, which is worse and not better.
+    ///
+    /// The loop had zero iterations across the whole workspace before this fixture, while carrying
+    /// a paragraph crediting it with a fix the two-file remote fixture passes without. It is this
+    /// document that the paragraph is true of.
+    #[test]
+    fn a_vendored_remote_schema_that_is_a_union_over_itself_is_rejected() {
+        const SELFY_URL: &str = "https://api.example.com/schemas/selfy.yaml";
+        const SELFY_YAML: &str = "oneOf:\n  - $ref: 'selfy.yaml'\n  - type: 'null'\n";
+        const SELFY_SHA: &str = "a85d6698c240a7a1bc9f53f18466c179a2f8fcc01492d822aa913b7a7f4e009a";
+
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{SELFY_URL}\"\nsha256 = \"{SELFY_SHA}\"\npath = \
+             \"api.example.com/schemas/selfy.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/selfy.yaml", SELFY_YAML)];
+
+        let (generated, _temp, _out) =
+            run_layout(&responds_with(SELFY_URL), Some(&lock), &vendor, false);
+        let (checked, _temp2, _out2) =
+            run_layout(&responds_with(SELFY_URL), Some(&lock), &vendor, true);
+
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            // The pin is live, so the document really reaches lowering rather than stopping at the
+            // lock.
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+            // A spec-facing code, the same one the root-document spelling of this shape draws —
+            // never the internal invariant's `E011`, and never a process abort.
+            assert!(
+                has_code(report, Code::NonDisjointUnion),
+                "{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{entry}: {report:#?}"
+            );
+        }
+    }
+
     fn responds_with(url: &str) -> String {
         format!(
             "openapi: 3.1.0\n\
@@ -507,6 +4960,65 @@ mod remote {
         // both must return an outcome rather than aborting.
         let (checked, _t2, _o2) = run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, true);
         assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    }
+
+    /// The cycle guard's two message arms, pinned SEPARATELY.
+    ///
+    /// Both said "direct recursive", and that was the only thing asserted, so swapping the local
+    /// and remote strings was green — which left the LOCAL arm's wording unpinned too: the local
+    /// case could have told the reader its reference was remote and nothing would have noticed.
+    /// Each arm now asserts the noun it must use and the noun it must not.
+    #[test]
+    fn the_cycle_guard_names_the_right_kind_of_reference_in_each_arm() {
+        const NODE_URL: &str = "https://api.example.com/schemas/recursive.yaml";
+        // A remote document whose own schema references itself with shape-bearing siblings.
+        const NODE_YAML: &str = "type: object\nproperties:\n  next:\n    $ref: \"https://api.example.com/schemas/recursive.yaml\"\n    type: object\n    properties:\n      x:\n        type: string\n";
+        const NODE_SHA: &str = "1c720abdd7ea1b336ad3d49b6a0c5a80430c55d28746fd7540d37e4ae0f091d3";
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{NODE_URL}\"\nsha256 = \"{NODE_SHA}\"\npath = \"api.example.com/schemas/recursive.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/recursive.yaml", NODE_YAML)];
+
+        let (report, _t, _o) = run_layout(&responds_with(NODE_URL), Some(&lock), &vendor, false);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let remote_messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(remote_messages.len(), 1, "{report:#?}");
+        assert!(
+            remote_messages[0].contains("remote `$ref`"),
+            "the remote arm must say the reference is remote: {:?}",
+            remote_messages[0]
+        );
+        assert!(
+            remote_messages[0].contains("closes a reference cycle"),
+            "{:?}",
+            remote_messages[0]
+        );
+
+        // The local arm, against the same guard. Asserting what it must NOT say is what closes the
+        // swap: with the two strings exchanged, this message would call a local component's
+        // reference remote.
+        let local = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          $ref: '#/components/schemas/Node'\n          type: object\n          properties: { x: { type: string } }\n";
+        let report = generate(local);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let local_messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(local_messages.len(), 1, "{report:#?}");
+        assert!(
+            !local_messages[0].contains("remote"),
+            "a local component reference must not be described as remote: {:?}",
+            local_messages[0]
+        );
+        assert!(
+            local_messages[0].contains("back to the schema that encloses it"),
+            "the local arm must name the enclosing schema: {:?}",
+            local_messages[0]
+        );
+
+        // And the two arms must not be the same string: a single shared message would satisfy every
+        // assertion above only by accident of wording, and this states the requirement directly.
+        assert_ne!(
+            local_messages[0], remote_messages[0],
+            "the two arms report the same message, so neither is pinned to its own case"
+        );
     }
 
     #[test]
@@ -3235,6 +7747,966 @@ fn e013_check_generate_parity() {
     assert!(has_code(&report, Code::AllOfIrreconcilable));
 }
 
+/// In JSON Schema 2020-12 `$ref` is an applicator, so a `$ref`'s shape-bearing siblings are
+/// intersected with the referenced schema rather than discarded. When that intersection is empty no
+/// value can satisfy the schema, which is a document error the author must hear about: before this
+/// was pinned, `spargen check` reported `clean` and the construct simply vanished — a request body
+/// whose method then took no body argument at all. Every construct that reaches the `$ref` arm of
+/// `LowerCtx::lower_schema_inner` must report `E013`, through both `generate` and `check`.
+#[test]
+fn e013_fires_when_a_ref_sibling_contradicts_its_target() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    // `Name` is a string; every site below intersects it with `type: integer`, which is empty.
+    const TAIL: &str = "components:\n  schemas:\n    Name: { type: string }\n";
+
+    // The issue's exact reproduction: the body vanished and `upload` lost its body argument.
+    let request_body = format!(
+        "{HEAD}{}{TAIL}",
+        r##"paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Name', type: integer }
+      responses: { '204': { description: ok } }
+"##
+    );
+    let response_body = format!(
+        "{HEAD}{}{TAIL}",
+        r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Name', type: integer }
+"##
+    );
+    let parameter = format!(
+        "{HEAD}{}{TAIL}",
+        r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      parameters:
+        - name: filter
+          in: query
+          schema: { $ref: '#/components/schemas/Name', type: integer }
+      responses: { '204': { description: ok } }
+"##
+    );
+    // A component property, which reaches the same arm through `object_body`/`ensure_component`.
+    let component_property = format!(
+        "{HEAD}paths: {{}}\n{}",
+        r##"components:
+  schemas:
+    Name: { type: string }
+    Holder:
+      type: object
+      properties:
+        field: { $ref: '#/components/schemas/Name', type: integer }
+      required: [field]
+"##
+    );
+
+    // The pointer is not decoration: `compat::carve_rules` maps it to the smallest omittable
+    // construct, so a diagnostic carrying the document root instead of the offending node yields no
+    // carve rule and turns a carvable rejection into an un-carvable residual. Each site therefore
+    // pins the exact pointer it must produce, and `carve.rs` proves the consequence end to end.
+    for (site, spec, pointer) in [
+        (
+            "request body",
+            &request_body,
+            "/paths/~1u/post/requestBody/content/application~1json/schema",
+        ),
+        (
+            "response body",
+            &response_body,
+            "/paths/~1u/get/responses/200/content/application~1json/schema",
+        ),
+        (
+            "parameter",
+            &parameter,
+            "/paths/~1u/get/parameters/0/schema",
+        ),
+        (
+            "component property",
+            &component_property,
+            "/components/schemas/Holder/properties/field",
+        ),
+    ] {
+        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{site}` was not rejected by {entry}: {report:#?}"
+            );
+            let pointers: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::AllOfIrreconcilable)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            assert_eq!(
+                pointers,
+                vec![pointer],
+                "`{site}` through {entry} must report E013 once, at the offending schema: \
+                 {report:#?}"
+            );
+        }
+    }
+}
+
+/// `intersect_types` returns `None` for TWO conditions: the intersection is empty, so no value
+/// satisfies both sides, and the intersection is inhabited but has no single Rust type (the catch-all
+/// in `intersect_non_null` — `Bytes` against a primitive, an array against a tuple). The emitted
+/// message must not claim the first when it may be the second: `{$ref: Data, format: binary}` over a
+/// string `Data` is satisfied by any string, and the `E013` explain and the `allOf` scalar site both
+/// already say "empty or unrepresentable". This pins the site to the same honest wording. It asserts
+/// what the message may NOT say as well as what it must, because the defect this replaced was a
+/// message that named the wrong one of the two.
+#[test]
+fn the_ref_sibling_rejection_does_not_claim_more_than_it_knows() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths: {}
+components:
+  schemas:
+    Name: { type: string }
+    Holder:
+      type: object
+      properties:
+        field: { $ref: '#/components/schemas/Name', type: integer }
+      required: [field]
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::AllOfIrreconcilable);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("empty or unrepresentable intersection"),
+        "the site must use the same wording as the `allOf` scalar site and the E013 explain: {:?}",
+        messages[0]
+    );
+    // `None` is not proof of emptiness, so the message may not assert unsatisfiability.
+    assert!(
+        !messages[0].contains("no value can satisfy"),
+        "the message asserts unsatisfiability, which `intersect_types` returning `None` does not \
+         establish: {:?}",
+        messages[0]
+    );
+    // The remedy is the author's only route out of a rejection, so it is pinned too: it must name
+    // the construct and offer the omit escape the taxonomy promises.
+    let remedy = report
+        .diagnostics()
+        .iter()
+        .find(|d| d.code == Code::AllOfIrreconcilable)
+        .and_then(|d| d.remedy.clone())
+        .unwrap_or_default();
+    assert!(remedy.contains("`$ref` target"), "{remedy:?}");
+    assert!(remedy.contains("spargen::omit!"), "{remedy:?}");
+}
+
+/// A union whose only non-null member has no typed intersection with the enclosing schema's own
+/// sibling constraints has no representable variant left. The multi-variant path already rejects
+/// that with `E007` once every variant is excluded, so the one-member collapse reports the same
+/// terminal code — otherwise the code would depend on how many variants the author happened to
+/// write. It used to be dropped silently.
+#[test]
+fn e007_fires_when_a_single_real_member_union_contradicts_its_sibling() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths: {}
+components:
+  schemas:
+    Collapsed:
+      type: integer
+      oneOf:
+        - { type: string }
+        - { type: 'null' }
+"##;
+    let generated = generate(spec);
+    assert_eq!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    assert!(
+        has_code(&generated, Code::NonDisjointUnion),
+        "{generated:#?}"
+    );
+    let checked = check(spec);
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::NonDisjointUnion), "{checked:#?}");
+}
+
+/// The shape-bearing sibling keywords `E013`'s explain names, READ OUT of the published text
+/// rather than copied into the fixture beside it. Two independent lists cannot pin each other: a
+/// keyword deleted from the prose simply disappears, and a hard-coded copy goes on passing.
+fn shape_bearing_keywords_the_explain_names() -> Vec<String> {
+    const LEAD: &str = "A sibling bears a shape of its own through ";
+    let explain = Code::AllOfIrreconcilable.explain();
+    let start = explain.find(LEAD).unwrap_or_else(|| {
+        panic!("E013's explain no longer enumerates its shape-bearing sibling keywords: {explain}")
+    }) + LEAD.len();
+    let sentence = &explain[start..];
+    let sentence = &sentence[..sentence
+        .find(". ")
+        .unwrap_or_else(|| panic!("E013's shape-bearing sentence never ends: {sentence}"))];
+    // The keywords are the backticked spans of that one sentence.
+    sentence
+        .split('`')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
+/// `E013`'s explain names the sibling keywords intersected with a `$ref`'s target rather than
+/// discarded. That is a published promise, and nothing but this fixture ties it to the code:
+/// `schema_has_shape_constraint` is the private gate deciding whether the intersection happens, and
+/// a sibling that clears the gate but lowers to `TypeKind::Any` intersects as identity and is
+/// discarded anyway.
+///
+/// The list under test is DERIVED from `explain()`, not repeated here, so deleting a keyword from
+/// the prose fails this fixture rather than quietly shrinking what it checks. And each row is a
+/// DIFFERENTIAL — the same document with and without the keyword — so the keyword is what flips the
+/// outcome. An earlier revision paired several keywords with a `type` against a target of another
+/// category, where the `type` alone already rejected and the keyword beside it was never
+/// load-bearing; three rows proved nothing at all.
+///
+/// The `$ref` sits at a response body rather than a component root. A component root whose value is
+/// a `$ref` with only non-shape-bearing siblings trips a release-level `assert_eq!` inside
+/// `ensure_component` (filed as #148, pre-existing on master), which would turn every "without"
+/// control here into an opaque panic instead of this fixture's own message.
+///
+/// Each target is chosen so the intersection is *genuinely empty*, never merely unrepresentable:
+/// the `contentEncoding`/`format: binary` rows sit against an integer, not a string, so they do not
+/// pin the `(Bytes, Primitive(Str))` case that has a representation spargen has not learned yet.
+#[test]
+fn every_sibling_keyword_the_explain_names_is_actually_intersected() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const BODY: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Target'
+SIBLING
+"##;
+
+    // (keyword, the target it must contradict, the sibling spelling of that keyword)
+    let cases: &[(&str, &str, &str)] = &[
+        ("type", "{ type: string }", "type: integer"),
+        // `properties` alone, with no `type` beside it to account for the rejection. The target
+        // REQUIRES `a`, so the conflicting property genuinely empties the composition — without
+        // that, an optional conflicting property is representable and correctly generates.
+        (
+            "properties",
+            "{ type: object, required: [a], properties: { a: { type: string } } }",
+            "properties: { a: { type: integer } }",
+        ),
+        (
+            "patternProperties",
+            "{ type: string }",
+            "patternProperties: { '^a': { type: string } }",
+        ),
+        ("enum", "{ type: integer }", "enum: ['a']"),
+        ("const", "{ type: integer }", "const: 'a'"),
+        (
+            "contentEncoding",
+            "{ type: integer }",
+            "contentEncoding: base64",
+        ),
+        ("format: binary", "{ type: integer }", "format: binary"),
+        ("allOf", "{ type: string }", "allOf: [{ type: integer }]"),
+    ];
+
+    // The fixture's table and the published text must name the same keywords, in the same order.
+    let named = shape_bearing_keywords_the_explain_names();
+    let covered: Vec<String> = cases
+        .iter()
+        .map(|(keyword, ..)| (*keyword).to_owned())
+        .collect();
+    assert_eq!(
+        named, covered,
+        "`E013`'s explain and this fixture disagree about which sibling keywords bear a shape; \
+         whichever moved, the other must move with it"
+    );
+
+    let mut unconstrained = Vec::new();
+    let mut spurious = Vec::new();
+    for (keyword, target, sibling) in cases {
+        let spec = |sibling: &str| {
+            format!(
+                "{HEAD}{}components:\n  schemas:\n    Target: {target}\n",
+                BODY.replace("SIBLING", sibling)
+            )
+        };
+        let with = generate(&spec(&format!("                {sibling}")));
+        if with.outcome() != Outcome::Rejected || !has_code(&with, Code::AllOfIrreconcilable) {
+            unconstrained.push(*keyword);
+        }
+        // The control: the identical document without the keyword must generate, so the rejection
+        // above is attributable to the keyword and to nothing else in the row.
+        let without = generate(&spec(""));
+        if without.outcome() == Outcome::Rejected {
+            spurious.push(*keyword);
+        }
+    }
+    assert!(
+        unconstrained.is_empty(),
+        "the explain names these sibling keywords as intersected, but a `$ref` carrying one against \
+         an irreconcilable target still generates: {unconstrained:?}"
+    );
+    assert!(
+        spurious.is_empty(),
+        "these rows reject even without their keyword, so they pin the rest of the row rather than \
+         the keyword the explain names: {spurious:?}"
+    );
+
+    // The other half of the published rule: the four refining keywords do NOT constrain alone,
+    // because each lowers to `TypeKind::Any` without a `type`/`properties` to give it a shape. If
+    // one of these ever starts rejecting, the explain's second clause has become wrong in the
+    // opposite direction and must move with it.
+    for (keyword, sibling) in [
+        ("required", "required: [a]"),
+        ("additionalProperties", "additionalProperties: false"),
+        ("items", "items: { type: integer }"),
+        ("prefixItems", "prefixItems: [{ type: integer }]"),
+    ] {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Target: {{ type: string }}\n    Sibling:\n      \
+             $ref: '#/components/schemas/Target'\n      {sibling}\n"
+        );
+        let report = generate(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "a bare `{keyword}` sibling now constrains, so the explain's \"refine a shape rather \
+             than establish one\" clause is no longer true: {report:#?}"
+        );
+    }
+
+    // And the third clause, which says WHICH establishing keyword each refiner needs. Neither tier
+    // above can check it: tier one pairs every refiner with a `type` against a target of a
+    // different category, where the `type` alone already rejects, so the keyword beside it is never
+    // load-bearing. This tier is a differential instead — the same document with and without the
+    // refining keyword, against a target the paired `type` AGREES with, so the only thing that can
+    // move the lowering is the keyword itself.
+    //
+    // (keyword, the establishing keywords beside it, the target it agrees with, must it participate)
+    let refiners: &[(&str, &str, &str, &str)] = &[
+        (
+            "additionalProperties",
+            "type: object",
+            "additionalProperties: false",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        (
+            "items",
+            "type: array",
+            "items: { type: integer }",
+            "{ type: array, items: { type: string } }",
+        ),
+        (
+            "prefixItems",
+            "type: array",
+            "prefixItems: [{ type: integer }]",
+            "{ type: array, items: { type: string } }",
+        ),
+        // `required` beside `properties` participates: `object_body` consumes it per declared
+        // property, and the property is declared.
+        (
+            "required",
+            "properties: { a: { type: string } }",
+            "required: [a]",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+    ];
+    // What is compared is `Sibling`'s OWN emitted definition, not the whole `types` module.
+    //
+    // The module also holds the intermediate aliases — `SiblingConstraint`,
+    // `SiblingReferenceIntersection` — which are emitted whenever the sibling clears
+    // `schema_has_shape_constraint`, whether the refining keyword participates in the intersection
+    // or not. So a whole-module comparison answers "did adding this keyword change ANY emitted
+    // byte", which is liveness; it does not answer "did it change the type", which is the claim in
+    // the failure message. Measured under the sibling-discarded mutation: `Sibling` itself is
+    // byte-identical with and without the refiner, and the whole-module comparison passed anyway.
+    let lowering = |establishing: &str, refiner: &str, target: &str| {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Target: {target}\n    Sibling:\n      \
+             $ref: '#/components/schemas/Target'\n      {establishing}\n{refiner}"
+        );
+        let (report, code) = generate_with_code(&spec);
+        // `Sibling`'s own item, ATTRIBUTES INCLUDED — `#[serde(deny_unknown_fields)]` sits above
+        // the declaration and is exactly what `additionalProperties` contributes. A rejection
+        // yields no item at all, which is itself a difference worth seeing.
+        let types = types_module(&code);
+        let lines: Vec<&str> = types.lines().collect();
+        let declares = |line: &str| {
+            let t = line.trim_start();
+            ["pub struct ", "pub type ", "pub enum "]
+                .iter()
+                .filter_map(|decl| t.strip_prefix(decl))
+                .any(|rest| {
+                    rest.split([' ', '<', '{', '(', ';', '='])
+                        .next()
+                        .is_some_and(|name| name == "Sibling")
+                })
+        };
+        let definition = lines
+            .iter()
+            .position(|line| declares(line))
+            .map(|decl| {
+                // Walk back over the item's attributes and rustdoc.
+                let mut start = decl;
+                while start > 0 {
+                    let prev = lines[start - 1].trim_start();
+                    if prev.starts_with("#[") || prev.starts_with("///") {
+                        start -= 1;
+                    } else {
+                        break;
+                    }
+                }
+                // Forward to the end of the item.
+                let mut end = decl;
+                if lines[decl].trim_end().ends_with(';') {
+                    end = decl + 1;
+                } else {
+                    while end < lines.len() {
+                        end += 1;
+                        if lines[end - 1].trim_end() == "}" {
+                            break;
+                        }
+                    }
+                }
+                lines[start..end].join("\n")
+            })
+            .unwrap_or_default();
+        (report.outcome(), definition)
+    };
+    for (keyword, establishing, refiner, target) in refiners {
+        assert_ne!(
+            lowering(establishing, &format!("      {refiner}\n"), target),
+            lowering(establishing, "", target),
+            "`{keyword}` beside `{establishing}` changed nothing about the lowering, so the \
+             explain's claim that it then takes part is not true"
+        );
+    }
+
+    // The clause that round 1 got wrong in the other direction: `required` does NOT take part
+    // beside a bare `type: object`. `object_body` materialises fields only from `properties` and
+    // consumes `required` as a per-field flag, so a sibling that declares no property has no field
+    // to mark and the requirement is dropped — the generated type accepts and can emit `{}`, which
+    // the description forbids. That is #140's territory to repair; the published text must not
+    // claim it is already handled.
+    assert_eq!(
+        lowering(
+            "type: object",
+            "      required: [a]\n",
+            "{ type: object, properties: { a: { type: string } } }"
+        ),
+        lowering(
+            "type: object",
+            "",
+            "{ type: object, properties: { a: { type: string } } }"
+        ),
+        "`required` beside a bare `type: object` now changes the lowering, so the explain's \
+         \"only beside the sibling's own `properties`\" clause has become wrong and must move"
+    );
+}
+
+/// Site B widened `E007`'s emission set, so its message has to describe the construct that actually
+/// reached it. A right code under a wrong message is still a wrong diagnostic: reusing the
+/// multi-variant path's wording verbatim would say "every variant impossible" of a union with one
+/// variant, and would inherit the same unsatisfiability claim `intersect_types` cannot support.
+/// This pins the sole-member wording, the empty-or-unrepresentable hedge, and that the message does
+/// not name some other cause entirely.
+#[test]
+fn the_single_member_union_rejection_names_its_own_cause() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths: {}
+components:
+  schemas:
+    Collapsed:
+      type: integer
+      oneOf:
+        - { type: string }
+        - { type: 'null' }
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::NonDisjointUnion);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("sole non-null member"),
+        "{:?}",
+        messages[0]
+    );
+    assert!(
+        messages[0].contains("empty or unrepresentable"),
+        "{:?}",
+        messages[0]
+    );
+    // The causes `E007`'s explain already named must not be borrowed for this one.
+    assert!(!messages[0].contains("discriminator"), "{:?}", messages[0]);
+    assert!(!messages[0].contains("`anyOf`"), "{:?}", messages[0]);
+
+    // The pointer, which both new `E013` sites pin and this one did not. It is not decoration:
+    // `compat::carve_rules` maps it to the smallest omittable construct, so a diagnostic carrying
+    // the document root instead of the offending node yields no rule, and a carvable rejection
+    // becomes an un-carvable residual that ends the whole run `Rejected`. `carve.rs` proves that
+    // consequence for this site end to end.
+    let pointers: Vec<&str> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::NonDisjointUnion)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert_eq!(
+        pointers,
+        vec!["/components/schemas/Collapsed"],
+        "the sole-member collapse must report at the offending component, not the document root: \
+         {report:#?}"
+    );
+
+    // check/generate parity for the same site, which the `E013` sites also assert.
+    let checked = check(spec);
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(has_code(&checked, Code::NonDisjointUnion), "{checked:#?}");
+
+    // And the abstinence Site B spends five lines of comment justifying: the multi-variant path
+    // emits a per-variant `W011` before its `E007` and this one deliberately does not, because
+    // `W011` means "declared construct has no effect" and describes something dropped from output
+    // that still exists — when the SOLE member is excluded no enum is generated at all, so there is
+    // no surviving construct for the warning to describe. Filtering to `NonDisjointUnion` above
+    // cannot see a second code, so adding exactly that `W011` survived the whole suite. One cause,
+    // one diagnostic.
+    assert!(
+        !has_code(&report, Code::DeclarationHasNoEffect),
+        "the sole-member collapse emitted `W011` beside its `E007`: two diagnostics for one cause, \
+         and the `W011` would assert a generated enum that does not exist: {report:#?}"
+    );
+    assert_eq!(
+        report.diagnostics().len(),
+        1,
+        "the sole-member collapse must report exactly its own cause: {report:#?}"
+    );
+}
+
+/// `E013`'s explain is what `spargen explain E013` prints, and this change REWROTE it: the code was
+/// repurposed from "irreconcilable allOf composition" to a composition-generic one, and the text
+/// moved with it. Nothing held the new text to the code. Measured before this fixture existed:
+/// reverting the explain to its `allOf`-only wording, and replacing it with text flatly
+/// contradicting the code ("a `$ref` replaces the containing schema: its sibling keywords are
+/// discarded, never intersected"), BOTH survived the entire suite.
+///
+/// The assertions are claims, not typography — a string-equality snapshot would pin the wording and
+/// go stale on every edit without ever catching a false clause. Each one below is a promise some
+/// other fixture in this file enforces against the code, so the two cannot drift apart silently.
+#[test]
+fn the_composition_explain_covers_every_cause_that_reports_it() {
+    let explain = Code::AllOfIrreconcilable.explain();
+
+    // Both constructs that report it, and that `$ref` siblings are INTERSECTED rather than
+    // discarded — the sentence the whole change exists to make true.
+    assert!(explain.contains("`allOf`"), "{explain}");
+    assert!(
+        explain.contains("`$ref` is an applicator"),
+        "the explain must say why a `$ref`'s siblings are not discarded: {explain}"
+    );
+    assert!(
+        explain.contains("instead of being discarded"),
+        "the explain must say the siblings are intersected rather than discarded: {explain}"
+    );
+
+    // The two-tier sibling-keyword rule, pinned against the code by
+    // `every_sibling_keyword_the_explain_names_is_actually_intersected`.
+    assert!(
+        explain.contains("A sibling bears a shape of its own through"),
+        "{explain}"
+    );
+    assert!(
+        explain.contains("refine a shape rather than establish one"),
+        "{explain}"
+    );
+
+    // The array-arm doctrine. `intersect_structs` now mirrors it for an optional conflicting
+    // property, so withdrawing this sentence would leave that behaviour unexplained.
+    assert!(
+        explain.contains("uninhabited item type"),
+        "the explain must keep the doctrine that an empty item intersection stays representable: \
+         {explain}"
+    );
+
+    // The hedge the round-1 repair put on every message that reports this code: `intersect_types`
+    // returns `None` for an empty intersection AND for an inhabited one with no single Rust type,
+    // and the text must not claim the first when it may be the second.
+    assert!(explain.contains("empty or unrepresentable"), "{explain}");
+
+    // The rejection causes, including the recursive one all three spellings now share — stated as a
+    // property of the document rather than of lowering order, which is what makes the verdict
+    // reproducible when `components.schemas` is reordered.
+    assert!(explain.contains("closes a reference cycle"), "{explain}");
+    assert!(
+        !explain.contains("not yet known") && !explain.contains("still being lowered"),
+        "the explain still describes the recursive cause as a lowering-order fact, which the \
+         guard no longer is: {explain}"
+    );
+
+    // Presence assertions cannot see a contradiction ADDED after them. Appending a paragraph
+    // saying sibling keywords are "discarded and never intersected, so none of the above applies"
+    // left every assertion above true and eleven suites green. The remedy is the last thing the
+    // explain says, so anything appended moves it — which is a structural rule, not typography.
+    assert!(
+        explain
+            .trim_end()
+            .ends_with("omit this API segment with `spargen::omit!`."),
+        "`E013`'s explain must end with its remedy; text after it can contradict everything \
+         above and no presence assertion would notice: {explain}"
+    );
+    // And the in-place forms of the same contradiction.
+    for denial in [
+        "never intersected",
+        "none of the above",
+        "always exactly its target",
+        "siblings are discarded",
+    ] {
+        assert!(
+            !explain.contains(denial),
+            "`E013`'s explain contradicts the code it documents (`{denial}`): {explain}"
+        );
+    }
+}
+
+/// `E007`'s published explain is what `spargen explain E007` prints, and Site B added a cause it did
+/// not describe. The `oneOf`-plus-`anyOf` and `defaultMapping` causes must survive, and the new one
+/// must be there beside them — the same standard this change applied to `E013`'s text.
+#[test]
+fn the_union_explain_covers_every_cause_that_reports_it() {
+    let explain = Code::NonDisjointUnion.explain();
+    assert!(explain.contains("`oneOf` and `anyOf`"), "{explain}");
+    assert!(explain.contains("defaultMapping"), "{explain}");
+    assert!(explain.contains("no branch at all"), "{explain}");
+    assert!(explain.contains("single non-null member"), "{explain}");
+
+    // The `W011` clause had no reader while its three neighbours did, and it is the clause Site B's
+    // abstinence rests on: a branch the adjacent constraints exclude is dropped with `W011` *while
+    // the rest of the enum stands*, which is exactly what does not happen when the excluded branch
+    // is the only one. `the_single_member_union_rejection_names_its_own_cause` asserts the
+    // behaviour; without this the published reason for it could be deleted silently.
+    assert!(
+        explain.contains("`W011`"),
+        "the explain must say what happens to a branch the adjacent constraints exclude: {explain}"
+    );
+    assert!(
+        explain.contains("while the rest of the enum stands"),
+        "the explain must keep the clause that distinguishes an excluded branch from an excluded \
+         sole member, which is why one warns and the other does not: {explain}"
+    );
+
+    // The same anti-append guard as `E013`'s: presence assertions cannot see a contradiction added
+    // after them, and the remedy is the last thing the explain says.
+    assert!(
+        explain
+            .trim_end()
+            .ends_with("omit this API segment with `spargen::omit!`."),
+        "`E007`'s explain must end with its remedy: {explain}"
+    );
+}
+
+/// The guard on the two rejections above: only an EMPTY intersection is an error. A sibling that
+/// merely narrows its target still lowers to the narrower type and generates, so the new rejection
+/// cannot creep into the ordinary applicator case.
+#[test]
+fn a_compatible_ref_sibling_still_generates() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Count', type: number }
+components:
+  schemas:
+    Count: { type: integer }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+    assert!(!code.contains("serde_json :: Value"), "{code}");
+
+    // The claim in the doc comment above — "lowers to the NARROWER type" — and the whole point of
+    // treating `$ref` as an applicator. Outcome assertions cannot see it: they pin when the tool
+    // refuses, and this is what it emits when it proceeds.
+    //
+    // `integer` ∧ `number` is `integer`, so the body must be `i64`. Two substitutions were green
+    // before this: taking the SIBLING alone, which is the exact defect this pull request exists to
+    // fix, and taking the TARGET alone, which is the behaviour before it. The first widens the body
+    // to `f64` — a generated type that accepts values the description forbids — and neither changes
+    // an outcome, a code, or introduces `serde_json::Value`.
+    let types = types_module(&code);
+    let body = code
+        .split("ResponseValue<types::")
+        .nth(1)
+        .and_then(|rest| rest.split('>').next())
+        .unwrap_or_else(|| panic!("no typed response: {code}"))
+        .trim()
+        .to_owned();
+    assert!(
+        types.contains(&format!("pub type {body} = i64;")),
+        "`integer` narrowed by `number` must stay `i64`; `f64` would accept values the document \
+         forbids: {types}"
+    );
+    // And the sibling is not simply discarded either: the intersection is taken, so the derived
+    // type exists rather than the response naming the target component directly.
+    assert!(
+        types.contains("pub type Count = i64;"),
+        "the target must still be emitted under its own name: {types}"
+    );
+
+    // The mirror, and the row that catches the OTHER substitution. Above, `integer` is both the
+    // intersection and the target, so taking the target alone happens to give the right answer and
+    // is invisible. Here the SIBLING is the narrower side: `number` narrowed by `integer` is
+    // `integer`, so target-alone would emit `f64` and widen the body.
+    let mirrored = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Measure', type: integer }
+components:
+  schemas:
+    Measure: { type: number }
+"##;
+    let (report, code) = generate_with_code(mirrored);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    let body = code
+        .split("ResponseValue<types::")
+        .nth(1)
+        .and_then(|rest| rest.split('>').next())
+        .unwrap_or_else(|| panic!("no typed response: {code}"))
+        .trim()
+        .to_owned();
+    assert!(
+        types.contains(&format!("pub type {body} = i64;")),
+        "`number` narrowed by `integer` must be `i64`; `f64` is the target alone, which is the \
+         behaviour before `$ref` was treated as an applicator: {types}"
+    );
+}
+
+/// Over-rejection is the whole risk of reporting where the code used to drop, and the fixture above
+/// pins one shape only — primitive narrowing. These are the other shapes that reach the `$ref` arm
+/// and must keep generating. Each is a direction the rejection could creep in, and each lands on a
+/// different mechanism: the early exit before any intersection, an intersection that succeeds
+/// unchanged, and `intersect_types`' both-sides-nullable rescue, which returns the exact JSON null
+/// type rather than `None` and so never reaches the new rejection at all.
+#[test]
+fn the_ref_sibling_rejection_does_not_creep_into_the_shapes_that_still_generate() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Name', SIBLING }
+"##;
+
+    // (what it exercises, the sibling keywords, the target, what must appear in the output)
+    let cases: &[(&str, &str, &str, &str)] = &[
+        // Validation-only siblings bear no shape, so the `$ref` arm exits before intersecting. They
+        // are reported as ignored (`W001`), never as irreconcilable.
+        (
+            "validation-only siblings",
+            "maxLength: 5, pattern: '^a'",
+            "{ type: string }",
+            "String",
+        ),
+        // The sibling agrees with its target: the intersection succeeds and is the target's type.
+        (
+            "an agreeing type",
+            "type: string",
+            "{ type: string }",
+            "String",
+        ),
+        // Both sides accept null and nothing else is shared. `intersect_types` returns the exact
+        // JSON null type — `null` genuinely is the only satisfying value — so this must NOT reject.
+        // The decision record lists "collapse to Null when nullable" as rejected; the code does it,
+        // and this fixture is why the record now says the code is right.
+        (
+            "a nullable-only intersection",
+            "type: [integer, 'null']",
+            "{ type: [string, 'null'] }",
+            "()",
+        ),
+    ];
+
+    for (what, sibling, target, expected) in cases {
+        let spec = format!(
+            "{HEAD}{}components:\n  schemas:\n    Name: {target}\n",
+            PATH.replace("SIBLING", sibling)
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "`{what}` was rejected, so the new rejection has crept: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "`{what}` reported E013: {report:#?}"
+        );
+        // The RESPONSE BODY's own type, resolved through the operation signature. The earlier
+        // revision asserted `code.contains("String")` and `code.contains("()")`, and both of those
+        // are true of every generated client — `pub fn url(&self) -> String` and `Server0::new()`
+        // are always emitted — so the column could not distinguish any behaviour at all.
+        let types = types_module(&code);
+        let body = code
+            .split("ResponseValue<types::")
+            .nth(1)
+            .and_then(|rest| rest.split('>').next())
+            .unwrap_or_else(|| panic!("`{what}` emitted no typed response: {code}"))
+            .trim()
+            .to_owned();
+        assert!(
+            types.contains(&format!("pub type {body} = {expected};")),
+            "`{what}` must lower its response body to `{expected}`, but `{body}` is not: {types}"
+        );
+    }
+
+    // The validation-only case is also the one that must still be *acknowledged*: bearing no shape
+    // is not the same as being silently dropped.
+    let validation_only = format!(
+        "{HEAD}{}components:\n  schemas:\n    Name: {{ type: string }}\n",
+        PATH.replace("SIBLING", "maxLength: 5, pattern: '^a'")
+    );
+    assert!(
+        has_code(&generate(&validation_only), Code::ValidationKeywordIgnored),
+        "a validation-only sibling must still be acknowledged"
+    );
+}
+
+/// When a `$ref` is BOTH unresolvable and carries a contradictory sibling, exactly one code must
+/// win and it must be `E004`: `ensure_component` returns `None` before the intersection is reached,
+/// so the missing component is reported and the sibling never gets a second, confusing diagnostic
+/// about a target that does not exist. The two sites are twenty lines apart in the same block, which
+/// is why this is pinned rather than assumed.
+///
+/// The absence of `E013` is only a SYMPTOM of that ordering, and a weak one: letting the miss fall
+/// through to a `TypeKind::Any` placeholder and reach the intersection looks identical from
+/// outside, because an `Any` sibling identity-intersects and emits nothing. So the ordering itself
+/// is measured, with a sibling whose own LOWERING would report — `patternProperties` whose value
+/// schemas disagree is `E005`. If the sibling is never lowered, `E005` cannot fire; the control
+/// proves it fires the moment the same sibling is lowered against a target that does exist.
+#[test]
+fn an_unresolvable_ref_reports_only_e004_even_when_its_sibling_contradicts() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Nope', type: integer }
+      responses: { '204': { description: ok } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "a missing component must not also be reported as an irreconcilable intersection — \
+             there is no target to intersect with: {report:#?}"
+        );
+    }
+
+    // The mechanism. `SIBLING` is shape-bearing, so it clears `schema_has_shape_constraint` and
+    // would be lowered if the `$ref` arm ever got that far.
+    const TRACED: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TARGET'
+              type: object
+              patternProperties: { '^a': { type: string }, '^b': { type: integer } }
+      responses: { '204': { description: ok } }
+components:
+  schemas:
+    Present: { type: object }
+"##;
+    for report in [
+        generate(&TRACED.replace("TARGET", "Nope")),
+        check(&TRACED.replace("TARGET", "Nope")),
+    ] {
+        assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
+        assert!(
+            !has_code(&report, Code::PatternPropertiesRejected),
+            "the sibling of an unresolvable `$ref` was lowered, so `ensure_component` no longer \
+             returns `None` before the intersection is reached and the ordering this fixture \
+             names is gone: {report:#?}"
+        );
+    }
+    // The control: the identical sibling against a target that resolves IS lowered, and reports.
+    let present = generate(&TRACED.replace("TARGET", "Present"));
+    assert!(
+        has_code(&present, Code::PatternPropertiesRejected),
+        "the marker sibling no longer reports when it is lowered, so its absence above proves \
+         nothing: {present:#?}"
+    );
+}
+
 /// A self-referential component (`Node.next -> Node`) once recursed forever, then was rejected as
 /// E014. It must now generate: the cycle-closing `$ref` is boxed so the recursive type is finite.
 #[test]
@@ -3823,11 +9295,24 @@ paths:
                 $ref: "#/paths/~1pets~1%7BpetId%7D/get/responses/200/content/application~1json/schema"
 "##;
     let report = generate(spec);
-    // The self-reference is a cycle, so it is rejected for being recursive — never for being
-    // unresolvable, which is what the missing percent-decoding used to report.
+    // The schema at that pointer *is* this `$ref`, so it names only itself: a cycle, and rejected
+    // for being one. What must never happen is the report the missing percent-decoding used to
+    // produce — that the target could not be found — so this asserts the wording, not merely the
+    // code. (`E004` covers both, since an alias cycle resolves to nothing; asserting its absence
+    // would now fail for the right reason rather than pass for the wrong one.)
+    let e004: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::UnresolvedRef)
+        .collect();
     assert!(
-        !has_code(&report, Code::UnresolvedRef),
+        e004.iter().all(|d| !d.message.contains("was not found")
+            && !d.message.contains("unsupported or unresolved")),
         "the percent-encoded pointer must resolve: {report:#?}"
+    );
+    assert!(
+        e004.iter().any(|d| d.message.contains("alias cycle")),
+        "a schema that references itself is a cycle, and is named as one: {report:#?}"
     );
 }
 
@@ -8204,6 +13689,30 @@ fn assert_parity(name: &str, spec: &str) {
         codes(&generated),
         "`{name}`: check and generate report different diagnostics"
     );
+
+    // A fixture whose name begins with a code must actually report it. Without this the parity
+    // suite is satisfied by both entry points being equally wrong: the `E004 unresolvable ref`
+    // fixture reported `clean` for as long as the bug it was named for existed, and passed, because
+    // parity compares the two reports to each other and the span test only *counts* verdicts.
+    if let Some(labelled) = parity_label(name) {
+        assert!(
+            codes(&checked).contains(&labelled),
+            "`{name}`: the fixture is named for {labelled} but reports {:?}",
+            codes(&checked)
+        );
+    }
+}
+
+/// The `E###`/`W###` code a [`PARITY_FIXTURES`] name is labelled with, if it is labelled at all.
+/// Shared by [`assert_parity`], which holds a labelled fixture to its label, and by
+/// [`every_parity_fixture_that_reports_is_labelled`], which stops the label convention from
+/// quietly becoming optional.
+fn parity_label(name: &str) -> Option<&str> {
+    name.split_whitespace().next().filter(|token| {
+        token.len() == 4
+            && matches!(token.as_bytes()[0], b'E' | b'W')
+            && token[1..].bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 /// One spec per diagnostic family the frontend can reach, plus a clean one. Rejections and warnings
@@ -8228,6 +13737,10 @@ const PARITY_FIXTURES: &[(&str, &str)] = &[
         "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths:\n  /a:\n    get:\n      operationId: getA\n      security: [{ nope: [] }]\n      responses: { '204': { description: ok } }\n",
     ),
     ("E013 irreconcilable allOf", ALL_OF_CONFLICT_SPEC),
+    // A nullable alias that generates cleanly. The suite's clean cases are all trivial documents;
+    // this one drives the lowering path this branch reworked, where `check` and `generate` take the
+    // same code and could silently stop agreeing.
+    ("nullable alias carries its target", NULLABLE_ALIAS_CARRY_SPEC),
     ("W005 schema default", W005_SPEC),
     (
         "W001 validation-only keyword",
@@ -8545,4 +14058,1218 @@ fn an_unparseable_response_key_behind_a_ref_reports_rather_than_vanishing() {
     assert!(has_code(&generated, Code::InvalidInput), "{generated:#?}");
     assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(has_code(&checked, Code::InvalidInput), "{checked:#?}");
+}
+
+/// A union whose own null acceptance came from a stripped `{type: "null"}` member or a `"null"` in
+/// the enclosing `type` array is still satisfied by `null`, and must not be rejected as having no
+/// variant. `lower_union` folds that acceptance into a local *before* it intersects, so the member
+/// it hands `intersect_types` carries `nullable: false` and `type_accepts_null` — which reads
+/// `Ty::nullable` — cannot see it. Both collapse paths had the blind spot: the sole-real-member
+/// site, and the pre-existing every-variant-excluded site below it.
+///
+/// The `$ref` spelling of the identical instance set already emits `()`
+/// (`the_ref_sibling_rejection_does_not_creep_into_the_shapes_that_still_generate` pins it), so two
+/// spellings of one schema disagreed. An independent Draft 2020-12 validator says `null` is the one
+/// value each of the rescued documents admits, and that each control admits nothing at all.
+#[test]
+fn a_union_that_null_still_satisfies_is_not_rejected_as_having_no_variant() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+
+    // (what it exercises, the schema body, whether `null` satisfies it)
+    let cases: &[(&str, &str, bool)] = &[
+        // Sole real member: `null` satisfies the enclosing `type` array AND the null-only member,
+        // so `null` is the only value satisfying the whole schema.
+        (
+            "a sole-member `oneOf` whose enclosing type array admits null",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a sole-member `anyOf` whose enclosing type array admits null",
+            "type: [integer, 'null']\n                anyOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+        // Every real variant excluded: the same blind spot on the multi-variant path.
+        (
+            "an every-variant-excluded `oneOf` whose enclosing type array admits null",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }, { type: boolean }, { type: 'null' }]",
+            true,
+        ),
+        // The controls that must keep rejecting: the union admits null but the sibling refuses it,
+        // so nothing satisfies both and the rejection is right.
+        (
+            "a sole-member union whose sibling refuses null",
+            "type: integer\n                oneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "an every-variant-excluded union whose sibling refuses null",
+            "type: integer\n                oneOf: [{ type: string }, { type: boolean }, { type: 'null' }]",
+            false,
+        ),
+    ];
+
+    for (what, body, null_satisfies) in cases {
+        let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            if *null_satisfies {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "`{what}` is satisfied by `null`, so {entry} must not reject it: {report:#?}"
+                );
+                assert!(
+                    !has_code(&report, Code::NonDisjointUnion),
+                    "`{what}` reported E007 through {entry}: {report:#?}"
+                );
+            } else {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "`{what}` admits no value at all, so {entry} must still reject it: {report:#?}"
+                );
+                assert!(
+                    has_code(&report, Code::NonDisjointUnion),
+                    "`{what}` did not report E007 through {entry}: {report:#?}"
+                );
+            }
+        }
+        if *null_satisfies {
+            // The exact JSON null type, not a silently dropped body and not `Option<()>`: `null` is
+            // the only satisfying value, so the response type has exactly one inhabitant. Followed
+            // through the operation's own signature rather than by guessing an alias name — the
+            // sole-member path lowers its member under the same hint, so the union's own def gets a
+            // disambiguating suffix.
+            let (_, code) = generate_with_code(&spec);
+            let body = code
+                .split("ResponseValue<types::")
+                .nth(1)
+                .and_then(|rest| rest.split('>').next())
+                .unwrap_or_else(|| panic!("`{what}` emitted no typed response: {code}"))
+                .trim()
+                .to_owned();
+            assert!(
+                code.contains(&format!("pub type {body} = ();")),
+                "`{what}` must lower its response body to the exact JSON null type, but \
+                 `{body}` is not `()`: {code}"
+            );
+        }
+    }
+
+    // The other half of restoring the union's null acceptance ONTO the member: nullability now
+    // flows THROUGH the intersection instead of around it, so the sibling gets a say in it. It
+    // previously did not, and the union's acceptance was OR-ed back on afterwards regardless —
+    // `{type: [string], oneOf: [{type: string}, {type: 'null'}]}` emitted `Option<String>` for a
+    // schema the enclosing `type` array forbids `null` in. An independent Draft 2020-12 validator
+    // rejects `null` for the first two rows and accepts it for the third.
+    //
+    // (what it exercises, the schema body, whether the generated response is optional)
+    let nullability: &[(&str, &str, bool)] = &[
+        (
+            "a null member under a sibling `type` array that excludes null",
+            "type: [string]\n                oneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "a nullable sole member under a sibling that excludes null",
+            "type: [string]\n                oneOf: [{ type: [string, 'null'] }]",
+            false,
+        ),
+        (
+            "a null member under a sibling `type` array that admits null",
+            "type: [string, 'null']\n                oneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+    ];
+    for (what, body, optional) in nullability {
+        let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            code.contains("ResponseValue<Option<types::"),
+            *optional,
+            "`{what}` must {} an optional response body: {code}",
+            if *optional { "have" } else { "not have" }
+        );
+    }
+}
+
+/// A `$ref` that closes a cycle resolves to a *reserved* id whose def is still the
+/// `TypeKind::Any` placeholder `TypeGraph::reserve` put there — the component's real shape is not
+/// known until its own body finishes. `intersect_non_null`'s `(Any, _)` arm returns the sibling
+/// unchanged, so intersecting against that placeholder is a no-op and **the target is silently
+/// discarded**: `Node.next: {$ref: Node, type: object, properties: {x}}` generated a standalone
+/// `Nodenext` with the recursion gone, and `{$ref: Node, type: string}` generated `String` for a
+/// schema nothing satisfies. Both were `Generated` and `check`-clean, which is the silent
+/// degradation the taxonomy forbids.
+///
+/// The `allOf` spelling of the identical conjunction has always rejected this, so the two
+/// spellings now agree. A cycle-closing `$ref` with NO shape-bearing sibling still boxes and
+/// generates — that is the ordinary recursive schema, and the third case pins it.
+#[test]
+fn a_cycle_closing_ref_whose_siblings_bear_a_shape_is_rejected_not_discarded() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths: {}\n";
+
+    // (what it exercises, the `next` subschema, the pointer E013 must carry)
+    let rejected: &[(&str, &str, &str)] = &[
+        (
+            "an object sibling on a self-recursive back-edge",
+            "$ref: '#/components/schemas/Node'\n          type: object\n          properties: { x: { type: string } }",
+            "/components/schemas/Node/properties/next",
+        ),
+        (
+            "a scalar sibling on a self-recursive back-edge",
+            "$ref: '#/components/schemas/Node'\n          type: string",
+            "/components/schemas/Node/properties/next",
+        ),
+    ];
+    for (what, next, pointer) in rejected {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          {next}\n"
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` was not rejected by {entry}, so the recursive target is still being \
+                 silently discarded: {report:#?}"
+            );
+            let pointers: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::AllOfIrreconcilable)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            assert_eq!(
+                pointers,
+                vec![*pointer],
+                "`{what}` through {entry} must report E013 once, at the offending `$ref`: \
+                 {report:#?}"
+            );
+        }
+        // The message must name the cause the reader can act on — a recursive reference — not the
+        // generic empty-intersection wording, which would send them looking for a contradiction
+        // that is not there.
+        let report = generate(&spec);
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(messages.len(), 1, "{messages:?}");
+        assert!(
+            messages[0].contains("closes a reference cycle"),
+            "`{what}` must say the reference is recursive: {:?}",
+            messages[0]
+        );
+    }
+
+    // Mutual recursion reaches the same placeholder one component further out.
+    let mutual = format!(
+        "{HEAD}components:\n  schemas:\n    A:\n      type: object\n      properties:\n        b: {{ $ref: '#/components/schemas/B' }}\n    B:\n      type: object\n      properties:\n        a:\n          $ref: '#/components/schemas/A'\n          type: object\n          properties: {{ x: {{ type: string }} }}\n"
+    );
+    for (entry, report) in [("generate", generate(&mutual)), ("check", check(&mutual))] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "a mutually recursive back-edge was not rejected by {entry}: {report:#?}"
+        );
+        assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+    }
+
+    // The control, and the reason the guard is gated on the sibling bearing a shape at all: an
+    // ordinary recursive schema still boxes its back-edge and generates, keeping the recursion.
+    let plain = format!(
+        "{HEAD}components:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          $ref: '#/components/schemas/Node'\n          description: an ordinary recursive reference\n"
+    );
+    let (report, code) = generate_with_code(&plain);
+    assert_ne!(
+        report.outcome(),
+        Outcome::Rejected,
+        "the new rejection crept into an ordinary recursive schema: {report:#?}"
+    );
+    assert!(
+        code.contains("Option<Box<Node>>"),
+        "the recursion must survive as a boxed back-edge: {code}"
+    );
+}
+
+/// A property whose two sides cannot be intersected does not make the composition empty unless
+/// some instance is obliged to carry it. When the property is optional on BOTH sides, `{}` and
+/// `{"zz": 1}` still satisfy the whole schema — an independent Draft 2020-12 validator confirms
+/// both — so rejecting the document deletes a body that has valid instances.
+///
+/// This is `E013`'s own published doctrine, which the array arm of `intersect_non_null` already
+/// implements: "an empty array-item intersection becomes an uninhabited item type so the valid
+/// empty array remains representable". `intersect_structs` propagated the failure instead. It now
+/// mirrors the array arm: the field takes an uninhabited type, so the instances that remain are
+/// exactly the ones that omit it.
+///
+/// Requiring the property on either side is the real empty composition, and both controls must
+/// keep rejecting — the validator says nothing satisfies them.
+#[test]
+fn a_property_conflict_on_an_optional_property_does_not_empty_the_object() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+
+    // Both sites that reach `intersect_structs` with a `$ref`-sibling composition: the `$ref` arm
+    // of `lower_schema_inner`, and the sole-real-member union collapse.
+    let inhabited: &[(&str, &str, &str)] = &[
+        (
+            "a `$ref` sibling conflicting on a property neither side requires",
+            "$ref: '#/components/schemas/Obj'\n                type: object\n                properties: { a: { type: integer } }",
+            "components:\n  schemas:\n    Obj: { type: object, properties: { a: { type: string } } }\n",
+        ),
+        (
+            "a sole-member union conflicting on a property neither side requires",
+            "type: object\n                properties: { a: { type: integer } }\n                oneOf: [{ type: object, properties: { a: { type: string } } }]",
+            "components:\n  schemas:\n    Unused: { type: string }\n",
+        ),
+    ];
+    for (what, body, components) in inhabited {
+        let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` still admits `{{}}`, so {entry} must not reject it: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable)
+                    && !has_code(&report, Code::NonDisjointUnion),
+                "`{what}` reported an irreconcilable composition through {entry}: {report:#?}"
+            );
+        }
+        // Not silently widened to something that accepts `{"a": 1}`: the field itself is
+        // uninhabited, so only instances omitting the property can be built or decoded.
+        let (_, code) = generate_with_code(&spec);
+        assert!(
+            code.contains("no JSON value can inhabit schema"),
+            "`{what}` must give the conflicting property an uninhabited type: {code}"
+        );
+        assert!(!code.contains("serde_json :: Value"), "{code}");
+    }
+
+    // The controls. Requiring the property on either side obliges every instance to carry a value
+    // no type admits, so the composition really is empty and the rejection is right.
+    let empty: &[(&str, &str, &str)] = &[
+        (
+            "the sibling requires the conflicting property",
+            "$ref: '#/components/schemas/Obj'\n                type: object\n                required: [a]\n                properties: { a: { type: integer } }",
+            "components:\n  schemas:\n    Obj: { type: object, properties: { a: { type: string } } }\n",
+        ),
+        (
+            "the target requires the conflicting property",
+            "$ref: '#/components/schemas/Obj'\n                type: object\n                properties: { a: { type: integer } }",
+            "components:\n  schemas:\n    Obj: { type: object, required: [a], properties: { a: { type: string } } }\n",
+        ),
+    ];
+    for (what, body, components) in empty {
+        let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` admits no value at all, so {entry} must still reject it: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::AllOfIrreconcilable),
+                "`{what}` did not report E013 through {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A null-only union MEMBER and a `"null"` in the enclosing `type` array are not the same fact, and
+/// only one of them can rescue an empty intersection.
+///
+/// A member supplies a branch that `null` validates against. A `"null"` in the enclosing `type`
+/// array only *permits* null — `oneOf` still demands exactly one matching member and `anyOf` at
+/// least one, so with no null member there is nothing for `null` to match and the schema admits
+/// nothing at all. Folding both into one flag made those two cases indistinguishable: an
+/// independent Draft 2020-12 validator says the first row below is satisfied by `null` and the
+/// second by **nothing**, and they produced byte-identical output — the tool could no longer tell
+/// "accepts only null" from "accepts nothing", and typed a body `()` that no real payload decodes
+/// into, with `check` reporting clean.
+#[test]
+fn only_a_null_member_can_rescue_an_empty_union_intersection() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+
+    // (what it exercises, the schema body, whether `null` satisfies it)
+    let cases: &[(&str, &str, bool)] = &[
+        // A null MEMBER: `null` matches it, and the enclosing `type` array permits null, so `null`
+        // satisfies the whole schema.
+        (
+            "a sole-member `oneOf` with a null member beside a nullable type array",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+        // The SAME enclosing type array with NO null member. Nothing satisfies this: `null` matches
+        // no member, and anything matching the `string` member fails the `type` array.
+        (
+            "a sole-member `oneOf` whose nullable type array supplies no null member",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }]",
+            false,
+        ),
+        (
+            "an `anyOf` whose nullable type array supplies no null member",
+            "type: [integer, 'null']\n                anyOf: [{ type: string }]",
+            false,
+        ),
+        // The same distinction on the every-variant-excluded path.
+        (
+            "an every-variant-excluded union with a null member",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }, { type: boolean }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "an every-variant-excluded union whose nullable type array supplies no null member",
+            "type: [integer, 'null']\n                oneOf: [{ type: string }, { type: boolean }]",
+            false,
+        ),
+    ];
+
+    let mut emitted: Vec<(&str, String)> = Vec::new();
+    for (what, body, null_satisfies) in cases {
+        let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            if *null_satisfies {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "`{what}` is satisfied by `null`, so {entry} must not reject it: {report:#?}"
+                );
+            } else {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "`{what}` admits no value at all, so {entry} must reject it rather than type \
+                     the body `()`: {report:#?}"
+                );
+                assert!(
+                    has_code(&report, Code::NonDisjointUnion),
+                    "`{what}` did not report E007 through {entry}: {report:#?}"
+                );
+            }
+        }
+        let (_, code) = generate_with_code(&spec);
+        emitted.push((what, code));
+    }
+
+    // What each generating row lowers TO, asserted positively.
+    //
+    // This replaces a differential that could not fail on the defect it named. It compared row 0
+    // (two members, lowers to `()`) against a one-member probe (lowers to `i64`) and required them
+    // to differ — but two documents of different member counts and different result types differ in
+    // every reachable state, independent of the null fact, so the `assert_ne!` was true whatever
+    // the production code did. Measured directly: under the re-merged-flag mutation the fixture
+    // fails at the per-case outcome assertion above, and with those assertions neutralised the
+    // fixture PASSED. It was held up entirely by its neighbours.
+    //
+    // Among the rows above, varying only the null fact flips a row between generating and
+    // rejecting, so no pair of THEM is a differential. One that generates on both sides does
+    // exist, and is asserted after the control below. Here the pin is positive: a row only `null`
+    // satisfies must lower to the exact JSON null
+    // type — not to `serde_json::Value`, not to `Option<T>` of anything — and that is a statement a
+    // mutation can falsify without changing any outcome, which is what the removed assertion could
+    // not manage.
+    for (what, code) in &emitted {
+        let module = types_module(code);
+        if module.is_empty() {
+            // A rejected row emits nothing; its verdict is asserted per case above.
+            continue;
+        }
+        assert!(
+            module.contains("= ();"),
+            "`{what}` is satisfied by `null` and nothing else, so it must lower to the exact JSON \
+             null type: {module}"
+        );
+    }
+    assert!(
+        !types_module(&emitted[0].1).is_empty(),
+        "the null-only row generated nothing: {:?}",
+        emitted[0].0
+    );
+
+    // The control the whole repair must not disturb: a non-empty intersection under the same
+    // nullable type array is unaffected either way.
+    let control = format!(
+        "{HEAD}{}",
+        PATH.replace(
+            "BODY",
+            "type: [integer, 'null']\n                oneOf: [{ type: integer }]"
+        )
+    );
+    let (report, code) = generate_with_code(&control);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("= i64;"),
+        "the non-empty intersection must still lower to its narrowed type: {code}"
+    );
+
+    // The differential that varies ONLY the null fact and generates on both sides: the control,
+    // and the control with a `{type: 'null'}` member added. The member is what makes `null` a
+    // valid body, so it — and only it — must make the response optional. The null fact lives on
+    // the operation signature, not in the types module: `types_module` is nullability-blind here
+    // (both documents emit the same `= i64;` alias), which is why this reads the signature.
+    let with_null_member = format!(
+        "{HEAD}{}",
+        PATH.replace(
+            "BODY",
+            "type: [integer, 'null']\n                oneOf: [{ type: integer }, { type: 'null' }]"
+        )
+    );
+    let (partner_report, partner) = generate_with_code(&with_null_member);
+    assert_ne!(
+        partner_report.outcome(),
+        Outcome::Rejected,
+        "{partner_report:#?}"
+    );
+    assert!(
+        !code.contains("ResponseValue<Option<"),
+        "without a null member `null` matches no branch, so the response is not optional: {code}"
+    );
+    assert!(partner.contains("= i64;"), "{partner}");
+    assert!(
+        partner.contains("ResponseValue<Option<"),
+        "the null member is a branch `null` satisfies, so the response must be optional: {partner}"
+    );
+}
+
+/// A union sibling gets a say in the union's nullability only where it makes a statement about
+/// null, and a sibling that carries no `type` makes none.
+///
+/// `properties` and `patternProperties` are OBJECT APPLICATORS in 2020-12: they constrain an
+/// object and are vacuously satisfied by every non-object, `null` included. They nonetheless lower
+/// to a non-nullable `Struct`, so reading `Ty::nullable` off one and letting it decide removed an
+/// acceptance the sibling never denied. An independent Draft 2020-12 validator says `null` is valid
+/// for all three rows below; they went non-optional, so a `200` of literal `null` that used to
+/// decode began failing at runtime with nothing reported at generate time.
+///
+/// The controls matter as much as the rows: a sibling that DOES carry a `type` is entitled to
+/// remove the acceptance, and must keep doing so.
+#[test]
+fn a_union_sibling_without_a_type_does_not_decide_nullability() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+
+    // (what it exercises, the schema body, whether the response must be optional)
+    let cases: &[(&str, &str, bool)] = &[
+        // No `type` on the sibling: it says nothing about null, so the union's own acceptance wins.
+        (
+            "a `properties`-only sibling beside a null member",
+            "properties: { a: { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a `patternProperties`-only sibling beside a null member",
+            "patternProperties: { '^a': { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a `properties`-only sibling beside a nullable sole member",
+            "properties: { a: { type: string } }\n                oneOf: [{ type: [object, 'null'] }]",
+            true,
+        ),
+        (
+            "a `required`-only sibling beside a null member",
+            "required: [a]\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "an `additionalProperties`-only sibling beside a null member",
+            "additionalProperties: false\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        // The sibling carries a `type` that excludes null, so it IS entitled to remove the
+        // acceptance — this is the case the round-2 change correctly fixed and must keep fixing.
+        (
+            "a sibling whose `type` excludes null, beside a null member",
+            "type: object\n                properties: { a: { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "a sibling whose `type` array excludes null, beside a null member",
+            "type: [string]\n                oneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "a sibling whose `type` excludes null, beside a nullable sole member",
+            "type: [string]\n                oneOf: [{ type: [string, 'null'] }]",
+            false,
+        ),
+        // And a `type` that ADMITS null must not remove it either.
+        (
+            "a sibling whose `type` array admits null, beside a null member",
+            "type: [string, 'null']\n                oneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+    ];
+
+    for (what, body, optional) in cases {
+        let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "`{what}`: {report:#?}");
+        assert_eq!(
+            code.contains("ResponseValue<Option<types::"),
+            *optional,
+            "`{what}` must {} an optional response body — `null` is {} under this schema: {code}",
+            if *optional { "have" } else { "not have" },
+            if *optional { "valid" } else { "invalid" }
+        );
+    }
+}
+
+/// Accept-versus-reject must not key on `components.schemas` map order.
+///
+/// The round-2 guard tested `in_progress` membership, which is a property of *when* lowering
+/// happens: `lower.rs` pre-lowers components in map iteration order, so for mutual recursion it
+/// fired on whichever entry was declared first. Two documents identical but for the order of two
+/// map entries — a no-op in OpenAPI, and a routine difference between description generators — got
+/// opposite verdicts: one `Rejected`, one `Generated`.
+///
+/// The guard now keys on the schema: a `$ref` whose target reaches back to the component enclosing
+/// it closes a reference cycle, and that is true of the document however its entries are ordered.
+/// The verdict is the same one the `allOf` spelling has always given; what changed is that it no
+/// longer depends on serialisation.
+#[test]
+fn the_recursive_ref_guard_does_not_key_on_component_declaration_order() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths: {}\n";
+    const A: &str = r##"    A:
+      type: object
+      properties:
+        b: { $ref: '#/components/schemas/B' }
+"##;
+    const B: &str = r##"    B:
+      type: object
+      properties:
+        a:
+          $ref: '#/components/schemas/A'
+          type: object
+          properties: { x: { type: string } }
+"##;
+
+    let a_first = format!("{HEAD}components:\n  schemas:\n{A}{B}");
+    let b_first = format!("{HEAD}components:\n  schemas:\n{B}{A}");
+
+    let mut verdicts = Vec::new();
+    for (order, spec) in [("A first", &a_first), ("B first", &b_first)] {
+        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+            verdicts.push((
+                format!("{order}/{entry}"),
+                report.outcome(),
+                has_code(&report, Code::AllOfIrreconcilable),
+            ));
+        }
+    }
+    let first = (verdicts[0].1, verdicts[0].2);
+    for (label, outcome, coded) in &verdicts {
+        assert_eq!(
+            (*outcome, *coded),
+            first,
+            "`{label}` disagrees with `{}`: re-ordering two `components.schemas` entries is a \
+             no-op in OpenAPI, so it cannot change accept-versus-reject. All verdicts: {verdicts:#?}",
+            verdicts[0].0
+        );
+    }
+    // And the verdict both orderings must reach is the `allOf` spelling's, so the three spellings
+    // of one conjunction still agree.
+    assert_eq!(first.0, Outcome::Rejected, "{verdicts:#?}");
+    assert!(first.1, "{verdicts:#?}");
+
+    // The message is now a statement about the schema, not about lowering order: "whose fields are
+    // not yet known" was only true in the ordering that happened to reject.
+    let report = generate(&a_first);
+    let messages = messages_for(&report, Code::AllOfIrreconcilable);
+    assert_eq!(messages.len(), 1, "{report:#?}");
+    assert!(
+        messages[0].contains("closes a reference cycle"),
+        "the message must name a property of the document, not of the lowering order: {:?}",
+        messages[0]
+    );
+    assert!(
+        !messages[0].contains("not yet known"),
+        "`not yet known` is a lowering-order claim, false in the other ordering: {:?}",
+        messages[0]
+    );
+
+    // The controls, in both orderings: a `$ref` with shape-bearing siblings whose target does NOT
+    // reach back to it still intersects and generates.
+    const PLAIN: &str = r##"    Leaf: { type: object, properties: { y: { type: integer } } }
+    Holder:
+      type: object
+      properties:
+        l:
+          $ref: '#/components/schemas/Leaf'
+          type: object
+          properties: { x: { type: string } }
+"##;
+    let acyclic = format!("{HEAD}components:\n  schemas:\n{PLAIN}");
+    let report = generate(&acyclic);
+    assert_ne!(
+        report.outcome(),
+        Outcome::Rejected,
+        "an acyclic `$ref` with shape-bearing siblings must still intersect: {report:#?}"
+    );
+}
+
+/// The third spelling of the same conjunction. The `$ref`-sibling arm and the `allOf` arm both
+/// guard a cycle-closing reference; the `oneOf`/`anyOf` sibling path — which is this pull
+/// request's own subject — did not, so it went on reading the `TypeKind::Any` placeholder.
+/// `lower_union_variant` receives the target's RESERVED id, `intersect_non_null`'s `(Any, _)` arm
+/// returns the sibling unchanged, and the recursive target is silently discarded:
+/// `Node.next: {type: object, properties: {x}, oneOf: [{$ref: Node}]}` generated cleanly with
+/// `Node`'s own `next` field gone from the emitted struct.
+///
+/// An independent Draft 2020-12 validator accepts arbitrarily deep `next` chains under that schema,
+/// so the emitted type described a strictly smaller language than the document. Three spellings of
+/// one conjunction were `Rejected` / `Rejected` / silently wrong.
+#[test]
+fn a_cycle_closing_union_member_is_rejected_not_discarded() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths: {}\n";
+
+    // (what it exercises, the `next` subschema)
+    let rejected: &[(&str, &str)] = &[
+        (
+            "a sole-member `oneOf` back-edge under a shape-bearing sibling",
+            "type: object\n          properties: { x: { type: string } }\n          oneOf: [{ $ref: '#/components/schemas/Node' }]",
+        ),
+        (
+            "a sole-member `anyOf` back-edge under a shape-bearing sibling",
+            "type: object\n          properties: { x: { type: string } }\n          anyOf: [{ $ref: '#/components/schemas/Node' }]",
+        ),
+        (
+            "a multi-variant union whose back-edge variant meets a shape-bearing sibling",
+            "type: object\n          properties: { x: { type: string } }\n          oneOf: [{ $ref: '#/components/schemas/Node' }, { type: object, properties: { y: { type: integer } } }]",
+        ),
+        (
+            "a back-edge beside a null member, under a shape-bearing sibling",
+            "type: object\n          properties: { x: { type: string } }\n          oneOf: [{ $ref: '#/components/schemas/Node' }, { type: 'null' }]",
+        ),
+    ];
+    for (what, next) in rejected {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          {next}\n"
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` was not rejected by {entry}, so the recursive target is still being \
+                 silently discarded on the union path: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::AllOfIrreconcilable),
+                "`{what}` did not report E013 through {entry}: {report:#?}"
+            );
+        }
+        let report = generate(&spec);
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("closes a reference cycle")),
+            "`{what}` must name the cycle rather than the generic empty-intersection wording: \
+             {messages:?}"
+        );
+    }
+
+    // The controls: the guard is reached only when there IS a sibling, so it must not fire on a
+    // recursive union that has none.
+    //
+    // What those documents then do is not this change's to decide, and the answer moved under the
+    // merge. Before it, the sole-member collapse read the reserved id's placeholder for its own
+    // kind and emitted `pub type Nodenext = serde_json::Value;` — the recursion lost and the type
+    // degraded, which the standing invariant forbids; filed as #160 and measured byte-identical at
+    // `a45d95c`. The parent's reservation work replaced that placeholder with `TypeKind::Reserved`
+    // and added an IR invariant, so the same documents now REJECT with `E011` naming the unlowered
+    // reservation. That closes #160's silent degradation, and it is the parent's decision, not this
+    // one's — so the assertion here is only ever about this guard: `E013` must not fire.
+    let permitted: &[(&str, &str)] = &[
+        (
+            "a recursive union with no shape-bearing sibling",
+            "oneOf: [{ $ref: '#/components/schemas/Node' }, { type: 'null' }]",
+        ),
+        (
+            "a recursive union whose only sibling is validation-only",
+            "description: plain\n          oneOf: [{ $ref: '#/components/schemas/Node' }, { type: 'null' }]",
+        ),
+        (
+            "a sole-member recursive union with no sibling",
+            "oneOf: [{ $ref: '#/components/schemas/Node' }]",
+        ),
+    ];
+    for (what, next) in permitted {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          {next}\n"
+        );
+        let report = generate(&spec);
+        assert!(
+            !has_code(&report, Code::AllOfIrreconcilable),
+            "the union guard crept into `{what}`, which has no sibling to intersect with: \
+             {report:#?}"
+        );
+        // And the outcome is the parent's reservation invariant, not a silent degradation: the
+        // `serde_json::Value` #160 records is gone in both directions.
+        let (_, code) = generate_with_code(&spec);
+        assert!(
+            !code.contains("serde_json :: Value"),
+            "`{what}` degraded to an untyped value: {code}"
+        );
+    }
+
+    // A plain recursive `$ref` with no sibling at all still boxes and generates — the shape that
+    // makes recursion usable, and the one neither this guard nor the reservation invariant touches.
+    let plain = format!(
+        "{HEAD}components:\n  schemas:\n    Node:\n      type: object\n      properties:\n        next:\n          $ref: '#/components/schemas/Node'\n"
+    );
+    let (report, code) = generate_with_code(&plain);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(code.contains("Option<Box<Node>>"), "{code}");
+
+    // And a union member that is an ACYCLIC `$ref` must still intersect with the sibling.
+    let acyclic = format!(
+        "{HEAD}components:\n  schemas:\n    Leaf: {{ type: object, properties: {{ y: {{ type: integer }} }} }}\n    Holder:\n      type: object\n      properties:\n        l:\n          type: object\n          properties: {{ x: {{ type: string }} }}\n          oneOf: [{{ $ref: '#/components/schemas/Leaf' }}]\n"
+    );
+    let report = generate(&acyclic);
+    assert_ne!(
+        report.outcome(),
+        Outcome::Rejected,
+        "an acyclic union member with a shape-bearing sibling must still intersect: {report:#?}"
+    );
+}
+
+/// The question is "does the SIBLING make a statement about `null`?", and the gate asked the
+/// ENCLOSING schema's `type`. The two differ in two ways, and each produces a wrong answer in the
+/// opposite direction.
+///
+/// `lower_union_sibling` deletes the enclosing `type` array whenever it holds more than one non-null
+/// type, because no single lowered type represents it. That deletion also throws away the array's
+/// `"null"`, so the lowered sibling reads as null-rejecting even where the array admitted null —
+/// **an under-accept that is a regression against master**, whose compiled client fails on a
+/// spec-legal `null` with `invalid type: null, expected struct …`. In the other direction, a sibling
+/// that speaks about null through `enum` or `const` rather than `type` was treated as silent, so the
+/// union's acceptance survived a sibling that denied it.
+///
+/// Both oracles — Python `jsonschema` 4.26 and the Rust crate 0.49.3 — agree on every row.
+#[test]
+fn the_nullability_gate_asks_the_sibling_not_the_enclosing_schema() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+
+    // (what it exercises, the schema body, whether `null` satisfies it)
+    let cases: &[(&str, &str, bool)] = &[
+        // The sibling carries a WIDE type array that admits null. Lowering deletes the array, so
+        // before this the sibling read as null-rejecting and the response went non-optional.
+        (
+            "a `properties`-only sibling under a wide nullable type array",
+            "type: [object, array, 'null']\n                properties: { a: { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a `patternProperties`-only sibling under a wide nullable type array",
+            "type: [object, array, 'null']\n                patternProperties: { '^a': { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a `required`-only sibling under a wide nullable type array",
+            "type: [object, array, 'null']\n                required: [a]\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        // The narrow spelling of the first row: one non-null type, so the array survives lowering.
+        // It was already right, and the wide spelling must now agree with it.
+        (
+            "the same sibling under a narrow nullable type array",
+            "type: [object, 'null']\n                properties: { a: { type: string } }\n                oneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        // The sibling speaks about null through `enum`/`const`, not `type`. It denies null, and the
+        // gate must let it.
+        (
+            "an `enum` sibling that excludes null",
+            "enum: ['a', 'b']\n                oneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "a `const` sibling",
+            "const: 'a'\n                oneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "an `allOf` sibling that excludes null",
+            "allOf: [{ type: object }]\n                oneOf: [{ type: object }, { type: 'null' }]",
+            false,
+        ),
+        // An `enum` that lists null admits it.
+        (
+            "an `enum` sibling that includes null",
+            "enum: ['a', null]\n                oneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+    ];
+
+    for (what, body, null_satisfies) in cases {
+        let spec = format!("{HEAD}{}", PATH.replace("BODY", body));
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "`{what}`: {report:#?}");
+        assert_eq!(
+            code.contains("ResponseValue<Option<types::"),
+            *null_satisfies,
+            "`{what}` must {} an optional response body — `null` is {} under this schema: {code}",
+            if *null_satisfies { "have" } else { "not have" },
+            if *null_satisfies { "valid" } else { "invalid" }
+        );
+    }
+
+    // The third symptom of the same root, and the sharpest: a document whose ONLY valid instance is
+    // `null` was REJECTED, with a message asserting an empty intersection when the intersection is
+    // `{null}`. The one-non-null-type spelling of the same instance set already generated `()`.
+    let only_null = format!(
+        "{HEAD}{}",
+        PATH.replace(
+            "BODY",
+            "type: [integer, boolean, 'null']\n                properties: { a: { type: string } }\n                oneOf: [{ type: string }, { type: 'null' }]"
+        )
+    );
+    for (entry, report) in [
+        ("generate", generate(&only_null)),
+        ("check", check(&only_null)),
+    ] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "a schema whose only valid instance is `null` must not be rejected as having no \
+             variant by {entry}: {report:#?}"
+        );
+        assert!(!has_code(&report, Code::NonDisjointUnion), "{report:#?}");
+    }
+    let (_, code) = generate_with_code(&only_null);
+    let body = code
+        .split("ResponseValue<types::")
+        .nth(1)
+        .and_then(|rest| rest.split('>').next())
+        .unwrap_or_else(|| panic!("no typed response: {code}"))
+        .trim()
+        .to_owned();
+    assert!(
+        code.contains(&format!("pub type {body} = ();")),
+        "the intersection is `{{null}}`, so the exact JSON null type is the answer, not a \
+         dropped body and not `Option<()>`: {code}"
+    );
+}
+
+/// The cycle predicate must count only the edges lowering actually follows.
+///
+/// `collect_schema_refs` chained `schema.defs` and `schema.validation_children`, so `$defs`, `not`,
+/// `if`/`then`/`else`, `contains`, `propertyNames`, `unevaluated*` and `dependentSchemas` were all
+/// treated as cycle edges. **Lowering never descends into any of them** — `.defs` and
+/// `validation_children` appear exactly once each in the whole of `lower.rs`, inside that walk — so
+/// a `$ref` reachable only that way can never put a component mid-flight and can never yield a
+/// placeholder. The guard rejected anyway, asserting a dependence that does not exist.
+///
+/// The consequence is sharp: adding **unreferenced `$defs`** to a document, which contributes zero
+/// emitted bytes and does not change the instance set by a single value, turned `Generated` into a
+/// hard `E013`. Both oracles agree the two documents below admit exactly the same instances.
+#[test]
+fn the_cycle_predicate_counts_only_edges_lowering_follows() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths: {}\n";
+    // `Holder.l` intersects `Leaf` with shape-bearing siblings. `Leaf` reaches back to `Holder`
+    // ONLY through the keyword under test, so the cycle is invisible to lowering.
+    const HOLDER: &str = r##"    Holder:
+      type: object
+      properties:
+        l:
+          $ref: '#/components/schemas/Leaf'
+          type: object
+          properties: { x: { type: string } }
+"##;
+
+    let baseline = format!(
+        "{HEAD}components:\n  schemas:\n    Leaf:\n      type: object\n      properties: {{ y: {{ type: integer }} }}\n{HOLDER}"
+    );
+    let (base_report, base_code) = generate_with_code(&baseline);
+    assert_ne!(base_report.outcome(), Outcome::Rejected, "{base_report:#?}");
+    let base_types = base_code
+        .find("pub mod types {")
+        .map(|i| base_code[i..].to_owned())
+        .unwrap_or_default();
+
+    // Each of these adds a back-edge through a keyword lowering does not traverse. None changes the
+    // instance set, and none can produce a placeholder.
+    let inert: &[(&str, &str)] = &[
+        (
+            "an unreferenced `$defs` entry",
+            "      $defs:\n        Back: { $ref: '#/components/schemas/Holder' }\n",
+        ),
+        (
+            "an `if` with no `then`/`else`",
+            "      if: { $ref: '#/components/schemas/Holder' }\n",
+        ),
+        (
+            "a `not`",
+            "      not: { $ref: '#/components/schemas/Holder' }\n",
+        ),
+        (
+            "a `propertyNames`",
+            "      propertyNames: { $ref: '#/components/schemas/Holder' }\n",
+        ),
+    ];
+    for (what, extra) in inert {
+        let spec = format!(
+            "{HEAD}components:\n  schemas:\n    Leaf:\n      type: object\n      properties: {{ y: {{ type: integer }} }}\n{extra}{HOLDER}"
+        );
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` is not an edge lowering follows, so it cannot make the `$ref` a \
+                 cycle-closing one and must not flip {entry} into a rejection: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "`{what}` reported E013 through {entry}: {report:#?}"
+            );
+        }
+        // Stronger than "still generates": the emitted types are the ones the baseline emits, so
+        // the keyword is confirmed inert rather than merely tolerated.
+        let (_, code) = generate_with_code(&spec);
+        let types = code
+            .find("pub mod types {")
+            .map(|i| code[i..].to_owned())
+            .unwrap_or_default();
+        assert_eq!(
+            types, base_types,
+            "`{what}` changed the emitted types, so it is not inert after all"
+        );
+    }
+
+    // The control, and the reason the predicate exists: a back-edge through a `properties` value —
+    // an edge lowering DOES follow — still closes the cycle and still rejects.
+    let real_cycle = format!(
+        "{HEAD}components:\n  schemas:\n    Leaf:\n      type: object\n      properties:\n        back: {{ $ref: '#/components/schemas/Holder' }}\n{HOLDER}"
+    );
+    let report = generate(&real_cycle);
+    assert_eq!(
+        report.outcome(),
+        Outcome::Rejected,
+        "a cycle through `properties` is an edge lowering follows and must still reject: \
+         {report:#?}"
+    );
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+}
+
+/// A schema must lower to the same nullability whether it is written inline or named as a
+/// component. `ensure_component` computed `schema_is_nullable(schema)` *before* the body was
+/// lowered and wrote it back over whatever the body computed — and `schema_is_nullable` is three
+/// disjuncts over `types`, `enum_values` and `const_value` that never look at `oneOf`, `anyOf`,
+/// `$ref` or `allOf`. So **every decision `lower_union` makes about null was discarded at a
+/// `components.schemas` boundary**, which is the dominant spelling in real descriptions.
+///
+/// The comment there claimed nullability was "a pure function of the component's own schema — the
+/// same inputs `lower_schema`/`lower_enum` use". That is true for a plain type/enum/const body and
+/// false for every composed one.
+///
+/// Both oracles agree on each row, and each row is asserted in BOTH spellings, so neither can drift
+/// from the other again.
+#[test]
+fn a_component_and_an_inline_schema_agree_about_null() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+
+    fn inline_spec(body: &str) -> String {
+        format!(
+            "{HEAD}paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                {body}\ncomponents:\n  schemas:\n    Ignore: {{ type: string }}\n",
+            body = body.replace('\n', "\n                ")
+        )
+    }
+    fn named_spec(body: &str) -> String {
+        format!(
+            "{HEAD}paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema: {{ $ref: '#/components/schemas/Body' }}\ncomponents:\n  schemas:\n    Body:\n      {body}\n",
+            body = body.replace('\n', "\n      ")
+        )
+    }
+
+    // (what it exercises, the schema body, whether `null` satisfies it)
+    let cases: &[(&str, &str, bool)] = &[
+        // `schema_is_nullable` sees the `"null"` in the type array and says nullable. The union says
+        // otherwise, and the union is right: with no null MEMBER there is no branch for `null` to
+        // match, so `oneOf` fails.
+        (
+            "a union whose type array admits null but whose members supply no null branch",
+            "type: [string, 'null']\noneOf: [{ type: string }]",
+            false,
+        ),
+        // The mirror: the type array is silent about null, the members are not.
+        (
+            "a union whose null branch comes from a member, under no type array",
+            "properties: { a: { type: string } }\noneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        (
+            "a union under a wide nullable type array",
+            "type: [object, array, 'null']\nproperties: { a: { type: string } }\noneOf: [{ type: object }, { type: 'null' }]",
+            true,
+        ),
+        // The sibling denies null through `enum`, which `schema_is_nullable` also reads — but it
+        // reads the ENUM, not the intersection, so it must still agree.
+        (
+            "a union whose `enum` sibling excludes null",
+            "enum: ['a', 'b']\noneOf: [{ type: string }, { type: 'null' }]",
+            false,
+        ),
+        (
+            "a union whose `enum` sibling includes null",
+            "enum: ['a', null]\noneOf: [{ type: string }, { type: 'null' }]",
+            true,
+        ),
+        // A plain body, where the reserve-time answer and the body's agree. This is the case the
+        // old comment described, and it must not move.
+        (
+            "a plain nullable type array with no composition",
+            "type: [string, 'null']",
+            true,
+        ),
+        (
+            "a plain non-nullable type",
+            "type: string",
+            false,
+        ),
+    ];
+
+    for (what, body, null_satisfies) in cases {
+        let mut seen = Vec::new();
+        for (spelling, spec) in [
+            ("inline", inline_spec(body)),
+            ("named component", named_spec(body)),
+        ] {
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` ({spelling}): {report:#?}"
+            );
+            let optional = code.contains("ResponseValue<Option<types::");
+            assert_eq!(
+                optional,
+                *null_satisfies,
+                "`{what}` as {spelling} must {} an optional response body — `null` is {} under \
+                 this schema: {code}",
+                if *null_satisfies { "have" } else { "not have" },
+                if *null_satisfies { "valid" } else { "invalid" }
+            );
+            seen.push((spelling, optional));
+        }
+        assert_eq!(
+            seen[0].1, seen[1].1,
+            "`{what}` lowers to different nullability inline and as a component: {seen:?}"
+        );
+    }
+
+    // A component whose union admits ONLY `null` must be the exact null type in both spellings too
+    // — the component boundary previously wrapped it back into an `Option`.
+    let only_null = "type: [integer, 'null']\noneOf: [{ type: string }, { type: 'null' }]";
+    for (spelling, spec) in [
+        ("inline", inline_spec(only_null)),
+        ("named component", named_spec(only_null)),
+    ] {
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !code.contains("ResponseValue<Option<types::"),
+            "`{spelling}`: the intersection is `{{null}}`, so the type already has exactly one \
+             inhabitant and must not be wrapped in `Option`: {code}"
+        );
+    }
+}
+
+/// The label check in [`assert_parity`] is opt-in by naming convention, so on its own it can be
+/// disarmed rather than satisfied: renaming `"E004 unresolvable ref"` to `"unresolvable ref"`, or
+/// widening [`parity_label`] until it matches nothing, makes the whole suite pass again — the same
+/// silent escape the label check was added to close.
+///
+/// This requires the convention instead of hoping for it: a fixture that reports any diagnostic at
+/// all must be named for one. Only the deliberately clean fixture reports nothing, and it is the
+/// only one allowed to go unlabelled.
+#[test]
+fn every_parity_fixture_that_reports_is_labelled() {
+    let mut labelled = 0;
+    for (name, spec) in PARITY_FIXTURES {
+        let report = check(spec);
+        match parity_label(name) {
+            Some(_) => labelled += 1,
+            None => assert!(
+                report.diagnostics().is_empty(),
+                "`{name}` reports {:?} but is not named for a code",
+                codes(&report)
+            ),
+        }
+    }
+    // Belt and braces: if `parity_label` itself stopped matching, every fixture would fall into the
+    // arm above and this floor is what notices.
+    assert!(
+        labelled >= 7,
+        "only {labelled} parity fixtures are labelled; the convention has been disarmed"
+    );
 }

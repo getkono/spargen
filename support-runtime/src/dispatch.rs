@@ -13,7 +13,7 @@ use reqwest::{Request, RequestBuilder, Response, Url};
 use secrecy::{ExposeSecret, SecretString};
 use serde::de::DeserializeOwned;
 
-use crate::{AuthKind, AuthScheme, ClientCore, Credential, Error, ResponseValue};
+use crate::{AuthKind, AuthScheme, ClientCore, Credential, Error, RequestError, ResponseValue};
 
 /// Build a request URL from the base URL and a pre-rendered path plus pre-encoded query
 /// fragments. Paths compile to static segment concatenation — no runtime regex. Non-generic.
@@ -120,12 +120,35 @@ pub fn build_url_with_query_string_on(
 /// of alternatives, each an AND of schemes; the first alternative whose schemes all have a
 /// registered credential wins, deterministically. An empty alternative (`{}` in the spec) marks
 /// security optional and always satisfies. If no alternative is satisfiable the request fails
-/// before it is sent — a request-construction error, never a silent 401.
+/// before it is sent — [`RequestError::MissingCredential`], never a silent 401 — and a registered
+/// token provider that fails does too, as [`RequestError::CredentialProvider`].
+///
+/// **Selection is on registration, not on success, and there is no fall-through.** Once an
+/// alternative is chosen, a failure while attaching it — a token provider that errors, or a
+/// credential registered under a kind its scheme cannot use — fails the call, even when a later
+/// alternative is fully registered and would have succeeded. Falling through would send
+/// credentials the caller's registration did not select, silently, on a call they had expressed a
+/// different intent for; an error they can see is the better failure.
+///
+/// A caller who wants the *other* alternative cannot get there by adjusting registrations on a
+/// built client. Registration is insert-only: [`ClientCore::set_credential`] is the only writer,
+/// there is no remove, clear, or replace-with-nothing operation at any layer, and [`Credential`]
+/// has no variant meaning "none" — so a credential cannot be withdrawn once registered. Nor does
+/// registering the fallback as well help, because selection stops at the first satisfiable
+/// alternative and the first one stays satisfied. The way to reach a later alternative is to
+/// build a client that is not registered for the earlier one.
 pub async fn attach_auth(
     core: &ClientCore,
     request: RequestBuilder,
     requirements: &[&[AuthScheme]],
 ) -> Result<RequestBuilder, Error<Infallible>> {
+    // No requirement means "attach nothing", not "unauthenticated". Without this, an empty slice
+    // would fall into the `find` below, which returns `None` for it, and the call would fail as
+    // `MissingCredential` naming no schemes at all. Generated output never produces an empty slice
+    // — `emit.rs` omits the call entirely for an operation with no `security` — but this function
+    // is public in the runtime crate and reachable from sibling code in whichever module `include!`s
+    // a generated client, so this is a contract, not dead code, and
+    // `no_requirement_attaches_nothing` holds it to that.
     if requirements.is_empty() {
         return Ok(request);
     }
@@ -136,17 +159,23 @@ pub async fn attach_auth(
             matches!(scheme.kind, AuthKind::MutualTls) || core.credential(scheme.name).is_some()
         })
     }) else {
-        let mut names: Vec<&str> = requirements
+        // Nothing was satisfied, so every alternative names at least one unregistered scheme.
+        let alternatives: Vec<Vec<&'static str>> = requirements
             .iter()
-            .flat_map(|alternative| alternative.iter().map(|scheme| scheme.name))
+            .map(|alternative| {
+                alternative
+                    .iter()
+                    .filter(|scheme| {
+                        !matches!(scheme.kind, AuthKind::MutualTls)
+                            && core.credential(scheme.name).is_none()
+                    })
+                    .map(|scheme| scheme.name)
+                    .collect::<Vec<_>>()
+            })
             .collect();
-        names.sort_unstable();
-        names.dedup();
-        return Err(Error::request_message(format!(
-            "no registered credential satisfies the operation's security requirement \
-             (schemes: {})",
-            names.join(", ")
-        )));
+        return Err(Error::RequestConstruction(
+            RequestError::MissingCredential { alternatives },
+        ));
     };
     let mut request = request;
     for scheme in *alternative {
@@ -167,13 +196,23 @@ async fn apply_credential(
     scheme: &AuthScheme,
     credential: &Credential,
 ) -> Result<RequestBuilder, Error<Infallible>> {
-    // A provider yields a single secret, usable anywhere a bearer token or apiKey fits.
+    // A provider yields a single secret, usable anywhere a bearer token or apiKey fits. Only a kind
+    // that takes a token asks it for one, so a provider registered under a scheme that takes none
+    // is the same mismatch whether or not a refresh would have succeeded. `attach_auth` skips
+    // `MutualTls` before calling this, so the `MutualTls` term below is never evaluated from there;
+    // it is deliberate defence, so a caller that bypasses the skip still never fetches a token.
+    let takes_token = !matches!(scheme.kind, AuthKind::Basic | AuthKind::MutualTls);
     let token: Option<SecretString> = match credential {
         Credential::Bearer(secret) | Credential::ApiKey(secret) => Some(secret.clone()),
-        Credential::Provider(provider) => {
-            Some(provider().await.map_err(Error::request_construction)?)
+        Credential::Provider(provider) if takes_token => {
+            Some(provider().await.map_err(|source| {
+                Error::RequestConstruction(RequestError::CredentialProvider {
+                    scheme: scheme.name,
+                    source,
+                })
+            })?)
         }
-        Credential::Basic { .. } => None,
+        Credential::Provider(_) | Credential::Basic { .. } => None,
     };
     match scheme.kind {
         AuthKind::Basic => match credential {
@@ -540,7 +579,9 @@ mod tests {
 
     use secrecy::SecretString;
 
-    use crate::{AuthKind, AuthScheme, ClientCore, Credential, TokenFuture};
+    use crate::{
+        AuthError, AuthKind, AuthScheme, ClientCore, Credential, RequestError, TokenFuture,
+    };
 
     use super::attach_auth;
     use bytes::Bytes;
@@ -605,6 +646,64 @@ mod tests {
         );
     }
 
+    /// A provider yields one secret, usable anywhere a token fits — not just as a bearer. The guard
+    /// that decides whether to ask it keys off the scheme *kind*, so the three `apiKey` kinds are
+    /// the branch a bearer-only reading of it would silently drop: every call would then fail as a
+    /// registration mismatch instead of attaching the refreshed token. One case per kind, since
+    /// each installs the token somewhere different.
+    #[test]
+    fn attaches_provider_token_under_every_api_key_kind() {
+        let refreshed = || {
+            Credential::Provider(Arc::new(|| {
+                Box::pin(async { Ok(SecretString::from("fresh")) }) as TokenFuture
+            }))
+        };
+
+        let mut core = core();
+        core.set_credential("key", refreshed());
+        let header = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "key",
+                kind: AuthKind::ApiKeyHeader("X-Api-Key"),
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(header.headers()["X-Api-Key"], "fresh");
+        // The refreshed token is a secret like any other, so it must not be printable.
+        assert!(header.headers()["X-Api-Key"].is_sensitive());
+
+        let query = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "key",
+                kind: AuthKind::ApiKeyQuery("api_key"),
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(query.url().query(), Some("api_key=fresh"));
+
+        let cookie = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "key",
+                kind: AuthKind::ApiKeyCookie("session"),
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(cookie.headers()[reqwest::header::COOKIE], "session=fresh");
+        assert!(cookie.headers()[reqwest::header::COOKIE].is_sensitive());
+    }
+
     #[test]
     fn attaches_api_key_query_from_first_satisfiable_alternative() {
         let mut core = core();
@@ -636,13 +735,250 @@ mod tests {
         assert!(request.headers().is_empty());
     }
 
+    /// No requirement at all is distinct from a requirement nothing satisfies: it attaches nothing
+    /// and succeeds. Without the early return an empty slice reaches `find`, which answers `None`
+    /// for it, and the call would fail as `MissingCredential` naming no schemes — the degenerate
+    /// rendering `Display` was made total for. Generated output cannot reach this (`emit.rs` omits
+    /// the call when an operation declares no `security`), but the function is public.
+    #[test]
+    fn no_requirement_attaches_nothing() {
+        let mut core = core();
+        // A registered credential must not be attached speculatively either.
+        core.set_credential("token", Credential::Bearer(SecretString::from("t0k")));
+        let request = poll_ready(attach_auth(&core, get(&core), &[]))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert!(request.headers().is_empty(), "{:?}", request.headers());
+        assert_eq!(request.url().query(), None);
+    }
+
     #[test]
     fn missing_credential_fails_before_send() {
         let core = core();
         let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
         assert!(error.to_string().contains("request construction"));
+        // Typed, so a consumer routes on the variant rather than on the message text.
+        let Error::RequestConstruction(RequestError::MissingCredential { alternatives }) = &error
+        else {
+            panic!("expected MissingCredential, got {error:?}");
+        };
+        assert_eq!(*alternatives, [vec!["token"]]);
+        // The chain ends at the typed cause.
         let source = std::error::Error::source(&error).unwrap();
-        assert!(source.to_string().contains("token"), "{source}");
+        assert_eq!(
+            source.to_string(),
+            "no registered credential satisfies the operation's security requirement \
+             (missing: token)"
+        );
+        assert!(std::error::Error::source(source).is_none());
+    }
+
+    /// Each alternative reports only what the caller still has to register: declaration order
+    /// (not sorted), a registered key and a transport-satisfied `mutualTLS` key omitted, and a key
+    /// shared by two alternatives listed under each.
+    #[test]
+    fn missing_credential_lists_each_alternatives_unregistered_schemes_in_declared_order() {
+        let mut core = core();
+        core.set_credential("key", Credential::ApiKey(SecretString::from("k3y")));
+        let error = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[
+                BEARER,
+                &[
+                    AuthScheme {
+                        name: "zeta",
+                        kind: AuthKind::Bearer,
+                    },
+                    AuthScheme {
+                        name: "key",
+                        kind: AuthKind::ApiKeyQuery("api_key"),
+                    },
+                    AuthScheme {
+                        name: "alpha",
+                        kind: AuthKind::Bearer,
+                    },
+                ],
+                &[
+                    AuthScheme {
+                        name: "mtls",
+                        kind: AuthKind::MutualTls,
+                    },
+                    AuthScheme {
+                        name: "token",
+                        kind: AuthKind::Bearer,
+                    },
+                ],
+            ],
+        ))
+        .unwrap_err();
+        let rendered = std::error::Error::source(&error).unwrap().to_string();
+        let Error::RequestConstruction(RequestError::MissingCredential { alternatives }) = error
+        else {
+            panic!("expected MissingCredential, got {error:?}");
+        };
+        assert_eq!(
+            alternatives,
+            [vec!["token"], vec!["zeta", "alpha"], vec!["token"]]
+        );
+        assert!(
+            rendered.ends_with("(missing: token or zeta + alpha or token)"),
+            "{rendered}"
+        );
+    }
+
+    /// A client that registers a token provider always has a credential registered, so a failed
+    /// refresh is its "unauthenticated" state — typed, with the provider's error as the cause.
+    #[test]
+    fn a_failed_token_provider_is_a_typed_credential_provider_error() {
+        let mut core = core();
+        core.set_credential(
+            "token",
+            Credential::Provider(Arc::new(|| {
+                Box::pin(async { Err(AuthError::new("refresh rejected")) }) as TokenFuture
+            })),
+        );
+        let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
+        let Error::RequestConstruction(RequestError::CredentialProvider { scheme, source }) =
+            &error
+        else {
+            panic!("expected CredentialProvider, got {error:?}");
+        };
+        assert_eq!(*scheme, "token");
+        assert_eq!(source.to_string(), "refresh rejected");
+        assert!(!error.is_transient());
+        let cause = std::error::Error::source(&error).unwrap();
+        assert_eq!(
+            cause.to_string(),
+            "the token provider registered for security scheme `token` failed"
+        );
+        let provider = std::error::Error::source(cause).expect("the provider's error is the cause");
+        assert!(provider.downcast_ref::<AuthError>().is_some());
+    }
+
+    /// A provider under a scheme that takes no token is a registration mismatch, and it must stay
+    /// one regardless of whether a refresh would have worked: the provider is never asked.
+    ///
+    /// Not asking is a break against master, where `apply_credential` awaited the provider for
+    /// every `AuthKind`, so a `Credential::Provider` under an `http basic` scheme *was* called. A
+    /// failing one propagated there and then, as the request-construction error's source, which
+    /// downcast to `AuthError`; a succeeding one had its token discarded by the `Basic` arm on the
+    /// next line and returned this same mismatch. So no succeeding call becomes a failing one, and
+    /// what changes for a consumer is that the round trip to the identity provider is gone and the
+    /// cause no longer downcasts to `AuthError`.
+    ///
+    /// Nothing typed replaces it. `credential_mismatch` goes through `Error::request_message`,
+    /// which boxes its text as a private `MessageError` — declared without `pub` in `error.rs`, and
+    /// named by none of the four lists that re-export the runtime into generated output — so the
+    /// cause has **no public type a consumer can name**, and `to_string()` matching is the only
+    /// recourse left. That is the same observable the typed missing-credential cause exists to
+    /// remove; this path still has it, tracked separately as #192.
+    #[test]
+    fn a_token_provider_under_a_basic_scheme_is_a_mismatch_without_calling_it() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let called = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&called);
+        let mut core = core();
+        core.set_credential(
+            "login",
+            Credential::Provider(Arc::new(move || {
+                flag.store(true, Ordering::SeqCst);
+                Box::pin(async { Err(AuthError::new("refresh rejected")) }) as TokenFuture
+            })),
+        );
+        let error = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "login",
+                kind: AuthKind::Basic,
+            }]],
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+            "{error:?}"
+        );
+        let source = std::error::Error::source(&error).unwrap();
+        assert!(source.to_string().contains("http basic"), "{source}");
+        // The break 0adccc5's footer declares, asserted at the level master's `AuthError` occupied:
+        // the cause is still reachable, and it is no longer that type.
+        assert!(
+            std::error::Error::source(source)
+                .is_some_and(|cause| cause.downcast_ref::<AuthError>().is_none()),
+            "the mismatch cause must be reachable and must not downcast to `AuthError`"
+        );
+        assert!(!called.load(Ordering::SeqCst), "the provider was called");
+    }
+
+    /// Selection is on registration, not on success, and there is no fall-through: once an
+    /// alternative is chosen, a failure while attaching it fails the call even though a later
+    /// alternative is fully registered and would have succeeded. Both ways of failing after
+    /// selection are pinned, because falling through is a silent behaviour — the caller would get
+    /// a 200 carrying credentials their registration did not select, with nothing to observe.
+    #[test]
+    fn a_failure_after_selection_does_not_fall_through_to_a_later_alternative() {
+        const FIRST_THEN_FALLBACK: &[&[AuthScheme]] = &[
+            &[AuthScheme {
+                name: "primary",
+                kind: AuthKind::Bearer,
+            }],
+            &[AuthScheme {
+                name: "fallback",
+                kind: AuthKind::ApiKeyQuery("api_key"),
+            }],
+        ];
+
+        // A registered fallback that would satisfy the second alternative outright.
+        let register_fallback = |core: &mut ClientCore| {
+            core.set_credential("fallback", Credential::ApiKey(SecretString::from("k3y")));
+        };
+
+        // (a) the selected alternative's token provider fails.
+        let mut failing_provider = core();
+        failing_provider.set_credential(
+            "primary",
+            Credential::Provider(Arc::new(|| {
+                Box::pin(async { Err(AuthError::new("refresh rejected")) }) as TokenFuture
+            })),
+        );
+        register_fallback(&mut failing_provider);
+        let error = poll_ready(attach_auth(
+            &failing_provider,
+            get(&failing_provider),
+            FIRST_THEN_FALLBACK,
+        ))
+        .unwrap_err();
+        let Error::RequestConstruction(RequestError::CredentialProvider { scheme, .. }) = &error
+        else {
+            panic!("expected the selected alternative's failure, got {error:?}");
+        };
+        assert_eq!(*scheme, "primary");
+
+        // (b) the selected alternative's credential is registered under a kind it cannot satisfy.
+        let mut wrong_kind = core();
+        wrong_kind.set_credential(
+            "primary",
+            Credential::Basic {
+                username: "u".to_owned(),
+                password: SecretString::from("p"),
+            },
+        );
+        register_fallback(&mut wrong_kind);
+        let error = poll_ready(attach_auth(
+            &wrong_kind,
+            get(&wrong_kind),
+            FIRST_THEN_FALLBACK,
+        ))
+        .unwrap_err();
+        assert!(
+            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+            "expected the selected alternative's mismatch, got {error:?}"
+        );
+        let source = std::error::Error::source(&error).unwrap();
+        assert!(source.to_string().contains("`primary`"), "{source}");
     }
 
     #[test]
@@ -656,6 +992,12 @@ mod tests {
             },
         );
         let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
+        // A mismatch is a misconfiguration at `with_credential`, not a state an application routes
+        // on, so it deliberately stays untyped.
+        assert!(
+            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+            "{error:?}"
+        );
         let source = std::error::Error::source(&error).unwrap();
         assert!(source.to_string().contains("bearer"), "{source}");
     }
@@ -791,6 +1133,46 @@ mod tests {
             request.headers()[reqwest::header::AUTHORIZATION],
             "Bearer t0k"
         );
+    }
+
+    #[test]
+    fn a_credential_registered_under_a_mutual_tls_scheme_never_reaches_a_token_provider() {
+        // `set_credential` takes an untyped `&str`, so a consumer can register a provider under a
+        // `mutualTLS` scheme's name. Awaiting it would be a live token fetch whose result the
+        // `MutualTls` arm then throws away. Two guards keep that from happening: `attach_auth`
+        // skips a `mutualTLS` scheme before `apply_credential` is called, and `takes_token` excludes
+        // `MutualTls` should anything reach `apply_credential` another way. This pins the
+        // behaviour they jointly hold rather than either line; drop both and the counter reaches 1.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider_calls = Arc::clone(&calls);
+        let mut core = core();
+        core.set_credential(
+            "mtls",
+            Credential::Provider(Arc::new(move || {
+                provider_calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(SecretString::from("never-fetched")) }) as TokenFuture
+            })),
+        );
+        let request = poll_ready(attach_auth(
+            &core,
+            get(&core),
+            &[&[AuthScheme {
+                name: "mtls",
+                kind: AuthKind::MutualTls,
+            }]],
+        ))
+        .unwrap()
+        .build()
+        .unwrap();
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a mutualTLS scheme must never invoke a token provider"
+        );
+        assert!(request.headers().is_empty(), "{:?}", request.headers());
+        assert_eq!(request.url().query(), None, "{}", request.url());
     }
 
     use super::{build_url, build_url_on, build_url_with_query_string, StatusSpec};

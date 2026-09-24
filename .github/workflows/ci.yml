@@ -232,7 +232,43 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `--all-features` is what puts the TLS stack in scope: `rustls` reaches the graph only
+      # through reqwest's TLS feature, so under default features `cargo deny list` matches it
+      # zero times and `cargo tree --workspace -i rustls` finds no such package. All three values
+      # stated below match the action's own defaults, so the gate's behaviour is unchanged — but
+      # a default is the action's property, not this repository's: *without the block below*, a
+      # change to the action's `arguments` default would silently turn this into an audit of a
+      # graph with no TLS stack in it, every run green and nothing noticing. That is a statement
+      # about the counterfactual, not about this step as configured — the `with:` block below is
+      # what makes it false here, which is the whole reason it is there.
+      #
+      # The action composes its argv as `cargo-deny <rust-version> <credentials> <ssh-key>
+      # <ssh-known-hosts> --log-level <log-level> --manifest-path <manifest-path> <arguments>
+      # <command> <command-arguments>`. The three inputs stated below are the ones that decide
+      # *which checks run*: `arguments` sets the feature scope, while `command` and
+      # `command-arguments` both feed `check`'s `[WHICH]...` positional, so
+      # `command-arguments: licenses` would drop `advisories` exactly as a narrowed `command`
+      # would. `command-arguments: ""` is the action's own default written out — the entrypoint's
+      # unquoted `cargo-deny $*` discards the empty slot, so the argv is unchanged — and stating
+      # it is what keeps that slot this repository's property rather than the action's.
+      # `the_deny_gate_states_the_feature_scope_it_audits` asserts all three.
+      #
+      # `arguments` is also spliced into that unquoted `cargo-deny $*`, so every *word* in it is
+      # a flag rather than only the feature scope: `--all-features --target
+      # wasm32-unknown-unknown` still contains `--all-features`, reads as added coverage, and
+      # drops RUSTSEC-2026-0285. The test rejects a measured deny-list of such graph-narrowing
+      # flags here -- a list, not a proof; #238 owns the general case.
+      #
+      # Still inherited: `log-level`, and the moving `@v2` ref itself -- both #229's. Of #229's
+      # residual inputs `manifest-path` is now partly held: the test requires at least one step
+      # to audit the root `Cargo.toml`, so this step cannot be pointed at a smaller manifest and
+      # leave the workspace unaudited, but a *second*, narrower step over some other manifest is
+      # deliberately allowed (#184).
       - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          arguments: --all-features
+          command: check
+          command-arguments: ""
 
   commits:
     name: Conventional commits
