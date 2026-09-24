@@ -13931,6 +13931,19 @@ fn in_grammar_response_keys_and_extensions_still_generate_behind_a_ref() {
             "accepted key's selector `{selector}` never reached the emitted client:\n{code}"
         );
     }
+    // The skipped extension contributes nothing to the emitted client — not even the
+    // `Response `x-…`: <description>` doc line an object-valued extension produced before the
+    // skip, when it was parsed as a Response Object. It is not a response, so it is not
+    // documented as one.
+    for fragment in [
+        "x-internal-note",
+        "a specification extension, not a response",
+    ] {
+        assert!(
+            !code.contains(fragment),
+            "skipped extension leaked `{fragment}` into the emitted client:\n{code}"
+        );
+    }
 }
 
 /// A specification extension is skipped whatever its value is, **inline and behind a `$ref`**.
