@@ -581,16 +581,17 @@ components:
     assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
 }
 
-/// A same-file `#/components/schemas/…` fragment that addresses a *subschema* rather than a
-/// top-level component name. spargen matches these by name only, so this is rejected — but the
-/// component it starts from is declared, and the identical pointer written against a relative file
-/// resolves through the resolver, so the message must not claim the target does not exist.
+/// A same-file `#/components/schemas/…` fragment that addresses a *subschema* of a declared
+/// component rather than a top-level component name. RFC 6901 gives it one meaning whichever file
+/// it is written against, and the relative-file spelling (`./lib.yaml#/components/schemas/Envelope/
+/// properties/payload`) already resolved through the resolver, so the same-file spelling resolves
+/// too: the operation's body is the subschema's type, not a rejection and not a dropped body.
 ///
-/// This pins a deliberate decision that nothing else constrains: the whole test tree contains no
-/// other `$ref` with a `/` inside the component name, so routing these to the resolver instead
-/// would flip a user-visible verdict with no test noticing.
+/// Before it was rejected, and before that it was silently dropped (`ResponseValue<()>`). The whole
+/// test tree held no other `$ref` with a `/` inside the component name, so this fixture is what
+/// pins the verdict either way.
 #[test]
-fn a_same_file_ref_into_a_component_subschema_is_rejected_as_not_a_component_name() {
+fn a_same_file_ref_into_a_component_subschema_resolves_like_the_cross_file_spelling() {
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -615,73 +616,193 @@ components:
           properties: { id: { type: string } }
           required: [id]
 "##;
-    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+    let (generated, code) = generate_with_code(spec);
+    for (entry, report) in [("generate", generated), ("check", check(spec))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnresolvedRef),
+            "{entry}: {report:#?}"
+        );
+    }
+    // The body is the subschema's own type, named for the pointer's last token — not `()`, which
+    // is what the silent drop emitted, and not `Envelope`, which is the component it starts from.
+    assert!(
+        code.contains("ResponseValue<types::Payload>"),
+        "the operation must return the subschema's type: {}",
+        types_module(&code)
+    );
+    assert_eq!(
+        declared_fields(&code, "Payload"),
+        ["id"],
+        "{}",
+        types_module(&code)
+    );
+
+    // The relative-file spelling of the same pointer, with `Envelope` declared in `lib.yaml`, is the
+    // behaviour the same-file spelling now matches: the same operation type, the same fields.
+    let (cross_generated, cross_checked, cross) = split(
+        "./lib.yaml#/components/schemas/Envelope/properties/payload",
+        &spec[spec.find("components:").unwrap()..],
+    );
+    for (entry, report) in [("generate", cross_generated), ("check", cross_checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert!(
+        cross.contains("ResponseValue<types::Payload>"),
+        "{}",
+        types_module(&cross)
+    );
+    assert_eq!(
+        declared_fields(&cross, "Payload"),
+        ["id"],
+        "{}",
+        types_module(&cross)
+    );
+
+    // Both spellings of ONE target in one document share one type. The resolver keys a lowered
+    // target on its resolved `file#pointer`, and the root document's own relative-file spelling
+    // (`./openapi.yaml#…`) resolves to the same pointer in the same file, so a second `Payload`
+    // here would mean the same-file spelling bypassed that identity.
+    let mixed = spec.replace(
+        "components:\n",
+        "  /v:\n    get:\n      operationId: getV\n      responses:\n        '200':\n          \
+         description: ok\n          content:\n            application/json:\n              \
+         schema: { $ref: './openapi.yaml#/components/schemas/Envelope/properties/payload' }\n\
+         components:\n",
+    );
+    let (report, code) = generate_with_code(&mixed);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        declared_types(&code, "Payload", |tail| !tail.ends_with("id")),
+        ["Payload"],
+        "the two spellings of one subschema must share one type: {}",
+        types_module(&code)
+    );
+    assert!(code.contains("fn get_v("), "{}", types_module(&code));
+
+    // A subschema that refers back to itself by the same deep pointer, and to the component that
+    // encloses it. The resolver's reservation is what makes this finite: the self-reference is a
+    // back-edge onto the subschema's own reserved type, and is boxed rather than re-entered.
+    let recursive = spec.replace(
+        "properties: { id: { type: string } }",
+        "properties:\n            id: { type: string }\n            \
+         child: { $ref: '#/components/schemas/Envelope/properties/payload' }\n            \
+         parent: { $ref: '#/components/schemas/Envelope' }",
+    );
+    let (generated, code) = generate_with_code(&recursive);
+    for (entry, report) in [("generate", generated), ("check", check(&recursive))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnresolvedRef),
+            "{entry}: {report:#?}"
+        );
+    }
+    let payload_child = code
+        .lines()
+        .map(str::trim_start)
+        .skip_while(|line| !line.starts_with("pub struct Payload "))
+        .take_while(|line| !line.starts_with('}'))
+        .find(|line| line.starts_with("pub child:"))
+        .map(str::to_owned);
+    assert_eq!(
+        payload_child.as_deref(),
+        Some("pub child: Option<Box<Payload>>,"),
+        "{}",
+        types_module(&code)
+    );
+    assert_eq!(
+        declared_fields(&code, "Payload"),
+        ["id", "child", "parent"],
+        "{}",
+        types_module(&code)
+    );
+
+    // The same pointer as an `allOf` member contributes the subschema's fields, as a component
+    // member contributes the component's.
+    let all_of = spec.replace(
+        "schema: { $ref: '#/components/schemas/Envelope/properties/payload' }",
+        "schema:\n                allOf:\n                  \
+         - { $ref: '#/components/schemas/Envelope/properties/payload' }\n                  \
+         - { type: object, properties: { extra: { type: string } } }",
+    );
+    let (report, code) = generate_with_code(&all_of);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    let merged = field_owner(&code, "pub extra:").expect("the sibling's field is emitted");
+    assert_eq!(
+        declared_fields(&code, &merged),
+        ["id", "extra"],
+        "the member's `id` and the sibling's `extra` must merge into one type: {}",
+        types_module(&code)
+    );
+
+    // And as a union member it is a member like the relative-file spelling is: lowered through the
+    // resolver to the same `Payload`, and — being a pointer into a component rather than a component
+    // name — deriving no component name for the variant, as `./lib.yaml#…` derives none. Taking
+    // `Envelope/properties/payload` as a name would leak the pointer into a variant identifier and
+    // an implicit discriminator tag.
+    let one_of = spec.replace(
+        "schema: { $ref: '#/components/schemas/Envelope/properties/payload' }",
+        "schema:\n                oneOf:\n                  \
+         - { $ref: '#/components/schemas/Envelope/properties/payload' }\n                  \
+         - { type: string }",
+    );
+    let (report, code) = generate_with_code(&one_of);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    assert!(code.contains("(Box<Payload>)"), "{}", types_module(&code));
+    assert!(
+        !code.contains("EnvelopePropertiesPayload"),
+        "{}",
+        types_module(&code)
+    );
+    let cross_one_of = one_of.replace(
+        "'#/components/schemas/Envelope/properties/payload'",
+        "'./openapi.yaml#/components/schemas/Envelope/properties/payload'",
+    );
+    let (report, cross_code) = generate_with_code(&cross_one_of);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        types_module(&code),
+        types_module(&cross_code),
+        "the two spellings of one union member must lower identically"
+    );
+
+    // A pointer that starts at a declared component but walks off its body is the resolver's
+    // miss, reported against the `$ref` site with the whole reference — not the old "addresses a
+    // subschema" wording, which would now claim a restriction that no longer exists.
+    let off_body = spec.replace(
+        "#/components/schemas/Envelope/properties/payload",
+        "#/components/schemas/Envelope/properties/nope",
+    );
+    for (entry, report) in [
+        ("generate", generate(&off_body)),
+        ("check", check(&off_body)),
+    ] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let subschema: Vec<_> = report
+        let e004: Vec<_> = report
             .diagnostics()
             .iter()
             .filter(|d| d.code == Code::UnresolvedRef)
             .collect();
-        assert!(!subschema.is_empty(), "{entry}: {report:#?}");
-        // `Envelope` IS declared, so the diagnostic must say the fragment is not a component name
-        // rather than that the target could not be found.
         assert!(
-            subschema
-                .iter()
-                .any(|d| d.message.contains("addresses a subschema")),
-            "{entry}: the message must not claim the target is missing — `Envelope` is declared: \
-             {report:#?}"
-        );
-        assert!(
-            !subschema.iter().any(|d| d.message.contains("unresolved")),
+            e004.iter().any(|d| d.message.contains(
+                "`#/components/schemas/Envelope/properties/nope` was not found in the input bundle"
+            ) && d.pointer.as_str()
+                == "/paths/~1u/get/responses/200/content/application~1json/schema"),
             "{entry}: {report:#?}"
         );
-        // This arm threads the `$ref` site's provenance exactly as the plain-name arm does, and for
-        // the same reason: a root pointer is one `omittable_enclosing` maps to `None`, which turns
-        // `--carve` on this document from clean into an un-carvable rejection.
         assert!(
-            subschema.iter().any(|d| d.pointer.as_str()
-                == "/paths/~1u/get/responses/200/content/application~1json/schema"),
-            "{entry}: the subschema rejection must point at the `$ref` site, not at {:?}: \
-             {report:#?}",
-            subschema
+            !e004
                 .iter()
-                .map(|d| d.pointer.as_str())
-                .collect::<Vec<_>>()
-        );
-        // The message makes two separate claims — which reference could not be followed, and which
-        // component it was found to address a subschema of — and it interpolates `Envelope` for
-        // both. `contains("Envelope")` is therefore satisfied by either half alone, so it pins
-        // neither; both mutations survived it. Assert the two independently.
-        assert!(
-            subschema.iter().any(|d| d
-                .message
-                .contains("`#/components/schemas/Envelope/properties/payload`")),
-            "{entry}: the message must name the whole reference that could not be followed, not \
-             only the component it starts from: {report:#?}"
-        );
-        assert!(
-            subschema
-                .iter()
-                .any(|d| d.message.contains("component `Envelope`")),
-            "{entry}: the message must name the component it did find, not merely describe the \
-             shape: {report:#?}"
-        );
-        // And carry the remedy, as the other rejections in this file do.
-        assert!(
-            subschema.iter().any(|d| d
-                .remedy
-                .as_deref()
-                .is_some_and(|remedy| remedy.contains("declare the subschema"))),
-            "{entry}: the rejection must carry its remedy: {report:#?}"
+                .any(|d| d.message.contains("addresses a subschema")),
+            "{entry}: {report:#?}"
         );
     }
 
-    // A deep pointer whose ROOT SEGMENT is not declared is a different fault and must not borrow
-    // this message. `Envelop` is a typo for `Envelope`; the document declares nothing by that name,
-    // so "addresses a subschema" would assert by implication that it is there, and the remedy
-    // "declare the subschema as its own entry" would send the reader to promote a subschema of a
-    // component that does not exist. The `/` in the fragment is not what is wrong with it.
+    // A deep pointer whose ROOT SEGMENT is not declared is a missing component, and keeps the
+    // plain-name wording that names the whole reference. `Envelop` is a typo for `Envelope`; the
+    // `/` in the fragment is not what is wrong with it.
     let typo = spec.replace(
         "#/components/schemas/Envelope/properties/payload",
         "#/components/schemas/Envelop/properties/payload",
@@ -694,21 +815,17 @@ components:
             .filter(|d| d.code == Code::UnresolvedRef)
             .collect();
         assert!(
-            e004.iter()
-                .any(|d| d.message.contains("unresolved schema reference")),
+            e004.iter().any(|d| d.message.contains(
+                "unresolved schema reference `#/components/schemas/Envelop/properties/payload`"
+            )),
             "{entry}: an undeclared root segment is an unresolved reference, not a fragment-shape \
              problem: {report:#?}"
         );
-        assert!(
-            !e004
-                .iter()
-                .any(|d| d.message.contains("addresses a subschema")),
-            "{entry}: `Envelop` is not declared, so nothing was addressed inside it: {report:#?}"
-        );
     }
 
-    // A trailing slash is a real subschema fragment: `Foo` IS declared and the pointer's final
-    // empty reference token addresses its `""`-keyed member, so this keeps the subschema wording.
+    // A trailing slash is a real pointer into `Envelope`: its final empty reference token
+    // addresses a `""`-keyed member, which `Envelope` does not have. So it reaches the resolver,
+    // and the resolver's miss is what reports it.
     let trailing = spec.replace(
         "#/components/schemas/Envelope/properties/payload",
         "#/components/schemas/Envelope/",
@@ -719,7 +836,10 @@ components:
         report
             .diagnostics()
             .iter()
-            .any(|d| d.code == Code::UnresolvedRef && d.message.contains("addresses a subschema")),
+            .any(|d| d.code == Code::UnresolvedRef
+                && d.message.contains(
+                    "`#/components/schemas/Envelope/` was not found in the input bundle"
+                )),
         "{report:#?}"
     );
 
@@ -6073,6 +6193,261 @@ fn a_malformed_discriminator_object_is_e011_at_the_field() {
                     .any(|d| d.code == Code::InvalidInput && d.pointer.as_str() == pointer),
                 "{what} via {entry}: E011 must sit at `{pointer}`: {report:#?}"
             );
+        }
+    }
+}
+
+/// A union member written as a pointer into a component (`#/components/schemas/Envelope/properties/
+/// payload`) is a member like any other, and a `mapping` value naming it — in the same-file
+/// spelling or the root document's own relative-file spelling — resolves to the same `file#pointer`
+/// and supplies its tag. Matching by component name alone could not name such a member at all, so
+/// its variant would take an invented tag on the wire; matching by resolved target gives it the
+/// one the document declares.
+#[test]
+fn a_discriminator_mapping_value_spelled_as_a_deep_pointer_names_its_member() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - { $ref: '#/components/schemas/Envelope/properties/payload' }
+        - { $ref: '#/components/schemas/Dog' }
+      discriminator:
+        propertyName: kind
+        mapping:
+          payload: 'TARGET'
+          dog: '#/components/schemas/Dog'
+    Envelope:
+      type: object
+      properties:
+        payload:
+          type: object
+          properties: { kind: { type: string }, id: { type: string } }
+          required: [kind]
+    Dog:
+      type: object
+      properties: { kind: { type: string }, bark: { type: string } }
+      required: [kind]
+"##;
+    for target in [
+        "#/components/schemas/Envelope/properties/payload",
+        "./openapi.yaml#/components/schemas/Envelope/properties/payload",
+    ] {
+        let spec = spec.replace("TARGET", target);
+        let (generated, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target} {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().is_empty(),
+                "{target} {entry}: {report:#?}"
+            );
+        }
+        for tag in ["\"payload\" => {", "\"dog\" => {"] {
+            assert!(code.contains(tag), "{target}: {tag}\n{code}");
+        }
+    }
+}
+
+/// A `mapping` value with no `/` or `#` in it is read as a component name, as the specification
+/// recommends for a value that is also a legal relative reference (`cat.yaml`). Read that way it
+/// names a schema the description does not hold even when a member is the file `$ref: 'cat.yaml'`,
+/// so it is `E004` at the entry — as is a name nothing declares (`Ghost`) — while a declared
+/// component that is not a member (`Bird`, in either spelling) is `E007` at the entry. Before
+/// either rejection the member's tag was silently replaced by an invented one. `./cat.yaml` is the
+/// unambiguous file spelling, and it names the file member.
+#[test]
+fn a_discriminator_mapping_value_naming_no_member_is_rejected_at_the_entry() {
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /pet:
+    get:
+      operationId: getPet
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - { $ref: 'MEMBER' }
+        - { $ref: '#/components/schemas/Dog' }
+      discriminator:
+        propertyName: kind
+        mapping:
+          meow: 'TARGET'
+          dog: Dog
+    Cat:
+      type: object
+      properties: { kind: { type: string }, purr: { type: string } }
+      required: [kind]
+    Bird:
+      type: object
+      properties: { kind: { type: string }, wing: { type: string } }
+      required: [kind]
+    Dog:
+      type: object
+      properties: { kind: { type: string }, bark: { type: string } }
+      required: [kind]
+"##;
+    let cat = "type: object\nproperties: { kind: { type: string }, purr: { type: string } }\n\
+               required: [kind]\n";
+    let run = |member: &str, target: &str| {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            root.replace("MEMBER", member).replace("TARGET", target),
+        )
+        .unwrap();
+        std::fs::write(dir.join("cat.yaml"), cat).unwrap();
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let code = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
+        (generated, checked, code)
+    };
+    let rejected = [
+        ("cat.yaml", "cat.yaml", Code::UnresolvedRef),
+        ("#/components/schemas/Cat", "Ghost", Code::UnresolvedRef),
+        ("#/components/schemas/Cat", "Bird", Code::NonDisjointUnion),
+        (
+            "#/components/schemas/Cat",
+            "#/components/schemas/Bird",
+            Code::NonDisjointUnion,
+        ),
+    ];
+    for (member, target, code) in rejected {
+        let (generated, checked, _) = run(member, target);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{member} / {target} {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| d.code == code
+                    && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/meow"
+                    && d.message.contains(&format!("`{target}`"))),
+                "{member} / {target} {entry}: {code:?} must sit at the entry: {report:#?}"
+            );
+        }
+    }
+
+    // The member's own name, bare or as a pointer, and the file member's unambiguous spelling are
+    // matched to their member and supply its tag.
+    for (member, target) in [
+        ("#/components/schemas/Cat", "Cat"),
+        ("#/components/schemas/Cat", "#/components/schemas/Cat"),
+        ("cat.yaml", "./cat.yaml"),
+    ] {
+        let (generated, checked, code) = run(member, target);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{member} / {target} {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::NonDisjointUnion) && !has_code(report, Code::UnresolvedRef),
+                "{member} / {target} {entry}: {report:#?}"
+            );
+        }
+        assert!(
+            code.contains("\"meow\" => {"),
+            "{member} / {target}: the mapped tag must dispatch\n{code}"
+        );
+    }
+}
+
+/// A union declared in a sub-file whose members are that file's own deep pointers
+/// (`#/components/schemas/Envelope/properties/cat`) generated before the root document's same-file
+/// deep pointers resolved, and it keeps the output it had: each member is named from its pointer
+/// text, and a `mapping` value spelled the same way resolves, relative to the sub-file it is
+/// written in, to that member and supplies its tag.
+#[test]
+fn a_sub_file_union_of_deep_pointer_members_keeps_its_names_and_mapping() {
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /pet:
+    get:
+      operationId: getPet
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: './lib.yaml#/components/schemas/Pet' }
+"##;
+    let lib = r##"
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - { $ref: '#/components/schemas/Envelope/properties/cat' }
+        - { $ref: '#/components/schemas/Envelope/properties/dog' }
+      discriminator:
+        propertyName: kind
+MAPPING
+    Envelope:
+      type: object
+      properties:
+        cat:
+          type: object
+          properties: { kind: { type: string }, purr: { type: string } }
+          required: [kind]
+        dog:
+          type: object
+          properties: { kind: { type: string }, bark: { type: string } }
+          required: [kind]
+"##;
+    let mapping = "        mapping:\n          \
+                   meow: '#/components/schemas/Envelope/properties/cat'\n          \
+                   woof: '#/components/schemas/Envelope/properties/dog'";
+    // With the mapping, its tags; without, the implicit tags the pointer text has always given.
+    for (with, cat_tag, dog_tag) in [
+        (mapping, "meow", "woof"),
+        ("", "Envelope/properties/cat", "Envelope/properties/dog"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), root).unwrap();
+        std::fs::write(dir.join("lib.yaml"), lib.replace("MAPPING", with)).unwrap();
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{cat_tag} {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::NonDisjointUnion),
+                "{cat_tag} {entry}: {report:#?}"
+            );
+        }
+        let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
+        for expected in [
+            "EnvelopePropertiesCat(Box<Cat>)".to_owned(),
+            "EnvelopePropertiesDog(Box<Dog>)".to_owned(),
+            format!("\"{cat_tag}\" => {{"),
+            format!("\"{dog_tag}\" => {{"),
+        ] {
+            assert!(code.contains(&expected), "{cat_tag}: {expected}\n{code}");
         }
     }
 }
