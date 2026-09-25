@@ -974,6 +974,41 @@ fn multi_status_dispatch_uses_each_status_media_codec() {
     server.join().unwrap();
 }
 
+// Issue #115: with no success status declared, `default` documents a 2xx, so its body is decoded
+// as the success value rather than discarded behind `Ok(())`; a non-2xx it covers is still the
+// error enum's `Default` variant, and the declared `404` keeps its own.
+#[test]
+fn default_types_a_2xx_when_no_success_status_is_declared() {
+    let (base, server) = serve_once("application/json", "200 OK", br#"{"kind":"ok","limit":3}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    let body = client.get_no_success().unwrap().into_inner();
+    assert_eq!(body.kind, "ok");
+    assert_eq!(body.limit, Some(3));
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/json", "500 Internal Server Error", br#"{"kind":"boom"}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_no_success().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetNoSuccessError::Default(body) => assert_eq!(body.kind, "boom"),
+            other => panic!("expected the default error variant, got {other:?}"),
+        },
+        other => panic!("expected typed API error, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("text/plain", "404 Not Found", b"gone");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_no_success().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetNoSuccessError::Status404(body) => assert_eq!(body.as_str(), "gone"),
+            other => panic!("expected the 404 error variant, got {other:?}"),
+        },
+        other => panic!("expected typed API error, got {other:?}"),
+    }
+    server.join().unwrap();
+}
+
 // `getMultiDefault` documents 200 and 201 with distinct bodies plus a bodied `default`. The
 // matches below are exhaustive with no wildcard, so a `default` routed into the success enum
 // fails to compile here; the undocumented 202 proves it is no success fallback at run time either.
@@ -3173,6 +3208,24 @@ paths:
                 type: array
                 items:
                   $ref: "#/components/schemas/Mode"
+  # No success status declared, only a `404` and a bodied `default` (issue #115): `default` is then
+  # the only documentation of a 2xx, so it types the success side (`DeepFilter`) as well as the
+  # error enum's catch-all, instead of the success side collapsing to `()` and dropping the body.
+  /no-success:
+    get:
+      operationId: getNoSuccess
+      responses:
+        "404":
+          description: Not Found
+          content:
+            text/plain:
+              schema: { type: string }
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeepFilter"
 components:
   securitySchemes:
     bearer:
