@@ -3,8 +3,10 @@
 //! macro-generated client compiles and drives real HTTP (against a local mock), and its Cargo.toml
 //! proves no spargen crate is in the runtime graph.
 //!
-//! The full feature surface (auth failure modes, retry, undocumented statuses, …) is covered by
-//! `examples/petstore`; this example is deliberately compact — its job is to exercise the *macro*.
+//! The full feature surface (every auth failure mode, retry, undocumented statuses, …) is covered
+//! by `examples/petstore`; this example is deliberately compact — its job is to exercise the
+//! *macro*. It does mirror the typed error variants a consumer matches on (a documented error
+//! body, a missing credential), so the macro expansion's copies are matched at runtime too.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -25,7 +27,7 @@ mod petstore {
     );
 }
 
-use petstore::{types, Client, Credential, Error};
+use petstore::{types, Client, Credential, Error, RequestError};
 
 const TOKEN: &str = "let-me-in";
 
@@ -69,6 +71,18 @@ async fn main() {
             println!("typed 404: {}", response.into_inner().message);
         }
         other => panic!("expected a typed 404, got {other:?}"),
+    }
+
+    // A missing credential fails before anything is sent, as the typed `MissingCredential`
+    // variant naming the scheme alternatives — the same contract `examples/petstore` drives over
+    // the build.rs path, held here for the macro expansion.
+    let unauthenticated = Client::new(&base_url).unwrap();
+    match unauthenticated.get_pet("1").await {
+        Err(Error::RequestConstruction(RequestError::MissingCredential { alternatives })) => {
+            assert_eq!(alternatives, [vec!["bearerAuth"]]);
+            println!("missing credential rejected up front, naming {alternatives:?}");
+        }
+        other => panic!("expected a missing-credential error, got {other:?}"),
     }
 
     println!("petstore-macro example: all checks passed");
