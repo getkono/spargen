@@ -553,29 +553,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.ensure_resolved(&reference, at, name);
             }
             // A raw `/` here is always a further pointer segment, never part of a component name: a
-            // literal slash in a key is spelled `~1`. So the fragment addresses a *subschema* — but
-            // only say so when the segment it starts from is actually declared. Otherwise the fault
-            // is the missing component, not the fragment's shape, and claiming otherwise would
-            // assert by implication that the root exists and send the reader to promote a subschema
-            // of something that does not. spargen matches a same-file component reference by name
-            // only; the same pointer written against a relative file goes through the resolver,
-            // which does walk it.
-            let subschema_of = name
+            // literal slash in a key is spelled `~1`. So when the segment it starts from is a
+            // declared component, the fragment is a JSON Pointer into that component's body — a
+            // *subschema* — and RFC 6901 gives it exactly the meaning the relative-file spelling
+            // (`./lib.yaml#/components/schemas/Envelope/properties/payload`) already has. Both go
+            // to the resolver, which walks the pointer and lowers its target once per resolved
+            // `file#pointer` with its own reservation, so a subschema that refers back to itself
+            // or to its enclosing component is boxed against that reservation rather than
+            // re-entered. A pointer that walks off the declared body is the resolver's to report.
+            //
+            // Only when the leading segment is declared: otherwise the fault is the missing
+            // component, not the fragment's shape, and that keeps the plain-name wording below.
+            let into_a_declared_component = name
                 .split_once('/')
-                .map(|(root, _)| root)
-                .filter(|root| self.document.components.schemas.contains_key(*root));
-            if let Some(root) = subschema_of {
-                Diagnostic::error(Code::UnresolvedRef, at.clone())
-                    .message(format!(
-                        "schema reference `{reference}` addresses a subschema of component \
-                         `{root}` rather than a top-level component name"
-                    ))
-                    .remedy(
-                        "declare the subschema as its own entry under `components/schemas` and \
-                         reference it by name",
-                    )
-                    .emit(self.diags);
-                return None;
+                .is_some_and(|(root, _)| self.document.components.schemas.contains_key(root));
+            if into_a_declared_component {
+                return self.ensure_resolved(&reference, at, name);
             }
             // The wording matches the parameter/request-body/response component arms, which
             // already reject.
@@ -1745,6 +1738,40 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         let strategy = if let Some(discriminator) = &schema.discriminator {
+            // A `mapping` value is matched to a member by component name (see
+            // `discriminated_strategy`), so one that names none of this union's members is ignored
+            // there, and a member it was written for takes an invented tag on the wire. That covers
+            // every spelling that is not a member's component name: a pointer into a component
+            // (`#/components/schemas/Envelope/properties/payload`), a file reference with or without
+            // a path separator (`./lib.yaml#/…`, or `cat.yaml` — also a legal component name, and
+            // read as one, as the specification recommends for a value that is both), and a
+            // component that is not a member. Refuse it rather than ignore it, as `defaultMapping`
+            // below is refused. Members are read as written, so a mapping for a member the sibling
+            // keywords removed (with `W011`) still names a member. A deep pointer written in a
+            // sub-file keeps its pointer text as its name (see `member_component_name`), so a
+            // `mapping` value spelled the same way there still matches it.
+            let root = self.resolver.root_id();
+            let members: Vec<&str> = real_members
+                .iter()
+                .filter_map(|member| member_component_name(member, root))
+                .collect();
+            if let Some((tag, target)) = discriminator.mapping.iter().find(|(_, target)| {
+                let name = target
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap_or(target);
+                !members.contains(&name)
+            }) {
+                return self.reject_union(
+                    schema,
+                    &format!(
+                        "`discriminator.mapping` maps `{tag}` to `{target}`, which names none of \
+                         this union's members by component name — it is a pointer into a \
+                         component, a file reference, or a component that is not a member — so it \
+                         cannot be matched to a member and the tag it declares would not be the \
+                         one on the wire"
+                    ),
+                );
+            }
             // A `defaultMapping` that names a schema outside this union describes a fallback
             // branch the generated enum does not have, so it cannot be quietly downgraded to
             // another dispatch strategy.
@@ -1833,13 +1860,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         member: &SchemaOr,
         hint: &str,
     ) -> Option<(Ty, Option<String>)> {
-        if let SchemaOr::Schema(schema) = member {
-            if let Some(reference) = &schema.reference {
-                if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                    let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
-                    return Some((ty, Some(name.to_owned())));
-                }
-            }
+        let root = self.resolver.root_id();
+        if let (Some(name), SchemaOr::Schema(schema)) =
+            (member_component_name(member, root), member)
+        {
+            let ty =
+                self.ensure_component(name, schema.reference.as_deref(), &schema.provenance)?;
+            return Some((ty, Some(name.to_owned())));
         }
         let ty = self.lower_schema_or(member, hint)?;
         Some((ty, None))
@@ -5144,6 +5171,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             boxed: false,
         }
     }
+}
+
+/// The component name a union member is written as — `$ref: '#/components/schemas/<name>'` — or
+/// `None`. It names the member's variant and implicit discriminator tag, and it is what a
+/// `discriminator.mapping` value is matched against. Written in the root document, a name with a
+/// raw `/` is a pointer *into* a component, not a component name: it has none to derive a variant
+/// or a tag from, exactly as the same pointer written against a relative file has none, and neither
+/// has any file reference.
+///
+/// Written in a sub-file, the same spelling keeps the name it has always had. That route resolved
+/// through the resolver before same-file deep pointers did in the root, and its members were named
+/// from the pointer text (`Envelope/properties/cat` → variant `EnvelopePropertiesCat`, implicit tag
+/// `Envelope/properties/cat`), with a `mapping` value spelled the same way matched to them. Dropping
+/// the name there would rename those variants and reject those mappings with `E007` in documents
+/// that generate today; the root-only filter confines the change to what previously rejected.
+fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option<&str> {
+    let SchemaOr::Schema(schema) = member else {
+        return None;
+    };
+    let in_sub_file = schema.provenance.span.is_some_and(|span| span.file != root);
+    schema
+        .reference
+        .as_deref()?
+        .strip_prefix("#/components/schemas/")
+        .filter(|name| in_sub_file || !name.contains('/'))
 }
 
 fn parameter_shape_supported(graph: &TypeGraph, ty: Ty) -> bool {
