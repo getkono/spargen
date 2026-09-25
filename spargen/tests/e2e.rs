@@ -1244,6 +1244,82 @@ fn success_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
         }
     }
     server.join().unwrap();
+
+    // A body the matched arm cannot parse is `Error::Decode` at that status, with the body kept.
+    let (base, server) = serve_once("application/json", "202 Accepted", b"not json");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_ranged().unwrap_err() {
+        basic_client::Error::Decode { status, body, .. } => {
+            assert_eq!(status, 202);
+            assert_eq!(&body[..], b"not json");
+        }
+        other => panic!("expected a decode error, got {other:?}"),
+    }
+    server.join().unwrap();
+}
+
+// Issue #128: the error-side counterpart of the test above, driven through the emitted dispatch
+// rather than a hand-written stand-in. `getErrorRanged` documents an exact 409 and an overlapping
+// 4XX range, declared range first. A 409 matches both and must take the exact arm; a 404 matches
+// only the range; a 500 matches neither; and a body the matched arm cannot parse is `Decode`. The
+// matches are exhaustive with no wildcard, so a variant appearing or vanishing fails to compile.
+#[test]
+fn error_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
+    let (base, server) = serve_once("application/json", "409 Conflict", br#"{"detail":"dup"}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_error_ranged().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 409);
+            match response.into_inner() {
+                basic_client::GetErrorRangedError::Status409(body) => assert_eq!(body.detail, "dup"),
+                basic_client::GetErrorRangedError::Status4xx(body) => {
+                    panic!("a 409 took the range arm: {body:?}")
+                }
+            }
+        }
+        other => panic!("expected a typed API error, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/json", "404 Not Found", br#"{"reason":"gone"}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_error_ranged().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 404);
+            match response.into_inner() {
+                basic_client::GetErrorRangedError::Status4xx(body) => assert_eq!(body.reason, "gone"),
+                basic_client::GetErrorRangedError::Status409(body) => {
+                    panic!("a 404 took the exact 409 arm: {body:?}")
+                }
+            }
+        }
+        other => panic!("expected a typed API error, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let problem: &'static [u8] = br#"{"reason":"boom","detail":"boom"}"#;
+    let (base, server) = serve_once("application/json", "500 Internal Server Error", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_error_ranged().unwrap_err() {
+        basic_client::Error::UnexpectedStatus { status, body, .. } => {
+            assert_eq!(status, 500);
+            assert_eq!(&body[..], problem);
+        }
+        other => panic!("an undocumented 500 must not decode as a documented body, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/json", "409 Conflict", b"not json");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_error_ranged().unwrap_err() {
+        basic_client::Error::Decode { status, body, truncated, .. } => {
+            assert_eq!(status, 409);
+            assert_eq!(&body[..], b"not json");
+            assert!(!truncated);
+        }
+        other => panic!("expected a decode error, got {other:?}"),
+    }
+    server.join().unwrap();
 }
 "##,
     )
@@ -3509,6 +3585,31 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MultiOk"
+  # The error-side counterpart of `getRanged`: an exact `409` beside an overlapping `4XX` range,
+  # each with its own body, declared range first so the emitted precedence cannot be declaration
+  # order. A `409` is `Status409`, any other 4xx is `Status4xx`, and a 5xx is undocumented.
+  /error-exact-or-range:
+    get:
+      operationId: getErrorRanged
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        "4XX":
+          description: Any other client error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NotFoundError"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConflictError"
 components:
   securitySchemes:
     bearer:
