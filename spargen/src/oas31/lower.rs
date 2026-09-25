@@ -3554,25 +3554,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // suffix covers, so it could win a tie or a rank and then be refused below as a range. While
         // a sibling can be sent, it is withheld from the choice and reported as not generated.
         let (candidates, withheld) = request_media_candidates(&body.content);
-        let (media_name, object) = choose_media(
+        let ChosenMedia {
+            media: media_name,
+            value: object,
+            narrowing,
+        } = choose_media(
             &candidates,
             &body.provenance,
             self.diags,
             BodyPosition::Request,
             |object: &&super::MediaTypeObject| media_object_is_opaque(object),
         )?;
-        if !withheld.is_empty() {
-            Diagnostic::warning(Code::AlternativeMediaIgnored, body.provenance.clone())
-                .message(format!(
-                    "`{media_name}` is generated; the alternative media type(s) `{}` are not",
-                    withheld.join("`, `")
-                ))
-                .remedy(
-                    "remove the alternatives, or omit this API segment with spargen::omit! and \
-                     hand-write the call",
-                )
-                .emit(self.diags);
+        let lowered = self.lower_chosen_request_body(body, media_name, object)?;
+        // Both `W014`s claim the selection "is generated", so they are emitted only now that every
+        // gate above has accepted it: the alternatives `choose_media` passed over, then the
+        // withheld suffix ranges — each true, always in this order.
+        let withheld = alternative_media_ignored(media_name, &withheld, &body.provenance);
+        for warning in narrowing.into_iter().chain(withheld) {
+            self.diags.emit(warning);
         }
+        Some(lowered)
+    }
+
+    /// Lower the request body entry [`Self::lower_request_body`] selected, or `None` when one of
+    /// the request-body gates (each an `E009`) refuses it.
+    fn lower_chosen_request_body(
+        &mut self,
+        body: &RequestBodyObject,
+        media_name: &str,
+        object: &MediaTypeObject,
+    ) -> Option<RequestBody> {
         let object = self.resolve_media_object(object, media_name)?;
         let media = lower_media_type(media_name, &body.provenance, self.diags)?;
         // A media *range* describes what a server may return, not what a client sends: `Content-Type`
@@ -3665,6 +3676,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          or omit this API segment with spargen::omit!",
                     )
                     .emit(self.diags);
+                return None;
             }
         }
         let ty = if media == MediaType::OctetStream {
@@ -4160,141 +4172,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             media_object_is_opaque,
         )
         .and_then(
-            |(media_name, object)| {
-                let object = self.resolve_media_object(object, media_name)?;
-                let media = lower_media_type(media_name, &response.provenance, self.diags)?;
-                // For a sequential/streaming media (`text/event-stream` / `application/x-ndjson`),
-                // OpenAPI 3.2 gives the PER-ITEM type in `itemSchema`; a whole-body `schema` does not
-                // apply to a stream, so `itemSchema` is preferred (falling back to `schema` for the
-                // pre-3.2 form where the item type was written as `schema`). On a non-streaming media
-                // `itemSchema` is meaningless: acknowledge it with `W010` and use `schema`.
-                let (ty, stream) = if let Some(framing) = media.stream_framing() {
-                    if let Some(item_schema) = object.item_schema.as_ref() {
-                        if media == MediaType::EventStream && self.document.is_oas32 {
-                            if let Some(json) = super::sse::json_data_schema(
-                                item_schema,
-                                self.resolver,
-                                self.diags,
-                            ) {
-                                let ty = self.lower_schema_or(&json.schema, "ResponseBody");
-                                self.warn_structural_default_or(
-                                    &json.schema,
-                                    "an SSE JSON data content schema",
-                                );
-                                (ty, Some(crate::ir::Framing::SseJsonData))
-                            } else {
-                                (
-                                    self.lower_schema_ref(item_schema, "ResponseBody"),
-                                    Some(crate::ir::Framing::SseEvent),
-                                )
-                            }
-                        } else {
-                            (
-                                self.lower_schema_ref(item_schema, "ResponseBody"),
-                                Some(framing),
-                            )
-                        }
-                    } else if self.document.is_oas32 && object.schema.is_some() {
-                        Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
-                            .message(
-                                "in OpenAPI 3.2, `schema` on sequential media describes the \
-                                 complete sequence; use `itemSchema` for a streaming client result",
-                            )
-                            .remedy("replace `schema` with `itemSchema`, or choose a non-sequential response media type")
-                            .emit(self.diags);
-                        return None;
-                    } else {
-                        (
-                            object
-                                .schema
-                                .as_ref()
-                                .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody")),
-                            Some(framing),
-                        )
-                    }
-                } else {
-                    if object.item_schema.is_some() {
-                        Diagnostic::warning(
-                            Code::Oas32ConstructIgnored,
-                            response.provenance.clone(),
-                        )
-                        .message(
-                            "`itemSchema` (OpenAPI 3.2) applies only to sequential/streaming media; \
-                             on this non-streaming media it is not used",
-                        )
-                        .emit(self.diags);
-                    }
-                    (
-                        object
-                            .schema
-                            .as_ref()
-                            .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody")),
-                        None,
-                    )
-                };
-                if let Some(schema) = object.item_schema.as_ref().filter(|_| stream.is_some()) {
-                    self.warn_structural_default_ref(schema, "a response body schema");
-                } else if let Some(schema) = object.schema.as_ref() {
-                    self.warn_structural_default_ref(schema, "a response body schema");
+            |ChosenMedia {
+                 media: media_name,
+                 value: object,
+                 narrowing,
+             }| {
+                let lowered = self.lower_chosen_response_body(response, media_name, object)?;
+                // `W014` claims the selection "is generated": emitted only once the gates in
+                // `lower_chosen_response_body` have accepted it.
+                if let Some(narrowing) = narrowing {
+                    self.diags.emit(narrowing);
                 }
-                if matches!(media, MediaType::FormUrlEncoded | MediaType::Multipart) {
-                    Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
-                        .message(format!(
-                            "media type `{media_name}` is supported for request bodies, not response bodies"
-                        ))
-                        .remedy("document a JSON, XML, textual, binary, or streaming response, or omit this API segment with spargen::omit!")
-                        .emit(self.diags);
-                    return None;
-                }
-                let ty = if media == MediaType::OctetStream {
-                    self.opaque_octets(
-                        "ResponseBody",
-                        ty,
-                        object.schema.is_some(),
-                        &response.provenance,
-                    )
-                } else {
-                    ty
-                };
-                if let Some(ty) = ty {
-                    let compatible = match media {
-                        MediaType::Text => raw_text_type_supported(&self.graph, ty),
-                        MediaType::OctetStream => matches!(
-                            self.graph.get(ty.id).map(|definition| &definition.kind),
-                            Some(TypeKind::Bytes)
-                        ),
-                        _ => true,
-                    };
-                    if !compatible {
-                        Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
-                            .message(format!(
-                                "media type `{media_name}` requires a string-like or binary response schema"
-                            ))
-                            .remedy("use a string/binary schema, choose a structured media type, or omit this API segment with spargen::omit!")
-                            .emit(self.diags);
-                        return None;
-                    }
-                    // A `bytes::Bytes` response is decoded as the raw octets of the body under any
-                    // media, so `null` is never what arrives, and the byte decoder has no `Option`
-                    // to build. The raw *text* codec decodes through serde and builds
-                    // `Option<String>` soundly, so it is not refused here, and neither is a
-                    // streamed item, which is framed and decoded element by element.
-                    if stream.is_none() && ty.nullable && self.is_bytes(ty) {
-                        Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
-                            .message(format!(
-                                "this `{media_name}` response body is read as raw bytes, whose \
-                                 content has no wire representation of `null`, but its schema \
-                                 admits `null`"
-                            ))
-                            .remedy(
-                                "remove `null` from the response body schema, or omit this API \
-                                 segment with spargen::omit!",
-                            )
-                            .emit(self.diags);
-                        return None;
-                    }
-                }
-                Some((media, ty, stream))
+                Some(lowered)
             },
         );
         // A streaming response media (`text/event-stream` / `application/x-ndjson`) records its
@@ -4308,6 +4197,145 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             stream: body.and_then(|(_, _, stream)| stream),
             headers,
         })
+    }
+
+    /// Lower the response body entry [`Self::lower_response`] selected into its media, type, and
+    /// framing, or `None` when one of the response-body gates (each an `E009`) refuses it.
+    fn lower_chosen_response_body(
+        &mut self,
+        response: &ResponseObject,
+        media_name: &str,
+        object: &MediaTypeObject,
+    ) -> Option<(MediaType, Option<Ty>, Option<crate::ir::Framing>)> {
+        let object = self.resolve_media_object(object, media_name)?;
+        let media = lower_media_type(media_name, &response.provenance, self.diags)?;
+        // For a sequential/streaming media (`text/event-stream` / `application/x-ndjson`),
+        // OpenAPI 3.2 gives the PER-ITEM type in `itemSchema`; a whole-body `schema` does not
+        // apply to a stream, so `itemSchema` is preferred (falling back to `schema` for the
+        // pre-3.2 form where the item type was written as `schema`). On a non-streaming media
+        // `itemSchema` is meaningless: acknowledge it with `W010` and use `schema`.
+        let (ty, stream) = if let Some(framing) = media.stream_framing() {
+            if let Some(item_schema) = object.item_schema.as_ref() {
+                if media == MediaType::EventStream && self.document.is_oas32 {
+                    if let Some(json) =
+                        super::sse::json_data_schema(item_schema, self.resolver, self.diags)
+                    {
+                        let ty = self.lower_schema_or(&json.schema, "ResponseBody");
+                        self.warn_structural_default_or(
+                            &json.schema,
+                            "an SSE JSON data content schema",
+                        );
+                        (ty, Some(crate::ir::Framing::SseJsonData))
+                    } else {
+                        (
+                            self.lower_schema_ref(item_schema, "ResponseBody"),
+                            Some(crate::ir::Framing::SseEvent),
+                        )
+                    }
+                } else {
+                    (
+                        self.lower_schema_ref(item_schema, "ResponseBody"),
+                        Some(framing),
+                    )
+                }
+            } else if self.document.is_oas32 && object.schema.is_some() {
+                Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
+                            .message(
+                                "in OpenAPI 3.2, `schema` on sequential media describes the \
+                                 complete sequence; use `itemSchema` for a streaming client result",
+                            )
+                            .remedy("replace `schema` with `itemSchema`, or choose a non-sequential response media type")
+                            .emit(self.diags);
+                return None;
+            } else {
+                (
+                    object
+                        .schema
+                        .as_ref()
+                        .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody")),
+                    Some(framing),
+                )
+            }
+        } else {
+            if object.item_schema.is_some() {
+                Diagnostic::warning(Code::Oas32ConstructIgnored, response.provenance.clone())
+                    .message(
+                        "`itemSchema` (OpenAPI 3.2) applies only to sequential/streaming media; \
+                             on this non-streaming media it is not used",
+                    )
+                    .emit(self.diags);
+            }
+            (
+                object
+                    .schema
+                    .as_ref()
+                    .and_then(|schema| self.lower_schema_ref(schema, "ResponseBody")),
+                None,
+            )
+        };
+        if let Some(schema) = object.item_schema.as_ref().filter(|_| stream.is_some()) {
+            self.warn_structural_default_ref(schema, "a response body schema");
+        } else if let Some(schema) = object.schema.as_ref() {
+            self.warn_structural_default_ref(schema, "a response body schema");
+        }
+        if matches!(media, MediaType::FormUrlEncoded | MediaType::Multipart) {
+            Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
+                        .message(format!(
+                            "media type `{media_name}` is supported for request bodies, not response bodies"
+                        ))
+                        .remedy("document a JSON, XML, textual, binary, or streaming response, or omit this API segment with spargen::omit!")
+                        .emit(self.diags);
+            return None;
+        }
+        let ty = if media == MediaType::OctetStream {
+            self.opaque_octets(
+                "ResponseBody",
+                ty,
+                object.schema.is_some(),
+                &response.provenance,
+            )
+        } else {
+            ty
+        };
+        if let Some(ty) = ty {
+            let compatible = match media {
+                MediaType::Text => raw_text_type_supported(&self.graph, ty),
+                MediaType::OctetStream => matches!(
+                    self.graph.get(ty.id).map(|definition| &definition.kind),
+                    Some(TypeKind::Bytes)
+                ),
+                _ => true,
+            };
+            if !compatible {
+                Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
+                            .message(format!(
+                                "media type `{media_name}` requires a string-like or binary response schema"
+                            ))
+                            .remedy("use a string/binary schema, choose a structured media type, or omit this API segment with spargen::omit!")
+                            .emit(self.diags);
+                return None;
+            }
+            // A `bytes::Bytes` response is decoded as the raw octets of the body under any
+            // media, so `null` is never what arrives, and the byte decoder has no `Option`
+            // to build. The raw *text* codec decodes through serde and builds
+            // `Option<String>` soundly, so it is not refused here, and neither is a
+            // streamed item, which is framed and decoded element by element.
+            if stream.is_none() && ty.nullable && self.is_bytes(ty) {
+                Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
+                    .message(format!(
+                        "this `{media_name}` response body is read as raw bytes, whose \
+                                 content has no wire representation of `null`, but its schema \
+                                 admits `null`"
+                    ))
+                    .remedy(
+                        "remove `null` from the response body schema, or omit this API \
+                                 segment with spargen::omit!",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+        }
+        Some((media, ty, stream))
     }
 
     /// Lower a response's documented headers into typed accessors.
@@ -5911,6 +5939,16 @@ enum BodyPosition {
     Response,
 }
 
+/// The `content` entry [`choose_media`] selected, and the `W014` disclosing what it passed over.
+struct ChosenMedia<'a, T> {
+    media: &'a str,
+    value: &'a T,
+    /// Built but not emitted. `W014` says the selection "is generated", which is only true once the
+    /// caller's own gates accept it, so the caller emits this when — and only when — the selected
+    /// entry lowers. A selection those gates then reject is reported by its `E009` alone.
+    narrowing: Option<Diagnostic>,
+}
+
 /// `opaque` answers, without lowering anything, whether an entry's body constrains nothing — the
 /// proof that an ignored alternative would decode exactly like the selection.
 fn choose_media<'a, T>(
@@ -5919,7 +5957,7 @@ fn choose_media<'a, T>(
     diags: &mut Diagnostics,
     position: BodyPosition,
     opaque: impl Fn(&T) -> bool,
-) -> Option<(&'a str, &'a T)> {
+) -> Option<ChosenMedia<'a, T>> {
     if content.is_empty() {
         return None;
     }
@@ -5995,25 +6033,41 @@ fn choose_media<'a, T>(
             })
             .map(|(candidate, _)| candidate.as_str())
             .collect();
-        if !ignored.is_empty() {
-            Diagnostic::warning(Code::AlternativeMediaIgnored, provenance.clone())
-                .message(format!(
-                    "`{media}` is generated; the alternative media type(s) `{}` are not",
-                    ignored.join("`, `")
-                ))
-                .remedy(
-                    "remove the alternatives, or omit this API segment with spargen::omit! and \
-                     hand-write the call",
-                )
-                .emit(diags);
-        }
-        return Some((media, value));
+        return Some(ChosenMedia {
+            media,
+            value,
+            narrowing: alternative_media_ignored(media, &ignored, provenance),
+        });
     }
     let (media, _) = content.first()?;
     Diagnostic::error(Code::UnsupportedMediaType, provenance.clone())
         .message(format!("media type `{media}` is not supported"))
         .emit(diags);
     None
+}
+
+/// The `W014` saying `media` is generated and `ignored` is not, or `None` when nothing was ignored.
+/// Built rather than emitted: see [`ChosenMedia::narrowing`].
+fn alternative_media_ignored(
+    media: &str,
+    ignored: &[&str],
+    provenance: &crate::diag::Provenance,
+) -> Option<Diagnostic> {
+    if ignored.is_empty() {
+        return None;
+    }
+    Some(
+        Diagnostic::warning(Code::AlternativeMediaIgnored, provenance.clone())
+            .message(format!(
+                "`{media}` is generated; the alternative media type(s) `{}` are not",
+                ignored.join("`, `")
+            ))
+            .remedy(
+                "remove the alternatives, or omit this API segment with spargen::omit! and \
+                 hand-write the call",
+            )
+            .build(),
+    )
 }
 
 /// Whether a Media Type Object constrains nothing about the body it describes.

@@ -10924,9 +10924,9 @@ paths:
 #[test]
 fn e009_a_request_offering_only_ranges_is_rejected_on_the_first() {
     // With no concrete key at all every candidate is a range, so the ladder and then source order
-    // decide as before: `video/*` ties `*/*` at the same rank and, listed first, is selected; the
-    // other range is reported as not generated (`W014`) and the selection is then rejected as a
-    // request `Content-Type` (`E009`) — both diagnostics, naming each key once.
+    // decide as before: `video/*` ties `*/*` at the same rank and, listed first, is selected, and
+    // the selection is then rejected as a request `Content-Type` (`E009`). Nothing is generated, so
+    // no `W014` claims `video/*` "is generated" beside the rejection (#110).
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -10958,15 +10958,8 @@ paths:
             ],
             "{report:#?}"
         );
-        let ignored: Vec<&str> = report
-            .diagnostics()
-            .iter()
-            .filter(|d| d.code == Code::AlternativeMediaIgnored)
-            .map(|d| d.message.as_str())
-            .collect();
-        assert_eq!(
-            ignored,
-            ["`video/*` is generated; the alternative media type(s) `*/*` are not"],
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
             "{report:#?}"
         );
     }
@@ -12858,13 +12851,18 @@ fn e009_a_suffix_range_beside_only_an_unclassified_request_sibling_is_a_media_ra
 fn e009_a_sendable_request_sibling_that_fails_its_own_gate_is_reported_for_itself() {
     // Sendable is decided by classification alone. A `text/plain` sibling carrying an object schema
     // is still chosen over the range, and then refused by the raw-text gate for its own reason
-    // rather than the range's.
+    // rather than the range's. Neither the withheld range nor anything else is then reported as
+    // passed over for a `text/plain` that "is generated": it is not (#110).
     let spec = request_body_document(&[
         ("application/*+json", "{ type: object }"),
         ("text/plain", "{ type: object }"),
     ]);
     for report in [generate(&spec), check(&spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
         let unsupported = messages_with_code(&report, Code::UnsupportedMediaType);
         assert!(
             unsupported
@@ -12885,7 +12883,7 @@ fn e009_a_sendable_request_sibling_that_fails_its_own_gate_is_reported_for_itsel
 fn w014_a_withheld_suffix_range_beside_two_request_entries_is_reported_separately() {
     // Pinned as it stands. `choose_media` names the alternatives it passed over, and the withheld
     // range gets its own W014 right after, so this body carries two: both true, always in this
-    // order.
+    // order, and both emitted only once the selection has passed every request-body gate.
     let spec = request_body_document(&[
         ("application/*+json", "{ type: object }"),
         ("application/json", "{ type: object }"),
@@ -12905,6 +12903,93 @@ fn w014_a_withheld_suffix_range_beside_two_request_entries_is_reported_separatel
                 "`application/json` is generated; the alternative media type(s) \
                  `application/*+json` are not",
             ],
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_a_rejected_multipart_request_selection_claims_nothing_is_generated() {
+    // `multipart/form-data` outranks `application/octet-stream`, so it is selected, and then its
+    // shape gate refuses a non-object schema. That rejection is the whole report for this body: no
+    // `W014` names the octet alternative as passed over for a multipart body that "is generated"
+    // (#110), and the gate stops there rather than lowering the refused body's encoding.
+    let spec = request_body_document(&[
+        ("multipart/form-data", "{ type: string }"),
+        ("application/octet-stream", "{}"),
+    ]);
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+        assert_eq!(
+            messages_with_code(&report, Code::UnsupportedMediaType),
+            [
+                "a `multipart/form-data` request body must be an object schema; its properties \
+                 are the form parts, so a non-object multipart body is not representable"
+            ],
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_a_rejected_response_selection_claims_nothing_is_generated() {
+    // The response side of #110: `text/plain` is selected over `text/html` (same rank, listed
+    // first) and refused by the raw-text gate, so no `W014` says it "is generated".
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /page:
+    get:
+      operationId: getPage
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain: { schema: { type: object } }
+            text/html: { schema: { type: object } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::AlternativeMediaIgnored),
+            "{report:#?}"
+        );
+        assert_eq!(
+            messages_with_code(&report, Code::UnsupportedMediaType),
+            ["media type `text/plain` requires a string-like or binary response schema"],
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_an_accepted_response_selection_still_reports_its_alternatives() {
+    // The counterpart: the same shape with a string schema passes the gate, so the narrowing it
+    // makes is still disclosed.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /page:
+    get:
+      operationId: getPage
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain: { schema: { type: string } }
+            text/html: { schema: { type: string } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert_eq!(
+            messages_with_code(&report, Code::AlternativeMediaIgnored),
+            ["`text/plain` is generated; the alternative media type(s) `text/html` are not"],
             "{report:#?}"
         );
     }
