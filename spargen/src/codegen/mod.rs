@@ -11,7 +11,7 @@ mod format;
 use crate::diag::Diagnostics;
 use crate::ir::Api;
 use crate::name::Names;
-use quote::quote;
+use quote::{format_ident, quote};
 
 pub(crate) use format::format_tokens;
 
@@ -78,40 +78,19 @@ pub(crate) fn generate(
     let blocking = emit::emit_blocking_client(api, names, options);
     // Attributes ride on items rather than the file (`#![…]`): inner attributes would make the
     // output unusable via `include!` from OUT_DIR, the build.rs consumption path.
-    let stream_exports = uses_streams.then(|| {
+    // The root surface is emitted from the lists `emit` owns, which `error_type_ident` also reads.
+    let root_reexport = |names: &[&str]| {
+        let idents = names.iter().map(|name| format_ident!("{}", name));
         quote! {
             #[allow(unused_imports)]
-            pub use support::{
-                EventStream, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
-            };
+            pub use support::{ #(#idents),* };
         }
-    });
-    let datetime_exports = uses_time.then(|| {
-        quote! {
-            #[allow(unused_imports)]
-            pub use support::{Date, DateTime};
-        }
-    });
+    };
+    let root_exports = root_reexport(emit::ROOT_REEXPORTS);
+    let stream_exports = uses_streams.then(|| root_reexport(emit::STREAM_ROOT_REEXPORTS));
+    let datetime_exports = uses_time.then(|| root_reexport(emit::DATETIME_ROOT_REEXPORTS));
     let tokens = quote! {
-        // The embedded `support` module is private, so this list is the whole nameable runtime
-        // surface. It therefore has to cover every type that appears in a signature this output
-        // emits: `HeaderError` is the return type of each `…Headers::from_headers`, `RetryWait` is
-        // what a caller's `RetryPolicy` must return, `ClientCore` is what `Client::core` hands
-        // back, and the taxonomy's payload types are matched on. Anything short of that leaves a
-        // generated signature a caller can call but cannot write down. `ApiErrorBody` is the
-        // bound `Error::api_body` needs, implemented by the uniform-body error enum, the
-        // single-body newtype, and the uninhabited shape (an enum whose bodies are different
-        // generated types gets none).
-        #[allow(unused_imports)]
-        pub use support::{
-            ApiErrorBody, AuthError, ClientConfig, ClientCore, Credential, Error, ExecuteFuture,
-            ExposeSecret, HeaderError, HeaderShape, HttpBackend, LinkPaginator, Middleware,
-            MiddlewareBackend, Next, ProtocolError, RedirectError, RequestCause, RequestError,
-            ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
-            SecretString, TimeoutKind, TokenFuture, TokenProvider, TransportError,
-            exponential_backoff, next_link,
-        };
-
+        #root_exports
         #stream_exports
         #datetime_exports
 
