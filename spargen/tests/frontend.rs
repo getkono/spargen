@@ -12673,6 +12673,70 @@ paths:
 }
 
 #[test]
+fn w014_a_structured_suffix_range_ties_its_codec_on_a_response() {
+    // Unlike a family range, which every concrete sibling outranks, `application/*+json` ranks
+    // level with `application/json` (the support matrix and `E009` say so). On a response nothing
+    // withholds it, so the tie is broken by source order: whichever is listed first is generated,
+    // and the other is reported as the alternative that is not. The two schemas differ so the
+    // generated body shows which key won.
+    let range = r#""application/*+json": { schema: { type: object, required: [fromRange], properties: { fromRange: { type: integer } } } }"#;
+    let json = r#""application/json": { schema: { type: object, required: [fromJson], properties: { fromJson: { type: integer } } } }"#;
+    for (first, second, generated, other, field, other_field) in [
+        (
+            range,
+            json,
+            "application/*+json",
+            "application/json",
+            "from_range",
+            "from_json",
+        ),
+        (
+            json,
+            range,
+            "application/json",
+            "application/*+json",
+            "from_json",
+            "from_range",
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            {first}
+            {second}
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert!(
+            code.contains(&format!("pub {field}: "))
+                && !code.contains(&format!("pub {other_field}: ")),
+            "`{generated}` listed first is generated, `{other}` is not: {code}"
+        );
+        let expected =
+            format!("`{generated}` is generated; the alternative media type(s) `{other}` are not");
+        for report in [report, check(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(
+                report.diagnostics().iter().any(|diagnostic| {
+                    diagnostic.code == Code::AlternativeMediaIgnored
+                        && diagnostic.message == expected
+                }),
+                "{report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn e009_a_structured_suffix_range_cannot_be_a_request_content_type() {
     // A request puts its media key on the wire verbatim, and `Content-Type: application/*+json`
     // names a family rather than a type, exactly like `video/*`. It is rejected as a range.
