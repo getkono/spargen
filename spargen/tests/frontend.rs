@@ -6211,7 +6211,7 @@ MAPPING
                 "{cat_tag} {entry}: {report:#?}"
             );
             assert!(
-                !has_code(&report, Code::NonDisjointUnion),
+                !has_code(report, Code::NonDisjointUnion),
                 "{cat_tag} {entry}: {report:#?}"
             );
         }
