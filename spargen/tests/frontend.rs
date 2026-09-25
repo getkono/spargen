@@ -11117,6 +11117,187 @@ paths:
     }
 }
 
+/// The raw-body schemas that admit `null` (#104), one per spelling: a union with `null` over
+/// `format: binary`, over `contentEncoding: base64`, and over a `$ref` to a binary component, the
+/// `anyOf` form, and the type-array form `type: [string, 'null']`, which used to lose its `null`
+/// before any gate saw it.
+const NULLABLE_BYTE_SCHEMAS: &[&str] = &[
+    "{ oneOf: [ { type: string, format: binary }, { type: 'null' } ] }",
+    "{ anyOf: [ { type: string, format: binary }, { type: 'null' } ] }",
+    "{ oneOf: [ { type: string, contentEncoding: base64 }, { type: 'null' } ] }",
+    "{ oneOf: [ { $ref: '#/components/schemas/Blob' }, { type: 'null' } ] }",
+    "{ type: [string, 'null'], format: binary }",
+    "{ type: [string, 'null'], contentEncoding: base64 }",
+    "{ $ref: '#/components/schemas/NullableBlob' }",
+];
+
+const NULLABLE_BYTE_COMPONENTS: &str = r#"
+components:
+  schemas:
+    Blob: { type: string, format: binary }
+    NullableBlob: { type: [string, 'null'], format: binary }
+"#;
+
+fn assert_rejected_as_nullable_raw_body(spec: &str) {
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{spec}\n{report:#?}");
+        assert!(
+            messages_for(&report, Code::UnsupportedMediaType)
+                .iter()
+                .any(|message| message.contains("has no wire representation of `null`")),
+            "{spec}\n{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn e009_a_nullable_raw_request_body_is_rejected() {
+    // A raw request body is sent verbatim as octets, and octets carry no `null`: an
+    // `Option<bytes::Bytes>` argument would ask the caller for a value the wire cannot send (the
+    // absent body is `required: false`, which is a different construct). Every spelling used to
+    // pass the frontend clean and generate `.body(body.clone())` over `Option<Bytes>`, which does
+    // not compile (`E0277`) — under octet-stream, and under text and JSON too, because a `Bytes`
+    // body is sent raw whatever its media.
+    for version in ["3.1.0", "3.2.0"] {
+        for media in ["application/octet-stream", "text/plain", "application/json"] {
+            for required in [true, false] {
+                for schema in NULLABLE_BYTE_SCHEMAS {
+                    let spec = format!(
+                        r#"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        required: {required}
+        content:
+          {media}: {{ schema: {schema} }}
+      responses: {{ "204": {{ description: ok }} }}
+{NULLABLE_BYTE_COMPONENTS}"#
+                    );
+                    assert_rejected_as_nullable_raw_body(&spec);
+                }
+            }
+        }
+    }
+
+    // The raw text codec has the same hole: `text/plain` over a nullable string used to emit
+    // `.body(body.to_string())` over `&Option<String>`, which does not compile (`E0599`).
+    for schema in [
+        "{ oneOf: [ { type: string }, { type: 'null' } ] }",
+        "{ type: [string, 'null'] }",
+    ] {
+        let spec = format!(
+            r#"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          text/plain: {{ schema: {schema} }}
+      responses: {{ "204": {{ description: ok }} }}
+"#
+        );
+        assert_rejected_as_nullable_raw_body(&spec);
+    }
+}
+
+#[test]
+fn e009_a_nullable_byte_response_body_is_rejected() {
+    // A byte response is read as the raw octets of the body, so `null` is never what arrives; the
+    // byte decoder has no `Option` to build, and the union spelling used to generate a
+    // `ResponseValue<Bytes>` where `ResponseValue<Option<Bytes>>` was declared (`E0308`), while the
+    // type-array spelling silently decoded plain `Bytes`. Success and error bodies, single and
+    // multi-status, go through the same gate.
+    let responses = [
+        r#"{ "200": { description: ok, content: { MEDIA: { schema: SCHEMA } } } }"#,
+        r#"{ "204": { description: ok }, "400": { description: bad, content: { MEDIA: { schema: SCHEMA } } } }"#,
+        r#"{ "200": { description: ok, content: { MEDIA: { schema: SCHEMA } } }, "201": { description: ok, content: { application/json: { schema: { type: string } } } } }"#,
+    ];
+    for media in ["application/octet-stream", "text/plain", "application/json"] {
+        for schema in NULLABLE_BYTE_SCHEMAS {
+            for shape in responses {
+                let responses = shape.replace("MEDIA", media).replace("SCHEMA", schema);
+                let spec = format!(
+                    r#"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /d:
+    get:
+      operationId: download
+      responses: {responses}
+{NULLABLE_BYTE_COMPONENTS}"#
+                );
+                assert_rejected_as_nullable_raw_body(&spec);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_nullable_byte_string_keeps_its_null_outside_a_raw_body() {
+    // `type: [string, 'null']` with `format: binary` or `contentEncoding: base64` is `bytes::Bytes`
+    // that also admits `null`, exactly as the union spelling is. Where the value is a JSON member,
+    // or a multipart part, `null` has a representation, so the field is `Option<bytes::Bytes>` —
+    // it used to be plain `Bytes`, which rejects the very `null` the schema allows.
+    let (report, code) = generate_with_code(
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /u:
+    post:
+      operationId: upload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [typed, united]
+              properties:
+                typed: { type: [string, 'null'], contentEncoding: base64 }
+                united: { oneOf: [ { type: string, contentEncoding: base64 }, { type: 'null' } ] }
+      responses: { "204": { description: ok } }
+"#,
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let code = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        code.contains("pub type RequestBodytyped = bytes::Bytes;"),
+        "{code}"
+    );
+    assert!(
+        code.contains("pub typed: Option<RequestBodytyped>,"),
+        "{code}"
+    );
+    assert!(code.contains("pub united: Option<"), "{code}");
+
+    // A nullable raw *text* response stays supported: the text codec decodes through serde, so
+    // `Option<String>` is built (always `Some`) and compiles. Only the byte codec, which has no
+    // `Option` to build, is rejected.
+    let report = generate(
+        r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /d:
+    get:
+      operationId: download
+      responses:
+        "200": { description: ok, content: { text/plain: { schema: { type: [string, 'null'] } } } }
+"#,
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+}
+
 #[test]
 fn e009_a_concrete_type_outside_the_byte_families_stays_unsupported() {
     // `application/*` mixes binary (`pdf`) with textual (`sdp`) subtypes and `font/*` is not
