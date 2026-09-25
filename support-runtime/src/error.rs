@@ -123,7 +123,8 @@ impl<E> Error<E> {
     ///
     /// A timeout is asked for before any of those, and the same connect discriminator splits it:
     /// one raised while establishing the connection (the client's `connect_timeout`, which bounds
-    /// name resolution, the TCP handshake, and TLS) is [`TimeoutKind::Connect`]; every other one,
+    /// name resolution, the TCP handshake, and TLS, or the operating system's own handshake
+    /// timeout) is [`TimeoutKind::Connect`]; every other one,
     /// the total-request budget elapsing during the connect included, is [`TimeoutKind::Total`].
     /// On `wasm32` every timeout is `Total`, for the reason above.
     pub fn from_reqwest(error: reqwest::Error) -> Self {
@@ -422,9 +423,10 @@ impl TransportError {
 /// Which timeout elapsed (taxonomy #3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeoutKind {
-    /// The connect timeout: no connection was established within the client's
-    /// `connect_timeout`, which covers name resolution, the TCP handshake, and TLS. Never
-    /// reported on `wasm32`, where the fetch backend does not say which phase timed out.
+    /// The connect timeout: no connection was established in time — the client's
+    /// `connect_timeout` (which covers name resolution, the TCP handshake, and TLS) elapsed, or
+    /// the operating system gave up on the handshake. Never reported on `wasm32`, where the fetch
+    /// backend does not say which phase timed out.
     Connect,
     /// The total-request timeout: the whole request ran over the client's `timeout`, whichever
     /// phase it was in when the budget elapsed.
