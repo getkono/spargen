@@ -683,8 +683,9 @@ pub(crate) fn emit_operation(
             }
         }
         // Multi-status success: read the body once, then dispatch by status in precedence order
-        // (exact before range before default) into the matching variant. A success status matching
-        // no documented variant is an unexpected-status error — there is no untyped fallback.
+        // (exact code ascending, then range ascending) into the matching variant. `default` never
+        // enters this shape, so there is no `Default` arm. A success status matching no documented
+        // variant is an unexpected-status error — there is no untyped fallback.
         SuccessShape::Enum(entries) => {
             let method_ident = names
                 .operations
