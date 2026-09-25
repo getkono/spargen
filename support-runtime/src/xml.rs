@@ -94,8 +94,9 @@ where
 ///
 /// An empty body always fails, whatever `T` is: XML 1.0 requires a root element, so there is no
 /// empty document to decode. This differs from [`crate::decode_text_body`], which reads an empty
-/// body as the empty string. A documented bodyless status never reaches this codec; the response
-/// enum gives it a unit variant.
+/// body as the empty string. A documented bodyless status never reaches this codec: it is a unit
+/// variant of the response enum on the success side and on an error side with several documented
+/// bodies, and `Error::UnexpectedStatus` on an error side with one documented body or none.
 pub fn decode_xml_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, String> {
     let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
     quick_xml::de::from_str::<T>(text).map_err(|error| error.to_string())
@@ -151,8 +152,9 @@ mod tests {
 
     /// An empty body is not an XML document (XML 1.0 `document` requires a root element), so a
     /// status that documents an XML body and sends none is a decode failure, never a defaulted
-    /// value. A documented bodyless status never reaches this codec: the response enum gives it a
-    /// unit variant (#121). Pinned for both the struct shape generated XML bodies take and a bare
+    /// value. A documented bodyless status never reaches this codec (#121): it is a unit variant of
+    /// the response enum on the success side and on an error side with several documented
+    /// bodies, and `Error::UnexpectedStatus` otherwise. Pinned for both the struct shape generated XML bodies take and a bare
     /// `String`, so the XML codec cannot quietly acquire the text codec's empty-string reading.
     #[test]
     fn an_empty_xml_body_is_a_decode_failure() {

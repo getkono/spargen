@@ -345,8 +345,9 @@ pub async fn decode_success_bytes(
 /// `Value::String("")`, so `T = String` decodes it to `""` by design, and a typed `T` (a string
 /// enum or format) accepts it only if `""` is one of its values. This is unlike the JSON and XML
 /// codecs, where an empty body is not a document and always fails. Only a status that documents
-/// a textual body reaches this codec; a documented bodyless status is a unit variant of the
-/// response enum and is never decoded.
+/// a textual body reaches this codec; a documented bodyless status is never decoded. It is a unit
+/// variant of the response enum on the success side and on an error side with several documented
+/// bodies, and `Error::UnexpectedStatus` on an error side with one documented body or none.
 pub fn decode_text_body<T>(body: &[u8]) -> Result<T, String>
 where
     T: DeserializeOwned,
@@ -1371,7 +1372,8 @@ mod tests {
     /// `String` decodes it to `""` on purpose (#126) — while a typed text value (a string enum or
     /// format) that has no empty member still fails with `Decode`, because the codec decodes the
     /// empty text rather than special-casing it. A documented bodyless status never reaches this
-    /// codec: the response enum gives it a unit variant (#121).
+    /// codec (#121): it is a unit variant of the response enum on the success side and on an
+    /// error side with several documented bodies, and `Error::UnexpectedStatus` otherwise.
     #[test]
     fn textual_codec_reads_an_empty_body_as_the_empty_string() {
         assert_eq!(decode_text_body::<String>(b"").unwrap(), "");
