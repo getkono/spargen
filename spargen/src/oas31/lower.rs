@@ -199,27 +199,29 @@ pub(crate) fn lower(
                 .and_then(|body| ctx.lower_request_body(&body));
 
             let responses = ctx.lower_responses(&operation.responses);
-            // XML decode is scoped to the single-body success/error paths. An XML body that would
-            // land in a multi-status response enum is rejected cleanly (narrowed `E009`) rather than
-            // silently decoded as JSON.
+            // XML decode is scoped to the single-body success/error paths. An XML body beside a
+            // second bodied status on the same side — a response enum that decodes two or more
+            // bodies — is rejected cleanly (narrowed `E009`) rather than silently decoded as JSON.
+            // A lone XML success body beside a bodyless status is still that one body.
             if responses.xml_in_multi_status() {
                 Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
                     .message(
                         "an application/xml (or text/xml) response body is only supported as an \
-                         operation's single success or single error body; it cannot participate in \
-                         a multi-status response enum",
+                         operation's single bodied success or single bodied error response \
+                         (bodyless statuses beside it are fine); it cannot share a response enum \
+                         with a second bodied success or error status",
                     )
                     .remedy(
                         "give the operation a single XML-bodied success/error response, use JSON \
-                         for the multi-status responses, or omit this API segment with \
+                         for the other bodied responses, or omit this API segment with \
                          spargen::omit!",
                     )
                     .emit(ctx.diags);
             }
             // Streaming decode is scoped to the single bodied success (`EventStream<T>`). A stream
             // anywhere else — an error status, a `default` (which is always offered to the error
-            // side), or a multi-status success enum — would be decoded as one whole JSON body, so
-            // it is rejected (narrowed `E009`) rather than misread on the wire.
+            // side), or a success enum beside a second bodied success — would be decoded as one
+            // whole JSON body, so it is rejected (narrowed `E009`) rather than misread on the wire.
             if responses.stream_outside_single_success() {
                 Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
                     .message(

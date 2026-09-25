@@ -7,7 +7,6 @@
 
 use std::convert::Infallible;
 
-use bytes::Bytes;
 use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
@@ -37,7 +36,7 @@ where
     let status = response.status();
     let headers = response.headers().clone();
     let body = response.bytes().await.map_err(Error::from_reqwest)?;
-    match from_xml_bytes::<T>(&body) {
+    match decode_xml_body::<T>(&body) {
         Ok(value) => Ok(ResponseValue::new(status, headers, value)),
         Err(path) => {
             let (body, truncated) = crate::dispatch::cap_body(body, core.config().max_error_body);
@@ -69,7 +68,7 @@ where
         Err(error) => return error,
     };
     if documented.iter().any(|spec| spec.matches(status)) {
-        match from_xml_bytes::<E>(&body) {
+        match decode_xml_body::<E>(&body) {
             Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
             Err(path) => Error::Decode {
                 status,
@@ -87,9 +86,11 @@ where
     }
 }
 
-/// Deserialize XML bytes into `T`, returning a human-readable error string (invalid UTF-8 or a
-/// quick-xml parse error) suitable for [`Error::Decode`]'s `path`.
-fn from_xml_bytes<T: DeserializeOwned>(body: &Bytes) -> Result<T, String> {
+/// Deserialize an already-read XML body into `T`, returning a human-readable error string (invalid
+/// UTF-8 or a quick-xml parse error) suitable for [`Error::Decode`]'s `path`. The XML analogue of
+/// [`crate::decode_text_body`]: a multi-status success enum reads the body once and decodes the arm
+/// its status selects through this.
+pub fn decode_xml_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, String> {
     let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
     quick_xml::de::from_str::<T>(text).map_err(|error| error.to_string())
 }
@@ -99,7 +100,7 @@ mod tests {
     use bytes::Bytes;
     use serde::{Deserialize, Serialize};
 
-    use super::{from_xml_bytes, to_xml};
+    use super::{decode_xml_body, to_xml};
 
     #[derive(Debug, PartialEq, Serialize, Deserialize)]
     struct Point {
@@ -132,19 +133,19 @@ mod tests {
             label: "p".to_owned(),
         };
         let xml = to_xml(&point).unwrap();
-        let decoded: Point = from_xml_bytes(&Bytes::from(xml.into_bytes())).unwrap();
+        let decoded: Point = decode_xml_body(&Bytes::from(xml.into_bytes())).unwrap();
         assert_eq!(decoded, point);
     }
 
     #[test]
     fn malformed_xml_yields_a_nonempty_error_path() {
-        let error = from_xml_bytes::<Point>(&Bytes::from_static(b"not xml")).unwrap_err();
+        let error = decode_xml_body::<Point>(&Bytes::from_static(b"not xml")).unwrap_err();
         assert!(!error.is_empty());
     }
 
     #[test]
     fn invalid_utf8_yields_a_decode_error_path() {
-        let error = from_xml_bytes::<Point>(&Bytes::from_static(&[0xff, 0xfe])).unwrap_err();
+        let error = decode_xml_body::<Point>(&Bytes::from_static(&[0xff, 0xfe])).unwrap_err();
         assert!(!error.is_empty());
     }
 
