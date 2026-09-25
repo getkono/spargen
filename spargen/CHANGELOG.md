@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/getkono/spargen/compare/spargen-v0.5.0...spargen-v0.6.0) - 2026-09-25
+
+### Added
+
+- *(oas31)* resolve a same-file $ref into a component subschema through the resolver ([#260](https://github.com/getkono/spargen/pull/260))
+
+### Fixed
+
+- *(runtime)* classify an elapsed connect timeout as TimeoutKind::Connect ([#261](https://github.com/getkono/spargen/pull/261))
+- *(ir)* [**breaking**] give a documented bodyless success beside a single body its own variant ([#259](https://github.com/getkono/spargen/pull/259))
+- *(oas31)* [**breaking**] reject a bodied streaming response outside the single success body ([#258](https://github.com/getkono/spargen/pull/258))
+- *(ir)* [**breaking**] let default type the success side when no success status is declared ([#254](https://github.com/getkono/spargen/pull/254))
+- *(oas31)* emit W014 only once the selected body entry passes its gates ([#250](https://github.com/getkono/spargen/pull/250))
+- *(oas31)* reject an encoding.contentType that is not a media type ([#249](https://github.com/getkono/spargen/pull/249))
+- *(oas31)* [**breaking**] reject a raw body that admits null, and keep null on a type-array byte string ([#247](https://github.com/getkono/spargen/pull/247))
+- *(runtime)* [**breaking**] keep the response status on Error::Decode ([#245](https://github.com/getkono/spargen/pull/245))
+
+### Other
+
+- *(e2e)* drive the emitted error dispatch through exact, range, undocumented and decode arms ([#267](https://github.com/getkono/spargen/pull/267))
+- cover the bodyless-default error-shape grid and the single-body StatusSpec::Any guard ([#266](https://github.com/getkono/spargen/pull/266))
+- *(codegen)* hold the generated re-export lists to each other and pin the root surface ([#255](https://github.com/getkono/spargen/pull/255))
+- *(ir)* cover how default routes beside explicit statuses in the response shapes ([#253](https://github.com/getkono/spargen/pull/253))
+- scope the "concrete sibling outranks a range" claim to family ranges ([#251](https://github.com/getkono/spargen/pull/251))
+- scope the "default last" dispatch precedence to the error enum ([#252](https://github.com/getkono/spargen/pull/252))
+
 ## [0.5.0](https://github.com/getkono/spargen/compare/spargen-v0.4.0...spargen-v0.5.0) - 2026-09-24
 
 ### Added
