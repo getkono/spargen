@@ -344,10 +344,13 @@ pub async fn decode_success_bytes(
 /// An empty body is the zero-length text and is not special-cased: it becomes
 /// `Value::String("")`, so `T = String` decodes it to `""` by design, and a typed `T` (a string
 /// enum or format) accepts it only if `""` is one of its values. This is unlike the JSON and XML
-/// codecs, where an empty body is not a document and always fails. Only a status that documents
-/// a textual body reaches this codec; a documented bodyless status is never decoded. It is a unit
-/// variant of the response enum on the success side and on an error side with several documented
-/// bodies, and `Error::UnexpectedStatus` on an error side with one documented body or none.
+/// codecs, where an empty body is not a document and always fails. A documented bodyless status
+/// is a unit variant of the response enum on the success side and on an error side with several
+/// documented bodies, and is not decoded there. On an error side with one documented body it is
+/// `Error::UnexpectedStatus`, unless that body is documented under a range (`4XX`) or `default`
+/// that also covers the bodyless status: the status then matches the range or `default` entry, so
+/// [`classify_error_text`] decodes its body here, and an empty one yields `Error::Api("")` for
+/// `String` (#204 tracks the bodyless-error-beside-one-body shape).
 pub fn decode_text_body<T>(body: &[u8]) -> Result<T, String>
 where
     T: DeserializeOwned,
@@ -1371,9 +1374,11 @@ mod tests {
     /// An empty body under a status that documents a textual body is the zero-length text, so
     /// `String` decodes it to `""` on purpose (#126) — while a typed text value (a string enum or
     /// format) that has no empty member still fails with `Decode`, because the codec decodes the
-    /// empty text rather than special-casing it. A documented bodyless status never reaches this
-    /// codec (#121): it is a unit variant of the response enum on the success side and on an
-    /// error side with several documented bodies, and `Error::UnexpectedStatus` otherwise.
+    /// empty text rather than special-casing it. A documented bodyless status reaches this codec
+    /// only on an error side with one documented body, when that body sits under a range (`4XX`)
+    /// or `default` covering the bodyless status; `classify_error_text` then yields `Api("")` for
+    /// `String` (see `decode_text_body`). Elsewhere it is a unit variant of the response enum
+    /// (#121) or `Error::UnexpectedStatus`.
     #[test]
     fn textual_codec_reads_an_empty_body_as_the_empty_string() {
         assert_eq!(decode_text_body::<String>(b"").unwrap(), "");
