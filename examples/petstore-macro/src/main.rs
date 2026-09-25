@@ -3,10 +3,11 @@
 //! macro-generated client compiles and drives real HTTP (against a local mock), and its Cargo.toml
 //! proves no spargen crate is in the runtime graph.
 //!
-//! The full feature surface (every auth failure mode, retry, undocumented statuses, …) is covered
-//! by `examples/petstore`; this example is deliberately compact — its job is to exercise the
-//! *macro*. It does mirror the typed error variants a consumer matches on (a documented error
-//! body, a missing credential), so the macro expansion's copies are matched at runtime too.
+//! The full feature surface (the missing-credential and wrong-token auth failures, retry,
+//! undocumented statuses, …) is covered by `examples/petstore`; this example is deliberately
+//! compact — its job is to exercise the *macro*. It does mirror the typed error variants a
+//! consumer matches on (a documented error body, a missing credential), so the macro expansion's
+//! copies are matched at runtime too.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
