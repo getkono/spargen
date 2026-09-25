@@ -12286,42 +12286,89 @@ paths:
 }
 
 #[test]
-fn a_malformed_multipart_part_content_type_is_not_diagnosed() {
-    // Pinned as it stands, not endorsed. A multipart part's `contentType` is a header value, not a
-    // `content` key: the part is built from the property's own type, and the declared string is
-    // attached verbatim through `mime_str`. Generation reports nothing for a malformed one. It
-    // surfaces only when a request is built, as a request-construction error, because reqwest's
-    // media type parser rejects the extra `/`.
-    let spec = r##"
+fn e009_a_malformed_encoding_content_type_is_unsupported() {
+    // An Encoding Object's `contentType` is held to the same RFC 6838 well-formedness rule as a
+    // `content` key. A value that is no media type at all used to fall through to the property's
+    // natural codec with nothing reported, and was then sent verbatim: a multipart part attached
+    // it through `mime_str`, which fails only when a request is built. Only the element a client
+    // sends (the first of the list) is checked, and parameters are not part of the rule.
+    let body = |media: &str, content_type: &str| {
+        format!(
+            r##"
 openapi: 3.2.0
-info: { title: T, version: 1.0.0 }
+info: {{ title: T, version: 1.0.0 }}
 paths:
   /upload:
     post:
       operationId: upload
       requestBody:
         content:
-          multipart/form-data:
+          {media}:
             schema:
               type: object
               properties:
-                note: { type: string }
+                note: {{ type: string }}
             encoding:
-              note: { contentType: "text/plain/extra" }
+              note: {{ contentType: "{content_type}" }}
       responses:
-        "204": { description: No Content }
-"##;
-    let (report, code) = generate_with_code(spec);
-    let checked = check(spec);
-    for report in [&report, &checked] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(!has_code(report, Code::UnsupportedMediaType), "{report:#?}");
+        "204": {{ description: No Content }}
+"##
+        )
+    };
+    for media in ["multipart/form-data", "application/x-www-form-urlencoded"] {
+        for content_type in [
+            "text/plain/extra",
+            "text/plain/extra; charset=utf-8",
+            "text/plain/extra, text/plain",
+            "text",
+            "",
+            "text/",
+            "/plain",
+            "te xt/plain",
+            "application/vnd.a/b+json",
+        ] {
+            let spec = body(media, content_type);
+            let first = content_type.split(',').next().unwrap_or_default().trim();
+            for report in [generate(&spec), check(&spec)] {
+                assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+                assert!(
+                    report.diagnostics().iter().any(|diagnostic| {
+                        diagnostic.code == Code::UnsupportedMediaType
+                            && diagnostic.message
+                                == format!(
+                                    "`encoding.note.contentType: {first}` is not a media type"
+                                )
+                    }),
+                    "{media} / {content_type:?}: {report:#?}"
+                );
+            }
+        }
     }
-    assert!(code.contains("mime_str(\"text/plain/extra\")"), "{code}");
+    // A well-formed type spargen has no codec for keeps the documented fallback: it rides on the
+    // part as its header, and the value is rendered from the property's own type.
+    let (report, code) = generate_with_code(&body("multipart/form-data", "application/sdp"));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(code.contains("mime_str(\"application/sdp\")"), "{code}");
     assert!(
         code.contains("reqwest::multipart::Part::text(value.to_string())"),
         "the part is built from the string property, not from the declared type: {code}"
     );
+    // A well-formed, classified type with parameters, and a malformed element after the one that
+    // is sent, both still generate.
+    for content_type in ["text/plain; charset=utf-8", "text/plain, text/plain/extra"] {
+        let spec = body("multipart/form-data", content_type);
+        for report in [generate(&spec), check(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            assert!(
+                !has_code(&report, Code::UnsupportedMediaType),
+                "{content_type:?}: {report:#?}"
+            );
+        }
+    }
 }
 
 #[test]
