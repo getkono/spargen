@@ -10,11 +10,10 @@ use super::{AdditionalProps, Api, MediaType, Ty, TypeKind};
 /// struct fields, typed additional properties, array items, tuple elements, and union variants —
 /// names a `TypeId` that resolves in the [`TypeGraph`](super::TypeGraph). The second is the kind
 /// of an octet-stream request body's type: when a request body with [`MediaType::OctetStream`]
-/// media has a type whose definition resolves, that definition's kind is [`TypeKind::Bytes`],
-/// because the emitter sends such a body only through its raw-bytes path, which sets
-/// `Content-Type`. Only the definition's kind is checked, not the reference's `nullable` flag: a
-/// nullable byte body passes here yet generates `.body(..)` over an `Option<bytes::Bytes>` that
-/// does not compile, a known gap tracked as #104. A failure here is a frontend bug, not a spec
+/// media has a type whose definition resolves, that definition's kind is [`TypeKind::Bytes`] and
+/// the reference is not nullable, because the emitter sends such a body only through its
+/// raw-bytes path, which sets `Content-Type` and passes the value to `.body(..)`, which accepts
+/// `bytes::Bytes` but not `Option<bytes::Bytes>`. A failure here is a frontend bug, not a spec
 /// problem, so it is reported as [`Code::InvalidInput`] against the construct that carries the
 /// violation.
 ///
@@ -37,17 +36,17 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
             if let Some(ty) = body.ty {
                 check_ty(api, ty, diags, "request body", operation.provenance.clone());
                 // A missing definition is already reported by `check_ty`; only a definition that
-                // exists with the wrong kind is an octet-stream violation.
+                // exists with the wrong kind, or is nullable, is an octet-stream violation.
                 if body.media == MediaType::OctetStream
                     && api
                         .types
                         .get(ty.id)
-                        .is_some_and(|def| !matches!(def.kind, TypeKind::Bytes))
+                        .is_some_and(|def| ty.nullable || !matches!(def.kind, TypeKind::Bytes))
                 {
                     Diagnostic::error(Code::InvalidInput, operation.provenance.clone())
                         .message(format!(
                             "IR invariant failed: request body `{}` is an octet-stream body whose \
-                             type is not `bytes::Bytes`",
+                             type is not a non-nullable `bytes::Bytes`",
                             body.content_type
                         ))
                         .emit(diags);
@@ -358,6 +357,33 @@ mod tests {
         assert!(
             diagnostic.message.contains("`image/png`")
                 && diagnostic.message.contains("octet-stream"),
+            "{diags:#?}"
+        );
+    }
+
+    #[test]
+    fn a_nullable_octet_stream_request_body_is_caught() {
+        // A nullable `Bytes` body is emitted as `Option<bytes::Bytes>`, which `.body(..)` does
+        // not accept (#104); the frontend refuses the schema, so one here is a frontend bug.
+        let mut api = api_with_request_body(
+            MediaType::OctetStream,
+            "application/octet-stream",
+            Some(TypeKind::Bytes),
+        );
+        api.operations[0]
+            .request_body
+            .as_mut()
+            .and_then(|body| body.ty.as_mut())
+            .expect("typed request body installed")
+            .nullable = true;
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&api, &mut diags);
+        let [diagnostic] = diags.items() else {
+            panic!("expected exactly one diagnostic: {diags:#?}");
+        };
+        assert_eq!(diagnostic.code, Code::InvalidInput, "{diags:#?}");
+        assert!(
+            diagnostic.message.contains("non-nullable `bytes::Bytes`"),
             "{diags:#?}"
         );
     }

@@ -1242,11 +1242,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         // A binary payload — `contentEncoding: base64` or `format: binary` (the OpenAPI file/upload
         // marker) — lowers to raw `bytes::Bytes` rather than a `String`, so a multipart file part
-        // carries bytes and a byte body is not misdecoded as UTF-8.
+        // carries bytes and a byte body is not misdecoded as UTF-8. A `"null"` in the type array
+        // (`type: [string, 'null']`) makes it nullable exactly as the `oneOf [.., null]` spelling
+        // is, so both spellings reach the raw-body gates, and a JSON member becomes
+        // `Option<bytes::Bytes>`, rather than the `null` being dropped here.
         if schema.content_encoding.as_deref() == Some("base64")
             || schema.format.as_deref() == Some("binary")
         {
-            return Some(self.insert_schema_type(schema, hint, TypeKind::Bytes));
+            let mut ty = self.insert_schema_type(schema, hint, TypeKind::Bytes);
+            ty.nullable = schema.types.types.contains(&JsonType::Null);
+            return Some(ty);
         }
 
         let nullable = schema.types.types.contains(&JsonType::Null);
@@ -3685,6 +3690,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
                 return None;
             }
+            // A raw request body — `bytes::Bytes` under any media, which the emitter sends
+            // verbatim, or anything under the raw text codec — is the literal content of the
+            // request, so a schema admitting `null` would ask the caller for an `Option` whose
+            // `None` the wire cannot carry. An absent body is `required: false`, a different
+            // construct, so the `null` is refused rather than reinterpreted as one.
+            if ty.nullable && (media == MediaType::Text || self.is_bytes(ty)) {
+                Diagnostic::error(Code::UnsupportedMediaType, body.provenance.clone())
+                    .message(format!(
+                        "this `{media_name}` request body is sent as raw content, which has no \
+                         wire representation of `null`, but its schema admits `null`"
+                    ))
+                    .remedy(
+                        "remove `null` from the body schema (use `required: false` for a body \
+                         that may be omitted), or omit this API segment with spargen::omit!",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
         }
         // A form-urlencoded body is rendered property by property, so it needs properties. Without
         // this gate a non-object body compiled and then failed at runtime inside the form encoder.
@@ -4266,6 +4289,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 "media type `{media_name}` requires a string-like or binary response schema"
                             ))
                             .remedy("use a string/binary schema, choose a structured media type, or omit this API segment with spargen::omit!")
+                            .emit(self.diags);
+                        return None;
+                    }
+                    // A `bytes::Bytes` response is decoded as the raw octets of the body under any
+                    // media, so `null` is never what arrives, and the byte decoder has no `Option`
+                    // to build. The raw *text* codec decodes through serde and builds
+                    // `Option<String>` soundly, so it is not refused here, and neither is a
+                    // streamed item, which is framed and decoded element by element.
+                    if stream.is_none() && ty.nullable && self.is_bytes(ty) {
+                        Diagnostic::error(Code::UnsupportedMediaType, response.provenance.clone())
+                            .message(format!(
+                                "this `{media_name}` response body is read as raw bytes, whose \
+                                 content has no wire representation of `null`, but its schema \
+                                 admits `null`"
+                            ))
+                            .remedy(
+                                "remove `null` from the response body schema, or omit this API \
+                                 segment with spargen::omit!",
+                            )
                             .emit(self.diags);
                         return None;
                     }
@@ -5007,6 +5049,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Docs::default(),
             Some(provenance.clone()),
         ))
+    }
+
+    /// Whether `ty`'s definition is raw `bytes::Bytes`, which the emitter sends and decodes
+    /// verbatim whatever the media.
+    fn is_bytes(&self, ty: Ty) -> bool {
+        matches!(
+            self.graph.get(ty.id).map(|definition| &definition.kind),
+            Some(TypeKind::Bytes)
+        )
     }
 
     fn insert_schema_type(&mut self, schema: &Schema, hint: &str, kind: TypeKind) -> Ty {

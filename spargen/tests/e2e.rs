@@ -2787,6 +2787,54 @@ paths:
       responses:
         "204":
           description: No Content
+  # A byte string that admits `null` (#104), in every position where `null` has a representation:
+  # a JSON member, both ways, and a multipart part become `Option<bytes::Bytes>` whichever way the
+  # `null` is spelled, and a query parameter an `Option<String>` (the binary parameter remap). The
+  # `type: [string, 'null']` spelling used to lose its `null` here; a *raw* body admitting `null`
+  # is rejected instead (`E009`, pinned in `frontend.rs`).
+  /nullable-bytes:
+    post:
+      operationId: postNullableBytes
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: [string, 'null'], format: binary }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [digest, previous]
+              properties:
+                digest: { type: [string, 'null'], contentEncoding: base64 }
+                previous: { oneOf: [ { type: string, contentEncoding: base64 }, { type: 'null' } ] }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [digest]
+                properties:
+                  digest: { type: [string, 'null'], contentEncoding: base64 }
+  /nullable-parts:
+    post:
+      operationId: postNullableParts
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: [string, 'null'], format: binary }
+                thumb: { oneOf: [ { type: string, format: binary }, { type: 'null' } ] }
+      responses:
+        "204":
+          description: No Content
   # Raw textual/vendor and binary response codecs: these bodies are not JSON documents. The
   # generated dispatch must decode UTF-8 text through a JSON string value (preserving typed string
   # schemas) and return binary bodies as bytes without attempting serde_json parsing.

@@ -461,8 +461,7 @@ pub(crate) fn emit_operation(
                 // (the gate in `oas31::lower::lower_request_body`, checked again by
                 // `ir::check_invariants`), so the `Bytes` branch above takes it and this arm is
                 // never reached. It sends the same tokens, so even a looser gate cannot drop the
-                // header. Neither check looks at nullability: a nullable byte body also takes the
-                // `Bytes` branch and generates code that does not compile (#104).
+                // header. Both also refuse a nullable body, which `.body(..)` could not accept.
                 MediaType::OctetStream => raw_bytes_send,
                 MediaType::Multipart => {
                     emit_multipart_body(ty, api, names, request_binding, body_binding, &encoding)
@@ -3231,6 +3230,9 @@ fn response_media_for_spec(
         .and_then(|(_, response)| response.media)
 }
 
+/// Whether a body is decoded by the raw byte codec, which yields `bytes::Bytes` itself. It reads
+/// only the definition's kind, which is sound because `oas31::lower::lower_response` refuses a
+/// nullable `Bytes` body (`E009`): no `Option<bytes::Bytes>` body reaches these decode sites.
 fn is_bytes_ty(api: &Api, ty: Ty) -> bool {
     matches!(
         api.types.get(ty.id).map(|definition| &definition.kind),
