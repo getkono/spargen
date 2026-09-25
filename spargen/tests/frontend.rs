@@ -7057,6 +7057,44 @@ paths:
 }
 
 #[test]
+fn a_lone_xml_or_streaming_body_beside_a_bodyless_success_still_generates() {
+    // Issue #121 makes a single body beside a documented bodyless `204` a success enum. That enum
+    // still decodes only one body, so neither the XML nor the streaming multi-status rejection
+    // (both narrowed `E009`) may fire for it.
+    for media in ["application/xml", "text/event-stream"] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /x:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            {media}:
+              schema: {{ type: object, required: [a], properties: {{ a: {{ type: string }} }} }}
+        "204":
+          description: No Content
+"##
+        );
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{media}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{media}: {report:#?}"
+        );
+        let checked = check(&spec);
+        assert_ne!(
+            checked.outcome(),
+            Outcome::Rejected,
+            "{media}: {checked:#?}"
+        );
+    }
+}
+
+#[test]
 fn sse_response_body_generates() {
     // a `text/event-stream` (SSE) success response is now a typed stream, not `E009`. It
     // generates without the code firing, and check/generate stay in parity.

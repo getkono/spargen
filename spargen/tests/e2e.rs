@@ -1048,6 +1048,92 @@ fn default_beside_multiple_bodied_successes_stays_on_the_error_side() {
     }
     server.join().unwrap();
 }
+
+// Issue #121: `getMaybeEmpty` documents a bodied 200 and a bodyless 204. The 204 is its own unit
+// variant, read without parsing the empty body, where a plain `MultiOk` returned `Error::Decode`.
+// The matches are exhaustive with no wildcard, so a variant appearing or vanishing fails to compile.
+#[test]
+fn a_bodyless_success_beside_one_body_is_its_own_variant() {
+    let (base, server) = serve_once("application/json", "200 OK", br#"{"ok":"yes"}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_maybe_empty().unwrap().into_inner() {
+        basic_client::GetMaybeEmptyResponse::Status200(body) => assert_eq!(body.ok, "yes"),
+        basic_client::GetMaybeEmptyResponse::Status204 => panic!("a 200 decoded as the 204"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/json", "204 No Content", b"");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    let response = client.get_maybe_empty().expect("a documented 204 is a success");
+    assert_eq!(response.status(), 204);
+    match response.into_inner() {
+        basic_client::GetMaybeEmptyResponse::Status204 => {}
+        basic_client::GetMaybeEmptyResponse::Status200(body) => {
+            panic!("a 204 decoded as the 200: {body:?}")
+        }
+    }
+    server.join().unwrap();
+
+    // An undocumented 2xx matches neither variant: preserved raw, never decoded as `MultiOk`.
+    let (base, server) = serve_once("application/json", "202 Accepted", br#"{"ok":"yes"}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_maybe_empty().unwrap_err() {
+        basic_client::Error::UnexpectedStatus { status, .. } => assert_eq!(status, 202),
+        other => panic!("expected an unexpected-status error, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // The XML variant of the same shape decodes its one body through the XML codec.
+    let (base, server) = serve_once(
+        "application/xml",
+        "200 OK",
+        b"<XmlReceipt><ReceiptCode>A1</ReceiptCode></XmlReceipt>",
+    );
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_xml_maybe_empty().unwrap().into_inner() {
+        basic_client::GetXmlMaybeEmptyResponse::Status200(body) => assert_eq!(body.code, "A1"),
+        basic_client::GetXmlMaybeEmptyResponse::Status204 => panic!("a 200 decoded as the 204"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/xml", "204 No Content", b"");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_xml_maybe_empty().unwrap().into_inner() {
+        basic_client::GetXmlMaybeEmptyResponse::Status204 => {}
+        basic_client::GetXmlMaybeEmptyResponse::Status200(body) => {
+            panic!("a 204 decoded as the 200: {body:?}")
+        }
+    }
+    server.join().unwrap();
+}
+
+// `getRanged` documents an exact 200 and an overlapping 2XX range with different bodies. A 200
+// matches both and must take the exact arm; a 202 matches only the range. Executed, not just
+// ordered in the emitted text.
+#[test]
+fn success_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
+    let (base, server) = serve_once("application/json", "200 OK", br#"{"ok":"yes"}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_ranged().unwrap().into_inner() {
+        basic_client::GetRangedResponse::Status200(body) => assert_eq!(body.ok, "yes"),
+        basic_client::GetRangedResponse::Status2xx(body) => {
+            panic!("a 200 took the range arm: {body:?}")
+        }
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/json", "202 Accepted", br#"{"id":7}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    let response = client.get_ranged().unwrap();
+    assert_eq!(response.status(), 202);
+    match response.into_inner() {
+        basic_client::GetRangedResponse::Status2xx(body) => assert_eq!(body.id, 7),
+        basic_client::GetRangedResponse::Status200(body) => {
+            panic!("a 202 took the exact 200 arm: {body:?}")
+        }
+    }
+    server.join().unwrap();
+}
 "##,
     )
     .unwrap();
@@ -3226,6 +3312,52 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/DeepFilter"
+  # One bodied success beside a documented bodyless `204` (issue #121): two outcomes, so the success
+  # type is `GetMaybeEmptyResponse` with a `Status204` unit variant rather than a plain `MultiOk`
+  # that would decode the `204`'s empty body as a malformed `MultiOk`.
+  /maybe-empty:
+    get:
+      operationId: getMaybeEmpty
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        "204":
+          description: No Content
+  # The same shape over an XML body: the enum arm decodes it through the XML codec.
+  /xml/maybe-empty:
+    get:
+      operationId: getXmlMaybeEmpty
+      responses:
+        "200":
+          description: OK
+          content:
+            application/xml:
+              schema:
+                $ref: "#/components/schemas/XmlReceipt"
+        "204":
+          description: No Content
+  # An exact `200` beside an overlapping `2XX` range, each with its own body: dispatch is exact
+  # before range, so a `200` is `Status200` and any other 2xx is `Status2xx`.
+  /exact-or-range:
+    get:
+      operationId: getRanged
+      responses:
+        "2XX":
+          description: Any other success
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiCreated"
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
 components:
   securitySchemes:
     bearer:

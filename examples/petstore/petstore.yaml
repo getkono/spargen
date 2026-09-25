@@ -106,6 +106,32 @@ paths:
       responses:
         "204":
           description: Deleted.
+    put:
+      operationId: updatePet
+      summary: Replace a pet, returning the stored pet unless the server has nothing to add.
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewPet"
+      # A bodied success beside a documented bodyless one: the generated method returns
+      # `UpdatePetResponse`, whose `Status204` variant is the empty reply, not a decode failure.
+      responses:
+        "200":
+          description: The stored pet.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+        "204":
+          description: Stored; nothing to return.
   /pets/{petId}/photo:
     post:
       operationId: uploadPhoto

@@ -149,6 +149,29 @@ async fn main() {
     assert_eq!(stored.status(), 204);
     println!("uploaded a photo with typed multipart part Content-Types");
 
+    // A bodied 200 beside a documented bodyless 204: each status is its own variant, so the empty
+    // 204 is a success the caller matches on rather than a failed decode of an empty `Pet`.
+    let rename = types::NewPet {
+        name: "Rexy".to_owned(),
+        tag: None,
+    };
+    for (pet_id, expected) in [("1", 200), ("2", 204)] {
+        let updated = client
+            .update_pet(pet_id, &rename)
+            .await
+            .expect("update_pet");
+        assert_eq!(updated.status(), expected);
+        match updated.into_inner() {
+            petstore::UpdatePetResponse::Status200(pet) => {
+                assert_eq!(pet.name, "Rexy");
+                println!("updated pet #{pet_id}, server returned it");
+            }
+            petstore::UpdatePetResponse::Status204 => {
+                println!("updated pet #{pet_id}, server returned nothing (204)");
+            }
+        }
+    }
+
     // 204 maps to a unit body.
     let deleted = client.delete_pet("1").await.expect("delete_pet");
     assert_eq!(deleted.status(), 204);
@@ -349,6 +372,16 @@ fn handle(mut stream: TcpStream) {
             }
             ("GET", _) => ("404 Not Found", r#"{"message":"no such pet"}"#.to_owned()),
             ("DELETE", "/pets/1") => ("204 No Content", String::new()),
+            // Pet 1 echoes the stored pet; pet 2 acknowledges with an empty 204.
+            ("PUT", "/pets/1") => {
+                let new: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+                let name = new["name"].as_str().unwrap_or("unnamed");
+                (
+                    "200 OK",
+                    format!(r#"{{"id":"1","name":"{name}","status":"available"}}"#),
+                )
+            }
+            ("PUT", "/pets/2") => ("204 No Content", String::new()),
             _ => (
                 "500 Internal Server Error",
                 r#"{"message":"unhandled route"}"#.to_owned(),
