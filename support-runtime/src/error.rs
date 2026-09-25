@@ -31,6 +31,8 @@ pub enum Error<E> {
     /// Not pre-send: an error reqwest classifies as a request error. reqwest raises that class
     /// from inside the send itself, so the request may already have been transmitted and the
     /// server may already have acted on it. Retrying it is not safe for a non-idempotent call.
+    /// A connection that was never established is not in this class: reqwest reports it as a
+    /// request error too, but it arrives as [`Error::Transport`] (off `wasm32`).
     ///
     /// After a response was accepted: when the API has streaming (sequential) responses, the
     /// generated client also embeds `EventStream`, which raises this class when the stored request
@@ -106,13 +108,26 @@ impl<E> Error<E> {
     }
 
     /// Classify a reqwest error into the closest runtime taxonomy class.
+    ///
+    /// reqwest reports every failure of the send itself as a request-kind error, a refused
+    /// connection, an unresolvable host, and a failed TLS handshake included. Those are asked for
+    /// first (`is_connect`) and become [`Error::Transport`]; only the request-kind errors that are
+    /// not connection failures stay [`Error::RequestConstruction`]. reqwest offers no connect
+    /// classification on `wasm32`, where the browser's fetch reports failures opaquely, so there
+    /// every request-kind error stays [`Error::RequestConstruction`].
     pub fn from_reqwest(error: reqwest::Error) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let connect = error.is_connect();
+        #[cfg(target_arch = "wasm32")]
+        let connect = false;
         if error.is_timeout() {
             Error::Timeout(TimeoutKind::Total)
         } else if error.is_redirect() {
             Error::Redirect(RedirectError { source: error })
         } else if error.is_decode() {
             Error::Protocol(ProtocolError { source: error })
+        } else if connect {
+            Error::Transport(TransportError { source: error })
         } else if error.is_request() {
             Error::RequestConstruction(RequestError::Other(RequestCause(Box::new(error))))
         } else {

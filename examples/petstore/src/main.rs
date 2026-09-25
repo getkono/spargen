@@ -1,6 +1,6 @@
 //! Drives the generated petstore client end to end against a local mock server: typed models,
 //! query/header/path parameters, JSON bodies, bearer auth, typed API errors, undocumented-status
-//! handling, the transient-failure classifier, and the bring-your-own-policy retry adapter.
+//! handling, a refused connection, the transient-failure classifier, and the bring-your-own-policy retry adapter.
 //! Everything runs on 127.0.0.1 — no external API, no real credentials.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -175,6 +175,25 @@ async fn main() {
             println!("undocumented 401 preserved for forensics");
         }
         other => panic!("expected an unexpected-status error, got {other:?}"),
+    }
+
+    // A refused connection is a transport failure, and retry-worthy — not a malformed request.
+    // reqwest reports every failed send as a request-kind error, a refused connect included, so
+    // this is the case a classifier keyed on `is_request()` alone gets wrong. The port is one the
+    // OS just handed out and this process released, so nothing is listening on it.
+    let closed = {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a throwaway port");
+        listener.local_addr().unwrap()
+    };
+    let unreachable = Client::new(&format!("http://{closed}"))
+        .unwrap()
+        .with_credential("bearerAuth", Credential::Bearer(SecretString::from(TOKEN)));
+    match unreachable.get_pet("1").await {
+        Err(error @ Error::Transport(_)) => {
+            assert!(error.is_transient());
+            println!("refused connection classified as a transient transport failure");
+        }
+        other => panic!("expected a transport error for a refused connection, got {other:?}"),
     }
 
     // Bring-your-own-policy retry: wrap the default transport in a `RetryBackend` and install it via
