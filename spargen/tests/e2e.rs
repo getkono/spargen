@@ -1110,6 +1110,56 @@ fn default_beside_multiple_bodied_successes_stays_on_the_error_side() {
     server.join().unwrap();
 }
 
+// Issue #127: a bodyless `default` is dropped from a single-body error shape, and the emitted status
+// table must drop it too. A `500` carrying a well-formed `Problem` is therefore
+// `Error::UnexpectedStatus` with its body preserved — were `StatusSpec::Any` in the table, it would
+// decode as the documented `404` body. Beside two bodied errors the same `default` is the enum's
+// unit `Default` variant instead; that match is exhaustive, so a variant appearing or vanishing
+// fails to compile.
+#[test]
+fn bodyless_default_beside_one_bodied_error_is_not_a_documented_status() {
+    let problem: &'static [u8] = br#"{"title":"t","detail":"d"}"#;
+    let (base, server) = serve_once("application/json", "404 Not Found", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_bodyless_default().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 404);
+            let basic_client::GetBodylessDefaultError(body) = response.into_inner();
+            assert_eq!(body.title, "t");
+        }
+        other => panic!("expected the typed 404 error body, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/json", "500 Internal Server Error", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_bodyless_default().unwrap_err() {
+        basic_client::Error::UnexpectedStatus { status, body, .. } => {
+            assert_eq!(status, 500);
+            assert_eq!(&body[..], problem);
+        }
+        other => panic!("a bodyless `default` must not classify a 500 as `Api`, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/json", "500 Internal Server Error", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_bodyless_default_multi().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 500);
+            match response.into_inner() {
+                basic_client::GetBodylessDefaultMultiError::Default => {}
+                basic_client::GetBodylessDefaultMultiError::Status404(body)
+                | basic_client::GetBodylessDefaultMultiError::Status409(body) => {
+                    panic!("a 500 decoded as a documented status: {body:?}")
+                }
+            }
+        }
+        other => panic!("expected the unit `Default` error variant, got {other:?}"),
+    }
+    server.join().unwrap();
+}
+
 // Issue #121: `getMaybeEmpty` documents a bodied 200 and a bodyless 204. The 204 is its own unit
 // variant, read without parsing the empty body, where a plain `MultiOk` returned `Error::Decode`.
 // The matches are exhaustive with no wildcard, so a variant appearing or vanishing fails to compile.
@@ -2933,6 +2983,46 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Problem"
+  # A BODYLESS `default` beside one bodied error (issue #127): only bodies are counted, so the error
+  # type is the single-body newtype `GetBodylessDefaultError(types::Problem)`, and the status table
+  # it classifies against must hold `404` alone — no `StatusSpec::Any` — or an undocumented `500`
+  # would decode as a `Problem` instead of surfacing as `Error::UnexpectedStatus`.
+  /bodyless-default:
+    get:
+      operationId: getBodylessDefault
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        default:
+          description: Anything else
+  # The same bodyless `default` beside two bodied errors: now an enum, in which the `default`
+  # survives as the trailing unit variant `Default`, so a `500` is `Error::Api` with no body parse.
+  /bodyless-default-multi:
+    get:
+      operationId: getBodylessDefaultMulti
+      responses:
+        "200":
+          description: OK
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        "409":
+          description: Conflict
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+        default:
+          description: Anything else
   # The single-body newtype over the same nullable component: `GetMaybeSingleError(Option<T>)`,
   # whose `ApiErrorBody::Body` is the bare `types::MaybeProblem` so one bound covers it and
   # `GetMaybeError` alike.

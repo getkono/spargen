@@ -889,6 +889,113 @@ mod tests {
         }
     }
 
+    /// An error shape reduced to comparable data: bodies by type id, enum entries in order.
+    #[derive(Debug, PartialEq)]
+    enum Shape {
+        None,
+        Single(u32),
+        Enum(Vec<(StatusSpec, Option<u32>)>),
+    }
+
+    fn shape(error: ErrorShape) -> Shape {
+        match error {
+            ErrorShape::None => Shape::None,
+            ErrorShape::Single(body) => Shape::Single(body.id.0),
+            ErrorShape::Enum(entries) => Shape::Enum(
+                entries
+                    .into_iter()
+                    .map(|(status, body)| (status, body.map(|body| body.id.0)))
+                    .collect(),
+            ),
+        }
+    }
+
+    #[test]
+    fn the_error_shape_grid_over_bodied_errors_and_default_body_presence() {
+        // Issue #127: every cell of bodied non-default errors (0 / 1 / 2) x `default` (absent /
+        // bodied / bodyless), each with and without a bodyless error status beside them. Only
+        // bodies are counted, so a bodyless `default` or `403` never lifts a `None` or `Single` to
+        // an `Enum`; once two bodies make it an enum, every declared error entry is a variant.
+        // `codegen`'s single-body status table must agree cell for cell (`e2e.rs`,
+        // `bodyless_default_beside_one_bodied_error_is_not_a_documented_status`).
+        const DEFAULT: u32 = 9;
+        let (e404, e409) = (StatusSpec::Exact(404), StatusSpec::Exact(409));
+        let (e403, any) = (StatusSpec::Exact(403), StatusSpec::Range(0));
+        for bodyless_sibling in [false, true] {
+            let sibling = || bodyless_sibling.then_some((e403, None));
+            let cells: [(usize, Option<Option<u32>>, Shape); 9] = [
+                (0, None, Shape::None),
+                (0, Some(Some(DEFAULT)), Shape::Single(DEFAULT)),
+                (0, Some(None), Shape::None),
+                (1, None, Shape::Single(4)),
+                (
+                    1,
+                    Some(Some(DEFAULT)),
+                    Shape::Enum(
+                        sibling()
+                            .into_iter()
+                            .chain([(e404, Some(4)), (any, Some(DEFAULT))])
+                            .collect(),
+                    ),
+                ),
+                (1, Some(None), Shape::Single(4)),
+                (
+                    2,
+                    None,
+                    Shape::Enum(
+                        sibling()
+                            .into_iter()
+                            .chain([(e404, Some(4)), (e409, Some(5))])
+                            .collect(),
+                    ),
+                ),
+                (
+                    2,
+                    Some(Some(DEFAULT)),
+                    Shape::Enum(
+                        sibling()
+                            .into_iter()
+                            .chain([(e404, Some(4)), (e409, Some(5)), (any, Some(DEFAULT))])
+                            .collect(),
+                    ),
+                ),
+                (
+                    2,
+                    Some(None),
+                    Shape::Enum(
+                        sibling()
+                            .into_iter()
+                            .chain([(e404, Some(4)), (e409, Some(5)), (any, None)])
+                            .collect(),
+                    ),
+                ),
+            ];
+            for (bodied_errors, default, expected) in cells {
+                // Document order is deliberately not precedence order: 409 before 404, and the
+                // bodyless `403` last, so the enum cells also pin the sort.
+                let mut by_status = vec![(StatusSpec::Exact(200), resp(Some(1)))];
+                by_status.extend(
+                    [(e409, resp(Some(5))), (e404, resp(Some(4)))]
+                        .into_iter()
+                        .skip(2 - bodied_errors),
+                );
+                if bodyless_sibling {
+                    by_status.push((e403, resp(None)));
+                }
+                let responses = Responses {
+                    by_status,
+                    default: default.map(resp),
+                };
+                assert_eq!(
+                    shape(responses.error()),
+                    expected,
+                    "{bodied_errors} bodied error(s), default {default:?}, \
+                     bodyless 403: {bodyless_sibling}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_default_with_no_explicit_status_is_both_the_success_and_the_error_body() {
         // `by_status` empty: the early return makes `default` the sole success source, and the
