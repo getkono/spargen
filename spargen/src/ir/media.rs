@@ -572,6 +572,154 @@ mod tests {
         assert!(matches!(responses.success(), SuccessShape::Plain(_)));
     }
 
+    /// The statuses of an enum shape, in the order it holds them.
+    fn statuses(entries: &[(StatusSpec, Option<Ty>)]) -> Vec<StatusSpec> {
+        entries.iter().map(|(status, _)| *status).collect()
+    }
+
+    #[test]
+    fn default_beside_multiple_bodied_successes_types_only_the_error_side() {
+        // Two bodied successes and a bodied `default`: the success enum holds exactly the two 2xx
+        // entries — `default` is no success variant and no fallback for another 2xx — while the
+        // error side is the `default` body alone, so it is `Single`, not an enum.
+        let responses = Responses {
+            by_status: vec![
+                (StatusSpec::Exact(201), resp(Some(2))),
+                (StatusSpec::Exact(200), resp(Some(1))),
+            ],
+            default: Some(resp(Some(3))),
+        };
+        match responses.success() {
+            SuccessShape::Enum(entries) => assert_eq!(
+                statuses(&entries),
+                vec![StatusSpec::Exact(200), StatusSpec::Exact(201)]
+            ),
+            other => panic!("expected Enum, got {other:?}"),
+        }
+        match responses.error() {
+            ErrorShape::Single(body) => assert_eq!(body.id, TypeId(3)),
+            other => panic!("expected Single, got {other:?}"),
+        }
+        assert_eq!(responses.single_success_media(), None);
+        assert_eq!(responses.single_error_media(), Some(super::MediaType::Json));
+
+        // With a bodied error status beside it, `default` becomes the last error variant — and
+        // still never a success one.
+        let responses = Responses {
+            by_status: vec![
+                (StatusSpec::Exact(200), resp(Some(1))),
+                (StatusSpec::Exact(201), resp(Some(2))),
+                (StatusSpec::Exact(404), resp(Some(4))),
+            ],
+            default: Some(resp(Some(3))),
+        };
+        match responses.success() {
+            SuccessShape::Enum(entries) => assert_eq!(
+                statuses(&entries),
+                vec![StatusSpec::Exact(200), StatusSpec::Exact(201)]
+            ),
+            other => panic!("expected Enum, got {other:?}"),
+        }
+        match responses.error() {
+            ErrorShape::Enum(entries) => assert_eq!(
+                statuses(&entries),
+                vec![StatusSpec::Exact(404), StatusSpec::Range(0)]
+            ),
+            other => panic!("expected Enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_bodyless_default_is_a_unit_error_variant_only_inside_an_enum() {
+        // `finish_shape` counts bodies: a bodyless `default` beside one bodied error is dropped
+        // from the `Single`, and beside two it survives as the trailing unit variant.
+        let single = Responses {
+            by_status: vec![
+                (StatusSpec::Exact(200), resp(Some(1))),
+                (StatusSpec::Exact(404), resp(Some(2))),
+            ],
+            default: Some(resp(None)),
+        };
+        assert!(matches!(single.error(), ErrorShape::Single(body) if body.id == TypeId(2)));
+
+        let multi = Responses {
+            by_status: vec![
+                (StatusSpec::Exact(200), resp(Some(1))),
+                (StatusSpec::Exact(404), resp(Some(2))),
+                (StatusSpec::Exact(409), resp(Some(3))),
+            ],
+            default: Some(resp(None)),
+        };
+        match multi.error() {
+            ErrorShape::Enum(entries) => {
+                assert_eq!(
+                    statuses(&entries),
+                    vec![
+                        StatusSpec::Exact(404),
+                        StatusSpec::Exact(409),
+                        StatusSpec::Range(0),
+                    ]
+                );
+                assert!(
+                    entries[2].1.is_none(),
+                    "the bodyless default is a unit variant"
+                );
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_default_with_no_explicit_status_is_both_the_success_and_the_error_body() {
+        // `by_status` empty: the early return makes `default` the sole success source, and the
+        // error side is still offered it as `Range(0)`, so one body types both sides.
+        let bodied = Responses {
+            by_status: Vec::new(),
+            default: Some(resp(Some(7))),
+        };
+        assert!(matches!(bodied.success(), SuccessShape::Plain(body) if body.id == TypeId(7)));
+        assert!(matches!(bodied.error(), ErrorShape::Single(body) if body.id == TypeId(7)));
+        assert_eq!(bodied.single_success_media(), Some(super::MediaType::Json));
+        assert_eq!(bodied.single_error_media(), Some(super::MediaType::Json));
+
+        // A bodyless sole `default` types neither side.
+        let bodyless = Responses {
+            by_status: Vec::new(),
+            default: Some(resp(None)),
+        };
+        assert!(matches!(bodyless.success(), SuccessShape::Unit));
+        assert!(matches!(bodyless.error(), ErrorShape::None));
+
+        // And no responses at all is `Unit` / `None`.
+        let empty = Responses {
+            by_status: Vec::new(),
+            default: None,
+        };
+        assert!(matches!(empty.success(), SuccessShape::Unit));
+        assert!(matches!(empty.error(), ErrorShape::None));
+    }
+
+    #[test]
+    fn explicit_statuses_with_no_success_leave_the_success_shape_unit() {
+        // `by_status` holds only error statuses: the early return does not fire, so `default` is
+        // not promoted to the success body; no success entry is lowered and the shape is `Unit`,
+        // while `default` joins the errors. Whether a 2xx should then decode as `()` is #115; this
+        // pins the current lowering so a change to it is deliberate.
+        let responses = Responses {
+            by_status: vec![(StatusSpec::Exact(404), resp(Some(1)))],
+            default: Some(resp(Some(2))),
+        };
+        assert!(matches!(responses.success(), SuccessShape::Unit));
+        assert_eq!(responses.single_success_media(), None);
+        match responses.error() {
+            ErrorShape::Enum(entries) => assert_eq!(
+                statuses(&entries),
+                vec![StatusSpec::Exact(404), StatusSpec::Range(0)]
+            ),
+            other => panic!("expected Enum, got {other:?}"),
+        }
+    }
+
     /// A graph whose ids are the positions of `kinds`.
     fn graph(kinds: Vec<TypeKind>) -> TypeGraph {
         let mut graph = TypeGraph::default();
