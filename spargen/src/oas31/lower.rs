@@ -3977,6 +3977,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
                     return None;
                 }
+                // The value is sent verbatim as the part's `Content-Type`, so it is held to the
+                // rule a `content` key is: a string that is not a media type at all would
+                // otherwise fall through to the natural codec below with nothing reported, and
+                // fail only when a request is built.
+                if !media_type_is_well_formed(media_essence(&first)) {
+                    Diagnostic::error(
+                        Code::UnsupportedMediaType,
+                        declared
+                            .map(|encoding| encoding.provenance.clone())
+                            .unwrap_or_else(|| at.clone()),
+                    )
+                    .message(format!(
+                        "`encoding.{name}.contentType: {first}` is not a media type"
+                    ))
+                    .remedy("name a media type such as `text/plain`, as `type/subtype`")
+                    .emit(self.diags);
+                    return None;
+                }
                 first
             }
             None => self.default_content_type(field_ty),
@@ -6066,7 +6084,9 @@ fn media_object_is_opaque(object: &MediaTypeObject) -> bool {
 /// suffix alone: not `text/plain/extra`, not `application/vnd.a/b+json`, and not the range `a/b/*`.
 /// Parameters are already gone, because every caller passes [`media_essence`] output. A key that
 /// fails is not a media type, so it classifies as nothing and takes the existing unsupported path:
-/// `E009` when it is the only candidate, or an ignored alternative under `W014` otherwise.
+/// `E009` when it is the only candidate, or an ignored alternative under `W014` otherwise. An
+/// Encoding Object's `contentType` is asked this directly and is `E009` when it fails, since it is
+/// sent verbatim even when it names no codec spargen has.
 fn media_type_is_well_formed(essence: &str) -> bool {
     /// `restricted-name = restricted-name-first *126restricted-name-chars` (RFC 6838 § 4.2). ASCII
     /// letters of either case are accepted; case sensitivity is left to the arms that match names.
