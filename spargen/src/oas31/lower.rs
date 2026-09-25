@@ -216,6 +216,26 @@ pub(crate) fn lower(
                     )
                     .emit(ctx.diags);
             }
+            // Streaming decode is scoped to the single bodied success (`EventStream<T>`). A stream
+            // anywhere else — an error status, a `default` (which is always offered to the error
+            // side), or a multi-status success enum — would be decoded as one whole JSON body, so
+            // it is rejected (narrowed `E009`) rather than misread on the wire.
+            if responses.stream_outside_single_success() {
+                Diagnostic::error(Code::UnsupportedMediaType, operation.provenance.clone())
+                    .message(
+                        "a streaming (text/event-stream, application/x-ndjson, or JSON Text \
+                         Sequence) response body is only supported as an operation's single success body; on an error \
+                         status, on a `default` response (which also documents error statuses), \
+                         or beside a second bodied success status it would be decoded as one \
+                         whole body",
+                    )
+                    .remedy(
+                        "declare the stream under an explicit 2xx status as the operation's only \
+                         bodied success, document error bodies with a whole-body media type, or \
+                         omit this API segment with spargen::omit!",
+                    )
+                    .emit(ctx.diags);
+            }
 
             let security: Vec<crate::ir::SecurityRequirement> = operation
                 .security
@@ -4206,8 +4226,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         );
         // A streaming response media (`text/event-stream` / `application/x-ndjson`) records its
         // framing; the body is then the streamed item type `T`. A whole-body response has no
-        // framing. Streaming only takes effect when this is the operation's single success body
-        // (see `Responses::stream_success`).
+        // framing. Framing is recorded in every response position; streaming only takes effect when
+        // this is the operation's single success body (see `Responses::stream_success`), and a
+        // bodied stream anywhere else rejects the operation (`Responses::stream_outside_single_success`).
         let headers = self.lower_response_headers(response);
         Some(Response {
             media: body.map(|(media, _, _)| media),

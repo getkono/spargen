@@ -577,6 +577,9 @@ pub(crate) fn emit_operation(
                         )
                         .await
                     },
+                    // JSON. A streaming error media never reaches this arm: lowering rejects a
+                    // bodied stream on the error side (`Responses::stream_outside_single_success`),
+                    // since a stream cannot be classified as one whole body.
                     _ => quote! {
                         support::classify_error::<#error_ty>(
                             &self.core,

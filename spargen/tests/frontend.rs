@@ -7170,6 +7170,157 @@ paths:
     assert!(has_code(&report, Code::UnsupportedMediaType));
 }
 
+/// The one message the streaming-position rejection carries, so each fixture below proves it is
+/// *this* gate that fired rather than some other `E009`.
+const STREAM_POSITION_MESSAGE: &str = "is only supported as an operation's single success body";
+
+/// Generate `spec`, require it rejected with the streaming-position `E009`, and hold `check` to the
+/// same verdict.
+fn assert_stream_position_rejected(spec: &str) {
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message.contains(STREAM_POSITION_MESSAGE)),
+        "{report:#?}"
+    );
+    let checked = check(spec);
+    assert_eq!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(
+        messages_for(&checked, Code::UnsupportedMediaType)
+            .iter()
+            .any(|message| message.contains(STREAM_POSITION_MESSAGE)),
+        "{checked:#?}"
+    );
+}
+
+#[test]
+fn e009_streaming_default_that_is_also_the_error_body_is_rejected() {
+    // #120: a lone streaming `default` is the operation's success source (so the method returns
+    // `EventStream<T>`) *and* its error body (`default` documents every undeclared status). The
+    // error side is a whole-body decode, so a non-2xx `text/event-stream` body would be handed to
+    // the JSON decoder. Nothing can consume the framing there, so it is rejected, as a streaming
+    // request body is.
+    assert_stream_position_rejected(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      responses:
+        default:
+          description: Events
+          content:
+            text/event-stream:
+              schema: { type: object, required: [seq], properties: { seq: { type: integer } } }
+"##,
+    );
+}
+
+#[test]
+fn e009_streaming_error_status_body_is_rejected() {
+    // A streaming body on an explicit error status (or on a `default` beside a declared success)
+    // lands in the whole-body error classification, which would decode NDJSON/SSE as one JSON
+    // document.
+    for errors in [
+        r#""4XX":
+          description: Failure
+          content:
+            application/x-ndjson:
+              schema: { type: string }"#,
+        r#"default:
+          description: Failure
+          content:
+            text/event-stream:
+              schema: { type: string }"#,
+    ] {
+        assert_stream_position_rejected(&format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /events:
+    get:
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {{ type: string }}
+        {errors}
+"##
+        ));
+    }
+}
+
+#[test]
+fn e009_streaming_body_in_a_multi_status_success_enum_is_rejected() {
+    // Streaming is scoped to the single bodied success: beside a second bodied success status the
+    // operation lowers to a success enum whose arms decode whole bodies, so the stream would be
+    // read as one JSON document.
+    assert_stream_position_rejected(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      responses:
+        "200":
+          description: Stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "202":
+          description: Accepted
+          content:
+            application/json:
+              schema: { type: string }
+"##,
+    );
+}
+
+#[test]
+fn a_streaming_success_beside_whole_body_errors_still_generates() {
+    // The control for the rejections above: the stream as the single bodied success, beside a
+    // bodyless success, a JSON error status, and a JSON `default`, is the supported shape.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /events:
+    get:
+      responses:
+        "200":
+          description: Stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+        "204": { description: Nothing yet }
+        "404":
+          description: Missing
+          content:
+            application/json:
+              schema: { type: string }
+        default:
+          description: Failure
+          content:
+            application/json:
+              schema: { type: string }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    assert!(code.contains("EventStream<"), "{code}");
+    let checked = check(spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+}
+
 #[test]
 fn multipart_form_data_request_body_generates() {
     // A `multipart/form-data` request body whose schema is an object (a file part + a text part) is

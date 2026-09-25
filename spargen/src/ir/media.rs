@@ -151,7 +151,9 @@ pub(crate) struct Response {
     pub(crate) media: Option<MediaType>,
     /// For a streaming response (chosen media `text/event-stream` or `application/x-ndjson`), the
     /// framing of the streamed items; `None` for a whole-body response. The `body` is the item
-    /// type `T` when this is `Some`.
+    /// type `T` when this is `Some`. Lowering records it in every response position, and rejects
+    /// a bodied stream anywhere but the operation's single bodied success (see
+    /// [`Responses::stream_outside_single_success`]).
     pub(crate) stream: Option<Framing>,
     /// Documented response headers, in source order. A `Content-Type` entry is dropped during
     /// lowering, because the specification says it is ignored.
@@ -249,7 +251,9 @@ impl Responses {
     /// carries a body and that body was lowered from a streaming media. The generated method then
     /// returns `EventStream<T>` in place of `ResponseValue<T>`. A JSON alternative on the same
     /// response wins during media selection (see `choose_media`), so it never reaches here as a
-    /// stream. Multiple bodied success statuses fall back to the normal (non-streaming) shape.
+    /// stream. A streaming body in any other position — beside a second bodied success, or on the
+    /// error side — is rejected during lowering (see [`Self::stream_outside_single_success`]), so
+    /// no generated operation decodes a stream as a whole body.
     pub(crate) fn stream_success(&self) -> Option<(Framing, Ty)> {
         let responses = self.success_responses();
         let mut bodied = responses
@@ -306,6 +310,23 @@ impl Responses {
         success_multi || error_multi
     }
 
+    /// Whether a bodied streaming response (`text/event-stream` / `application/x-ndjson`) sits
+    /// anywhere but the operation's single bodied success — the one position whose framing
+    /// [`Self::stream_success`] consumes. Every other position decodes a whole body: an error
+    /// response (an explicit non-2xx status, or a `default`, which is offered to the error side
+    /// even when it is also the sole success source) is classified into `E`, and a success enum
+    /// decodes each arm whole. A stream there would be read as one JSON document, so lowering
+    /// rejects it (narrowed `E009`), as it rejects a streaming request body. A bodyless streaming
+    /// response is never read, so it is not counted.
+    pub(crate) fn stream_outside_single_success(&self) -> bool {
+        let is_bodied_stream =
+            |response: &&Response| response.stream.is_some() && response.body.is_some();
+        let error_stream = self.error_responses().iter().any(is_bodied_stream);
+        let success_multi_stream = matches!(self.success(), SuccessShape::Enum(_))
+            && self.success_responses().iter().any(is_bodied_stream);
+        error_stream || success_multi_stream
+    }
+
     /// The operation's error responses: every non-success explicit status plus the `default`
     /// response (which matches any status). Mirrors the entry set built by [`Self::error`].
     fn error_responses(&self) -> Vec<&Response> {
@@ -354,7 +375,10 @@ impl Responses {
     /// `default` is *offered* here as `Range(0)` whenever it is declared — including when it is
     /// also the operation's sole success source (see [`Self::success`]), which then types both
     /// sides with that one body, as the specification does: `default` documents every undeclared
-    /// status, of either class — but it reaches the shape only through the body count above. A
+    /// status, of either class — but it reaches the shape only through the body count above. (A
+    /// bodied *streaming* `default` cannot be typed on both sides — the success side would stream
+    /// and this side decode it whole — so lowering rejects it; see
+    /// [`Self::stream_outside_single_success`].) A
     /// bodyless `default` therefore becomes the catch-all unit variant of an `Enum` and is dropped
     /// from a `None` or a `Single`.
     pub(crate) fn error(&self) -> ErrorShape {
@@ -514,6 +538,66 @@ mod tests {
             stream: None,
             headers: Vec::new(),
         }
+    }
+
+    fn stream_resp(body: Option<u32>) -> Response {
+        Response {
+            media: Some(super::MediaType::EventStream),
+            body: body.map(ty),
+            stream: Some(super::Framing::Sse),
+            headers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_bodied_stream_is_admitted_only_as_the_single_bodied_success() {
+        let case = |by_status: Vec<(StatusSpec, Response)>, default: Option<Response>| {
+            Responses { by_status, default }.stream_outside_single_success()
+        };
+        // Supported: the single bodied success, beside a bodyless success and whole-body errors.
+        assert!(!case(
+            vec![
+                (StatusSpec::Exact(200), stream_resp(Some(1))),
+                (StatusSpec::Exact(204), resp(None)),
+                (StatusSpec::Exact(404), resp(Some(2))),
+            ],
+            Some(resp(Some(3))),
+        ));
+        // A bodyless stream is never read, wherever it sits.
+        assert!(!case(
+            vec![
+                (StatusSpec::Exact(200), resp(Some(1))),
+                (StatusSpec::Range(4), stream_resp(None)),
+            ],
+            None,
+        ));
+        // A lone streaming `default` is the success source and also offered to the error side.
+        assert!(case(Vec::new(), Some(stream_resp(Some(1)))));
+        // So is one beside only non-2xx statuses.
+        assert!(case(
+            vec![(StatusSpec::Exact(404), resp(None))],
+            Some(stream_resp(Some(1))),
+        ));
+        // A streaming error status, and a streaming `default` beside a declared success.
+        assert!(case(
+            vec![
+                (StatusSpec::Exact(200), resp(Some(1))),
+                (StatusSpec::Range(4), stream_resp(Some(2))),
+            ],
+            None,
+        ));
+        assert!(case(
+            vec![(StatusSpec::Exact(200), resp(Some(1)))],
+            Some(stream_resp(Some(2))),
+        ));
+        // A stream in a multi-status success enum.
+        assert!(case(
+            vec![
+                (StatusSpec::Exact(200), stream_resp(Some(1))),
+                (StatusSpec::Exact(202), resp(Some(2))),
+            ],
+            None,
+        ));
     }
 
     #[test]
