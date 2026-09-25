@@ -19,7 +19,8 @@ What it exercises:
   and headers.
 - **Wire behavior** — path/query/header parameters, a `deepObject` filter that travels as
   `filter[name]=…` pairs, a JSON request body, a multipart body whose parts carry the
-  `Content-Type` the Encoding Object declares, and a `204` unit response. The mock server asserts
+  `Content-Type` the Encoding Object declares, a `204` unit response, and an update whose bodied
+  `200` and bodyless `204` are the two variants of `UpdatePetResponse`. The mock server asserts
   those bytes, so a serialization regression fails the example rather than passing silently.
 - **Typed servers** — the spec's server is templated (`http://{host}:{port}`), so spargen emits a
   builder whose variables default to a resolvable URL.
