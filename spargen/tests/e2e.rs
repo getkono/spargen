@@ -559,6 +559,67 @@ fn blocking_method_round_trips_against_a_mock() {
     server.join().unwrap();
 }
 
+/// A resolver whose lookup never completes. reqwest's `connect_timeout` bounds the whole connector
+/// call, name resolution included, so a lookup that hangs is a connect that hangs: it reaches the
+/// same `TimedOut` inside the same connect error a blackholed TCP handshake does, without needing a
+/// non-routable address that some networks refuse instead of dropping.
+struct NeverResolves;
+
+impl reqwest::dns::Resolve for NeverResolves {
+    fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        Box::pin(std::future::pending())
+    }
+}
+
+// A connect that exceeds the client's `connect_timeout` is `TimeoutKind::Connect` — the server never
+// accepted a connection — and not `Total`, which says the whole request ran over its budget.
+#[test]
+fn an_elapsed_connect_timeout_is_classified_as_connect() {
+    let http = reqwest::Client::builder()
+        .dns_resolver(std::sync::Arc::new(NeverResolves))
+        .connect_timeout(std::time::Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let client = basic_client::BlockingClient::with_client(http, "http://never-resolves.invalid").unwrap();
+    match client.get_multi() {
+        Err(basic_client::Error::Timeout(kind)) => {
+            assert_eq!(kind, basic_client::TimeoutKind::Connect);
+        }
+        other => panic!("expected a connect timeout, got {other:?}"),
+    }
+}
+
+// The total-request budget elapsing is `TimeoutKind::Total`, including when the connection itself
+// succeeded — and a connect timeout configured beside it does not change that.
+#[test]
+fn an_elapsed_total_timeout_is_classified_as_total() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    // Accept the connection and hold it open without answering, until the client has given up.
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 2048];
+        while stream.read(&mut buf).map(|read| read > 0).unwrap_or(false) {}
+    });
+
+    let http = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_millis(200))
+        .build()
+        .unwrap();
+    let client = basic_client::BlockingClient::with_client(http, &format!("http://{addr}")).unwrap();
+    let outcome = client.get_multi();
+    drop(client);
+    match outcome {
+        Err(basic_client::Error::Timeout(kind)) => {
+            assert_eq!(kind, basic_client::TimeoutKind::Total);
+        }
+        other => panic!("expected a total timeout, got {other:?}"),
+    }
+
+    server.join().unwrap();
+}
+
 #[test]
 fn typed_parameters_follow_openapi_wire_rules() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
