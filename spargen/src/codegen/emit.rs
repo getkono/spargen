@@ -2418,7 +2418,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
     // `time` mapping enabled; only then does the audit require `time` of the consumer.
     let datetime_module = uses_time.then(|| embed(&crate::support::datetime_runtime_file()));
     let datetime_reexport = uses_time.then(|| {
-        quote! { pub use datetime::{Date, DateTime}; }
+        quote! { pub use datetime::{Date, DateTime, ParseError}; }
     });
     // The blocking facade (`BlockingRuntime`) is embedded unconditionally but gated on the
     // `blocking` feature AND `not(target_arch = "wasm32")` at the module level: the tokio-dependent
