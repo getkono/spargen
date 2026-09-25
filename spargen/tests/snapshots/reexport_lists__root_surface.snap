@@ -1,0 +1,37 @@
+---
+source: spargen/tests/reexport_lists.rs
+expression: surface
+---
+# A spec with no conditional runtime module
+
+#[allow(unused_imports)]
+pub use support::{
+    ApiErrorBody, AuthError, ClientConfig, ClientCore, Credential, Error, ExecuteFuture,
+    ExposeSecret, HeaderError, HeaderShape, HttpBackend, LinkPaginator, Middleware,
+    MiddlewareBackend, Next, ProtocolError, RedirectError, RequestCause, RequestError,
+    ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    SecretString, TimeoutKind, TokenFuture, TokenProvider, TransportError,
+    exponential_backoff, next_link,
+};
+#[allow(unused_imports)]
+pub use __spargen_blocking::*;
+
+# A spec with XML, sequential, and date-time bodies
+
+#[allow(unused_imports)]
+pub use support::{
+    ApiErrorBody, AuthError, ClientConfig, ClientCore, Credential, Error, ExecuteFuture,
+    ExposeSecret, HeaderError, HeaderShape, HttpBackend, LinkPaginator, Middleware,
+    MiddlewareBackend, Next, ProtocolError, RedirectError, RequestCause, RequestError,
+    ReqwestBackend, ResponseValue, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    SecretString, TimeoutKind, TokenFuture, TokenProvider, TransportError,
+    exponential_backoff, next_link,
+};
+#[allow(unused_imports)]
+pub use support::{
+    EventStream, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
+};
+#[allow(unused_imports)]
+pub use support::{Date, DateTime};
+#[allow(unused_imports)]
+pub use __spargen_blocking::*;

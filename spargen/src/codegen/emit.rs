@@ -2418,7 +2418,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
     // `time` mapping enabled; only then does the audit require `time` of the consumer.
     let datetime_module = uses_time.then(|| embed(&crate::support::datetime_runtime_file()));
     let datetime_reexport = uses_time.then(|| {
-        quote! { pub use datetime::{Date, DateTime}; }
+        quote! { pub use datetime::{Date, DateTime, ParseError}; }
     });
     // The blocking facade (`BlockingRuntime`) is embedded unconditionally but gated on the
     // `blocking` feature AND `not(target_arch = "wasm32")` at the module level: the tokio-dependent
@@ -3266,22 +3266,29 @@ fn reqwest_method(method: &crate::ir::Method) -> TokenStream {
     }
 }
 
-/// Every name the generated module re-exports from the embedded runtime into its root.
+/// The names every generated module re-exports from the embedded runtime into its root, in the
+/// order `generate` emits them.
 ///
-/// Generated error types live in that same root, so a name taken from this list would be defined
-/// twice (`E0255`) and the output would not compile. The list is deliberately the *union* of the
-/// conditional re-exports too (streaming, dates), so an operation's type name never changes because
-/// an unrelated part of the spec started or stopped using streams.
-const RUNTIME_PRELUDE: &[&str] = &[
+/// The embedded `support` module is private, so this list and its two conditional siblings are the
+/// whole nameable runtime surface of a generated client, and so part of its semver surface. It has
+/// to cover every type that appears in a signature the output emits: `HeaderError` is the return
+/// type of each `…Headers::from_headers`, `RetryWait` is what a caller's `RetryPolicy` must return,
+/// `ClientCore` is what `Client::core` hands back, and the taxonomy's payload types are matched on.
+/// Anything short of that leaves a generated signature a caller can call but cannot write down.
+/// `ApiErrorBody` is the bound `Error::api_body` needs, implemented by the uniform-body error enum,
+/// the single-body newtype, and the uninhabited shape (an enum whose bodies are different generated
+/// types gets none).
+///
+/// `generate` emits the root `pub use` from these lists and [`error_type_ident`] steers clear of
+/// them, so the two read one source. `spargen/tests/reexport_lists.rs` holds each name to the
+/// embedded `support` module's own re-exports, and pins the emitted root surface as a golden file.
+pub(super) const ROOT_REEXPORTS: &[&str] = &[
     "ApiErrorBody",
     "AuthError",
     "ClientConfig",
     "ClientCore",
     "Credential",
-    "Date",
-    "DateTime",
     "Error",
-    "EventStream",
     "ExecuteFuture",
     "ExposeSecret",
     "HeaderError",
@@ -3292,9 +3299,6 @@ const RUNTIME_PRELUDE: &[&str] = &[
     "MiddlewareBackend",
     "Next",
     "ProtocolError",
-    "ReconnectPolicy",
-    "ReconnectReason",
-    "ReconnectWait",
     "RedirectError",
     "RequestCause",
     "RequestError",
@@ -3305,12 +3309,26 @@ const RUNTIME_PRELUDE: &[&str] = &[
     "RetryPolicy",
     "RetryWait",
     "SecretString",
-    "StreamError",
     "TimeoutKind",
     "TokenFuture",
     "TokenProvider",
     "TransportError",
+    "exponential_backoff",
+    "next_link",
 ];
+
+/// The root re-exports emitted only when the API has a sequential (streaming) response.
+pub(super) const STREAM_ROOT_REEXPORTS: &[&str] = &[
+    "EventStream",
+    "ReconnectPolicy",
+    "ReconnectReason",
+    "ReconnectWait",
+    "StreamError",
+];
+
+/// The root re-exports emitted only when a date-typed primitive survives lowering with the `time`
+/// mapping on.
+pub(super) const DATETIME_ROOT_REEXPORTS: &[&str] = &["Date", "DateTime"];
 
 /// The name of an operation's error type: `{Operation}Error`, widened to
 /// `{Operation}OperationError` when the first form would shadow a runtime re-export.
@@ -3318,10 +3336,21 @@ const RUNTIME_PRELUDE: &[&str] = &[
 /// An `operationId` of `request`, `transport`, or `header` otherwise produces `RequestError`,
 /// `TransportError`, or `HeaderError` beside the `pub use` of the same name, and the emitted module
 /// fails to compile. Operation IDs are unique, so both forms stay unique across operations.
+///
+/// The check reads the *union* of the root re-exports, the conditional ones included, so an
+/// operation's type name never changes because an unrelated part of the spec started or stopped
+/// using streams or dates.
 fn error_type_ident(method_ident: &str) -> proc_macro2::Ident {
     let base = to_pascal(method_ident);
     let name = format!("{base}Error");
-    if RUNTIME_PRELUDE.contains(&name.as_str()) {
+    let shadows_reexport = [
+        ROOT_REEXPORTS,
+        STREAM_ROOT_REEXPORTS,
+        DATETIME_ROOT_REEXPORTS,
+    ]
+    .iter()
+    .any(|names| names.contains(&name.as_str()));
+    if shadows_reexport {
         format_ident!("{}OperationError", base)
     } else {
         format_ident!("{}", name)
