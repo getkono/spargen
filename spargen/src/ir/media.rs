@@ -427,8 +427,7 @@ impl Responses {
 /// Collapse per-status entries into a response shape by counting how many carry a body: zero → the
 /// `unit` shape, exactly one → the `single` shape over that lone body (bodyless siblings are not
 /// modeled here; on the success side [`Responses::success`] promotes that case to its enum before
-/// calling this), two or
-/// more → the `multi` shape over all entries (bodied and bodyless alike).
+/// calling this), two or more → the `multi` shape over all entries (bodied and bodyless alike).
 fn finish_shape<S>(
     entries: Vec<(StatusSpec, Option<Ty>)>,
     unit: S,
