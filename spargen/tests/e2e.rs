@@ -973,6 +973,46 @@ fn multi_status_dispatch_uses_each_status_media_codec() {
     }
     server.join().unwrap();
 }
+
+// `getMultiDefault` documents 200 and 201 with distinct bodies plus a bodied `default`. The
+// matches below are exhaustive with no wildcard, so a `default` routed into the success enum
+// fails to compile here; the undocumented 202 proves it is no success fallback at run time either.
+#[test]
+fn default_beside_multiple_bodied_successes_stays_on_the_error_side() {
+    let (base, server) = serve_once("application/json", "201 Created", br#"{"id":7}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_multi_default().unwrap().into_inner() {
+        basic_client::GetMultiDefaultResponse::Status200(body) => {
+            panic!("201 decoded as the 200 variant: {body:?}")
+        }
+        basic_client::GetMultiDefaultResponse::Status201(body) => assert_eq!(body.id, 7),
+    }
+    server.join().unwrap();
+
+    let problem: &'static [u8] = br#"{"title":"t","detail":"d"}"#;
+    let (base, server) = serve_once("application/json", "202 Accepted", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_multi_default().unwrap_err() {
+        basic_client::Error::UnexpectedStatus { status, body, .. } => {
+            assert_eq!(status, 202);
+            assert_eq!(&body[..], problem);
+        }
+        other => panic!("an undocumented 2xx must not decode as `default`, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/json", "500 Internal Server Error", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_multi_default().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 500);
+            let basic_client::GetMultiDefaultError(body) = response.into_inner();
+            assert_eq!(body.title, "t");
+        }
+        other => panic!("expected the typed `default` error body, got {other:?}"),
+    }
+    server.join().unwrap();
+}
 "##,
     )
     .unwrap();
@@ -2684,6 +2724,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MaybeProblem"
+  # Two bodied successes AND a bodied `default`. `default` is never a success variant: the success
+  # enum is exactly `Status200`/`Status201` (an exhaustive match in `tests/blocking.rs` fails to
+  # compile if another appears), an undocumented 2xx is `Error::UnexpectedStatus` rather than a
+  # `default` decode, and the `default` body is the sole error body, so the error type is the
+  # single-body newtype `GetMultiDefaultError(types::Problem)`.
+  /multi-default:
+    get:
+      operationId: getMultiDefault
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiCreated"
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   # The single-body newtype over the same nullable component: `GetMaybeSingleError(Option<T>)`,
   # whose `ApiErrorBody::Body` is the bare `types::MaybeProblem` so one bound covers it and
   # `GetMaybeError` alike.
