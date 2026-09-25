@@ -1736,6 +1736,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         let strategy = if let Some(discriminator) = &schema.discriminator {
+            // A `mapping` value is matched to a member by component name (see
+            // `discriminated_strategy`). One that is not a component name — a pointer into a
+            // component (`#/components/schemas/Envelope/properties/payload`) or a reference to
+            // another file (`./lib.yaml#/…`) — can match no member, so the tag it declares would be
+            // replaced by an invented one on the wire. Refuse it rather than ignore it.
+            if let Some((tag, target)) = discriminator.mapping.iter().find(|(_, target)| {
+                let name = target
+                    .strip_prefix("#/components/schemas/")
+                    .unwrap_or(target);
+                name.contains(['/', '#'])
+            }) {
+                return self.reject_union(
+                    schema,
+                    &format!(
+                        "`discriminator.mapping` maps `{tag}` to `{target}`, which is not a \
+                         component name — a pointer into a component or a reference to another \
+                         file — so it cannot be matched to a member and the tag it declares \
+                         would not be the one on the wire"
+                    ),
+                );
+            }
             // A `defaultMapping` that names a schema outside this union describes a fallback
             // branch the generated enum does not have, so it cannot be quietly downgraded to
             // another dispatch strategy.

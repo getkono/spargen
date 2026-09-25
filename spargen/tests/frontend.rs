@@ -5960,6 +5960,86 @@ components:
     }
 }
 
+/// A `discriminator.mapping` value is matched to a member by component name. A value that is not
+/// one — a pointer into a component, in the same-file or any file spelling, or a reference to
+/// another file — matches no member, so the tag it declares for that member would be replaced by
+/// an invented one on the wire. It is rejected rather than ignored; a component-name value, bare or
+/// as a full pointer, still generates.
+#[test]
+fn e007_discriminator_mapping_value_that_is_not_a_component_name() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - { $ref: '#/components/schemas/Envelope/properties/payload' }
+        - { $ref: '#/components/schemas/Dog' }
+      discriminator:
+        propertyName: kind
+        mapping:
+          payload: 'TARGET'
+          dog: '#/components/schemas/Dog'
+    Envelope:
+      type: object
+      properties:
+        payload:
+          type: object
+          properties: { kind: { type: string }, id: { type: string } }
+          required: [kind]
+    Dog:
+      type: object
+      properties: { kind: { type: string }, bark: { type: string } }
+      required: [kind]
+"##;
+    for target in [
+        "#/components/schemas/Envelope/properties/payload",
+        "./openapi.yaml#/components/schemas/Envelope/properties/payload",
+    ] {
+        let spec = spec.replace("TARGET", target);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target} {entry}: {report:#?}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::NonDisjointUnion
+                        && d.message.contains(&format!(
+                            "`discriminator.mapping` maps `payload` to `{target}`"
+                        ))
+                        && d.pointer.as_str() == "/components/schemas/Pet"),
+                "{target} {entry}: {report:#?}"
+            );
+        }
+    }
+
+    // A component-name value in either spelling is matched to its member and generates.
+    let named = spec
+        .replace(
+            "'#/components/schemas/Envelope/properties/payload' }",
+            "'#/components/schemas/Cat' }",
+        )
+        .replace("payload: 'TARGET'", "cat: Cat")
+        .replace(
+            "    Dog:\n",
+            "    Cat:\n      type: object\n      properties: { kind: { type: string } }\n      \
+             required: [kind]\n    Dog:\n",
+        );
+    for (entry, report) in [("generate", generate(&named)), ("check", check(&named))] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::NonDisjointUnion),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
 #[test]
 fn oas32_xml_attribute_node_type_maps_to_the_existing_typed_xml_path() {
     let spec = r##"
