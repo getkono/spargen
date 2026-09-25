@@ -373,6 +373,27 @@ fn changing_the_success_type_is_major() {
     assert_eq!(report.bump, Impact::Major);
 }
 
+#[test]
+fn documenting_a_bodyless_success_beside_the_body_is_major() {
+    // A bodyless `204` beside the `200` body turns the plain `Pet` into a response enum with a
+    // `Status204` variant (issue #121), so every consumer reading the `Pet` directly breaks.
+    let old = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
+    let new = full(
+        &format!(
+            "{}        '204':\n          description: nothing\n",
+            pets_get("listPets", "", PET_REF)
+        ),
+        PET_SCHEMA,
+    );
+    let report = diff(&old, &new);
+    assert!(
+        kinds(&report).contains(&ChangeKind::SuccessTypeChanged),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
 /// `get /pets` with a documented `404` whose body is `error_schema`.
 fn with_error(error_schema: &str) -> String {
     format!(
