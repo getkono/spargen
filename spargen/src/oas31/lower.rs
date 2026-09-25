@@ -551,29 +551,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.ensure_resolved(&reference, at, name);
             }
             // A raw `/` here is always a further pointer segment, never part of a component name: a
-            // literal slash in a key is spelled `~1`. So the fragment addresses a *subschema* — but
-            // only say so when the segment it starts from is actually declared. Otherwise the fault
-            // is the missing component, not the fragment's shape, and claiming otherwise would
-            // assert by implication that the root exists and send the reader to promote a subschema
-            // of something that does not. spargen matches a same-file component reference by name
-            // only; the same pointer written against a relative file goes through the resolver,
-            // which does walk it.
-            let subschema_of = name
+            // literal slash in a key is spelled `~1`. So when the segment it starts from is a
+            // declared component, the fragment is a JSON Pointer into that component's body — a
+            // *subschema* — and RFC 6901 gives it exactly the meaning the relative-file spelling
+            // (`./lib.yaml#/components/schemas/Envelope/properties/payload`) already has. Both go
+            // to the resolver, which walks the pointer and lowers its target once per resolved
+            // `file#pointer` with its own reservation, so a subschema that refers back to itself
+            // or to its enclosing component is boxed against that reservation rather than
+            // re-entered. A pointer that walks off the declared body is the resolver's to report.
+            //
+            // Only when the leading segment is declared: otherwise the fault is the missing
+            // component, not the fragment's shape, and that keeps the plain-name wording below.
+            let into_a_declared_component = name
                 .split_once('/')
-                .map(|(root, _)| root)
-                .filter(|root| self.document.components.schemas.contains_key(*root));
-            if let Some(root) = subschema_of {
-                Diagnostic::error(Code::UnresolvedRef, at.clone())
-                    .message(format!(
-                        "schema reference `{reference}` addresses a subschema of component \
-                         `{root}` rather than a top-level component name"
-                    ))
-                    .remedy(
-                        "declare the subschema as its own entry under `components/schemas` and \
-                         reference it by name",
-                    )
-                    .emit(self.diags);
-                return None;
+                .is_some_and(|(root, _)| self.document.components.schemas.contains_key(root));
+            if into_a_declared_component {
+                return self.ensure_resolved(&reference, at, name);
             }
             // The wording matches the parameter/request-body/response component arms, which
             // already reject.
@@ -1833,7 +1826,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ) -> Option<(Ty, Option<String>)> {
         if let SchemaOr::Schema(schema) = member {
             if let Some(reference) = &schema.reference {
-                if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+                // A name with a raw `/` is a pointer *into* a component, not a component name: it
+                // has no name to derive a variant or an implicit tag from, exactly as the same
+                // pointer written against a relative file has none. It lowers below like any other
+                // non-component reference.
+                if let Some(name) = reference
+                    .strip_prefix("#/components/schemas/")
+                    .filter(|name| !name.contains('/'))
+                {
                     let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
                     return Some((ty, Some(name.to_owned())));
                 }
