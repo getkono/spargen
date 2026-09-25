@@ -65,9 +65,14 @@ pub enum Error<E> {
         /// The raw response body.
         body: Bytes,
     },
-    /// #8 — the response body failed to deserialize; retains the serde error path and the raw
-    /// body, capped on every path but the two named on `body` below.
+    /// #8 — the response body failed to deserialize; retains the status the response carried, the
+    /// serde error path, and the raw body, capped on every path but the two named on `body` below.
     Decode {
+        /// The status of the response whose body failed to decode: a success status when a
+        /// success body did not match its schema, the documented error status when a documented
+        /// error body did not. For `EventStream`'s per-frame decode, it is the status of the
+        /// response the frame was read from — after a reconnect, the reconnected response's.
+        status: StatusCode,
         /// The serde deserialization error path.
         path: String,
         /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
@@ -120,40 +125,38 @@ impl<E> Error<E> {
         }
     }
 
-    /// Whether the failure is worth retrying: transport failures, timeouts, `429`, and `5xx`
-    /// Lets callers wrap any retry policy around the client without spargen
-    /// shipping one.
+    /// Whether the failure is worth retrying: transport failures, timeouts, and a `429` or `5xx`
+    /// response — whichever class carries it, including [`Error::Decode`], since a server that
+    /// answered `503` is unavailable whether or not its body matched the schema. This is the
+    /// rule `RetryOutcome::is_transient` applies to the undecoded response. Lets callers wrap any
+    /// retry policy around the client without spargen shipping one.
     pub fn is_transient(&self) -> bool {
         match self {
             Error::Transport(_) | Error::Timeout(_) | Error::InterruptedBody(_) => true,
             Error::Api(value) => {
                 value.status() == StatusCode::TOO_MANY_REQUESTS || value.status().is_server_error()
             }
-            Error::UnexpectedStatus { status, .. } => {
+            Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => {
                 *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
             }
-            Error::RequestConstruction(_)
-            | Error::Protocol(_)
-            | Error::Redirect(_)
-            | Error::Decode { .. } => false,
+            Error::RequestConstruction(_) | Error::Protocol(_) | Error::Redirect(_) => false,
         }
     }
 
     /// The HTTP status the failed call's response carried: `Some` for a documented error status
-    /// ([`Error::Api`], the same value as its `ResponseValue::status()`) and for an undocumented
-    /// status ([`Error::UnexpectedStatus`], which includes an undocumented 2xx), `None` for every
-    /// class that has no status. That includes [`Error::Decode`], which does not keep the status of
-    /// the response it failed to decode.
+    /// ([`Error::Api`], the same value as its `ResponseValue::status()`), for an undocumented
+    /// status ([`Error::UnexpectedStatus`], which includes an undocumented 2xx), and for a
+    /// response whose body failed to decode ([`Error::Decode`], success or documented error
+    /// status alike); `None` for every class that produced no response to read a status from.
     pub fn status(&self) -> Option<StatusCode> {
         match self {
             Error::Api(value) => Some(value.status()),
-            Error::UnexpectedStatus { status, .. } => Some(*status),
+            Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => Some(*status),
             Error::RequestConstruction(_)
             | Error::Transport(_)
             | Error::Timeout(_)
             | Error::Protocol(_)
             | Error::Redirect(_)
-            | Error::Decode { .. }
             | Error::InterruptedBody(_) => None,
         }
     }
@@ -183,10 +186,12 @@ impl Error<std::convert::Infallible> {
                 body,
             },
             Error::Decode {
+                status,
                 path,
                 body,
                 truncated,
             } => Error::Decode {
+                status,
                 path,
                 body,
                 truncated,
@@ -253,7 +258,9 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
             Error::UnexpectedStatus { status, .. } => {
                 write!(f, "unexpected response status {status}")
             }
-            Error::Decode { path, .. } => write!(f, "response decode failed at {path}"),
+            Error::Decode { status, path, .. } => {
+                write!(f, "response decode failed ({status}) at {path}")
+            }
             Error::InterruptedBody(_) => f.write_str("response body was interrupted"),
         }
     }
@@ -902,6 +909,7 @@ mod tests {
                 body: Bytes::new(),
             },
             Error::Decode {
+                status: StatusCode::OK,
                 path: "items[0].id".to_owned(),
                 body: Bytes::from_static(b"{}"),
                 truncated: false,
@@ -931,19 +939,17 @@ mod tests {
             let expected = match &error {
                 // Worth retrying: the failure is about the connection, not the request.
                 Error::Transport(_) | Error::Timeout(_) | Error::InterruptedBody(_) => true,
-                // A documented or undocumented status is retryable only when the server said so.
+                // A response status is retryable only when the server said so, whichever class
+                // carries it: documented, undocumented, or undecodable.
                 Error::Api(value) => {
                     value.status() == StatusCode::TOO_MANY_REQUESTS
                         || value.status().is_server_error()
                 }
-                Error::UnexpectedStatus { status, .. } => {
+                Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => {
                     *status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
                 }
                 // Deterministic failures: retrying reproduces them.
-                Error::RequestConstruction(_)
-                | Error::Protocol(_)
-                | Error::Redirect(_)
-                | Error::Decode { .. } => false,
+                Error::RequestConstruction(_) | Error::Protocol(_) | Error::Redirect(_) => false,
             };
             assert_eq!(
                 error.is_transient(),
@@ -953,33 +959,65 @@ mod tests {
         }
     }
 
-    /// `status` answers exactly for the two classes that carry a response status; every other class,
-    /// including `Decode`, has none to report.
+    /// A `Decode` error is retryable exactly when its status is: a `429` or `5xx` whose body did
+    /// not match the schema is still the server saying "try again", while a `2xx` or `4xx` body
+    /// that does not decode reproduces on retry. This is the rule `RetryOutcome::is_transient`
+    /// applies to the same response before its body is read.
     #[test]
-    fn status_is_present_exactly_on_the_two_status_variants() {
+    fn a_decode_error_is_transient_exactly_when_its_status_is() {
+        let decode = |code: u16| Error::<ApiBody>::Decode {
+            status: StatusCode::from_u16(code).unwrap(),
+            path: "x".to_owned(),
+            body: Bytes::new(),
+            truncated: false,
+        };
+        for code in [429, 500, 502, 503] {
+            assert!(decode(code).is_transient(), "{code} should be transient");
+        }
+        for code in [200, 201, 400, 404, 422, 499] {
+            assert!(
+                !decode(code).is_transient(),
+                "{code} should not be transient"
+            );
+        }
+    }
+
+    /// `status` answers exactly for the three classes that carry a response status; every other
+    /// class produced no response to read one from.
+    #[test]
+    fn status_is_present_exactly_on_the_three_status_variants() {
         for error in every_variant() {
             let expected = match &error {
                 Error::Api(value) => Some(value.status()),
-                Error::UnexpectedStatus { status, .. } => Some(*status),
+                Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => {
+                    Some(*status)
+                }
                 Error::RequestConstruction(_)
                 | Error::Transport(_)
                 | Error::Timeout(_)
                 | Error::Protocol(_)
                 | Error::Redirect(_)
-                | Error::Decode { .. }
                 | Error::InterruptedBody(_) => None,
             };
             assert_eq!(error.status(), expected, "status() disagrees for {error}");
         }
         let statuses: Vec<_> = every_variant().iter().filter_map(Error::status).collect();
-        assert_eq!(statuses, [StatusCode::BAD_REQUEST, StatusCode::IM_A_TEAPOT]);
+        assert_eq!(
+            statuses,
+            [
+                StatusCode::BAD_REQUEST,
+                StatusCode::IM_A_TEAPOT,
+                StatusCode::OK
+            ]
+        );
     }
 
     /// Generated clients hold `Error<Infallible>` for an operation with no documented error body,
     /// so `status` is pinned on that instantiation too, over every variant it can hold (`Api` is
-    /// statically unreachable there): only `UnexpectedStatus` answers, with its own code.
+    /// statically unreachable there): `UnexpectedStatus` and `Decode` answer, each with its own
+    /// code.
     #[test]
-    fn status_on_an_uninhabited_api_error_is_present_only_for_unexpected_status() {
+    fn status_on_an_uninhabited_api_error_is_present_only_for_the_response_variants() {
         let narrow: Vec<Error<std::convert::Infallible>> = vec![
             Error::request_message("bad path segment"),
             Error::Transport(TransportError::new(reqwest_error())),
@@ -996,6 +1034,7 @@ mod tests {
                 body: Bytes::from_static(b"teapot"),
             },
             Error::Decode {
+                status: StatusCode::PARTIAL_CONTENT,
                 path: "items[0].id".to_owned(),
                 body: Bytes::from_static(b"{}"),
                 truncated: true,
@@ -1005,19 +1044,23 @@ mod tests {
         for error in &narrow {
             let expected = match error {
                 Error::Api(value) => match *value.inner() {},
-                Error::UnexpectedStatus { status, .. } => Some(*status),
+                Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => {
+                    Some(*status)
+                }
                 Error::RequestConstruction(_)
                 | Error::Transport(_)
                 | Error::Timeout(_)
                 | Error::Protocol(_)
                 | Error::Redirect(_)
-                | Error::Decode { .. }
                 | Error::InterruptedBody(_) => None,
             };
             assert_eq!(error.status(), expected, "status() disagrees for {error}");
         }
         let statuses: Vec<_> = narrow.iter().filter_map(Error::status).collect();
-        assert_eq!(statuses, [StatusCode::IM_A_TEAPOT]);
+        assert_eq!(
+            statuses,
+            [StatusCode::IM_A_TEAPOT, StatusCode::PARTIAL_CONTENT]
+        );
     }
 
     #[test]
@@ -1070,6 +1113,22 @@ mod tests {
         }
     }
 
+    /// A decode failure's message names the status it arrived with, so a log line tells a drifted
+    /// `200` from an error page served under a documented status without matching the variant.
+    #[test]
+    fn a_decode_error_displays_its_status_and_path() {
+        let error = Error::<ApiBody>::Decode {
+            status: StatusCode::BAD_GATEWAY,
+            path: "items[0].id".to_owned(),
+            body: Bytes::new(),
+            truncated: false,
+        };
+        assert_eq!(
+            error.to_string(),
+            "response decode failed (502 Bad Gateway) at items[0].id"
+        );
+    }
+
     /// The variants that wrap a cause expose it; the three that carry only data do not. A caller
     /// walking the chain must not find a phantom source, nor lose a real one.
     #[test]
@@ -1120,6 +1179,7 @@ mod tests {
                 body: Bytes::from_static(b"teapot"),
             },
             Error::Decode {
+                status: StatusCode::SERVICE_UNAVAILABLE,
                 path: "items[0].id".to_owned(),
                 body: Bytes::from_static(b"{}"),
                 truncated: true,
@@ -1141,12 +1201,14 @@ mod tests {
 
         // The payload fields survive, not just the discriminant.
         let widened: Error<ApiBody> = Error::<std::convert::Infallible>::Decode {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
             path: "a.b".to_owned(),
             body: Bytes::from_static(b"raw"),
             truncated: true,
         }
         .widen();
         let Error::Decode {
+            status,
             path,
             body,
             truncated,
@@ -1154,6 +1216,7 @@ mod tests {
         else {
             panic!("widen changed the variant");
         };
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         assert_eq!(path, "a.b");
         assert_eq!(body, Bytes::from_static(b"raw"));
         assert!(truncated);
@@ -1213,7 +1276,8 @@ mod tests {
 
     /// `status` and `api_body` read one `Error` from two sides, so they must agree on what each
     /// class carries: a documented API error answers both from the same `ResponseValue`, an
-    /// undocumented status has a status but no typed body, and every other class has neither.
+    /// undocumented status and an undecodable body have a status but no typed body, and every
+    /// other class has neither.
     #[test]
     fn status_and_api_body_agree_on_every_variant() {
         for error in every_variant() {
@@ -1230,7 +1294,7 @@ mod tests {
                         "api_body is not the Api value's own body: {error}"
                     );
                 }
-                Error::UnexpectedStatus { status, .. } => {
+                Error::UnexpectedStatus { status, .. } | Error::Decode { status, .. } => {
                     assert_eq!(error.status(), Some(*status), "{error}");
                     assert!(error.api_body().is_none(), "{error}");
                 }
@@ -1239,7 +1303,6 @@ mod tests {
                 | Error::Timeout(_)
                 | Error::Protocol(_)
                 | Error::Redirect(_)
-                | Error::Decode { .. }
                 | Error::InterruptedBody(_) => {
                     assert!(error.status().is_none(), "{error}");
                     assert!(error.api_body().is_none(), "{error}");

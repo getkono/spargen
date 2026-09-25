@@ -42,6 +42,7 @@ where
         Err(path) => {
             let (body, truncated) = crate::dispatch::cap_body(body, core.config().max_error_body);
             Err(Error::Decode {
+                status,
                 path,
                 body,
                 truncated,
@@ -71,6 +72,7 @@ where
         match from_xml_bytes::<E>(&body) {
             Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
             Err(path) => Error::Decode {
+                status,
                 path,
                 body,
                 truncated,
@@ -184,6 +186,52 @@ mod tests {
                 assert_eq!(body.len(), 16);
             }
             other => panic!("expected a capped Decode error, got {other:?}"),
+        }
+    }
+
+    /// Both XML helpers that raise `Decode` keep the status of the response they failed to
+    /// decode. Neither status is `200`, so a hard-coded status cannot pass.
+    #[test]
+    fn xml_decode_failures_keep_the_response_status() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        fn poll_ready<F: Future>(future: F) -> F::Output {
+            let mut future = std::pin::pin!(future);
+            match future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            {
+                Poll::Ready(value) => value,
+                Poll::Pending => panic!("future was not immediately ready"),
+            }
+        }
+        fn response(status: u16) -> reqwest::Response {
+            reqwest::Response::from(
+                http::Response::builder()
+                    .status(status)
+                    .body("not xml <")
+                    .expect("valid synthetic response"),
+            )
+        }
+
+        let core = crate::ClientCore::new("https://example.com").unwrap();
+        match poll_ready(super::decode_success_xml::<Point>(&core, response(203))) {
+            Err(error @ crate::Error::Decode { .. }) => {
+                assert_eq!(error.status().map(|s| s.as_u16()), Some(203));
+            }
+            other => panic!("expected a Decode error, got {other:?}"),
+        }
+        let documented = [crate::StatusSpec::Exact(422)];
+        match poll_ready(super::classify_error_xml::<Point>(
+            &core,
+            response(422),
+            &documented,
+        )) {
+            error @ crate::Error::Decode { .. } => {
+                assert_eq!(error.status().map(|s| s.as_u16()), Some(422));
+            }
+            other => panic!("expected a Decode error, got {other:?}"),
         }
     }
 }
