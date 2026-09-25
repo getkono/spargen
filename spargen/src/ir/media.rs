@@ -211,13 +211,15 @@ impl Responses {
     /// that also carries each bodyless success *entry* as a payload-free unit variant.
     ///
     /// The entries are the lowered success statuses of `by_status`, not everything the document
-    /// declares; `default` is never among them. It is the success source only when `by_status` is
-    /// empty — the early return that bypasses the count above — and is offered to the error shape
-    /// as the `Range(0)` sentinel whenever it is declared, subject there to the same body count
-    /// (see [`Self::error`]).
+    /// declares; `default` is never among them. It is the success source only when `by_status`
+    /// documents no success status at all (see [`Self::default_is_success_source`]) — the early
+    /// return that bypasses the count above — and is offered to the error shape as the `Range(0)`
+    /// sentinel whenever it is declared, subject there to the same body count (see
+    /// [`Self::error`]).
     pub(crate) fn success(&self) -> SuccessShape {
-        // A default with no explicit status entries is the operation's single success body.
-        if self.by_status.is_empty() {
+        // With no success status documented, `default` is what documents every 2xx, so it is the
+        // operation's single success body.
+        if self.default_is_success_source() {
             return match self.default.as_ref().and_then(|default| default.body) {
                 Some(body) => SuccessShape::Plain(body),
                 None => SuccessShape::Unit,
@@ -319,11 +321,23 @@ impl Responses {
         responses
     }
 
+    /// Whether `default` is the operation's success source: exactly when `by_status` documents no
+    /// success status — it is empty, or holds only non-2xx statuses such as `404`. The
+    /// specification defines `default` as the documentation of every status not declared
+    /// explicitly, so with no success status declared it is what documents a 2xx response. While
+    /// any success status is declared, `default` stays on the error side alone.
+    fn default_is_success_source(&self) -> bool {
+        !self
+            .by_status
+            .iter()
+            .any(|(status, _)| is_success_status(*status))
+    }
+
     /// The operation's success responses in document order: the `default` response alone when no
-    /// explicit statuses are declared (it is then the sole success), otherwise the 2xx entries.
+    /// success status is declared (it is then the sole success), otherwise the 2xx entries.
     /// Mirrors the success/error split used by [`Self::success`].
     fn success_responses(&self) -> Vec<&Response> {
-        if self.by_status.is_empty() {
+        if self.default_is_success_source() {
             return self.default.iter().collect();
         }
         self.by_status
@@ -339,7 +353,8 @@ impl Responses {
     /// sentinel — last) and carrying any documented bodyless error status as a unit variant.
     /// `default` is *offered* here as `Range(0)` whenever it is declared — including when it is
     /// also the operation's sole success source (see [`Self::success`]), which then types both
-    /// sides with that one body — but it reaches the shape only through the body count above. A
+    /// sides with that one body, as the specification does: `default` documents every undeclared
+    /// status, of either class — but it reaches the shape only through the body count above. A
     /// bodyless `default` therefore becomes the catch-all unit variant of an `Enum` and is dropped
     /// from a `None` or a `Single`.
     pub(crate) fn error(&self) -> ErrorShape {
@@ -401,9 +416,9 @@ fn is_success_status(status: StatusSpec) -> bool {
 /// enters the success branch on the raw transport status alone, and only [`SuccessShape::Enum`]
 /// carries a status set to compare it against — [`SuccessShape::Unit`] and [`SuccessShape::Plain`]
 /// name no status, so they draw no distinction between a documented 2xx and any other. `default`
-/// reaches the success side only when `by_status` is empty; while `by_status` holds any entry,
-/// `default` is not among them and is no success fallback for a 2xx that matches none of them —
-/// which is a fact about the lowered entries, not about what the document declares.
+/// reaches the success side only when `by_status` documents no success status; while it holds any
+/// success entry, `default` is not among them and is no success fallback for a 2xx that matches
+/// none of them — which is a fact about the lowered entries, not about what the document declares.
 #[derive(Debug, Clone)]
 pub(crate) enum SuccessShape {
     /// No success body.
@@ -570,6 +585,81 @@ mod tests {
             default: None,
         };
         assert!(matches!(responses.success(), SuccessShape::Plain(_)));
+    }
+
+    #[test]
+    fn default_documents_the_success_side_when_no_success_status_is_declared() {
+        // `404` plus a bodied `default` (issue #115): `default` is the only documentation of a 2xx,
+        // so it is the success body — not `Unit`, which would accept any 2xx as `()` and discard
+        // the body — and it stays the error side's catch-all beside the `404`.
+        let responses = Responses {
+            by_status: vec![(StatusSpec::Exact(404), resp(Some(1)))],
+            default: Some(resp(Some(2))),
+        };
+        assert!(matches!(responses.success(), SuccessShape::Plain(body) if body.id == TypeId(2)));
+        assert_eq!(
+            responses.single_success_media(),
+            Some(super::MediaType::Json)
+        );
+        match responses.error() {
+            ErrorShape::Enum(entries) => {
+                let specs: Vec<_> = entries.iter().map(|(s, _)| *s).collect();
+                assert_eq!(specs, vec![StatusSpec::Exact(404), StatusSpec::Range(0)]);
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+
+        // Every non-2xx status class counts as "no success declared", ranges included.
+        for status in [
+            StatusSpec::Exact(304),
+            StatusSpec::Range(4),
+            StatusSpec::Range(5),
+        ] {
+            let responses = Responses {
+                by_status: vec![(status, resp(None))],
+                default: Some(resp(Some(2))),
+            };
+            assert!(
+                matches!(responses.success(), SuccessShape::Plain(body) if body.id == TypeId(2)),
+                "{status:?}"
+            );
+        }
+
+        // A bodyless `default` documents a bodyless 2xx: `Unit` is then the documented shape.
+        let responses = Responses {
+            by_status: vec![(StatusSpec::Exact(404), resp(Some(1)))],
+            default: Some(resp(None)),
+        };
+        assert!(matches!(responses.success(), SuccessShape::Unit));
+        assert_eq!(responses.single_success_media(), None);
+    }
+
+    #[test]
+    fn a_declared_success_status_keeps_default_off_the_success_side() {
+        // Any 2xx entry, bodied or not, exact or range, is the success documentation; `default`
+        // then stays on the error side alone.
+        for (status, body) in [
+            (StatusSpec::Exact(204), None),
+            (StatusSpec::Range(2), None),
+            (StatusSpec::Exact(200), Some(1)),
+        ] {
+            let responses = Responses {
+                by_status: vec![
+                    (status, resp(body)),
+                    (StatusSpec::Exact(404), resp(Some(3))),
+                ],
+                default: Some(resp(Some(2))),
+            };
+            match (body, responses.success()) {
+                (None, SuccessShape::Unit) => {}
+                (Some(_), SuccessShape::Plain(ty)) => assert_eq!(ty.id, TypeId(1)),
+                (_, other) => panic!("{status:?}: unexpected success shape {other:?}"),
+            }
+            assert_eq!(
+                responses.single_success_media(),
+                body.map(|_| super::MediaType::Json)
+            );
+        }
     }
 
     /// A graph whose ids are the positions of `kinds`.
