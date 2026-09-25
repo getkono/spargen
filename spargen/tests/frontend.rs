@@ -6146,6 +6146,87 @@ components:
     }
 }
 
+/// A union declared in a sub-file whose members are that file's own deep pointers
+/// (`#/components/schemas/Envelope/properties/cat`) generated before the root document's same-file
+/// deep pointers resolved, and it keeps the output it had: each member is named from its pointer
+/// text, and a `mapping` value spelled the same way is matched to it and supplies its tag. Only the
+/// root spelling, which used to reject, derives no name.
+#[test]
+fn a_sub_file_union_of_deep_pointer_members_keeps_its_names_and_mapping() {
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /pet:
+    get:
+      operationId: getPet
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: './lib.yaml#/components/schemas/Pet' }
+"##;
+    let lib = r##"
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - { $ref: '#/components/schemas/Envelope/properties/cat' }
+        - { $ref: '#/components/schemas/Envelope/properties/dog' }
+      discriminator:
+        propertyName: kind
+MAPPING
+    Envelope:
+      type: object
+      properties:
+        cat:
+          type: object
+          properties: { kind: { type: string }, purr: { type: string } }
+          required: [kind]
+        dog:
+          type: object
+          properties: { kind: { type: string }, bark: { type: string } }
+          required: [kind]
+"##;
+    let mapping = "        mapping:\n          \
+                   meow: '#/components/schemas/Envelope/properties/cat'\n          \
+                   woof: '#/components/schemas/Envelope/properties/dog'";
+    // With the mapping, its tags; without, the implicit tags the pointer text has always given.
+    for (with, cat_tag, dog_tag) in [
+        (mapping, "meow", "woof"),
+        ("", "Envelope/properties/cat", "Envelope/properties/dog"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("openapi.yaml"), root).unwrap();
+        std::fs::write(dir.join("lib.yaml"), lib.replace("MAPPING", with)).unwrap();
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{cat_tag} {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::NonDisjointUnion),
+                "{cat_tag} {entry}: {report:#?}"
+            );
+        }
+        let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
+        for expected in [
+            "EnvelopePropertiesCat(Box<Cat>)".to_owned(),
+            "EnvelopePropertiesDog(Box<Dog>)".to_owned(),
+            format!("\"{cat_tag}\" => {{"),
+            format!("\"{dog_tag}\" => {{"),
+        ] {
+            assert!(code.contains(&expected), "{cat_tag}: {expected}\n{code}");
+        }
+    }
+}
+
 #[test]
 fn oas32_xml_attribute_node_type_maps_to_the_existing_typed_xml_path() {
     let spec = r##"
