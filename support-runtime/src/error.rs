@@ -120,13 +120,23 @@ impl<E> Error<E> {
     /// not connection failures stay [`Error::RequestConstruction`]. reqwest offers no connect
     /// classification on `wasm32`, where the browser's fetch reports failures opaquely, so there
     /// every request-kind error stays [`Error::RequestConstruction`].
+    ///
+    /// A timeout is asked for before any of those, and the same connect discriminator splits it:
+    /// one raised while establishing the connection (the client's `connect_timeout`, which bounds
+    /// name resolution, the TCP handshake, and TLS) is [`TimeoutKind::Connect`]; every other one,
+    /// the total-request budget elapsing during the connect included, is [`TimeoutKind::Total`].
+    /// On `wasm32` every timeout is `Total`, for the reason above.
     pub fn from_reqwest(error: reqwest::Error) -> Self {
         #[cfg(not(target_arch = "wasm32"))]
         let connect = error.is_connect();
         #[cfg(target_arch = "wasm32")]
         let connect = false;
         if error.is_timeout() {
-            Error::Timeout(TimeoutKind::Total)
+            Error::Timeout(if connect {
+                TimeoutKind::Connect
+            } else {
+                TimeoutKind::Total
+            })
         } else if error.is_redirect() {
             Error::Redirect(RedirectError { source: error })
         } else if error.is_decode() {
@@ -412,9 +422,12 @@ impl TransportError {
 /// Which timeout elapsed (taxonomy #3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TimeoutKind {
-    /// The connect timeout.
+    /// The connect timeout: no connection was established within the client's
+    /// `connect_timeout`, which covers name resolution, the TCP handshake, and TLS. Never
+    /// reported on `wasm32`, where the fetch backend does not say which phase timed out.
     Connect,
-    /// The total-request timeout.
+    /// The total-request timeout: the whole request ran over the client's `timeout`, whichever
+    /// phase it was in when the budget elapsed.
     Total,
 }
 
@@ -936,8 +949,9 @@ mod tests {
     /// `from_reqwest` is the taxonomy: every failure a [`crate::HttpBackend`] reports is mapped
     /// through it, which is what keeps a custom transport classifying identically to executing on
     /// a `reqwest::Client` directly. Its timeout, redirect, decode, and request branches all need a
-    /// live connection attempt to reach (reqwest exposes no constructor for its own error), so what
-    /// is pinned here is the *fallback*: an error reqwest does not classify becomes `Transport`,
+    /// live connection attempt to reach (reqwest exposes no constructor for its own error; the two
+    /// timeout kinds are driven over a real client in `spargen/tests/e2e.rs`), so what is pinned
+    /// here is the *fallback*: an error reqwest does not classify becomes `Transport`,
     /// and a `Transport` failure is retryable. A backend that reported a permanent failure reqwest
     /// leaves unclassified would therefore be retried, so the fallback is worth stating explicitly.
     #[test]
