@@ -6040,6 +6040,112 @@ components:
     }
 }
 
+/// The same silent fallback, reached by a `mapping` value with no `/` or `#` in it. `cat.yaml` is a
+/// relative file reference and also a legal component name (`^[a-zA-Z0-9.\-_]+$`); the
+/// specification leaves such a value implementation-defined and recommends reading it as a name,
+/// which spargen does. Read as a name it names no member here — the member is the file
+/// `$ref: 'cat.yaml'`, which has no component name — so, unrejected, it generated with the member's
+/// tag silently replaced by `PetVariant0`. A value naming a declared component that is not a member
+/// (`Bird`), or no component at all (`Ghost`), matches nothing for the same reason. Every value must
+/// name one of the union's members, as `defaultMapping`'s already must.
+#[test]
+fn e007_discriminator_mapping_value_that_names_no_member() {
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /pet:
+    get:
+      operationId: getPet
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+components:
+  schemas:
+    Pet:
+      oneOf:
+        - { $ref: 'MEMBER' }
+        - { $ref: '#/components/schemas/Dog' }
+      discriminator:
+        propertyName: kind
+        mapping:
+          meow: 'TARGET'
+          dog: Dog
+    Cat:
+      type: object
+      properties: { kind: { type: string }, purr: { type: string } }
+      required: [kind]
+    Bird:
+      type: object
+      properties: { kind: { type: string }, wing: { type: string } }
+      required: [kind]
+    Dog:
+      type: object
+      properties: { kind: { type: string }, bark: { type: string } }
+      required: [kind]
+"##;
+    let cat = "type: object\nproperties: { kind: { type: string }, purr: { type: string } }\n\
+               required: [kind]\n";
+    let cases = [
+        ("cat.yaml", "cat.yaml"),
+        ("#/components/schemas/Cat", "Bird"),
+        ("#/components/schemas/Cat", "Ghost"),
+        ("#/components/schemas/Cat", "#/components/schemas/Bird"),
+    ];
+    for (member, target) in cases {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            root.replace("MEMBER", member).replace("TARGET", target),
+        )
+        .unwrap();
+        std::fs::write(dir.join("cat.yaml"), cat).unwrap();
+        let generated = spargen::generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
+        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{member} / {target} {entry}: {report:#?}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::NonDisjointUnion
+                        && d.message.contains(&format!(
+                            "`discriminator.mapping` maps `meow` to `{target}`"
+                        ))
+                        && d.pointer.as_str() == "/components/schemas/Pet"),
+                "{member} / {target} {entry}: {report:#?}"
+            );
+        }
+    }
+
+    // The member's own component name, bare or as a full pointer, is matched and generates.
+    for target in ["Cat", "#/components/schemas/Cat"] {
+        let spec = root
+            .replace("MEMBER", "#/components/schemas/Cat")
+            .replace("TARGET", target);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target} {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::NonDisjointUnion),
+                "{target} {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn oas32_xml_attribute_node_type_maps_to_the_existing_typed_xml_path() {
     let spec = r##"

@@ -1739,23 +1739,33 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         let strategy = if let Some(discriminator) = &schema.discriminator {
             // A `mapping` value is matched to a member by component name (see
-            // `discriminated_strategy`). One that is not a component name — a pointer into a
-            // component (`#/components/schemas/Envelope/properties/payload`) or a reference to
-            // another file (`./lib.yaml#/…`) — can match no member, so the tag it declares would be
-            // replaced by an invented one on the wire. Refuse it rather than ignore it.
+            // `discriminated_strategy`), so one that names none of this union's members is ignored
+            // there, and a member it was written for takes an invented tag on the wire. That covers
+            // every spelling that is not a member's component name: a pointer into a component
+            // (`#/components/schemas/Envelope/properties/payload`), a file reference with or without
+            // a path separator (`./lib.yaml#/…`, or `cat.yaml` — also a legal component name, and
+            // read as one, as the specification recommends for a value that is both), and a
+            // component that is not a member. Refuse it rather than ignore it, as `defaultMapping`
+            // below is refused. Members are read as written, so a mapping for a member the sibling
+            // keywords removed (with `W011`) still names a member.
+            let members: Vec<&str> = real_members
+                .iter()
+                .filter_map(|member| member_component_name(member))
+                .collect();
             if let Some((tag, target)) = discriminator.mapping.iter().find(|(_, target)| {
                 let name = target
                     .strip_prefix("#/components/schemas/")
                     .unwrap_or(target);
-                name.contains(['/', '#'])
+                !members.contains(&name)
             }) {
                 return self.reject_union(
                     schema,
                     &format!(
-                        "`discriminator.mapping` maps `{tag}` to `{target}`, which is not a \
-                         component name — a pointer into a component or a reference to another \
-                         file — so it cannot be matched to a member and the tag it declares \
-                         would not be the one on the wire"
+                        "`discriminator.mapping` maps `{tag}` to `{target}`, which names none of \
+                         this union's members by component name — it is a pointer into a \
+                         component, a file reference, or a component that is not a member — so it \
+                         cannot be matched to a member and the tag it declares would not be the \
+                         one on the wire"
                     ),
                 );
             }
@@ -1847,20 +1857,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         member: &SchemaOr,
         hint: &str,
     ) -> Option<(Ty, Option<String>)> {
-        if let SchemaOr::Schema(schema) = member {
-            if let Some(reference) = &schema.reference {
-                // A name with a raw `/` is a pointer *into* a component, not a component name: it
-                // has no name to derive a variant or an implicit tag from, exactly as the same
-                // pointer written against a relative file has none. It lowers below like any other
-                // non-component reference.
-                if let Some(name) = reference
-                    .strip_prefix("#/components/schemas/")
-                    .filter(|name| !name.contains('/'))
-                {
-                    let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
-                    return Some((ty, Some(name.to_owned())));
-                }
-            }
+        if let (Some(name), SchemaOr::Schema(schema)) = (member_component_name(member), member) {
+            let ty =
+                self.ensure_component(name, schema.reference.as_deref(), &schema.provenance)?;
+            return Some((ty, Some(name.to_owned())));
         }
         let ty = self.lower_schema_or(member, hint)?;
         Some((ty, None))
@@ -5165,6 +5165,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             boxed: false,
         }
     }
+}
+
+/// The component name a union member is written as — `$ref: '#/components/schemas/<name>'` — or
+/// `None`. It names the member's variant and implicit discriminator tag, and it is what a
+/// `discriminator.mapping` value is matched against. A name with a raw `/` is a pointer *into* a
+/// component, not a component name: it has none to derive a variant or a tag from, exactly as the
+/// same pointer written against a relative file has none, and neither has any file reference.
+fn member_component_name(member: &SchemaOr) -> Option<&str> {
+    let SchemaOr::Schema(schema) = member else {
+        return None;
+    };
+    schema
+        .reference
+        .as_deref()?
+        .strip_prefix("#/components/schemas/")
+        .filter(|name| !name.contains('/'))
 }
 
 fn parameter_shape_supported(graph: &TypeGraph, ty: Ty) -> bool {
