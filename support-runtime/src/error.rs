@@ -428,8 +428,9 @@ pub enum TimeoutKind {
     /// the operating system gave up on the handshake. Never reported on `wasm32`, where the fetch
     /// backend does not say which phase timed out.
     Connect,
-    /// The total-request timeout: the whole request ran over the client's `timeout`, whichever
-    /// phase it was in when the budget elapsed.
+    /// Every other timeout: the client's total-request `timeout` elapsed, whichever phase the
+    /// request was in (connecting included), or a `read_timeout` elapsed on an established
+    /// connection. On `wasm32` this is every timeout.
     Total,
 }
 
