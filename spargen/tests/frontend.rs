@@ -5960,13 +5960,251 @@ components:
     }
 }
 
-/// A `discriminator.mapping` value is matched to a member by component name. A value that is not
-/// one — a pointer into a component, in the same-file or any file spelling, or a reference to
-/// another file — matches no member, so the tag it declares for that member would be replaced by
-/// an invented one on the wire. It is rejected rather than ignored; a component-name value, bare or
-/// as a full pointer, still generates.
+/// A `Pet` union over `Cat` and `Dog` (both declared) plus a declared non-member `Fish`, carrying
+/// the given `discriminator` body. `members` replaces the `oneOf` list when a case needs another
+/// member shape.
+fn discriminated_pet(version: &str, members: &str, discriminator: &str) -> String {
+    format!(
+        "openapi: {version}\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         paths: {{}}\n\
+         components:\n  \
+         schemas:\n    \
+         Pet:\n      \
+         oneOf:\n{members}      \
+         discriminator:\n{discriminator}    \
+         Cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }} }} }}\n    \
+         Dog: {{ type: object, required: [kind, bark], properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }} }}\n    \
+         Fish: {{ type: object, required: [kind, fins], properties: {{ kind: {{ type: string }}, fins: {{ type: integer }} }} }}\n"
+    )
+}
+
+const CAT_AND_DOG: &str = "        - { $ref: '#/components/schemas/Cat' }\n        \
+                           - { $ref: '#/components/schemas/Dog' }\n";
+
+/// Issue #124: a `discriminator.mapping` value is a reference to a schema, and one naming a schema
+/// that does not exist was dropped with no diagnostic — `check` said `clean` while the tag it
+/// described had no variant to decode into. It is an unresolved reference like any other, so it is
+/// `E004`, reported at the mapping entry itself so the rejection names (and auto-carve can reach)
+/// the site that is wrong. The same holds for 3.2 `defaultMapping`, which used to be reported as a
+/// membership problem (`E007`) about a schema that was never declared at all.
 #[test]
-fn e007_discriminator_mapping_value_that_is_not_a_component_name() {
+fn a_discriminator_mapping_value_naming_an_undeclared_schema_is_e004_at_the_entry() {
+    let cases = [
+        (
+            "pointer spelling",
+            discriminated_pet(
+                "3.1.0",
+                CAT_AND_DOG,
+                "        propertyName: kind\n        mapping:\n          \
+                 cat: '#/components/schemas/Cat'\n          \
+                 c: '#/components/schemas/MissingC'\n",
+            ),
+            "/components/schemas/Pet/discriminator/mapping/c",
+            "MissingC",
+        ),
+        (
+            "schema-name spelling",
+            discriminated_pet(
+                "3.1.0",
+                CAT_AND_DOG,
+                "        propertyName: kind\n        mapping:\n          c: MissingC\n",
+            ),
+            "/components/schemas/Pet/discriminator/mapping/c",
+            "MissingC",
+        ),
+        (
+            "3.2 defaultMapping",
+            discriminated_pet(
+                "3.2.0",
+                CAT_AND_DOG,
+                "        propertyName: kind\n        defaultMapping: MissingC\n",
+            ),
+            "/components/schemas/Pet/discriminator/defaultMapping",
+            "MissingC",
+        ),
+    ];
+    for (what, spec, pointer, named) in cases {
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}\n{spec}"
+            );
+            let e004: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::UnresolvedRef)
+                .collect();
+            assert!(
+                e004.iter()
+                    .any(|d| d.pointer.as_str() == pointer && d.message.contains(named)),
+                "{what} via {entry}: E004 must sit at `{pointer}` and name `{named}`: \
+                 {report:#?}"
+            );
+            // The schema does not exist, so saying it is "not a member" would send the reader to
+            // edit the union rather than to the dangling name.
+            assert!(
+                !has_code(&report, Code::NonDisjointUnion),
+                "{what} via {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The sibling shape issue #124 asked to settle. A mapping value that resolves, but to a schema the
+/// `oneOf`/`anyOf` does not list, describes a tag whose payload the generated enum has no variant
+/// for. The specification requires every possible schema to be listed explicitly beside the
+/// discriminator, so this is the same refusal `defaultMapping` already gets for a non-member —
+/// `E007` — now reported at the mapping entry. Checked on the sole-real-member collapse as well as
+/// the multi-member union, since that path returns before any discriminated dispatch is built and
+/// once dropped the mapping there without looking at it.
+#[test]
+fn a_discriminator_mapping_value_naming_a_non_member_is_e007_at_the_entry() {
+    let fish = "        propertyName: kind\n        mapping:\n          \
+                cat: Cat\n          fish: '#/components/schemas/Fish'\n";
+    let cases = [
+        ("two members", discriminated_pet("3.1.0", CAT_AND_DOG, fish)),
+        (
+            "one real member beside null",
+            discriminated_pet(
+                "3.1.0",
+                "        - { $ref: '#/components/schemas/Cat' }\n        \
+                 - { type: 'null' }\n",
+                fish,
+            ),
+        ),
+        (
+            "inline member",
+            discriminated_pet(
+                "3.1.0",
+                "        - { $ref: '#/components/schemas/Cat' }\n        \
+                 - { type: object, required: [kind, fins], properties: { kind: { type: string }, \
+                 fins: { type: integer } } }\n",
+                fish,
+            ),
+        ),
+    ];
+    for (what, spec) in cases {
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::NonDisjointUnion
+                        && d.pointer.as_str()
+                            == "/components/schemas/Pet/discriminator/mapping/fish"
+                        && d.message.contains("Fish")),
+                "{what} via {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::UnresolvedRef),
+                "{what} via {entry}: `Fish` is declared: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The well-formed control for the two rejections above: a mapping that names every member, in
+/// each spelling the specification allows, generates and dispatches on the mapped tags. The file
+/// spelling of a root component is the one that used to miss: matching compared strings, so
+/// `./openapi.yaml#/components/schemas/Dog` never equalled `Dog`, and the variant silently decoded
+/// on the tag `"Dog"` instead of the `"doggo"` the document gave it.
+#[test]
+fn a_discriminator_mapping_naming_every_member_in_any_spelling_generates_its_tags() {
+    let spec = discriminated_pet(
+        "3.1.0",
+        "        - { $ref: '#/components/schemas/Cat' }\n        \
+         - { $ref: '#/components/schemas/Dog' }\n        \
+         - { $ref: '#/components/schemas/Fish' }\n",
+        "        propertyName: kind\n        mapping:\n          \
+         kitty: Cat\n          \
+         doggo: './openapi.yaml#/components/schemas/Dog'\n          \
+         fishy: '#/components/schemas/Fish'\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    for tag in ["\"kitty\"", "\"doggo\"", "\"fishy\""] {
+        assert!(
+            code.contains(tag),
+            "the mapped tag {tag} must dispatch:\n{code}"
+        );
+    }
+    assert!(
+        !code.contains("\"Dog\""),
+        "`Dog` has an explicit tag:\n{code}"
+    );
+    let checked = check(&spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
+}
+
+/// A Discriminator Object whose fields have the wrong shape was read leniently and the bad part
+/// thrown away: a missing `propertyName` became the empty tag field, a non-string mapping value
+/// vanished from the map, a non-object `mapping` became no mapping at all. Each is a malformed
+/// document (`E011`), reported where the bad field sits.
+#[test]
+fn a_malformed_discriminator_object_is_e011_at_the_field() {
+    let cases = [
+        (
+            "missing propertyName",
+            "        mapping: { cat: Cat }\n",
+            "/components/schemas/Pet/discriminator",
+        ),
+        (
+            "non-string propertyName",
+            "        propertyName: 5\n",
+            "/components/schemas/Pet/discriminator/propertyName",
+        ),
+        (
+            "non-string mapping value",
+            "        propertyName: kind\n        mapping: { cat: 5 }\n",
+            "/components/schemas/Pet/discriminator/mapping/cat",
+        ),
+        (
+            "non-object mapping",
+            "        propertyName: kind\n        mapping: [Cat]\n",
+            "/components/schemas/Pet/discriminator/mapping",
+        ),
+        (
+            "non-string defaultMapping",
+            "        propertyName: kind\n        defaultMapping: 5\n",
+            "/components/schemas/Pet/discriminator/defaultMapping",
+        ),
+    ];
+    for (what, discriminator, pointer) in cases {
+        let spec = discriminated_pet("3.2.0", CAT_AND_DOG, discriminator);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::InvalidInput && d.pointer.as_str() == pointer),
+                "{what} via {entry}: E011 must sit at `{pointer}`: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A union member written as a pointer into a component (`#/components/schemas/Envelope/properties/
+/// payload`) is a member like any other, and a `mapping` value naming it — in the same-file
+/// spelling or the root document's own relative-file spelling — resolves to the same `file#pointer`
+/// and supplies its tag. Matching by component name alone could not name such a member at all, so
+/// its variant would take an invented tag on the wire; matching by resolved target gives it the
+/// one the document declares.
+#[test]
+fn a_discriminator_mapping_value_spelled_as_a_deep_pointer_names_its_member() {
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -5999,57 +6237,33 @@ components:
         "./openapi.yaml#/components/schemas/Envelope/properties/payload",
     ] {
         let spec = spec.replace("TARGET", target);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
+        let (generated, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
                 report.outcome(),
                 Outcome::Rejected,
                 "{target} {entry}: {report:#?}"
             );
             assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::NonDisjointUnion
-                        && d.message.contains(&format!(
-                            "`discriminator.mapping` maps `payload` to `{target}`"
-                        ))
-                        && d.pointer.as_str() == "/components/schemas/Pet"),
+                report.diagnostics().is_empty(),
                 "{target} {entry}: {report:#?}"
             );
         }
-    }
-
-    // A component-name value in either spelling is matched to its member and generates.
-    let named = spec
-        .replace(
-            "'#/components/schemas/Envelope/properties/payload' }",
-            "'#/components/schemas/Cat' }",
-        )
-        .replace("payload: 'TARGET'", "cat: Cat")
-        .replace(
-            "    Dog:\n",
-            "    Cat:\n      type: object\n      properties: { kind: { type: string } }\n      \
-             required: [kind]\n    Dog:\n",
-        );
-    for (entry, report) in [("generate", generate(&named)), ("check", check(&named))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(&report, Code::NonDisjointUnion),
-            "{entry}: {report:#?}"
-        );
+        for tag in ["\"payload\" => {", "\"dog\" => {"] {
+            assert!(code.contains(tag), "{target}: {tag}\n{code}");
+        }
     }
 }
 
-/// The same silent fallback, reached by a `mapping` value with no `/` or `#` in it. `cat.yaml` is a
-/// relative file reference and also a legal component name (`^[a-zA-Z0-9.\-_]+$`); the
-/// specification leaves such a value implementation-defined and recommends reading it as a name,
-/// which spargen does. Read as a name it names no member here — the member is the file
-/// `$ref: 'cat.yaml'`, which has no component name — so, unrejected, it generated with the member's
-/// tag silently replaced by `PetVariant0`. A value naming a declared component that is not a member
-/// (`Bird`), or no component at all (`Ghost`), matches nothing for the same reason. Every value must
-/// name one of the union's members, as `defaultMapping`'s already must.
+/// A `mapping` value with no `/` or `#` in it is read as a component name, as the specification
+/// recommends for a value that is also a legal relative reference (`cat.yaml`). Read that way it
+/// names a schema the description does not hold even when a member is the file `$ref: 'cat.yaml'`,
+/// so it is `E004` at the entry — as is a name nothing declares (`Ghost`) — while a declared
+/// component that is not a member (`Bird`, in either spelling) is `E007` at the entry. Before
+/// either rejection the member's tag was silently replaced by an invented one. `./cat.yaml` is the
+/// unambiguous file spelling, and it names the file member.
 #[test]
-fn e007_discriminator_mapping_value_that_names_no_member() {
+fn a_discriminator_mapping_value_naming_no_member_is_rejected_at_the_entry() {
     let root = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -6090,13 +6304,7 @@ components:
 "##;
     let cat = "type: object\nproperties: { kind: { type: string }, purr: { type: string } }\n\
                required: [kind]\n";
-    let cases = [
-        ("cat.yaml", "cat.yaml"),
-        ("#/components/schemas/Cat", "Bird"),
-        ("#/components/schemas/Cat", "Ghost"),
-        ("#/components/schemas/Cat", "#/components/schemas/Bird"),
-    ];
-    for (member, target) in cases {
+    let run = |member: &str, target: &str| {
         let temp = tempfile::tempdir().unwrap();
         let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
         std::fs::write(
@@ -6107,6 +6315,21 @@ components:
         std::fs::write(dir.join("cat.yaml"), cat).unwrap();
         let generated = spargen::generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
         let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let code = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
+        (generated, checked, code)
+    };
+    let rejected = [
+        ("cat.yaml", "cat.yaml", Code::UnresolvedRef),
+        ("#/components/schemas/Cat", "Ghost", Code::UnresolvedRef),
+        ("#/components/schemas/Cat", "Bird", Code::NonDisjointUnion),
+        (
+            "#/components/schemas/Cat",
+            "#/components/schemas/Bird",
+            Code::NonDisjointUnion,
+        ),
+    ];
+    for (member, target, code) in rejected {
+        let (generated, checked, _) = run(member, target);
         for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_eq!(
                 report.outcome(),
@@ -6114,43 +6337,45 @@ components:
                 "{member} / {target} {entry}: {report:#?}"
             );
             assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::NonDisjointUnion
-                        && d.message.contains(&format!(
-                            "`discriminator.mapping` maps `meow` to `{target}`"
-                        ))
-                        && d.pointer.as_str() == "/components/schemas/Pet"),
-                "{member} / {target} {entry}: {report:#?}"
+                report.diagnostics().iter().any(|d| d.code == code
+                    && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/meow"
+                    && d.message.contains(&format!("`{target}`"))),
+                "{member} / {target} {entry}: {code:?} must sit at the entry: {report:#?}"
             );
         }
     }
 
-    // The member's own component name, bare or as a full pointer, is matched and generates.
-    for target in ["Cat", "#/components/schemas/Cat"] {
-        let spec = root
-            .replace("MEMBER", "#/components/schemas/Cat")
-            .replace("TARGET", target);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+    // The member's own name, bare or as a pointer, and the file member's unambiguous spelling are
+    // matched to their member and supply its tag.
+    for (member, target) in [
+        ("#/components/schemas/Cat", "Cat"),
+        ("#/components/schemas/Cat", "#/components/schemas/Cat"),
+        ("cat.yaml", "./cat.yaml"),
+    ] {
+        let (generated, checked, code) = run(member, target);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_ne!(
                 report.outcome(),
                 Outcome::Rejected,
-                "{target} {entry}: {report:#?}"
+                "{member} / {target} {entry}: {report:#?}"
             );
             assert!(
-                !has_code(&report, Code::NonDisjointUnion),
-                "{target} {entry}: {report:#?}"
+                !has_code(report, Code::NonDisjointUnion) && !has_code(report, Code::UnresolvedRef),
+                "{member} / {target} {entry}: {report:#?}"
             );
         }
+        assert!(
+            code.contains("\"meow\" => {"),
+            "{member} / {target}: the mapped tag must dispatch\n{code}"
+        );
     }
 }
 
 /// A union declared in a sub-file whose members are that file's own deep pointers
 /// (`#/components/schemas/Envelope/properties/cat`) generated before the root document's same-file
 /// deep pointers resolved, and it keeps the output it had: each member is named from its pointer
-/// text, and a `mapping` value spelled the same way is matched to it and supplies its tag. Only the
-/// root spelling, which used to reject, derives no name.
+/// text, and a `mapping` value spelled the same way resolves, relative to the sub-file it is
+/// written in, to that member and supplies its tag.
 #[test]
 fn a_sub_file_union_of_deep_pointer_members_keeps_its_names_and_mapping() {
     let root = r##"

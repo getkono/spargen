@@ -428,6 +428,28 @@ struct UnionSibling {
     speaks_about_null: bool,
 }
 
+/// Whether a Discriminator Object value is a schema *name* rather than a URI reference: a
+/// non-empty string of the characters a Components Object key may hold (`^[a-zA-Z0-9.\-_]+$`).
+/// The specification recommends reading a value that is both a valid name and a valid relative
+/// reference (`Cat`, `pets.yaml`) as a name, and asks authors to write `./pets.yaml` to mean the
+/// file — which the `/` here excludes.
+fn is_schema_component_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+/// A union's Discriminator Object resolved against the union's own members: every `mapping`
+/// entry's tag with the index (into the union's real, non-null members) of the member it names, in
+/// document order, and the member `defaultMapping` names. Built by
+/// [`LowerCtx::discriminator_members`], which rejects any entry naming a schema that does not
+/// exist or is not a member, so every index here is a member.
+struct DiscriminatorMembers {
+    mapping: Vec<(String, usize)>,
+    default: Option<usize>,
+}
+
 struct LowerCtx<'a, 'doc> {
     document: &'doc Document,
     resolver: &'a Resolver<'doc>,
@@ -1467,6 +1489,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The union's overall acceptance needs both; only the rescues below need them apart.
         let mut nullable = null_from_type_array || null_from_member;
 
+        // Every schema the discriminator names is checked against the members before any path
+        // below can return. The collapses do not build a discriminated dispatch at all, so a check
+        // made only where one is built dropped a dangling or non-member mapping entry there
+        // without looking at it. Resolution here reads identities, not schemas, so it lowers
+        // nothing and cannot reorder what the members lower to.
+        let discriminator_members = match &schema.discriminator {
+            Some(discriminator) => Some(self.discriminator_members(discriminator, &real_members)?),
+            None => None,
+        };
+
         // Only null members remained: the exact JSON null type.
         if real_members.is_empty() {
             return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
@@ -1636,6 +1668,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // the union def below), recording the `$ref` component name for tag/variant naming.
         let mut variants: Vec<UnionVariant> = Vec::new();
         let mut ref_names: Vec<Option<String>> = Vec::new();
+        // The real member each variant came from: sibling keywords can exclude a member, so a
+        // variant's position is not its member's.
+        let mut variant_members: Vec<usize> = Vec::new();
         let mut used_hints: HashSet<String> = HashSet::new();
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
@@ -1710,6 +1745,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             variants.push(UnionVariant { name_hint, ty });
             ref_names.push(ref_name);
+            variant_members.push(index);
         }
 
         if variants.is_empty() {
@@ -1737,61 +1773,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(ty);
         }
 
-        let strategy = if let Some(discriminator) = &schema.discriminator {
-            // A `mapping` value is matched to a member by component name (see
-            // `discriminated_strategy`), so one that names none of this union's members is ignored
-            // there, and a member it was written for takes an invented tag on the wire. That covers
-            // every spelling that is not a member's component name: a pointer into a component
-            // (`#/components/schemas/Envelope/properties/payload`), a file reference with or without
-            // a path separator (`./lib.yaml#/…`, or `cat.yaml` — also a legal component name, and
-            // read as one, as the specification recommends for a value that is both), and a
-            // component that is not a member. Refuse it rather than ignore it, as `defaultMapping`
-            // below is refused. Members are read as written, so a mapping for a member the sibling
-            // keywords removed (with `W011`) still names a member. A deep pointer written in a
-            // sub-file keeps its pointer text as its name (see `member_component_name`), so a
-            // `mapping` value spelled the same way there still matches it.
-            let root = self.resolver.root_id();
-            let members: Vec<&str> = real_members
-                .iter()
-                .filter_map(|member| member_component_name(member, root))
-                .collect();
-            if let Some((tag, target)) = discriminator.mapping.iter().find(|(_, target)| {
-                let name = target
-                    .strip_prefix("#/components/schemas/")
-                    .unwrap_or(target);
-                !members.contains(&name)
-            }) {
-                return self.reject_union(
-                    schema,
-                    &format!(
-                        "`discriminator.mapping` maps `{tag}` to `{target}`, which names none of \
-                         this union's members by component name — it is a pointer into a \
-                         component, a file reference, or a component that is not a member — so it \
-                         cannot be matched to a member and the tag it declares would not be the \
-                         one on the wire"
-                    ),
-                );
-            }
-            // A `defaultMapping` that names a schema outside this union describes a fallback
-            // branch the generated enum does not have, so it cannot be quietly downgraded to
-            // another dispatch strategy.
-            if let Some(target) = &discriminator.default_mapping {
-                let bare = target
-                    .strip_prefix("#/components/schemas/")
-                    .unwrap_or(target);
-                if !ref_names.iter().any(|name| name.as_deref() == Some(bare)) {
-                    return self.reject_union(
-                        schema,
-                        &format!(
-                            "`discriminator.defaultMapping` names `{target}`, which is not one of \
-                             this union's members, so there is no branch to fall back to"
-                        ),
-                    );
+        let strategy = if let (Some(discriminator), Some(resolved)) =
+            (&schema.discriminator, &discriminator_members)
+        {
+            // `discriminator_members` already refused a `defaultMapping` naming a non-member. A
+            // member the enclosing schema's sibling keywords excluded (`W011`) is the one way left
+            // for it to have no variant, and a fallback to a branch the enum does not have cannot
+            // be quietly downgraded to another dispatch strategy either.
+            let default_variant = match resolved.default {
+                None => None,
+                Some(member) => {
+                    let Some(variant) = variant_members.iter().position(|&m| m == member) else {
+                        return self.reject_union(
+                            schema,
+                            "`discriminator.defaultMapping` names a member that the enclosing \
+                             schema's own sibling keywords exclude, so there is no branch to fall \
+                             back to",
+                        );
+                    };
+                    Some(variant)
                 }
-            }
-            self.discriminated_strategy(&variants, &ref_names, discriminator)
-                .or_else(|| self.disjoint_strategy(&variants))
-                .unwrap_or_else(|| self.trial_strategy(&variants, mode))
+            };
+            self.discriminated_strategy(
+                &variants,
+                &ref_names,
+                &variant_members,
+                &discriminator.property_name,
+                resolved,
+                default_variant,
+            )
+            .or_else(|| self.disjoint_strategy(&variants))
+            .unwrap_or_else(|| self.trial_strategy(&variants, mode))
         } else {
             self.disjoint_strategy(&variants)
                 .unwrap_or_else(|| self.trial_strategy(&variants, mode))
@@ -1872,18 +1884,143 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some((ty, None))
     }
 
+    /// Resolve every schema a union's Discriminator Object names — each `mapping` value, then
+    /// `defaultMapping` — to the union member it denotes.
+    ///
+    /// A value is a component name or a URI reference. The specification recommends reading a value
+    /// that could be either as a name, and a name is exactly a Components Object key, so a value
+    /// made only of key characters is `#/components/schemas/<value>` and anything else is a
+    /// reference, written relative to the file the discriminator sits in. The two sides are compared
+    /// by resolved `file#pointer` ([`Self::schema_reference_identity`]), never by spelling, so
+    /// `Cat`, `#/components/schemas/Cat` and `./openapi.yaml#/components/schemas/Cat` all name one
+    /// member. Only `$ref` members can be named: the specification excludes inline members from
+    /// name mapping.
+    ///
+    /// Every entry is checked, and each failure is reported at the entry itself: one naming no
+    /// schema the loaded description holds is `E004`, like any other reference that cannot be
+    /// followed; one naming a schema the union does not list is `E007`, because the tag it describes
+    /// has no variant to decode into and the specification requires every possible schema to be
+    /// listed beside the discriminator.
+    fn discriminator_members(
+        &mut self,
+        discriminator: &super::Discriminator,
+        members: &[&SchemaOr],
+    ) -> Option<DiscriminatorMembers> {
+        let member_identities: Vec<_> = members
+            .iter()
+            .map(|member| match member {
+                SchemaOr::Schema(schema) => schema.reference.as_deref().and_then(|reference| {
+                    self.schema_reference_identity(reference, &schema.provenance)
+                }),
+                SchemaOr::Bool(_) => None,
+            })
+            .collect();
+        let entries = discriminator
+            .mapping
+            .iter()
+            .map(|(tag, target)| (Some(tag), target))
+            .chain(
+                discriminator
+                    .default_mapping
+                    .iter()
+                    .map(|target| (None, target)),
+            );
+        let mut resolved = DiscriminatorMembers {
+            mapping: Vec::new(),
+            default: None,
+        };
+        let mut failed = false;
+        for (tag, target) in entries {
+            let entry = match tag {
+                Some(tag) => format!("`discriminator.mapping` entry `{tag}`"),
+                None => "`discriminator.defaultMapping`".to_owned(),
+            };
+            let value = &target.value;
+            let reference = if is_schema_component_name(value) {
+                format!("#/components/schemas/{value}")
+            } else {
+                value.clone()
+            };
+            let Some(identity) = self
+                .schema_reference_identity(&reference, &target.provenance)
+                .filter(|(file, pointer)| self.resolver.node_at(*file, pointer).is_some())
+            else {
+                Diagnostic::error(Code::UnresolvedRef, target.provenance.clone())
+                    .message(format!(
+                        "{entry} names `{value}`, which is not a schema in the loaded description"
+                    ))
+                    .remedy(
+                        "declare the schema, correct the name or reference, or remove the entry",
+                    )
+                    .emit(self.diags);
+                failed = true;
+                continue;
+            };
+            let Some(member) = member_identities
+                .iter()
+                .position(|member| member.as_ref() == Some(&identity))
+            else {
+                let consequence = match tag {
+                    Some(tag) => format!("a payload tagged `{tag}` has no variant to decode into"),
+                    None => "there is no branch to fall back to".to_owned(),
+                };
+                Diagnostic::error(Code::NonDisjointUnion, target.provenance.clone())
+                    .message(format!(
+                        "{entry} names `{value}`, which is not one of this union's `$ref` \
+                         members, so {consequence}"
+                    ))
+                    .remedy(
+                        "list the schema as a `$ref` member of the union beside the \
+                         discriminator, or remove the entry",
+                    )
+                    .emit(self.diags);
+                failed = true;
+                continue;
+            };
+            match tag {
+                Some(tag) => resolved.mapping.push((tag.clone(), member)),
+                None => resolved.default = Some(member),
+            }
+        }
+        (!failed).then_some(resolved)
+    }
+
+    /// The `file#pointer` a schema `$ref` written at `at` resolves to, answered the way lowering
+    /// resolves it: a `#/components/schemas/<name>` the root document declares is the root's
+    /// component wherever it is written — [`Self::ensure_component`] consults the root map first —
+    /// and every other reference is the bundle's own answer. Reads no schema and emits nothing.
+    fn schema_reference_identity(
+        &self,
+        reference: &str,
+        at: &Provenance,
+    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+        let root_component = reference
+            .strip_prefix("#/components/schemas/")
+            .is_some_and(|name| self.document.components.schemas.contains_key(name));
+        if root_component {
+            return self
+                .resolver
+                .reference_identity_from(reference, self.resolver.root_id());
+        }
+        self.resolver.reference_identity(reference, at)
+    }
+
     /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its
-    /// unique JSON category. The tag value comes from `discriminator.mapping` (matched by `$ref`)
-    /// when present, otherwise from the variant's own `$ref` component name.
+    /// unique JSON category. The tag value comes from the first `discriminator.mapping` entry naming
+    /// the variant's member when there is one, otherwise from the variant's own `$ref` component
+    /// name.
     fn discriminated_strategy(
         &self,
         variants: &[UnionVariant],
         ref_names: &[Option<String>],
-        discriminator: &super::Discriminator,
+        variant_members: &[usize],
+        tag_field: &str,
+        discriminator: &DiscriminatorMembers,
+        default_variant: Option<usize>,
     ) -> Option<UnionStrategy> {
         let mut tags = Vec::new();
         let mut categories = Vec::new();
-        for (variant, ref_name) in variants.iter().zip(ref_names) {
+        for ((variant, ref_name), member) in variants.iter().zip(ref_names).zip(variant_members) {
             if !matches!(
                 self.graph.get(variant.ty.id).map(|def| &def.kind),
                 Some(TypeKind::Struct(_))
@@ -1896,46 +2033,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 categories.push(Some(category));
                 continue;
             }
-            // Prefer an explicit mapping entry that points at this variant's component; fall back to
-            // the component name (implicit mapping). A mapping value may be a bare name or a full
-            // `#/components/schemas/Name` pointer.
-            let tag = ref_name
-                .as_ref()
-                .and_then(|name| {
-                    discriminator
-                        .mapping
-                        .iter()
-                        .find(|(_, target)| {
-                            target.as_str() == name
-                                || target.strip_prefix("#/components/schemas/") == Some(name)
-                        })
-                        .map(|(key, _)| key.clone())
-                        .or_else(|| Some(name.clone()))
-                })
+            // Prefer an explicit mapping entry naming this variant's member — already resolved by
+            // identity, so its spelling does not matter; fall back to the component name (implicit
+            // mapping), then to the variant's own hint.
+            let tag = discriminator
+                .mapping
+                .iter()
+                .find(|(_, named)| named == member)
+                .map(|(tag, _)| tag.clone())
+                .or_else(|| ref_name.clone())
                 .unwrap_or_else(|| variant.name_hint.clone());
             tags.push(Some(tag));
             categories.push(None);
         }
-        // 3.2 `defaultMapping` names the schema to fall back to when the tag is absent or
-        // unrecognized. It must name one of this union's own variants; anything else describes a
-        // branch that does not exist.
-        let default_variant = match &discriminator.default_mapping {
-            None => None,
-            Some(target) => {
-                let bare = target
-                    .strip_prefix("#/components/schemas/")
-                    .unwrap_or(target);
-                // A fallback naming a non-member is rejected by the caller, which owns the
-                // union's provenance; here it simply means there is no discriminated strategy.
-                Some(
-                    ref_names
-                        .iter()
-                        .position(|name| name.as_deref() == Some(bare))?,
-                )
-            }
-        };
         Some(UnionStrategy::Discriminated {
-            tag_field: discriminator.property_name.clone(),
+            tag_field: tag_field.to_owned(),
             tags,
             categories,
             default_variant,
@@ -5174,8 +5286,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 }
 
 /// The component name a union member is written as — `$ref: '#/components/schemas/<name>'` — or
-/// `None`. It names the member's variant and implicit discriminator tag, and it is what a
-/// `discriminator.mapping` value is matched against. Written in the root document, a name with a
+/// `None`. It names the member's variant and implicit discriminator tag; an explicit
+/// `discriminator.mapping` value is matched by resolved target instead
+/// ([`LowerCtx::discriminator_members`]). Written in the root document, a name with a
 /// raw `/` is a pointer *into* a component, not a component name: it has none to derive a variant
 /// or a tag from, exactly as the same pointer written against a relative file has none, and neither
 /// has any file reference.
@@ -5183,9 +5296,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// Written in a sub-file, the same spelling keeps the name it has always had. That route resolved
 /// through the resolver before same-file deep pointers did in the root, and its members were named
 /// from the pointer text (`Envelope/properties/cat` → variant `EnvelopePropertiesCat`, implicit tag
-/// `Envelope/properties/cat`), with a `mapping` value spelled the same way matched to them. Dropping
-/// the name there would rename those variants and reject those mappings with `E007` in documents
-/// that generate today; the root-only filter confines the change to what previously rejected.
+/// `Envelope/properties/cat`). Dropping the name there would rename those variants and their
+/// implicit tags in documents that generate today; the root-only filter confines the change to what
+/// previously rejected.
 fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option<&str> {
     let SchemaOr::Schema(schema) = member else {
         return None;

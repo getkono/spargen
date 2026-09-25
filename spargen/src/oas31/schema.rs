@@ -211,11 +211,24 @@ pub(crate) enum JsonType {
 pub(crate) struct Discriminator {
     /// `propertyName`.
     pub(crate) property_name: String,
-    /// `mapping`: discriminator value → schema name/`$ref`.
-    pub(crate) mapping: IndexMap<String, String>,
+    /// `mapping`: discriminator value → the schema it names.
+    pub(crate) mapping: IndexMap<String, DiscriminatorTarget>,
     /// OpenAPI 3.2 `defaultMapping`: the schema to use when the discriminating property is absent
     /// or carries a value with no mapping.
-    pub(crate) default_mapping: Option<String>,
+    pub(crate) default_mapping: Option<DiscriminatorTarget>,
+}
+
+/// One schema a Discriminator Object names — a `mapping` value or the `defaultMapping` — as a
+/// schema name or a URI reference, with the provenance of the entry itself. Each is a reference
+/// lowering must resolve against the union's members, and a diagnostic about one belongs at the
+/// entry, not at the union around it.
+#[derive(Debug, Clone)]
+pub(crate) struct DiscriminatorTarget {
+    /// The value as written: a component name (`Cat`) or a URI reference
+    /// (`#/components/schemas/Cat`, `./pets.yaml#/Cat`).
+    pub(crate) value: String,
+    /// Where the value sits (`…/discriminator/mapping/cat`, `…/discriminator/defaultMapping`).
+    pub(crate) provenance: Provenance,
 }
 
 /// The validation-only JSON Schema keywords spargen retains but does not enforce at runtime

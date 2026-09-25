@@ -1261,34 +1261,82 @@ fn parse_schema_array(
         .collect()
 }
 
+/// Parse a Discriminator Object. Every field it carries is load-bearing — the tag field, and the
+/// schemas the tags name — so a field of the wrong shape is a malformed document (`E011`) at that
+/// field rather than something to read leniently: a missing `propertyName` used to become the empty
+/// tag field, and a non-string mapping value used to vanish from the map with nothing said.
 fn parse_discriminator(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,
 ) -> Option<Discriminator> {
     let _ = object(value, pointer, diags)?;
+    let mut malformed = false;
+    let property_name = required(value, "propertyName", pointer, diags).and_then(|name| {
+        let name = expect_string(name, &pointer.push("propertyName"), diags);
+        malformed |= name.is_none();
+        name
+    });
+    let default_mapping = value.get("defaultMapping").and_then(|target| {
+        let pointer = pointer.push("defaultMapping");
+        let parsed = discriminator_target(target, &pointer, diags);
+        malformed |= parsed.is_none();
+        parsed
+    });
+    let mut mapping = IndexMap::new();
+    if let Some(map) = value.get("mapping") {
+        let map_pointer = pointer.push("mapping");
+        match object(map, &map_pointer, diags) {
+            Some(map) => {
+                for (key, target) in map.iter() {
+                    match discriminator_target(target, &map_pointer.push(&key.name), diags) {
+                        Some(target) => {
+                            mapping.insert(key.name.clone(), target);
+                        }
+                        None => malformed = true,
+                    }
+                }
+            }
+            None => malformed = true,
+        }
+    }
+    let property_name = property_name?;
+    if malformed {
+        return None;
+    }
     Some(Discriminator {
-        property_name: value
-            .get("propertyName")
-            .and_then(string)
-            .unwrap_or_default()
-            .to_owned(),
-        default_mapping: value
-            .get("defaultMapping")
-            .and_then(string)
-            .map(str::to_owned),
-        mapping: value
-            .get("mapping")
-            .and_then(SpannedValue::as_object)
-            .map(|map| {
-                map.iter()
-                    .filter_map(|(key, value)| {
-                        string(value).map(|value| (key.name.clone(), value.to_owned()))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default(),
+        property_name: property_name.to_owned(),
+        default_mapping,
+        mapping,
     })
+}
+
+/// A `mapping` value or `defaultMapping`: a string naming a schema, kept with its own provenance.
+fn discriminator_target(
+    value: &SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<super::schema::DiscriminatorTarget> {
+    let target = expect_string(value, pointer, diags)?;
+    Some(super::schema::DiscriminatorTarget {
+        value: target.to_owned(),
+        provenance: provenance(pointer, value),
+    })
+}
+
+/// The string at `value`, or `E011` at `pointer` when it is not one.
+fn expect_string<'a>(
+    value: &'a SpannedValue,
+    pointer: &JsonPointer,
+    diags: &mut Diagnostics,
+) -> Option<&'a str> {
+    let found = string(value);
+    if found.is_none() {
+        Diagnostic::error(Code::InvalidInput, provenance(pointer, value))
+            .message("expected a string")
+            .emit(diags);
+    }
+    found
 }
 
 /// Parse the OpenAPI `xml` object. Malformed shapes (a non-object `xml`) yield `None`; individual
