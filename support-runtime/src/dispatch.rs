@@ -1470,8 +1470,13 @@ mod tests {
         Status202(Accepted),
     }
 
-    /// Mirror of the generated per-status success dispatch: read once, select the variant whose
-    /// selector matches (vec order = precedence), decode into it, else an undocumented-success error.
+    /// A hand-written stand-in shaped like the generated per-status success dispatch: read once,
+    /// select the variant whose selector matches (arm order = precedence), decode into it, else an
+    /// undocumented-success error. Nothing ties it to the emitter's template: the tests over it pin
+    /// the runtime primitives it calls (`read_success_body`, `StatusSpec::matches`) and nothing
+    /// more. The emitted dispatch itself is driven over HTTP in `spargen/tests/e2e.rs`
+    /// (`success_dispatch_takes_the_exact_arm_before_an_overlapping_range`,
+    /// `a_bodyless_success_beside_one_body_is_its_own_variant`).
     fn dispatch_success(
         response: reqwest::Response,
     ) -> Result<ResponseValue<SuccessEnum>, Error<Infallible>> {
@@ -1555,9 +1560,12 @@ mod tests {
         Status4xx(ClientError),
     }
 
-    /// Mirror of the generated per-status error classification: read capped, select by status (exact
-    /// before range), decode → `Api`; a parse failure → `Decode`; an undocumented status →
-    /// `UnexpectedStatus`.
+    /// A hand-written stand-in shaped like the generated per-status error classification: read
+    /// capped, select by status (exact before range), decode → `Api`; a parse failure → `Decode`;
+    /// an undocumented status → `UnexpectedStatus`. Like `dispatch_success`, it pins the runtime
+    /// primitives (`read_error_body`, `StatusSpec::matches`), not the emitter; the emitted
+    /// classification is driven over HTTP in `spargen/tests/e2e.rs`
+    /// (`error_dispatch_takes_the_exact_arm_before_an_overlapping_range`).
     fn dispatch_error(response: reqwest::Response) -> Error<ApiError> {
         let core = core();
         let (status, headers, body, truncated) =
