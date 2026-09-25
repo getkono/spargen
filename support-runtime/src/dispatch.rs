@@ -300,7 +300,9 @@ where
 
 /// Decode a raw UTF-8 success body as the JSON string value described by a textual OpenAPI media
 /// type. Converting through `Value::String` keeps generated string enums and string formats typed
-/// while avoiding JSON's quote requirement on the wire.
+/// while avoiding JSON's quote requirement on the wire. An empty body is decoded like any other
+/// (see [`decode_text_body`]): `String` yields `""`, a typed value with no empty member yields
+/// [`Error::Decode`].
 pub async fn decode_success_text<T>(
     core: &ClientCore,
     response: Response,
@@ -338,6 +340,13 @@ pub async fn decode_success_bytes(
 
 /// Deserialize a raw UTF-8 body through a JSON string value. Exposed to the generated shim so
 /// multi-status response variants use exactly the same textual codec as single-body responses.
+///
+/// An empty body is the zero-length text and is not special-cased: it becomes
+/// `Value::String("")`, so `T = String` decodes it to `""` by design, and a typed `T` (a string
+/// enum or format) accepts it only if `""` is one of its values. This is unlike the JSON and XML
+/// codecs, where an empty body is not a document and always fails. Only a status that documents
+/// a textual body reaches this codec; a documented bodyless status is a unit variant of the
+/// response enum and is never decoded.
 pub fn decode_text_body<T>(body: &[u8]) -> Result<T, String>
 where
     T: DeserializeOwned,
@@ -1356,6 +1365,35 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(value.into_inner(), "<p>raw</p>");
+    }
+
+    /// An empty body under a status that documents a textual body is the zero-length text, so
+    /// `String` decodes it to `""` on purpose (#126) — while a typed text value (a string enum or
+    /// format) that has no empty member still fails with `Decode`, because the codec decodes the
+    /// empty text rather than special-casing it. A documented bodyless status never reaches this
+    /// codec: the response enum gives it a unit variant (#121).
+    #[test]
+    fn textual_codec_reads_an_empty_body_as_the_empty_string() {
+        assert_eq!(decode_text_body::<String>(b"").unwrap(), "");
+        assert!(decode_text_body::<TextChoice>(b"").is_err());
+
+        let value = poll_ready(decode_success_text::<String>(
+            &core(),
+            json_response(200, ""),
+        ))
+        .unwrap();
+        assert_eq!(value.into_inner(), "");
+
+        match poll_ready(decode_success_text::<TextChoice>(
+            &core(),
+            json_response(200, ""),
+        )) {
+            Err(Error::Decode { status, body, .. }) => {
+                assert_eq!(status.as_u16(), 200);
+                assert!(body.is_empty());
+            }
+            other => panic!("expected a Decode error, got {other:?}"),
+        }
     }
 
     #[test]

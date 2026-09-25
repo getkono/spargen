@@ -25,7 +25,8 @@ where
 
 /// Decode an XML success response body into `T`, wrapping it with status and headers. The XML
 /// analogue of [`crate::decode_success`]; a parse failure (invalid UTF-8 or malformed XML) becomes
-/// [`Error::Decode`] with the quick-xml error path and a body capped at `max_error_body`.
+/// [`Error::Decode`] with the quick-xml error path and a body capped at `max_error_body`. An empty
+/// body is not an XML document and is a parse failure too (see [`decode_xml_body`]).
 pub async fn decode_success_xml<T>(
     core: &ClientCore,
     response: Response,
@@ -90,6 +91,11 @@ where
 /// UTF-8 or a quick-xml parse error) suitable for [`Error::Decode`]'s `path`. The XML analogue of
 /// [`crate::decode_text_body`]: a multi-status success enum reads the body once and decodes the arm
 /// its status selects through this.
+///
+/// An empty body always fails, whatever `T` is: XML 1.0 requires a root element, so there is no
+/// empty document to decode. This differs from [`crate::decode_text_body`], which reads an empty
+/// body as the empty string. A documented bodyless status never reaches this codec; the response
+/// enum gives it a unit variant.
 pub fn decode_xml_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, String> {
     let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
     quick_xml::de::from_str::<T>(text).map_err(|error| error.to_string())
@@ -140,6 +146,19 @@ mod tests {
     #[test]
     fn malformed_xml_yields_a_nonempty_error_path() {
         let error = decode_xml_body::<Point>(&Bytes::from_static(b"not xml")).unwrap_err();
+        assert!(!error.is_empty());
+    }
+
+    /// An empty body is not an XML document (XML 1.0 `document` requires a root element), so a
+    /// status that documents an XML body and sends none is a decode failure, never a defaulted
+    /// value. A documented bodyless status never reaches this codec: the response enum gives it a
+    /// unit variant (#121). Pinned for both the struct shape generated XML bodies take and a bare
+    /// `String`, so the XML codec cannot quietly acquire the text codec's empty-string reading.
+    #[test]
+    fn an_empty_xml_body_is_a_decode_failure() {
+        let error = decode_xml_body::<Point>(b"").unwrap_err();
+        assert!(!error.is_empty());
+        let error = decode_xml_body::<String>(b"").unwrap_err();
         assert!(!error.is_empty());
     }
 
