@@ -289,6 +289,7 @@ where
         Err(error) => {
             let (body, truncated) = cap_body(body, core.config().max_error_body);
             Err(Error::Decode {
+                status,
                 path: error.to_string(),
                 body,
                 truncated,
@@ -315,6 +316,7 @@ where
         Err(path) => {
             let (body, truncated) = cap_body(body, core.config().max_error_body);
             Err(Error::Decode {
+                status,
                 path,
                 body,
                 truncated,
@@ -416,6 +418,7 @@ where
                 match serde_json::from_slice::<E>(&body) {
                     Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
                     Err(error) => Error::Decode {
+                        status,
                         path: error.to_string(),
                         body,
                         truncated,
@@ -450,6 +453,7 @@ where
                 match decode_text_body::<E>(&body) {
                     Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
                     Err(path) => Error::Decode {
+                        status,
                         path,
                         body,
                         truncated,
@@ -1395,6 +1399,49 @@ mod tests {
         assert_eq!(&body[..], br#"{"ok":true}"#);
     }
 
+    /// Every runtime helper that raises `Decode` keeps the status of the response it failed to
+    /// decode, so `Error::status()` answers it. Each response carries a status other than `200`,
+    /// so a hard-coded status cannot pass.
+    #[test]
+    fn every_decode_helper_keeps_the_response_status() {
+        use reqwest::StatusCode;
+
+        fn assert_decode_status<E: std::fmt::Debug>(error: Error<E>, expected: u16) {
+            match &error {
+                Error::Decode { status, .. } => assert_eq!(status.as_u16(), expected),
+                other => panic!("expected a Decode error, got {other:?}"),
+            }
+            assert_eq!(error.status(), StatusCode::from_u16(expected).ok());
+        }
+
+        let success = poll_ready(super::decode_success::<Created>(
+            &core(),
+            json_response(203, "not json"),
+        ));
+        assert_decode_status(success.unwrap_err(), 203);
+
+        let text = poll_ready(decode_success_text::<TextChoice>(
+            &core(),
+            json_response(206, "not a choice"),
+        ));
+        assert_decode_status(text.unwrap_err(), 206);
+
+        let documented = [StatusSpec::Exact(422)];
+        let error = poll_ready(super::classify_error::<Created>(
+            &core(),
+            json_response(422, "not json"),
+            &documented,
+        ));
+        assert_decode_status(error, 422);
+
+        let error = poll_ready(classify_error_text::<TextChoice>(
+            &core(),
+            json_response(422, "not a choice"),
+            &documented,
+        ));
+        assert_decode_status(error, 422);
+    }
+
     #[test]
     fn read_error_body_truncates_at_cap() {
         let mut core = core();
@@ -1432,6 +1479,7 @@ mod tests {
         if StatusSpec::Exact(200).matches(status) {
             let value =
                 serde_json::from_slice::<Created>(&body).map_err(|error| Error::Decode {
+                    status,
                     path: error.to_string(),
                     body: body.clone(),
                     truncated: false,
@@ -1445,6 +1493,7 @@ mod tests {
         if StatusSpec::Exact(202).matches(status) {
             let value =
                 serde_json::from_slice::<Accepted>(&body).map_err(|error| Error::Decode {
+                    status,
                     path: error.to_string(),
                     body: body.clone(),
                     truncated: false,
@@ -1485,8 +1534,9 @@ mod tests {
 
     #[test]
     fn success_dispatch_parse_failure_is_decode() {
-        let error = dispatch_success(json_response(200, "not json")).unwrap_err();
+        let error = dispatch_success(json_response(202, "not json")).unwrap_err();
         assert!(matches!(error, Error::Decode { .. }));
+        assert_eq!(error.status(), Some(reqwest::StatusCode::ACCEPTED));
     }
 
     // Stand-ins for a generated multi-status ERROR enum: an exact status plus a range that would
@@ -1523,6 +1573,7 @@ mod tests {
                     ApiError::Status409(value),
                 )),
                 Err(error) => Error::Decode {
+                    status,
                     path: error.to_string(),
                     body,
                     truncated,
@@ -1537,6 +1588,7 @@ mod tests {
                     ApiError::Status4xx(value),
                 )),
                 Err(error) => Error::Decode {
+                    status,
                     path: error.to_string(),
                     body,
                     truncated,
@@ -1588,6 +1640,7 @@ mod tests {
     fn error_dispatch_parse_failure_is_decode() {
         let error = dispatch_error(json_response(409, "not json"));
         assert!(matches!(error, Error::Decode { .. }));
+        assert_eq!(error.status(), Some(reqwest::StatusCode::CONFLICT));
     }
 
     // --- error-body cap fixtures -------------------------------------------------------------
