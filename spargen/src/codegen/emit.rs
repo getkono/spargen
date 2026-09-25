@@ -703,12 +703,15 @@ pub(crate) fn emit_operation(
                     Some(ty) => {
                         let body_ty = *ty;
                         let ty = response_payload_ty_tokens(body_ty, names, options, true);
+                        let media = response_media_for_spec(&operation.responses, *spec);
                         let decode = if is_bytes_ty(api, body_ty) {
                             quote! { Ok::<#ty, String>(Box::new(body.clone())) }
-                        } else if response_media_for_spec(&operation.responses, *spec)
-                            == Some(MediaType::Text)
-                        {
+                        } else if media == Some(MediaType::Text) {
                             quote! { support::decode_text_body::<#ty>(&body) }
+                        } else if media == Some(MediaType::Xml) {
+                            // Only as the lone body beside bodyless siblings: a second bodied
+                            // success beside an XML one is rejected (`xml_in_multi_status`).
+                            quote! { support::decode_xml_body::<#ty>(&body) }
                         } else {
                             quote! {
                                 serde_json::from_slice::<#ty>(&body)
@@ -2415,7 +2418,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
     // dependency audit require `quick-xml` of the consumer. A non-XML output never references it.
     let xml_module = uses_xml.then(|| embed(&crate::support::xml_runtime_file()));
     let xml_reexport = uses_xml.then(|| {
-        quote! { pub use xml::{classify_error_xml, decode_success_xml, to_xml}; }
+        quote! { pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml}; }
     });
     // The RFC 3339 newtypes are embedded only when a date-typed primitive survives lowering with the
     // `time` mapping enabled; only then does the audit require `time` of the consumer.

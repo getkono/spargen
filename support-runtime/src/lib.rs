@@ -88,4 +88,4 @@ pub use stream::{
 pub use transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
 pub use wasm::{MaybeSend, MaybeSync};
 #[cfg(feature = "xml")]
-pub use xml::{classify_error_xml, decode_success_xml, to_xml};
+pub use xml::{classify_error_xml, decode_success_xml, decode_xml_body, to_xml};
