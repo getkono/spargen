@@ -264,13 +264,18 @@ impl Responses {
             .is_some()
     }
 
-    /// Whether the operation's success response is a typed *stream* (`text/event-stream` or
-    /// `application/x-ndjson`), and if so its framing plus the streamed item type `T`. Streaming is
+    /// Whether the operation's success response is a typed *stream*, and if so its framing plus the
+    /// streamed item type `T`. A stream is a body lowered from a sequential media — any media whose
+    /// [`MediaType::stream_framing`] is `Some`: Server-Sent Events (`text/event-stream`), JSON Lines
+    /// (`application/x-ndjson`, `application/jsonl`), or JSON Text Sequences
+    /// (`application/json-seq`, `application/*+json-seq`). The returned framing may be any
+    /// [`Framing`] variant: an OpenAPI 3.2 `itemSchema` on `text/event-stream` yields
+    /// [`Framing::SseEvent`] or [`Framing::SseJsonData`] rather than [`Framing::Sse`]. Streaming is
     /// scoped to the single-success-body case: it fires only when exactly one success response
     /// carries a body and that body was lowered from a streaming media. The generated method then
-    /// returns `EventStream<T>` in place of `ResponseValue<T>`. A JSON alternative on the same
-    /// response wins during media selection (see `choose_media`), so it never reaches here as a
-    /// stream. A streaming body in any other position — beside a second bodied success, or on the
+    /// returns `EventStream<T>` in place of `ResponseValue<T>`. Media selection (`choose_media`)
+    /// ranks JSON above every streaming media, so a response that also offers a JSON alternative
+    /// lowers to that JSON body and never reaches here as a stream. A streaming body in any other position — beside a second bodied success, or on the
     /// error side — is rejected during lowering (see [`Self::stream_outside_single_success`]), so
     /// no generated operation decodes a stream as a whole body.
     pub(crate) fn stream_success(&self) -> Option<(Framing, Ty)> {

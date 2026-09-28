@@ -7548,28 +7548,95 @@ paths:
 fn json_alternative_wins_over_stream_media_on_same_response() {
     // When a response offers BOTH a whole-body (JSON) and a streaming alternative, media selection
     // deterministically picks JSON — the operation is a normal `ResponseValue<T>`, not a stream —
-    // and generation succeeds with no `E009`.
-    let spec = r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
+    // and generation succeeds with no `E009`, disclosing the passed-over stream as `W014`.
+    //
+    // A clean report alone cannot see the selection: a JSON-plus-stream response generates either
+    // way, so the fixture reads the emitted method. One case per streaming framing, each spelled the
+    // way its version lowers it to a stream (3.1 `schema`, 3.2 `itemSchema`), with the stream both
+    // before and after the JSON key, so neither source order nor framing decides the winner. The
+    // control drops the JSON key and requires `EventStream<T>`, proving each stream spelling does
+    // lower to a stream here — without it, "no `EventStream`" would hold for a stream that simply
+    // never classified.
+    let json = "application/json:\n              \
+                schema: { type: object, required: [id], properties: { id: { type: string } } }";
+    for (version, keyword) in [("3.1.0", "schema"), ("3.2.0", "itemSchema")] {
+        for media in [
+            "text/event-stream",
+            "application/x-ndjson",
+            "application/json-seq",
+        ] {
+            let stream = format!("{media}:\n              {keyword}: {{ type: object }}");
+            for (first, second) in [(&stream as &str, json), (json, &stream as &str)] {
+                let spec = format!(
+                    r##"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
 paths:
   /both:
     get:
+      operationId: getBoth
       responses:
         "200":
           description: OK
           content:
-            text/event-stream:
-              schema: { type: object }
-            application/json:
-              schema: { type: object, required: [id], properties: { id: { type: string } } }
-"##;
-    let report = generate(spec);
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        !has_code(&report, Code::UnsupportedMediaType),
-        "{report:#?}"
-    );
+            {first}
+            {second}
+"##
+                );
+                let (report, code) = generate_with_code(&spec);
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{media} {version}: {report:#?}"
+                );
+                assert!(
+                    !has_code(&report, Code::UnsupportedMediaType),
+                    "{media} {version}: {report:#?}"
+                );
+                assert_eq!(
+                    messages_for(&report, Code::AlternativeMediaIgnored),
+                    [format!(
+                        "`application/json` is generated; the alternative media type(s) \
+                         `{media}` are not"
+                    )],
+                    "{media} {version}: {report:#?}"
+                );
+                let client = types_module(&code);
+                assert!(
+                    !client.contains("EventStream<"),
+                    "{media} {version}: the stream was selected over JSON: {client}"
+                );
+                // The success value is the JSON schema's type — the one declaring `id` — and not
+                // the stream's open object.
+                let flat: String = client.split_whitespace().collect();
+                assert!(
+                    flat.contains(
+                        "pubasyncfnget_both(&self,)->Result<support::ResponseValue<types::ResponseBody>,"
+                    ),
+                    "{media} {version}: the JSON body is not the success value: {client}"
+                );
+                assert_eq!(
+                    field_owner(&client, "pub id:").as_deref(),
+                    Some("ResponseBody"),
+                    "{media} {version}: {client}"
+                );
+
+                // Drop the JSON key together with the indentation of the line it sits on.
+                let control = spec.replace(&format!("\n            {json}"), "");
+                assert_ne!(control, spec, "the control must drop the JSON alternative");
+                let (report, code) = generate_with_code(&control);
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{media} {version}: {report:#?}"
+                );
+                assert!(
+                    types_module(&code).contains("EventStream<"),
+                    "{media} {version}: the control did not stream: {code}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
