@@ -16694,6 +16694,34 @@ fn placement_fixtures() -> Vec<Placement> {
             split_at: "/paths/~1pet/get/parameters/0",
             rejects: true,
         },
+        // In 3.1 a Parameter's and a Header's `examples` are admitted only under the
+        // `dependentSchemas: { schema: … }` branch of their definitions, so this is the one route
+        // by which validation reaches a Reference there.
+        Placement {
+            name: "OpenAPI 3.1 Parameter Example with an unknown field",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet",
+                "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string" },
+                "examples": { "a": { "value": "x", "bogus": 1 } } }],
+                "responses": { "200": { "description": "ok" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/parameters/0/examples/a",
+            rejects: true,
+        },
+        Placement {
+            name: "OpenAPI 3.1 Header Example with an unknown field",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": { "200": {
+                "description": "ok", "headers": { "X-Rate": { "schema": { "type": "integer" },
+                "examples": { "a": { "value": 1, "bogus": 1 } } } } } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/responses/200/headers/X-Rate/examples/a",
+            rejects: true,
+        },
         Placement {
             name: "Request Body without `content`",
             document: placement_document(
