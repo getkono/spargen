@@ -10151,6 +10151,94 @@ components:
     );
 }
 
+#[test]
+fn multi_status_enum_precedence_emits_exact_and_range_arms_in_ascending_order() {
+    // Issue #138: every selector class is listed in DESCENDING document order — the exact
+    // successes, the exact errors, and the two error ranges — with `default` first. A key that
+    // orders only by class keeps document order within each class, so only the emitted arm order
+    // below tells ascending from document order. `4XX` and `5XX` are the only two ranges one sort
+    // can hold (`2XX` is the lone success range), so the error chain is where "range ascending" is
+    // observable at all.
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec_path,
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /p:
+    get:
+      operationId: getP
+      responses:
+        default:
+          description: Other
+          content: { application/json: { schema: { $ref: "#/components/schemas/Other" } } }
+        "201":
+          description: Created
+          content: { application/json: { schema: { $ref: "#/components/schemas/Created" } } }
+        "200":
+          description: Ok
+          content: { application/json: { schema: { $ref: "#/components/schemas/Ok" } } }
+        "5XX":
+          description: ServerErr
+          content: { application/json: { schema: { $ref: "#/components/schemas/ServerErr" } } }
+        "4XX":
+          description: ClientErr
+          content: { application/json: { schema: { $ref: "#/components/schemas/ClientErr" } } }
+        "409":
+          description: Conflict
+          content: { application/json: { schema: { $ref: "#/components/schemas/Conflict" } } }
+        "404":
+          description: Missing
+          content: { application/json: { schema: { $ref: "#/components/schemas/Missing" } } }
+components:
+  schemas:
+    Other: { type: object, properties: { o: { type: string } } }
+    Created: { type: object, properties: { c: { type: string } } }
+    Ok: { type: object, properties: { k: { type: string } } }
+    ServerErr: { type: object, properties: { s: { type: string } } }
+    ClientErr: { type: object, properties: { l: { type: string } } }
+    Conflict: { type: object, properties: { f: { type: string } } }
+    Missing: { type: object, properties: { m: { type: string } } }
+"##,
+    )
+    .unwrap();
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(&build(
+        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
+        Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
+    ));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+
+    let code = std::fs::read_to_string(&out).unwrap();
+    let at = |selector: &str| {
+        assert_eq!(
+            code.matches(selector).count(),
+            1,
+            "{selector} must appear exactly once, as its dispatch arm"
+        );
+        code.find(selector).unwrap()
+    };
+    // Success dispatch: 200 before 201, though the document lists 201 first.
+    assert!(
+        at("Exact(200u16)") < at("Exact(201u16)"),
+        "exact successes must dispatch in ascending code order"
+    );
+    // Error classification: 404 < 409 < 4XX < 5XX, each listed after its successor in the document.
+    let errors = [
+        at("Exact(404u16)"),
+        at("Exact(409u16)"),
+        at("Range(4u8)"),
+        at("Range(5u8)"),
+    ];
+    assert!(
+        errors.is_sorted(),
+        "error arms must be exact ascending, then range ascending: {errors:?}"
+    );
+}
+
 /// Build an OpenAPI document whose components form a chain `S0 -> S1 -> ... -> S{depth}`, where each
 /// `S{i}` composes the next via `allOf: [{ $ref: S{i+1} }]` and `S{depth}` is a plain string. Every
 /// component is parsed shallowly, so this defeats the parser's own nesting cap and forces lowering
