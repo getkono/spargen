@@ -8442,10 +8442,10 @@ fn e013_fires_when_a_ref_sibling_contradicts_its_target() {
 
 /// `intersect_types` returns `None` for TWO conditions: the intersection is empty, so no value
 /// satisfies both sides, and the intersection is inhabited but has no single Rust type (the catch-all
-/// in `intersect_non_null` — `Bytes` against a primitive, an array against a tuple). The emitted
-/// message must not claim the first when it may be the second: `{$ref: Data, format: binary}` over a
-/// string `Data` is satisfied by any string, and the `E013` explain and the `allOf` scalar site both
-/// already say "empty or unrepresentable". This pins the site to the same honest wording. It asserts
+/// in `intersect_non_null` — `Bytes` against a `uuid` or date string, say). The emitted message must
+/// not claim the first when it may be the second: `{$ref: Id, contentEncoding: base64}` over a
+/// `uuid` string `Id` is satisfied by a base64 UUID, and the `E013` explain and the `allOf` scalar
+/// site both already say "empty or unrepresentable". This pins the site to the same honest wording. It asserts
 /// what the message may NOT say as well as what it must, because the defect this replaced was a
 /// message that named the wrong one of the two.
 #[test]
@@ -8490,6 +8490,368 @@ components:
         .unwrap_or_default();
     assert!(remedy.contains("`$ref` target"), "{remedy:?}");
     assert!(remedy.contains("spargen::omit!"), "{remedy:?}");
+}
+
+/// `ty` with every `pub type` alias the generated `types` module declares expanded, recursively,
+/// down to the Rust type the alias chain finally names — `Holderblob` to `bytes::Bytes`, `Coord` to
+/// `(f64, f64)`.
+///
+/// Different spellings of one schema emit differently named intermediate aliases (`Data`,
+/// `HolderblobConstraint`, `ResponseBody`, …), so comparing names compares spellings. What the
+/// spellings must agree on is the type a consumer finally holds, and that is the expansion.
+fn expand_aliases(types: &str, ty: &str) -> String {
+    let aliases: std::collections::HashMap<&str, &str> = types
+        .lines()
+        .filter_map(|line| line.trim_start().strip_prefix("pub type "))
+        .filter_map(|rest| rest.split_once(" = "))
+        .map(|(name, rhs)| (name, rhs.trim_end_matches(';')))
+        .collect();
+    let mut current = ty.replace("types::", "");
+    // A bound rather than a fixpoint test alone: a cyclic alias set must fail the fixture, not
+    // hang it.
+    for _ in 0..32 {
+        let mut next = String::new();
+        let mut word = String::new();
+        for ch in current.chars().chain(std::iter::once(' ')) {
+            if ch.is_alphanumeric() || ch == '_' || ch == ':' {
+                word.push(ch);
+                continue;
+            }
+            next.push_str(aliases.get(word.as_str()).copied().unwrap_or(&word));
+            word.clear();
+            next.push(ch);
+        }
+        next.pop();
+        let next = next.replace("types::", "");
+        if next == current {
+            return current;
+        }
+        current = next;
+    }
+    panic!("the alias chain from `{ty}` does not terminate: {current}");
+}
+
+/// What one spelling lowered to: the expanded `(property, body)` Rust types, or the codes it was
+/// rejected with.
+type SpellingOutcome = Result<(String, String), String>;
+
+/// Generate one document per spelling of one schema — the schema placed as a required JSON
+/// property, as a `201` response body under `body_media`, and (when `multipart`) as a multipart
+/// request part, under both 3.1 and 3.2 — and return, per spelling and version, the expanded Rust
+/// type of the property and of the body. A spelling that rejects is an `Err` naming its codes.
+///
+/// `components` is the shared `components.schemas` block (indented four spaces); every spelling is
+/// written as a YAML flow mapping, so it slots into every position unchanged. The positions are
+/// parameters because not every shape is valid in every one: a tuple is not an octet-stream body
+/// in any spelling, the inline one included (`E009`), so the tuple fixtures use a JSON body.
+fn lower_each_spelling(
+    spellings: &[(&str, &str)],
+    components: &str,
+    body_media: &str,
+    multipart: bool,
+) -> Vec<(String, SpellingOutcome)> {
+    let mut outcomes = Vec::new();
+    for version in ["3.1.0", "3.2.0"] {
+        for (label, spelling) in spellings {
+            let request = if multipart {
+                format!(
+                    "      requestBody:\n        required: true\n        content:\n          \
+                     multipart/form-data:\n            schema:\n              type: object\n              \
+                     properties:\n                part: {spelling}\n              required: [part]\n"
+                )
+            } else {
+                String::new()
+            };
+            let spec = format!(
+                r##"openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    post:
+      operationId: fetch
+{request}      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: {{ $ref: '#/components/schemas/Holder' }}
+        '201':
+          description: ok
+          content:
+            {body_media}:
+              schema: {spelling}
+components:
+  schemas:
+{components}
+    Holder:
+      type: object
+      properties:
+        field: {spelling}
+      required: [field]
+"##
+            );
+            let key = format!("{version} {label}");
+            let (report, code) = generate_with_code(&spec);
+            let checked = check(&spec);
+            assert_eq!(
+                report.outcome() == Outcome::Rejected,
+                checked.outcome() == Outcome::Rejected,
+                "`{key}`: check and generate disagree: {report:#?} {checked:#?}"
+            );
+            if report.outcome() == Outcome::Rejected {
+                let codes: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
+                outcomes.push((key, Err(format!("rejected with {codes:?}"))));
+                continue;
+            }
+            let types = types_module(&code);
+            let field = field_type(&types, "pub field:")
+                .unwrap_or_else(|| panic!("`{key}`: `Holder.field` was not emitted: {types}"));
+            let body = types
+                .lines()
+                .map(str::trim_start)
+                .find_map(|line| line.strip_prefix("Status201("))
+                .and_then(|rest| rest.strip_suffix("),"))
+                .map(|payload| {
+                    payload
+                        .strip_prefix("Box<")
+                        .and_then(|inner| inner.strip_suffix('>'))
+                        .unwrap_or(payload)
+                        .to_owned()
+                })
+                .unwrap_or_else(|| {
+                    panic!("`{key}`: the `201` body variant was not emitted: {types}")
+                });
+            outcomes.push((
+                key,
+                Ok((
+                    expand_aliases(&types, &field),
+                    expand_aliases(&types, &body),
+                )),
+            ));
+        }
+    }
+    outcomes
+}
+
+/// A binary string has one representation, `bytes::Bytes`, and spargen already emits it for the
+/// inline spelling and for a `$ref` to a binary component. `{$ref: Data, format: binary}` over a
+/// plain string `Data` is the same conjunction — a string that is binary — spelled with the
+/// constraint on the other side of the `$ref`, and it used to reject with `E013`, because
+/// `intersect_non_null` had no arm for `(Bytes, Primitive(String))` and its catch-all `None` reads
+/// as an irreconcilable composition. Every spelling must now reach the same type, in every
+/// position (a JSON property, a raw response body, a multipart part) and under both versions.
+#[test]
+fn a_binary_string_lowers_to_bytes_however_the_binary_constraint_is_spelled() {
+    let components = "    Data: { type: string }\n    \
+                      Blob: { type: string, format: binary }\n    \
+                      Blob64: { type: string, contentEncoding: base64 }";
+    let spellings: &[(&str, &str)] = &[
+        ("inline", "{ type: string, format: binary }"),
+        ("ref to binary", "{ $ref: '#/components/schemas/Blob' }"),
+        (
+            "ref to string + format: binary",
+            "{ $ref: '#/components/schemas/Data', format: binary }",
+        ),
+        (
+            "ref to string + contentEncoding",
+            "{ $ref: '#/components/schemas/Data', contentEncoding: base64 }",
+        ),
+        (
+            "ref to base64 + type: string",
+            "{ $ref: '#/components/schemas/Blob64', type: string }",
+        ),
+        (
+            "allOf",
+            "{ allOf: [{ $ref: '#/components/schemas/Data' }, { format: binary }] }",
+        ),
+    ];
+    let expected = Ok(("bytes::Bytes".to_owned(), "bytes::Bytes".to_owned()));
+    let disagreeing: Vec<_> =
+        lower_each_spelling(spellings, components, "application/octet-stream", true)
+            .into_iter()
+            .filter(|(_, outcome)| *outcome != expected)
+            .collect();
+    assert!(
+        disagreeing.is_empty(),
+        "every spelling of a binary string must lower to `bytes::Bytes` in every position, \
+         but these did not: {disagreeing:#?}"
+    );
+}
+
+/// The boundary of the arm above, pinned so that moving it is a visible decision: a string with a
+/// format spargen DECODES (`uuid`, `date-time`, `date`) has a Rust representation of its own, and
+/// `bytes::Bytes` cannot also be it, so the binary conjunction there stays `E013` rather than
+/// silently picking one of the two.
+#[test]
+fn a_binary_constraint_on_a_decoded_string_format_still_rejects() {
+    for format in ["uuid", "date-time", "date"] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths: {{}}
+components:
+  schemas:
+    Formatted: {{ type: string, format: {format} }}
+    Holder:
+      type: object
+      properties:
+        field: {{ $ref: '#/components/schemas/Formatted', contentEncoding: base64 }}
+      required: [field]
+"##
+        );
+        let report = generate(&spec);
+        assert_eq!(report.outcome(), Outcome::Rejected, "{format}: {report:#?}");
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "{format}: {report:#?}"
+        );
+    }
+}
+
+/// A closed `prefixItems` tuple conjoined with a homogeneous array is the tuple, each position
+/// narrowed by the array's item schema: `[1.0, 2.0]` satisfies both `{$ref: Coord, type: array}`
+/// and `Coord`. That pair also fell to `intersect_non_null`'s catch-all and rejected with `E013`.
+/// Every spelling — the tuple on either side of the `$ref`, and through `allOf` — must reach the
+/// type the inline tuple reaches.
+#[test]
+fn a_tuple_conjoined_with_an_array_lowers_to_the_tuple_however_it_is_spelled() {
+    let components =
+        "    Coord: { type: array, prefixItems: [{ type: number }, { type: number }], \
+                      items: false }\n    \
+                      Numbers: { type: array, items: { type: number } }";
+    let spellings: &[(&str, &str)] = &[
+        (
+            "inline",
+            "{ type: array, prefixItems: [{ type: number }, { type: number }], items: false }",
+        ),
+        ("ref to tuple", "{ $ref: '#/components/schemas/Coord' }"),
+        (
+            "ref to tuple + type: array",
+            "{ $ref: '#/components/schemas/Coord', type: array }",
+        ),
+        (
+            "ref to tuple + typed items",
+            "{ $ref: '#/components/schemas/Coord', type: array, items: { type: number } }",
+        ),
+        (
+            "ref to array + prefixItems",
+            "{ $ref: '#/components/schemas/Numbers', type: array, \
+             prefixItems: [{ type: number }, { type: number }], items: false }",
+        ),
+        (
+            "allOf",
+            "{ allOf: [{ $ref: '#/components/schemas/Coord' }, { type: array }] }",
+        ),
+    ];
+    let expected = Ok(("(f64, f64)".to_owned(), "(f64, f64)".to_owned()));
+    let disagreeing: Vec<_> = lower_each_spelling(spellings, components, "application/json", false)
+        .into_iter()
+        .filter(|(_, outcome)| *outcome != expected)
+        .collect();
+    assert!(
+        disagreeing.is_empty(),
+        "every spelling of a two-number tuple must lower to `(f64, f64)` in every position, but \
+         these did not: {disagreeing:#?}"
+    );
+}
+
+/// The array's item schema is a real constraint on every tuple position, not a formality the
+/// tuple absorbs: an `integer` item narrows `number` positions to `i64`, and a position the item
+/// contradicts leaves no tuple at all — a fixed-length tuple has no empty value to fall back on the
+/// way an array's `Never` item does — so that composition is still `E013`.
+#[test]
+fn an_array_item_schema_narrows_each_tuple_position_or_empties_the_tuple() {
+    let narrowed = lower_each_spelling(
+        &[(
+            "integer items",
+            "{ $ref: '#/components/schemas/Coord', type: array, items: { type: integer } }",
+        )],
+        "    Coord: { type: array, prefixItems: [{ type: number }, { type: number }], \
+         items: false }",
+        "application/json",
+        false,
+    );
+    for (key, outcome) in narrowed {
+        assert_eq!(
+            outcome,
+            Ok(("(i64, i64)".to_owned(), "(i64, i64)".to_owned())),
+            "`{key}`"
+        );
+    }
+
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths: {}
+components:
+  schemas:
+    Pair: { type: array, prefixItems: [{ type: string }, { type: number }], items: false }
+    Holder:
+      type: object
+      properties:
+        field: { $ref: '#/components/schemas/Pair', type: array, items: { type: number } }
+      required: [field]
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+}
+
+/// The union path intersects the enclosing schema's sibling constraints with every branch, and a
+/// branch whose intersection is `None` is dropped with `W011`. So before the two pairs above had
+/// arms, a tuple branch under a sibling `type: array`, and a binary branch under a sibling
+/// `type: string`, were dropped as excluded although the sibling admits them — and the union
+/// silently lost a member (`U` became `Vec<String>`, or `uuid::Uuid`). Both branches now survive,
+/// with no `W011`, so the union keeps both variants; and a union whose only branches were those
+/// used to be `E007` and now generates the lone surviving branch.
+#[test]
+fn a_sibling_constraint_keeps_a_tuple_or_binary_union_branch_it_admits() {
+    let spec = |union: &str| {
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\n\
+             paths: {{}}\ncomponents:\n  schemas:\n    U: {union}\n"
+        )
+    };
+    for (label, union) in [
+        (
+            "tuple under type: array",
+            "{ type: array, oneOf: [{ type: array, prefixItems: [{ type: number }, { type: number }], \
+             items: false }, { type: array, items: { type: string } }] }",
+        ),
+        (
+            "binary under type: string",
+            "{ type: string, anyOf: [{ contentEncoding: base64 }, { type: string, format: uuid }] }",
+        ),
+    ] {
+        let (report, code) = generate_with_code(&spec(union));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{label}: a branch the sibling admits was dropped as excluded: {report:#?}"
+        );
+        assert_eq!(
+            enum_variants(&types_module(&code), "U").len(),
+            2,
+            "{label}: both branches must survive as variants: {}",
+            types_module(&code)
+        );
+    }
+
+    // A union whose every other branch the sibling excludes: the admitted branch is what remains.
+    let (report, code) = generate_with_code(&spec(
+        "{ type: string, oneOf: [{ format: binary }, { type: integer }] }",
+    ));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        expand_aliases(&types_module(&code), "U"),
+        "bytes::Bytes",
+        "{}",
+        types_module(&code)
+    );
 }
 
 /// A union whose only non-null member has no typed intersection with the enclosing schema's own
@@ -8564,8 +8926,9 @@ fn shape_bearing_keywords_the_explain_names() -> Vec<String> {
 /// control here into an opaque panic instead of this fixture's own message.
 ///
 /// Each target is chosen so the intersection is *genuinely empty*, never merely unrepresentable:
-/// the `contentEncoding`/`format: binary` rows sit against an integer, not a string, so they do not
-/// pin the `(Bytes, Primitive(Str))` case that has a representation spargen has not learned yet.
+/// the `contentEncoding`/`format: binary` rows sit against an integer, not a string, because a
+/// plain string target intersects to `bytes::Bytes` and generates (see
+/// `a_binary_string_lowers_to_bytes_however_the_binary_constraint_is_spelled`).
 #[test]
 fn every_sibling_keyword_the_explain_names_is_actually_intersected() {
     const HEAD: &str =
