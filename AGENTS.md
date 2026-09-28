@@ -140,7 +140,10 @@ the author's of whichever pull request showed it first. It is fixed the day it i
 patched release exists, adds an `[advisories] ignore` entry to `deny.toml` stating why the
 advisory does not reach this graph and what lifts it. That pull request merges first, and open
 pull requests then merge `master` in; none of them carries the fix. Otherwise a lockfile changes
-only with the manifest change that needs it, or in release-plz's release pull request.
+only with the manifest change that needs it, and the workspace one also in release-plz's release
+pull request. That pull request does not touch the example lockfiles, so their `spargen` version
+stamp goes stale on each release and a local `mise run example` rewrites it; that rewrite is not
+part of any change and is not committed with one.
 
 Standing invariants:
 
