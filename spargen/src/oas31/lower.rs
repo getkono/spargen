@@ -580,6 +580,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 RefOr::Item(_) => return None,
             };
             if !self.component_alias_stack.insert(name.to_owned()) {
+                // E004 case: cycle
                 Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
                     .message(format!(
                         "schema component alias `{name}` forms a reference cycle"
@@ -895,6 +896,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // than through the reserve/pop machinery, which assumes the body inserts a fresh root.
         if schema.reference.is_some() {
             if !self.remote_alias_stack.insert(reference.to_owned()) {
+                // E004 case: cycle
                 Diagnostic::error(Code::UnresolvedRef, self.document.provenance.clone())
                     .message(format!("remote $ref `{reference}` forms an alias cycle"))
                     .emit(self.diags);
@@ -1036,6 +1038,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // which assumes the body inserts a fresh root.
         if schema.reference.is_some() {
             if !self.resolved_alias_stack.insert(key.clone()) {
+                // E004 case: cycle
                 Diagnostic::error(Code::UnresolvedRef, at.clone())
                     .message(format!(
                         "schema reference `{reference}` forms an alias cycle"
@@ -5614,6 +5617,7 @@ fn resolve_path_item(
     // One level of indirection is what the specification requires implementations to support, and
     // a chain would need its own cycle guard.
     if target.reference.is_some() {
+        // E004 case: declined-hop
         Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
             .message(format!(
                 "Path Item `$ref` `{}` resolves to another Path Item `$ref`; chained Path Item \
@@ -5737,6 +5741,7 @@ fn lower_security_schemes(
                 match resolved {
                     Ok(target) => target,
                     Err(message) => {
+                        // E004 case: undeclared-component, declined-hop
                         Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
                             .message(message)
                             .remedy(

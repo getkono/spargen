@@ -187,6 +187,21 @@ impl Code {
     }
 
     /// Extended documentation shown by `spargen explain E###` and on the published errors index.
+    ///
+    /// Every body is published, user-facing text, but not every body is held to the code by a
+    /// test, and a contributor editing one should know which kind they are editing:
+    ///
+    /// - A body that **enumerates the cases reaching its code** is listed in this module's
+    ///   `ENUMERATED_CASES` test table. Each case names a phrase the body must contain, and every
+    ///   emission site of the code carries a `// E### case: <case>` marker naming the cases it
+    ///   reports, so an emission site outside the enumeration, a case with no emission site, or a
+    ///   case deleted from the body fails `every_emission_site_falls_into_a_case_its_explain_text_lists`.
+    ///   A case may also reserve a message wording, which its sites must use and no other site of
+    ///   the code may. Adding an enumerating body means adding it to that table.
+    /// - `E023`'s body is pinned byte-for-byte, clause by clause, by
+    ///   `runtime_contract::tests::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`.
+    /// - Every other body is prose held only to being non-empty. A body that grows a list of the
+    ///   cases reaching its code has become the first kind, and belongs in the table.
     pub fn explain(self) -> &'static str {
         match self {
             Code::UnsupportedOpenApiVersion => {
@@ -649,6 +664,223 @@ mod tests {
                 code.as_str()
             );
         }
+    }
+
+    /// One case an enumerating explain body lists: the marker tag its emission sites carry, the
+    /// phrase of the body that states it, and — where the case has one — the message wording that
+    /// is reserved to it: every site of the case says it, and no other site of the code does.
+    struct Case {
+        tag: &'static str,
+        stated_as: &'static str,
+        reserved_wording: Option<&'static str>,
+    }
+
+    /// The codes whose explain body enumerates the cases that reach them. See [`Code::explain`].
+    const ENUMERATED_CASES: &[(Code, &[Case])] = &[(
+        Code::UnresolvedRef,
+        &[
+            Case {
+                tag: "absent-target",
+                stated_as: "the target is absent from the loaded input bundle",
+                reserved_wording: Some("not found in the input bundle"),
+            },
+            Case {
+                tag: "undeclared-component",
+                stated_as: "a local component reference names an entry the document does not \
+                            declare",
+                reserved_wording: None,
+            },
+            Case {
+                tag: "cycle",
+                stated_as: "a chain of reference hops closes into a cycle",
+                reserved_wording: Some("cycle"),
+            },
+            Case {
+                tag: "declined-hop",
+                stated_as: "a hop resolves but spargen declines to follow it",
+                reserved_wording: None,
+            },
+            Case {
+                tag: "resource-scope",
+                stated_as: "static `$id`/`$anchor` schema resource scopes",
+                reserved_wording: Some("`$id`/`$anchor`"),
+            },
+            Case {
+                tag: "unsupported-or-unresolved",
+                stated_as: "a reference reported as `unsupported or unresolved` is one spargen \
+                            could not resolve *and* could not tell an absent target from a \
+                            fragment form it declines to follow",
+                reserved_wording: Some("unsupported or unresolved"),
+            },
+        ],
+    )];
+
+    /// How far above a `Code::<Variant>` line its case marker may sit: far enough for a
+    /// `Diagnostic::error(` that rustfmt breaks before its first argument, near enough that a
+    /// marker cannot drift onto an unrelated site.
+    const MARKER_REACH: usize = 3;
+
+    /// The `(code, tags)` a `// E### case: a, b` marker line declares, if it is one.
+    fn case_marker(line: &str) -> Option<(&str, Vec<&str>)> {
+        let rest = line.trim().strip_prefix("// ")?;
+        let (code, tags) = rest.split_once(" case: ")?;
+        let is_code = code.len() == 4
+            && matches!(code.as_bytes()[0], b'E' | b'W')
+            && code[1..].bytes().all(|byte| byte.is_ascii_digit());
+        is_code.then(|| (code, tags.split(',').map(str::trim).collect()))
+    }
+
+    /// Every `.rs` file under `dir`, recursively, in a stable order.
+    fn rust_sources(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("{} must be readable: {error}", dir.display()))
+            .map(|entry| entry.expect("directory entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                rust_sources(&path, into);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                into.push(path);
+            }
+        }
+    }
+
+    /// `spargen explain` prints an explain body verbatim, and a body that lists the cases reaching
+    /// its code makes a claim about the generator a test can check: that the list is exhaustive.
+    /// `E004`'s once was not — a security scheme alias miss and a chained Path Item `$ref` reached
+    /// the code while the body listed neither — and the only assertion on it was `!is_empty()`.
+    ///
+    /// So every occurrence of such a code in the crate's sources (outside `diag`, which declares
+    /// it) must carry a case marker within [`MARKER_REACH`] lines above it, every tag a marker
+    /// names must be a case of that code, every case must have a site and be stated in the body,
+    /// and a case's reserved wording must appear in exactly its own sites — from the marker to the
+    /// `.emit(` that ends the diagnostic. A new emission site fails until someone decides which
+    /// listed case it is, or extends the list; a case deleted from the body fails too.
+    #[test]
+    fn every_emission_site_falls_into_a_case_its_explain_text_lists() {
+        let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let mut files = Vec::new();
+        rust_sources(src, &mut files);
+        let diag = src.join("diag");
+
+        let mut failures = Vec::new();
+        let mut sites: std::collections::BTreeMap<(&str, &str), usize> = Default::default();
+        for path in files.iter().filter(|path| !path.starts_with(&diag)) {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
+            let lines: Vec<&str> = text.lines().collect();
+            let shown = path.strip_prefix(src).unwrap_or(path).display().to_string();
+
+            // Every marker must name an enumerating code and sit above a site of it.
+            for (at, line) in lines.iter().enumerate() {
+                let Some((code, tags)) = case_marker(line) else {
+                    continue;
+                };
+                let Some((declared, cases)) = ENUMERATED_CASES
+                    .iter()
+                    .find(|(declared, _)| declared.as_str() == code)
+                else {
+                    failures.push(format!(
+                        "src/{shown}:{}: a `{code} case:` marker, but {code} is not in \
+                         ENUMERATED_CASES",
+                        at + 1
+                    ));
+                    continue;
+                };
+                let variant = variant_name(*declared);
+                let attached = lines[at + 1..]
+                    .iter()
+                    .take(MARKER_REACH)
+                    .any(|below| mentions_variant(below, variant));
+                if !attached {
+                    failures.push(format!(
+                        "src/{shown}:{}: a `{code} case:` marker with no `Code::{variant}` in the \
+                         {MARKER_REACH} lines below it",
+                        at + 1
+                    ));
+                }
+                let region: String = lines[at..]
+                    .iter()
+                    .take_while({
+                        let mut done = false;
+                        move |line| !std::mem::replace(&mut done, line.contains(".emit("))
+                    })
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for tag in &tags {
+                    match cases.iter().find(|case| case.tag == *tag) {
+                        Some(case) => *sites.entry((declared.as_str(), case.tag)).or_default() += 1,
+                        None => failures.push(format!(
+                            "src/{shown}:{}: {code} has no case `{tag}`; its explain text lists \
+                             {:?}",
+                            at + 1,
+                            cases.iter().map(|case| case.tag).collect::<Vec<_>>()
+                        )),
+                    }
+                }
+                for case in cases.iter() {
+                    let Some(wording) = case.reserved_wording else {
+                        continue;
+                    };
+                    let tagged = tags.contains(&case.tag);
+                    let says = region.contains(wording);
+                    if tagged != says {
+                        failures.push(format!(
+                            "src/{shown}:{}: a {code} site {} `{}` but {} {wording:?}, the wording \
+                             reserved to that case",
+                            at + 1,
+                            if tagged { "tagged" } else { "not tagged" },
+                            case.tag,
+                            if says { "says" } else { "does not say" },
+                        ));
+                    }
+                }
+            }
+
+            // Every site of an enumerating code must carry a marker for it.
+            for (code, _) in ENUMERATED_CASES {
+                let variant = variant_name(*code);
+                for (at, line) in lines.iter().enumerate() {
+                    if !mentions_variant(line, variant) {
+                        continue;
+                    }
+                    let marked = lines[at.saturating_sub(MARKER_REACH)..at]
+                        .iter()
+                        .any(|above| case_marker(above).is_some_and(|(c, _)| c == code.as_str()));
+                    if !marked {
+                        failures.push(format!(
+                            "src/{shown}:{}: `Code::{variant}` with no `// {code} case: <case>` \
+                             marker in the {MARKER_REACH} lines above it — decide which case of \
+                             `spargen explain {code}` this site is, or add one to the explain text \
+                             and to ENUMERATED_CASES",
+                            at + 1
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (code, cases) in ENUMERATED_CASES {
+            for case in cases.iter() {
+                if !code.explain().contains(case.stated_as) {
+                    failures.push(format!(
+                        "`spargen explain {code}` no longer states case `{}`: {:?}",
+                        case.tag, case.stated_as
+                    ));
+                }
+                if !sites.contains_key(&(code.as_str(), case.tag)) {
+                    failures.push(format!(
+                        "{code} case `{}` has no emission site; drop it from the explain text and \
+                         from ENUMERATED_CASES, or mark the site that reports it",
+                        case.tag
+                    ));
+                }
+            }
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     /// CLAUDE.md: every code gets "a fixture in `spargen/tests/frontend.rs`", enforced by tests

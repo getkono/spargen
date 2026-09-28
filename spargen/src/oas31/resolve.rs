@@ -162,6 +162,7 @@ impl<'doc> Resolver<'doc> {
         diags: &mut Diagnostics,
     ) -> Option<super::PathItem> {
         let Some((file, pointer)) = self.bundle.reference_target(reference, from) else {
+            // E004 case: unsupported-or-unresolved
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!(
                     "unsupported or unresolved Path Item `$ref` `{reference}`"
@@ -170,6 +171,7 @@ impl<'doc> Resolver<'doc> {
             return None;
         };
         let Some(node) = self.bundle.value_at(file).pointer(&pointer) else {
+            // E004 case: absent-target
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!(
                     "Path Item `$ref` target `{reference}` was not found in the input bundle"
@@ -205,12 +207,14 @@ impl<'doc> Resolver<'doc> {
         diags: &mut Diagnostics,
     ) -> Result<Resolved<'doc>, Aborted> {
         let Some((file, pointer)) = self.bundle.reference_target(reference, from) else {
+            // E004 case: unsupported-or-unresolved
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!("unsupported or unresolved $ref `{reference}`"))
                 .emit(diags);
             return Err(Aborted);
         };
         let Some(node) = self.bundle.value_at(file).pointer(&pointer) else {
+            // E004 case: absent-target
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!(
                     "$ref target `{reference}` was not found in the input bundle"
