@@ -16830,6 +16830,17 @@ fn placement_twins(value: &serde_json::Value) -> Vec<Twin> {
                 serde_json::json!({ "shared": { "item": value.clone() } }),
             )],
         ),
+        // A fragment is a URI fragment, so a key holding a space is percent-encoded in it, and one
+        // holding a `/` is `~1`-escaped as well. Lowering decodes both; validation must address
+        // the same node, or the target is lowered without ever being validated.
+        (
+            "a percent-encoded JSON Pointer into a file",
+            "./fragment.json#/shared/an%20item~1b".to_owned(),
+            vec![(
+                "fragment.json",
+                serde_json::json!({ "shared": { "an item/b": value.clone() } }),
+            )],
+        ),
         // A pointer into the root's own specification extension: the one place in the root the
         // whole-document validation admits anything at all, so the target must be validated at
         // the position its reference implies there too. The root rewrite below moves the value in.

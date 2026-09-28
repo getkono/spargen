@@ -24,7 +24,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use serde_json::Value;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance};
-use crate::source::{InputBundle, Node, Number, SpannedValue};
+use crate::source::{canonical_pointer, InputBundle, Node, Number, SpannedValue};
 
 const OAS31_SCHEMA: &str = include_str!("spec/oas-3.1-2025-09-15.json");
 const OAS32_SCHEMA: &str = include_str!("spec/oas-3.2-2025-09-17.json");
@@ -103,7 +103,13 @@ impl MetaSchemaValidator {
 
         while let Some((from, pending)) = queue.pop_front() {
             // An unresolvable reference is lowering's to report, in its own words (`E004`).
-            let Some((file, pointer)) = bundle.reference_target(&pending.reference, from) else {
+            let Some((file, fragment)) = bundle.reference_target(&pending.reference, from) else {
+                continue;
+            };
+            // The fragment is percent-encoded where lowering's lookup decodes it, so it is read
+            // here through that same decoding: a target lowering reaches is a target validated,
+            // and the pointer compares equal to the ones the walk builds (`covered`) and reports.
+            let Some(pointer) = canonical_pointer(&fragment) else {
                 continue;
             };
             // Already validated at this location: either queued before, or enclosed by a node an
