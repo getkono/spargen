@@ -15,7 +15,9 @@
 //!     than bouncing off the parser's reject path;
 //!   * valid-skeleton documents wrapping random schemas, so lowering runs to completion;
 //!   * deep `$ref` chains that exercise the recursion depth guard (the stack-overflow vector this
-//!     issue found and fixed).
+//!     issue found and fixed);
+//!   * components whose root is a `$ref` beside random sibling keywords, over a random ref graph
+//!     (the release-mode assertion abort of issue #148).
 //!
 //! Every generated document is fed through BOTH the JSON and the YAML parser (by file extension;
 //! JSON is a subset of YAML). The run is deterministic and bounded: a fixed-seed RNG and capped
@@ -251,6 +253,63 @@ fn arb_ref_chain() -> impl Strategy<Value = String> {
     })
 }
 
+/// Sibling keywords a `$ref` can carry, most of them bearing no shape (annotations, validation-only
+/// keywords, a `default`) and a few that do, so both of the `$ref` arm's exits are reached.
+const REF_SIBLINGS: &[(&str, &str)] = &[
+    ("description", "\"d\""),
+    ("title", "\"t\""),
+    ("maxLength", "5"),
+    ("pattern", "\"^a\""),
+    ("readOnly", "true"),
+    ("deprecated", "true"),
+    ("default", "\"x\""),
+    ("type", "\"string\""),
+    ("properties", "{\"p\":{\"type\":\"integer\"}}"),
+];
+
+/// Components `S0..S{n}` where every `S{i}` past the first is a `$ref` to a random component —
+/// earlier, later, or itself — beside a random subset of [`REF_SIBLINGS`], and the operation reaches
+/// a random one of them first. A component whose ROOT is such a `$ref` is the shape `arb_value`
+/// essentially never produces (neither `description` nor `maxLength` is in [`KEYWORDS`], and `S0` is
+/// the only in-document target in [`SCALARS`]), and it aborted the process whenever the target had
+/// been lowered first (issue #148). The ref graph's order is what decided it, so it is randomised.
+fn arb_ref_sibling_components() -> impl Strategy<Value = String> {
+    (2usize..6)
+        .prop_flat_map(|count| {
+            (
+                Just(count),
+                prop::collection::vec(
+                    (
+                        0..count,
+                        prop::collection::vec(any::<bool>(), REF_SIBLINGS.len()),
+                    ),
+                    count - 1,
+                ),
+                0..count,
+                prop::sample::select(&["{\"type\":\"string\"}", "{\"type\":\"object\"}", "{}"][..]),
+            )
+        })
+        .prop_map(|(_, aliases, entry, root)| {
+            let mut schemas = format!("\"S0\":{root}");
+            for (i, (target, chosen)) in aliases.into_iter().enumerate() {
+                let mut body = format!("\"$ref\":\"#/components/schemas/S{target}\"");
+                for ((key, value), keep) in REF_SIBLINGS.iter().zip(chosen) {
+                    if keep {
+                        body.push_str(&format!(",\"{key}\":{value}"));
+                    }
+                }
+                schemas.push_str(&format!(",\"S{}\":{{{body}}}", i + 1));
+            }
+            format!(
+                "{{\"openapi\":\"3.1.0\",\"info\":{{\"title\":\"t\",\"version\":\"1.0.0\"}},\
+                 \"paths\":{{\"/p\":{{\"get\":{{\"operationId\":\"op\",\"responses\":{{\"200\":\
+                 {{\"description\":\"ok\",\"content\":{{\"application/json\":{{\"schema\":\
+                 {{\"$ref\":\"#/components/schemas/S{entry}\"}}}}}}}}}}}}}}}},\
+                 \"components\":{{\"schemas\":{{{schemas}}}}}}}"
+            )
+        })
+}
+
 // The no-panic properties
 
 #[test]
@@ -294,6 +353,17 @@ fn check_never_panics_on_skeleton_documents() {
     let dir = TempDir::new().unwrap();
     deterministic_runner(400)
         .run(&arb_skeleton_doc(), |text| {
+            exercise_both(&dir, &text);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn check_never_panics_on_component_root_refs_with_siblings() {
+    let dir = TempDir::new().unwrap();
+    deterministic_runner(256)
+        .run(&arb_ref_sibling_components(), |text| {
             exercise_both(&dir, &text);
             Ok(())
         })
