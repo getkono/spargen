@@ -10094,6 +10094,53 @@ webhooks:
     assert!(has_code(&report, Code::ServerInitiatedFlowIgnored));
 }
 
+/// A webhook whose request and response bodies name a component the document never declares. A
+/// webhook is acknowledged (`W002`) and never lowered for a client, so its schemas are never
+/// resolved and the dangling reference is not `E004`: this is the "constructs never lowered for a
+/// client, such as a webhook body, are unaffected" clause of `docs/support-matrix.md`'s References
+/// row.
+const W002_WEBHOOK_DANGLING_REF_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /ping:
+    get:
+      responses:
+        "204": { description: No Content }
+webhooks:
+  newThing:
+    post:
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Missing" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AlsoMissing" }
+"##;
+
+#[test]
+fn w002_a_dangling_ref_in_a_webhook_body_is_not_e004() {
+    let checked = check(W002_WEBHOOK_DANGLING_REF_SPEC);
+    assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+    assert!(
+        has_code(&checked, Code::ServerInitiatedFlowIgnored),
+        "{checked:#?}"
+    );
+    assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
+
+    let generated = generate(W002_WEBHOOK_DANGLING_REF_SPEC);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    assert!(
+        has_code(&generated, Code::ServerInitiatedFlowIgnored),
+        "{generated:#?}"
+    );
+    assert!(!has_code(&generated, Code::UnresolvedRef), "{generated:#?}");
+}
+
 const W005_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
