@@ -1263,6 +1263,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      but for the target's nullability",
                 );
             }
+            // Against a union target the intersection is taken branch by branch, and a branch the
+            // inferred category excludes is dropped without a word: `oneOf: [string, Obj]` with a
+            // `required` sibling would become `Obj` alone and reject the strings the target
+            // accepts. Whether an untyped refiner is instead vacuous for the other branches is the
+            // same undecided question the inline union sibling raises (#282), so the loss is
+            // reported rather than chosen. Every branch surviving is the only outcome kept.
+            let target_branches = match &self.graph.get(referenced.id)?.kind {
+                TypeKind::Union(target) => Some(target.variants.len()),
+                _ => None,
+            };
+            if inferred_category
+                && target_branches.is_some_and(|branches| {
+                    !matches!(
+                        &kind,
+                        TypeKind::Union(result) if result.variants.len() == branches
+                    )
+                })
+            {
+                return self.reject_ref_sibling_intersection(
+                    schema,
+                    "this `$ref`'s untyped sibling keywords establish a category some branch of \
+                     its target union does not have, so intersecting would drop that branch and \
+                     reject values the target accepts",
+                );
+            }
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
             ty.boxed = intersection.boxed;

@@ -9452,6 +9452,51 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
         }
     }
 
+    // A union target whose branches do not all share the inferred category. Intersecting branch by
+    // branch drops every branch of another category (the string one here), so `Sibling` would
+    // become a struct that rejects the strings `Target` accepts, with no diagnostic. Whether an
+    // untyped refiner beside a mixed-category union is vacuous for the other branches is #282's
+    // open design question, so the `$ref` spelling rejects rather than choosing silently.
+    for (keyword, target, sibling) in [
+        (
+            "required",
+            "{ oneOf: [{ type: string }, { type: object, properties: { a: { type: string } } }] }",
+            "required: [a]",
+        ),
+        (
+            "items",
+            "{ oneOf: [{ type: string }, { type: array, items: { type: number } }] }",
+            "items: { type: integer }",
+        ),
+    ] {
+        let spec = format!(
+            "{HEAD}    Target: {target}\n    Sibling:\n      $ref: \
+             '#/components/schemas/Target'\n      {sibling}\n{holder}"
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "an untyped `{keyword}` sibling silently dropped a union target's branch of \
+                 another category: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::AllOfIrreconcilable);
+            assert_eq!(messages.len(), 1, "{keyword}: {report:#?}");
+            assert!(messages[0].contains("branch"), "{keyword}: {messages:?}");
+        }
+    }
+    // A union whose every branch has the inferred category loses no branch, so it still composes.
+    let spec = format!(
+        "{HEAD}    A: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }}, \
+         a: {{ type: string }} }} }}\n    B: {{ type: object, required: [kind], properties: {{ \
+         kind: {{ type: string }}, a: {{ type: string }} }} }}\n    Target:\n      oneOf: [{{ \
+         $ref: '#/components/schemas/A' }}, {{ $ref: '#/components/schemas/B' }}]\n      \
+         discriminator: {{ propertyName: kind }}\n    Sibling:\n      $ref: \
+         '#/components/schemas/Target'\n      required: [a]\n{holder}"
+    );
+    let report = generate(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+
     let spec = format!(
         "{HEAD}    Target: {{ type: object, properties: {{ a: {{ type: string }} }} }}\n    \
          Sibling:\n      $ref: '#/components/schemas/Target'\n      required: [a]\n      \
@@ -9515,6 +9560,16 @@ fn a_required_name_no_property_declares_is_still_required() {
             "a"
         ),
         "pub a: i64,"
+    );
+    // A value schema that closes a cycle back to the object: the map drops the `Box` its own
+    // indirection makes unnecessary, and a plain required field has none, so it is boxed again.
+    assert_eq!(
+        field(
+            "{ type: object, additionalProperties: { $ref: '#/components/schemas/Thing' }, \
+             required: [child] }",
+            "child"
+        ),
+        "pub child: Box<Thing>,"
     );
     // `additionalProperties: false` closes the object to the fields the type declares, as it does
     // everywhere else in lowering, and the required name is one of them.
@@ -9693,6 +9748,10 @@ fn the_composition_explain_covers_every_cause_that_reports_it() {
     );
     assert!(
         explain.contains("the target's nullability stands"),
+        "{explain}"
+    );
+    assert!(
+        explain.contains("Beside a `$ref` to a union, such a sibling is rejected"),
         "{explain}"
     );
     assert!(
