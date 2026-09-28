@@ -16979,3 +16979,29 @@ fn a_violation_behind_a_ref_is_sited_in_the_file_that_holds_it() {
         );
     }
 }
+
+/// A Reference cycle across files (`r.json#/A` → `#/B` → `#/A`) terminates. Validation follows a
+/// chain hop by hop through a queue whose only stop is the set of targets already validated at a
+/// location, so a cycle must end at the first repeat rather than spin forever. Every hop is a valid
+/// Reference Object, so validation itself reports nothing; the verdict on the cycle is lowering's,
+/// and is deliberately not pinned here.
+#[test]
+fn a_cross_file_reference_cycle_terminates() {
+    let root = placement_document(
+        "3.1.0",
+        serde_json::json!({ "operationId": "getPet", "responses": {
+        "200": { "$ref": "./r.json#/A" } } }),
+        serde_json::json!({}),
+    );
+    let cycle = serde_json::json!({ "A": { "$ref": "#/B" }, "B": { "$ref": "#/A" } });
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(run_placement(&[("openapi.json", root), ("r.json", cycle)]));
+    });
+    let (generated, checked) = receiver
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a cross-file Reference cycle did not terminate within 60 s");
+    for report in [&generated, &checked] {
+        assert!(!has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
