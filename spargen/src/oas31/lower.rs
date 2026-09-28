@@ -5699,27 +5699,44 @@ fn lower_security_schemes(
     for (name, scheme) in &document.components.security_schemes {
         let scheme = match scheme {
             RefOr::Item(scheme) => scheme,
-            // A `$ref` to another scheme component resolves; anything else is unresolvable.
+            // A `$ref` to another scheme component of this document resolves, one hop only. Each
+            // way it can fail gets its own message: calling a declared-but-aliased scheme
+            // "unresolved" would send the reader looking for a declaration that is right there.
             RefOr::Ref(reference) => {
-                let target = reference
+                let resolved = match reference
                     .reference
                     .strip_prefix("#/components/securitySchemes/")
-                    .and_then(|target| document.components.security_schemes.get(target))
-                    .and_then(|target| match target {
-                        RefOr::Item(target) => Some(target),
-                        RefOr::Ref(_) => None,
-                    });
-                match target {
-                    Some(target) => target,
-                    None => {
+                {
+                    None => Err(format!(
+                        "security scheme `$ref` `{}` does not point into this document's \
+                         `#/components/securitySchemes/`; only a reference to a scheme the \
+                         same document declares is resolved",
+                        reference.reference
+                    )),
+                    Some(target) => match document.components.security_schemes.get(target) {
+                        Some(RefOr::Item(target)) => Ok(target),
+                        None => Err(format!(
+                            "unresolved security scheme reference `{}`: no scheme named \
+                             `{target}` is declared under `#/components/securitySchemes/`",
+                            reference.reference
+                        )),
+                        // One level of indirection is what the specification requires, and a
+                        // chain would need its own cycle guard (an alias to itself is one).
+                        Some(RefOr::Ref(_)) => Err(format!(
+                            "security scheme `$ref` `{}` resolves to another security scheme \
+                             `$ref`; chained security scheme references are not resolved",
+                            reference.reference
+                        )),
+                    },
+                };
+                match resolved {
+                    Ok(target) => target,
+                    Err(message) => {
                         Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
-                            .message(format!(
-                                "unresolved security scheme reference `{}`",
-                                reference.reference
-                            ))
+                            .message(message)
                             .remedy(
-                                "reference a scheme declared under \
-                                 `#/components/securitySchemes/`",
+                                "reference a scheme declared directly, not as another `$ref`, \
+                                 under this document's `#/components/securitySchemes/`",
                             )
                             .emit(diags);
                         continue;
