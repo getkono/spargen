@@ -1212,9 +1212,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // diagnostic (#140). The applicators establish the category they apply to, as an
             // untyped `properties` already does, and say nothing about `null` (the same reading
             // `lower_union_sibling` takes), so the target's nullability survives the intersection.
+            let mut inferred_category = false;
             match implied_applicator_category(&sibling) {
                 Some(ImpliedCategory::Only(category)) => {
                     sibling.types.types = vec![category, JsonType::Null];
+                    inferred_category = true;
                 }
                 Some(ImpliedCategory::Conflicting) => {
                     return self.reject_ref_sibling_intersection(
@@ -1244,6 +1246,23 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             };
             let kind = self.graph.get(intersection.id)?.kind.clone();
+            // The `null` the inferred category carries is there to leave the target's nullability
+            // alone, not to satisfy the intersection on its own. Against a nullable target of
+            // another category the two share only `null`, and typing that as the exact JSON null
+            // would silently replace, say, a nullable string with `()`: the category contradiction
+            // is the same empty intersection it is against the non-null target, and is reported
+            // the same way. A target that is itself exactly `null` keeps its type.
+            if inferred_category
+                && matches!(kind, TypeKind::Null)
+                && !matches!(self.graph.get(referenced.id)?.kind, TypeKind::Null)
+            {
+                return self.reject_ref_sibling_intersection(
+                    schema,
+                    "this `$ref`'s untyped sibling keywords establish a category its target does \
+                     not have, so the only value both accept is `null`; the intersection is empty \
+                     but for the target's nullability",
+                );
+            }
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
             ty.boxed = intersection.boxed;

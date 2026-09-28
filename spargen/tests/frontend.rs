@@ -9339,6 +9339,49 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
         );
     }
 
+    // Keeping the target's `null` must not rescue a category contradiction. Against a nullable
+    // target of ANOTHER category the inferred `[category, null]` shares only `null` with it, and
+    // typing that as the exact JSON null (`pub type Sibling = ();`) would silently replace a
+    // nullable string with a type that decodes nothing else. It is the empty intersection the
+    // same sibling has against a non-null string, so it rejects the same way; an untyped
+    // `properties` sibling rejected here before the category was inferred at all.
+    for (keyword, target, sibling) in [
+        ("required", "{ type: [string, 'null'] }", "required: [q]"),
+        (
+            "properties",
+            "{ type: [string, 'null'] }",
+            "properties: { b: { type: integer } }",
+        ),
+        (
+            "items",
+            "{ type: [string, 'null'] }",
+            "items: { type: integer }",
+        ),
+        (
+            "additionalProperties",
+            "{ type: [array, 'null'], items: { type: string } }",
+            "additionalProperties: { type: integer }",
+        ),
+    ] {
+        let spec = format!(
+            "{HEAD}    Target: {target}\n    Sibling:\n      $ref: \
+             '#/components/schemas/Target'\n      {sibling}\n{holder}"
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "an untyped `{keyword}` sibling against a nullable target of another category \
+                 did not reject: {report:#?}"
+            );
+            assert_eq!(
+                messages_for(&report, Code::AllOfIrreconcilable).len(),
+                1,
+                "{keyword}: {report:#?}"
+            );
+        }
+    }
+
     let spec = format!(
         "{HEAD}    Target: {{ type: object, properties: {{ a: {{ type: string }} }} }}\n    \
          Sibling:\n      $ref: '#/components/schemas/Target'\n      required: [a]\n      \
