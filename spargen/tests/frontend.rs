@@ -7984,6 +7984,76 @@ paths:
     }
 }
 
+/// An object parameter's `required` name that no `properties` entry declares is a required field
+/// (#140), typed by `additionalProperties`. With no value schema that field is unconstrained, and
+/// an unconstrained JSON value has no `name[key]=value` or `key=value` serialization, so the
+/// parameter rejects with `E010` — naming the property and why, rather than the generic "nested
+/// arrays or objects", which describes nothing the author wrote. A value schema that is a scalar
+/// gives the field a serialization, and the parameter generates.
+#[test]
+fn an_object_parameters_undeclared_required_name_needs_a_scalar_value_schema() {
+    const TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          style: STYLE
+          explode: true
+          schema:
+            type: object
+            properties: { b: { type: string } }
+            required: [a]
+ADDITIONAL      responses:
+        "204": { description: No Content }
+"##;
+    let spec = |style: &str, additional: &str| {
+        TEMPLATE
+            .replace("STYLE", style)
+            .replace("ADDITIONAL", additional)
+    };
+    for style in ["deepObject", "form"] {
+        for additional in ["", "            additionalProperties: true\n"] {
+            let spec = spec(style, additional);
+            for report in [generate(&spec), check(&spec)] {
+                assert_eq!(report.outcome(), Outcome::Rejected, "{style}: {report:#?}");
+                let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+                assert_eq!(messages.len(), 1, "{style}: {report:#?}");
+                assert!(
+                    messages[0].contains("`a`")
+                        && messages[0].contains("no schema constrains its value")
+                        && !messages[0].contains("nested arrays or objects"),
+                    "{style}: {messages:?}"
+                );
+            }
+        }
+        let spec = spec(
+            style,
+            "            additionalProperties: { type: integer }\n",
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{style}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedParameterStyle),
+            "{report:#?}"
+        );
+        let types = types_module(&code);
+        assert!(
+            types
+                .lines()
+                .any(|line| line.trim() == "pub a: FilterAdditional,")
+                && types
+                    .lines()
+                    .any(|line| line.trim() == "pub type FilterAdditional = i64;"),
+            "{style}: the required name lost its field or its value type:\n{types}"
+        );
+        assert_ne!(check(&spec).outcome(), Outcome::Rejected, "{style}");
+    }
+}
+
 #[test]
 fn matrix_and_label_path_styles_generate() {
     let spec = r##"

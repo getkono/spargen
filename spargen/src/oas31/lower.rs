@@ -3723,6 +3723,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(parameter.provenance.clone()),
             )
         };
+        if let Some(property) = unconstrained_parameter_property(&self.graph, ty) {
+            // Most often a `required` name no `properties` entry declares, which is a required
+            // field typed by `additionalProperties` and unconstrained without one (#140). An
+            // arbitrary JSON value has no `key=value` token, and "nested arrays or objects"
+            // would describe nothing the author wrote.
+            Diagnostic::error(
+                Code::UnsupportedParameterStyle,
+                parameter.provenance.clone(),
+            )
+            .message(format!(
+                "parameter property `{property}` is unconstrained: no schema constrains its \
+                 value, so simple/form/deepObject serialization has no scalar token for it"
+            ))
+            .remedy(format!(
+                "declare `{property}` under `properties` with a scalar schema, or give the object \
+                 a scalar `additionalProperties` schema"
+            ))
+            .emit(self.diags);
+            return None;
+        }
         if !parameter_shape_supported(&self.graph, ty) {
             Diagnostic::error(
                 Code::UnsupportedParameterStyle,
@@ -5346,6 +5366,21 @@ fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option
         .as_deref()?
         .strip_prefix("#/components/schemas/")
         .filter(|name| in_sub_file || !name.contains('/'))
+}
+
+/// The wire name of the first field of an object parameter whose value is unconstrained
+/// ([`TypeKind::Any`]), which [`parameter_shape_supported`] refuses because an arbitrary JSON value
+/// has no single serialized token. `None` for a parameter that is not an object, or has no such
+/// field.
+fn unconstrained_parameter_property(graph: &TypeGraph, ty: Ty) -> Option<String> {
+    let TypeKind::Struct(object) = &graph.get(ty.id)?.kind else {
+        return None;
+    };
+    object
+        .fields
+        .iter()
+        .find(|field| matches!(graph.get(field.ty.id).map(|d| &d.kind), Some(TypeKind::Any)))
+        .map(|field| field.name.wire.clone())
 }
 
 fn parameter_shape_supported(graph: &TypeGraph, ty: Ty) -> bool {
