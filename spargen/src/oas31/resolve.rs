@@ -20,6 +20,20 @@ pub(crate) struct Resolved<'doc> {
     pub(crate) schema: Cow<'doc, Schema>,
 }
 
+/// Why [`Resolver::resolve_component`] could not produce its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComponentMiss {
+    /// The bundle could not place the reference in a loaded file at a JSON Pointer: it names a
+    /// file the bundle does not hold, or a fragment form (a named anchor) the resolver declines to
+    /// walk, and the bundle cannot tell which.
+    Unclassifiable,
+    /// The reference names a loaded file, but nothing sits at its JSON Pointer.
+    AbsentTarget,
+    /// The target exists but is not the object it should be. The parser has already reported
+    /// that itself, at the target.
+    Unparsable,
+}
+
 impl<'doc> Resolver<'doc> {
     /// Build a resolver over a document and its bundle.
     pub(crate) fn new(document: &'doc Document, bundle: &'doc InputBundle) -> Self {
@@ -162,6 +176,7 @@ impl<'doc> Resolver<'doc> {
         diags: &mut Diagnostics,
     ) -> Option<super::PathItem> {
         let Some((file, pointer)) = self.bundle.reference_target(reference, from) else {
+            // E004 case: unsupported-or-unresolved
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!(
                     "unsupported or unresolved Path Item `$ref` `{reference}`"
@@ -170,6 +185,7 @@ impl<'doc> Resolver<'doc> {
             return None;
         };
         let Some(node) = self.bundle.value_at(file).pointer(&pointer) else {
+            // E004 case: absent-target
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!(
                     "Path Item `$ref` target `{reference}` was not found in the input bundle"
@@ -185,16 +201,26 @@ impl<'doc> Resolver<'doc> {
     /// Multi-file API descriptions commonly reference a whole file — `../responses/Error.yaml` —
     /// rather than a `#/components/...` entry, so component aliases fall back to the bundle the
     /// same way schema references already do.
+    ///
+    /// A miss says which of the three ways it failed, so the caller can report each in its own
+    /// words rather than one wording for all of them.
     pub(crate) fn resolve_component<T>(
         &self,
         reference: &str,
         from: crate::diag::FileId,
         parse: impl Fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
         diags: &mut Diagnostics,
-    ) -> Option<T> {
-        let (file, pointer) = self.bundle.reference_target(reference, from)?;
-        let node = self.bundle.value_at(file).pointer(&pointer)?;
-        parse(&node.clone(), &pointer, diags)
+    ) -> Result<T, ComponentMiss> {
+        let (file, pointer) = self
+            .bundle
+            .reference_target(reference, from)
+            .ok_or(ComponentMiss::Unclassifiable)?;
+        let node = self
+            .bundle
+            .value_at(file)
+            .pointer(&pointer)
+            .ok_or(ComponentMiss::AbsentTarget)?;
+        parse(&node.clone(), &pointer, diags).ok_or(ComponentMiss::Unparsable)
     }
 
     fn resolve_bundle(
@@ -205,12 +231,14 @@ impl<'doc> Resolver<'doc> {
         diags: &mut Diagnostics,
     ) -> Result<Resolved<'doc>, Aborted> {
         let Some((file, pointer)) = self.bundle.reference_target(reference, from) else {
+            // E004 case: unsupported-or-unresolved
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!("unsupported or unresolved $ref `{reference}`"))
                 .emit(diags);
             return Err(Aborted);
         };
         let Some(node) = self.bundle.value_at(file).pointer(&pointer) else {
+            // E004 case: absent-target
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!(
                     "$ref target `{reference}` was not found in the input bundle"

@@ -1082,6 +1082,7 @@ fn parse_schema_or(
             .emit(diags);
     }
     if map.get("$id").is_some() || map.get("$anchor").is_some() {
+        // E004 case: resource-scope
         Diagnostic::error(Code::UnresolvedRef, provenance(pointer, value))
             .message("static `$id`/`$anchor` schema resource scopes are not yet supported")
             // The code reads "unresolved $ref" because scope-aware resolution is what is missing;
