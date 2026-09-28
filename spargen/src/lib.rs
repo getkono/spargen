@@ -860,7 +860,7 @@ fn lower_frontend(
     }
 
     let validator = oas31::MetaSchemaValidator::load_vendored();
-    validator.validate(bundle.root(), diags);
+    validator.validate(&bundle, diags);
     if diags.has_errors() {
         return Err(());
     }

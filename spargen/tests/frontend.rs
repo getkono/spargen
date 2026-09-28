@@ -16602,3 +16602,335 @@ fn every_parity_fixture_that_reports_is_labelled() {
         "only {labelled} parity fixtures are labelled; the convention has been disarmed"
     );
 }
+
+// --- placement independence: an inline document and its `$ref`-split twins -------------------
+//
+// The metaschema used to run over the root document only, so a construct it closes was rejected
+// when written inline and accepted once moved behind a `$ref` into a sibling file (#234). The two
+// instances found that way — Responses keys and `additionalOperations` tokens — were each patched
+// by transcribing one rule out of the metaschema into Rust. The property below is the general one:
+// every fixture is written inline, then mechanically split at one Reference-able position into
+// three twins — a whole-file `$ref`, a JSON Pointer into a file, and a two-hop chain through a
+// file that is itself a Reference — and all four must reach the same verdict under the same codes,
+// through both `generate` and `check`.
+
+/// One inline document and the position to split it at.
+struct Placement {
+    name: &'static str,
+    document: serde_json::Value,
+    /// RFC 6901 pointer to the Reference-able value moved out of the root.
+    split_at: &'static str,
+    /// Whether the inline document is rejected. Asserted on the inline document itself, so a
+    /// fixture cannot quietly stop exercising the violation it is named for.
+    rejects: bool,
+}
+
+/// A root document with one `GET /pet` operation, plus any further top-level members.
+fn placement_document(
+    version: &str,
+    get: serde_json::Value,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut document = serde_json::json!({
+        "openapi": version,
+        "info": { "title": "T", "version": "1.0.0" },
+        "servers": [{ "url": "https://e.com" }],
+        "paths": { "/pet": { "get": get } },
+    });
+    if let (Some(document), Some(extra)) = (document.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            document.insert(key.clone(), value.clone());
+        }
+    }
+    document
+}
+
+fn ok_get() -> serde_json::Value {
+    serde_json::json!({
+        "operationId": "getPet",
+        "responses": { "200": { "description": "ok" } },
+    })
+}
+
+/// One fixture per Reference-able position the metaschema closes something at, plus valid twins
+/// that pin the other direction: validating a referenced file must not over-reject what the same
+/// construct inline accepts — a chained Reference included.
+fn placement_fixtures() -> Vec<Placement> {
+    use serde_json::json;
+    let none = json!({});
+    vec![
+        Placement {
+            name: "out-of-grammar Responses key in a Path Item",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": {
+                "200": { "description": "ok" }, "0XX": { "description": "bad" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet",
+            rejects: true,
+        },
+        Placement {
+            name: "unknown field in a Response",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": {
+                "200": { "description": "ok", "bogus": 1 } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/responses/200",
+            rejects: true,
+        },
+        Placement {
+            name: "Parameter without `in`",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet",
+                "parameters": [{ "name": "q", "schema": { "type": "string" } }],
+                "responses": { "200": { "description": "ok" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/parameters/0",
+            rejects: true,
+        },
+        Placement {
+            name: "Request Body without `content`",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "requestBody": { "description": "none" },
+                "responses": { "200": { "description": "ok" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/requestBody",
+            rejects: true,
+        },
+        Placement {
+            name: "Header with neither `schema` nor `content`",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": { "200": {
+                "description": "ok", "headers": { "X-Rate": { "description": "rate" } } } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/responses/200/headers/X-Rate",
+            rejects: true,
+        },
+        Placement {
+            name: "Security Scheme without `type`",
+            document: placement_document(
+                "3.1.0",
+                ok_get(),
+                json!({ "components": { "securitySchemes": {
+                "key": { "name": "k", "in": "header" } } } }),
+            ),
+            split_at: "/components/securitySchemes/key",
+            rejects: true,
+        },
+        Placement {
+            name: "component Response with an unknown field, reached through a component ref",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": {
+                "200": { "$ref": "#/components/responses/Ok" } } }),
+                json!({ "components": { "responses": {
+                "Ok": { "description": "ok", "bogus": 1 } } } }),
+            ),
+            split_at: "/components/responses/Ok",
+            rejects: true,
+        },
+        Placement {
+            name: "Callback Path Item with an unknown field",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet",
+                "callbacks": { "onEvent": { "{$request.body#/url}": { "bogus": 1 } } },
+                "responses": { "200": { "description": "ok" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/callbacks/onEvent",
+            rejects: true,
+        },
+        Placement {
+            name: "OpenAPI 3.2 `additionalOperations` key that is not a method token",
+            document: json!({
+                "openapi": "3.2.0",
+                "info": { "title": "T", "version": "1.0.0" },
+                "servers": [{ "url": "https://e.com" }],
+                "paths": { "/pet": { "additionalOperations": { "pu rge": {
+                "operationId": "purge", "responses": { "204": { "description": "ok" } } } } } },
+            }),
+            split_at: "/paths/~1pet",
+            rejects: true,
+        },
+        Placement {
+            name: "OpenAPI 3.2 Media Type with an unknown field",
+            document: placement_document(
+                "3.2.0",
+                json!({ "operationId": "getPet", "responses": { "200": { "description": "ok",
+                "content": { "application/json": {
+                "schema": { "type": "string" }, "bogus": 1 } } } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/responses/200/content/application~1json",
+            rejects: true,
+        },
+        Placement {
+            name: "a valid Response, split without changing the verdict",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": { "200": { "description": "ok",
+                "headers": { "X-Rate": { "schema": { "type": "integer" } } },
+                "content": { "application/json": { "schema": { "type": "string" } } } } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/responses/200",
+            rejects: false,
+        },
+        Placement {
+            name: "a valid Path Item, split without changing the verdict",
+            document: placement_document("3.1.0", ok_get(), none.clone()),
+            split_at: "/paths/~1pet",
+            rejects: false,
+        },
+        Placement {
+            name: "a valid Parameter, split without changing the verdict",
+            document: placement_document(
+                "3.2.0",
+                json!({ "operationId": "getPet",
+                "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string" } }],
+                "responses": { "200": { "description": "ok" } } }),
+                none,
+            ),
+            split_at: "/paths/~1pet/get/parameters/0",
+            rejects: false,
+        },
+    ]
+}
+
+/// A value moved out of the root, as `(label, root reference, files to write)`.
+type Twin = (&'static str, String, Vec<(&'static str, serde_json::Value)>);
+
+const CHAINED: &str = "a two-hop chain through a Reference";
+const IN_ROOT: &str = "#/x-shared/item";
+
+/// The ways a value can be moved out of the root document.
+fn placement_twins(value: &serde_json::Value) -> Vec<Twin> {
+    vec![
+        (
+            "a whole-file $ref",
+            "./fragment.json".to_owned(),
+            vec![("fragment.json", value.clone())],
+        ),
+        (
+            "a JSON Pointer into a file",
+            "./fragment.json#/shared/item".to_owned(),
+            vec![(
+                "fragment.json",
+                serde_json::json!({ "shared": { "item": value.clone() } }),
+            )],
+        ),
+        // A pointer into the root's own specification extension: the one place in the root the
+        // whole-document validation admits anything at all, so the target must be validated at
+        // the position its reference implies there too. The root rewrite below moves the value in.
+        (
+            "a JSON Pointer into the root document's own extension",
+            IN_ROOT.to_owned(),
+            Vec::new(),
+        ),
+        (
+            CHAINED,
+            "./hop.json".to_owned(),
+            vec![
+                ("hop.json", serde_json::json!({ "$ref": "./fragment.json" })),
+                ("fragment.json", value.clone()),
+            ],
+        ),
+    ]
+}
+
+/// Write `files` into a fresh directory and run both entry points over its `openapi.json`.
+fn run_placement(files: &[(&str, serde_json::Value)]) -> (Report, Report) {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    for (name, value) in files {
+        std::fs::write(dir.join(name), serde_json::to_vec_pretty(value).unwrap()).unwrap();
+    }
+    let generated = spargen::generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
+    let checked = spargen::check(&Spec::new(dir.join("openapi.json")));
+    (generated, checked)
+}
+
+fn distinct_codes(report: &Report) -> Vec<&'static str> {
+    let mut codes = codes(report);
+    codes.dedup();
+    codes
+}
+
+/// An inline document and each of its `$ref`-split twins reach the same verdict under the same
+/// diagnostic codes, through both `generate` and `check`.
+#[test]
+fn a_construct_reaches_the_same_verdict_inline_and_behind_a_ref() {
+    let mut divergent = Vec::new();
+    for fixture in placement_fixtures() {
+        let (inline_generated, inline_checked) =
+            run_placement(&[("openapi.json", fixture.document.clone())]);
+        assert_eq!(
+            inline_generated.outcome() == Outcome::Rejected,
+            fixture.rejects,
+            "{}: inline: {inline_generated:#?}",
+            fixture.name
+        );
+        if fixture.rejects {
+            assert!(
+                has_code(&inline_generated, Code::InvalidInput),
+                "{}: inline: {inline_generated:#?}",
+                fixture.name
+            );
+        }
+        let moved = fixture
+            .document
+            .pointer(fixture.split_at)
+            .unwrap_or_else(|| panic!("{}: nothing at {}", fixture.name, fixture.split_at))
+            .clone();
+        for (label, reference, mut files) in placement_twins(&moved) {
+            // A chain is held to the property only where the inline document rejects: there the
+            // metaschema decides the verdict before lowering runs. On a valid document the verdict
+            // is lowering's, which does not follow every chain — Path Items deliberately (`E004`,
+            // #135), Parameters by defect (#274).
+            if label == CHAINED && !fixture.rejects {
+                continue;
+            }
+            let mut root = fixture.document.clone();
+            *root.pointer_mut(fixture.split_at).unwrap() = serde_json::json!({ "$ref": reference });
+            if reference == IN_ROOT {
+                root.as_object_mut().unwrap().insert(
+                    "x-shared".to_owned(),
+                    serde_json::json!({ "item": moved.clone() }),
+                );
+            }
+            files.push(("openapi.json", root));
+            let (generated, checked) = run_placement(&files);
+            for (entry, inline, split) in [
+                ("generate", &inline_generated, &generated),
+                ("check", &inline_checked, &checked),
+            ] {
+                if split.outcome() != inline.outcome()
+                    || distinct_codes(split) != distinct_codes(inline)
+                {
+                    divergent.push(format!(
+                        "{} through {label}: `{entry}` reached {:?} {:?}, inline {:?} {:?}\n\
+                         split: {split:#?}",
+                        fixture.name,
+                        split.outcome(),
+                        distinct_codes(split),
+                        inline.outcome(),
+                        distinct_codes(inline),
+                    ));
+                }
+            }
+        }
+    }
+    // Collected rather than asserted one at a time, so a regression names every placement it
+    // reaches rather than the first.
+    assert!(divergent.is_empty(), "{}", divergent.join("\n\n"));
+}
