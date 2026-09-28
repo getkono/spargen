@@ -1155,3 +1155,87 @@ fn carve_removes_a_union_whose_sole_member_cannot_be_intersected() {
         "the carved op is absent: {generated}"
     );
 }
+
+/// A rejection whose provenance lies in a referenced sub-file is **not** carvable today, and this
+/// pins that limit so a change to it is deliberate. `compat::carve_rules` keys the rule it derives
+/// on the pointer alone, not on the file the pointer is written in, so a dangling `$ref` inside
+/// `lib.yaml`'s `Node` yields the rule `component schemas Node`, which is read against the root
+/// document, matches nothing there, and ends the run with `E019` instead of recovering it. The
+/// root-document counterpart, which does recover, is
+/// `a_dangling_ref_in_an_unreferenced_component_rejects_and_omitting_it_recovers`.
+#[test]
+fn carve_cannot_recover_a_rejection_whose_provenance_lies_in_a_sub_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string } } }
+  /uses-node:
+    get:
+      operationId: getUsesNode
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "./lib.yaml#/components/schemas/Node" }
+"##,
+    );
+    write_spec(
+        temp.path(),
+        "lib.yaml",
+        r##"
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        missing: { $ref: "#/components/schemas/Missing" }
+"##,
+    );
+    let out = temp.path().join("client.rs");
+
+    // Without carve, the sub-file's dangling reference rejects the document.
+    let report = spargen::generate(&config(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef),
+        "the dangling sub-file reference is E004: {report:#?}"
+    );
+
+    // With carve, the derived rule names the sub-file's component but is read against the root
+    // document, which declares no `Node`, so the rule itself fails with `E019`.
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::InvalidOmitRule
+                && d.message
+                    .contains("omit rule did not match any source construct")
+                && d.message.contains("component schemas Node")),
+        "E019 names the sub-file component rule that matched nothing in the root: {report:#?}"
+    );
+    assert!(
+        !out.exists(),
+        "an un-carvable rejection writes no output: {}",
+        out.display()
+    );
+}
