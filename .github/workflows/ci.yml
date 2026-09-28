@@ -200,6 +200,18 @@ jobs:
           workspaces: |
             examples/petstore
             examples/petstore-macro
+      # Guard the premise deny.toml reasons about TLS advisories on: generated output carries its
+      # own default-features-off reqwest, so no example's committed lockfile holds a TLS crate
+      # (#146). First, so no cargo call has rewritten a lockfile yet.
+      - name: Assert example lockfiles are TLS-free
+        run: |
+          for lock in examples/petstore/Cargo.lock examples/petstore-macro/Cargo.lock examples/github-api/Cargo.lock; do
+            tls=$(grep -En '^name = "([^"]*(rustls|native-tls|openssl|webpki)[^"]*|[^"]*-tls)"$' "$lock" || test $? -eq 1)
+            if [ -n "$tls" ]; then
+              echo "$lock carries a TLS crate:"; echo "$tls"; exit 1
+            fi
+          done
+          echo "example lockfiles are TLS-free"
       # build.rs path
       - run: cargo clippy --manifest-path examples/petstore/Cargo.toml -- -D warnings
       - run: cargo run --manifest-path examples/petstore/Cargo.toml
@@ -239,26 +251,7 @@ jobs:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --workspace --all-features --document-private-items
 
-  deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.98.1
-      # The cargo-deny version `[tools]` pins in mise.toml, not the copy an action bundles: the
-      # action's version moved with its `@v2` ref and nothing held it to the pin (#228), and its
-      # inputs composed an argv this repository could only partly state (#229).
-      # `ci_installs_exactly_the_tool_versions_mise_pins` holds the version here to the pin.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny@0.20.2
-      # `mise run deny`'s command, byte for byte
-      # (`every_mise_task_runs_exactly_what_its_ci_job_runs`).
-      # `--all-features` is what puts the TLS stack in scope: `rustls` reaches the graph only
-      # through reqwest's TLS feature, so without it the audit sees no TLS stack at all (#147).
-      # `the_deny_gate_states_the_feature_scope_it_audits` holds the command to that scope, to a
-      # bare `check`, and to no graph-narrowing flag.
-      - run: cargo deny --all-features check
+  # The `deny` job lives in deny.yml, which runs it on the same triggers plus a daily schedule.
 
   commits:
     name: Conventional commits

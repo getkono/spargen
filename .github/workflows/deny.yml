@@ -1,0 +1,46 @@
+name: Supply chain
+
+# The audit's verdict depends on when it runs, not only on what is committed: cargo-deny fetches
+# the RustSec database fresh each run, and `yanked = "deny"` reads the registry as it is now. A new
+# advisory therefore turns every open pull request red while `master`'s last status stays green,
+# and before this schedule it was found by whichever contributor's unrelated pull request hit it
+# first (#146). The daily run finds it on `master` itself; CLAUDE.md says who responds. The job is
+# the same gate pull requests and pushes run, in its own workflow so the schedule re-runs only it.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: deny-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      # The cargo-deny version `[tools]` pins in mise.toml, not the copy an action bundles: the
+      # action's version moved with its `@v2` ref and nothing held it to the pin (#228), and its
+      # inputs composed an argv this repository could only partly state (#229).
+      # `ci_installs_exactly_the_tool_versions_mise_pins` holds the version here to the pin.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      # `mise run deny`'s command, byte for byte
+      # (`every_mise_task_runs_exactly_what_its_ci_job_runs`).
+      # `--all-features` is what puts the TLS stack in scope: `rustls` reaches the graph only
+      # through reqwest's TLS feature, so without it the audit sees no TLS stack at all (#147).
+      # `--locked` makes the committed `Cargo.lock` the audited one: without it cargo-deny's
+      # `cargo metadata` silently rewrote a skewed lockfile, or wrote a missing one, and audited
+      # that instead (#146). `the_deny_gate_states_the_feature_scope_it_audits` holds the command
+      # to both flags, to a bare `check`, and to no graph-narrowing flag.
+      - run: cargo deny --all-features --locked check

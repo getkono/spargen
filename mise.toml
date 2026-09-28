@@ -48,10 +48,12 @@ run = [
 # above (`every_mise_task_runs_exactly_what_its_ci_job_runs` and
 # `ci_installs_exactly_the_tool_versions_mise_pins` in spargen/tests/corpus_manifest.rs). `--all-features` is load-bearing: rustls enters the graph
 # only under it, so without it an advisory against rustls is clean here and failing there (#141).
-# `the_deny_gate_states_the_feature_scope_it_audits` holds the command to that scope, to a bare
+# `--locked` audits the committed `Cargo.lock`: without it a skewed lockfile was silently rewritten,
+# and a missing one written, and the rewrite was what got audited (#146).
+# `the_deny_gate_states_the_feature_scope_it_audits` holds the command to both flags, to a bare
 # `check`, and to no graph-narrowing flag.
 description = "Supply-chain audit (licenses, advisories, bans)"
-run = "cargo deny --all-features check"
+run = "cargo deny --all-features --locked check"
 
 [tasks.bench]
 description = "Run the generation benchmarks (criterion). CI uploads these as a release artifact."
@@ -133,6 +135,20 @@ run = [
 [tasks.example]
 description = "Run the end-to-end petstore examples (build.rs + macro) against a local mock server"
 run = [
+  # Every example workspace's committed lockfile stays TLS-free: deny.toml reasons about TLS
+  # advisories on the premise that generated output carries its own default-features-off reqwest,
+  # and this is what holds that premise (#146). It reads the lockfiles before any cargo call below
+  # can rewrite them. `|| test $? -eq 1` lets grep's no-match through and keeps its error fatal, so
+  # a missing lockfile fails rather than passing as TLS-free. The script is CI's step verbatim.
+  '''
+for lock in examples/petstore/Cargo.lock examples/petstore-macro/Cargo.lock examples/github-api/Cargo.lock; do
+  tls=$(grep -En '^name = "([^"]*(rustls|native-tls|openssl|webpki)[^"]*|[^"]*-tls)"$' "$lock" || test $? -eq 1)
+  if [ -n "$tls" ]; then
+    echo "$lock carries a TLS crate:"; echo "$tls"; exit 1
+  fi
+done
+echo "example lockfiles are TLS-free"
+''',
   # build.rs path
   "cargo clippy --manifest-path examples/petstore/Cargo.toml -- -D warnings",
   "cargo run --manifest-path examples/petstore/Cargo.toml",
