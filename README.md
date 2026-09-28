@@ -81,7 +81,9 @@ the version it emits, and the idioms spargen handles.
   A missing required credential is a request-construction error — typed as
   `RequestError::MissingCredential`, listing for each security alternative the schemes with no
   registered credential, and a failed token provider as `RequestError::CredentialProvider` —
-  never a silent 401.
+  never a silent 401. A failure inside the selected alternative never falls through to a later
+  one; `Client::without_credential(scheme)` unregisters a scheme, so a client derived with it
+  (`client.clone().without_credential("oauth")`) selects the next fully registered alternative.
 - A closed error taxonomy, identical across all spargen output: request-construction, transport,
   timeout, protocol, redirect, documented API error (typed `E`), undocumented status (raw body
   preserved), decode failure (serde path + body, capped except on the two paths the emitted

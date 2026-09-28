@@ -559,6 +559,54 @@ fn blocking_method_round_trips_against_a_mock() {
     server.join().unwrap();
 }
 
+// Selection never falls through past a chosen alternative whose credential fails, so the remedy
+// is to unregister it: `without_credential` on the same client reaches the later, fully registered
+// alternative over real HTTP, and the request carries that alternative's credential alone.
+#[test]
+fn without_credential_falls_through_to_a_later_alternative() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream.flush().unwrap();
+        request
+    });
+    let failing_bearer = basic_client::Credential::Provider(std::sync::Arc::new(|| {
+        Box::pin(async { Err(basic_client::AuthError::new("idp down")) })
+            as basic_client::TokenFuture
+    }));
+    // `getConjunction` is `tenant + bearer`, or `apiKey`, or `mtls + tenant`: all three registered
+    // selects the first, whose bearer provider fails before anything is sent — so the mock sees
+    // no connection from this call.
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}"))
+        .unwrap()
+        .with_credential("tenant", basic_client::Credential::ApiKey(basic_client::SecretString::from("acme")))
+        .with_credential("bearer", failing_bearer)
+        .with_credential("apiKey", basic_client::Credential::ApiKey(basic_client::SecretString::from("k3y")));
+    match client.get_conjunction() {
+        Err(basic_client::Error::RequestConstruction(
+            basic_client::RequestError::CredentialProvider { scheme, .. },
+        )) => assert_eq!(scheme, "bearer"),
+        other => panic!("expected the selected alternative's provider failure, got {other:?}"),
+    }
+
+    let client = client.without_credential("bearer");
+    let response = client.get_conjunction().expect("the apiKey alternative is selected and sent");
+    assert_eq!(response.status(), 204);
+    let request = server.join().unwrap();
+    // The second alternative is `apiKey` alone: the still-registered `tenant` belongs only to
+    // alternatives that were not selected, so it must not ride along, and neither may a bearer.
+    assert!(request.contains("x-api-key: k3y\r\n"), "{request}");
+    assert!(!request.contains("x-tenant"), "{request}");
+    assert!(!request.contains("authorization"), "{request}");
+}
+
 /// A resolver whose lookup never completes. reqwest's `connect_timeout` bounds the whole connector
 /// call, name resolution included, so a lookup that hangs is a connect that hangs: it reaches the
 /// same `TimedOut` inside the same connect error a blackholed TCP handshake does, without needing a
@@ -1975,6 +2023,34 @@ fn a_missing_credential_is_a_typed_request_construction_error() {
     let _: Option<basic_client::RequestCause> = None;
     let client = basic_client::Client::new("http://127.0.0.1:1").unwrap();
     let mut call = std::pin::pin!(client.get_user("1", None));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("a missing credential must fail before anything is sent");
+    };
+    match result {
+        Err(basic_client::Error::RequestConstruction(
+            basic_client::RequestError::MissingCredential { alternatives },
+        )) => assert_eq!(alternatives, [vec!["bearer"], vec!["apiKey"]]),
+        other => panic!("expected MissingCredential, got {other:?}"),
+    }
+}
+
+// `without_credential` on the async client reaches dispatch: a client derived from a registered
+// one by unregistering its only credential is back to reporting that scheme as missing, and the
+// client it was cloned from keeps its registration.
+#[test]
+fn without_credential_unregisters_a_scheme_on_a_derived_client() {
+    use std::future::Future;
+    let registered = basic_client::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_credential(
+            "bearer",
+            basic_client::Credential::Bearer(basic_client::SecretString::from("t0k")),
+        );
+    let derived = registered.clone().without_credential("bearer").without_credential("never");
+    assert!(registered.core().credential("bearer").is_some());
+    assert!(derived.core().credential("bearer").is_none());
+    let mut call = std::pin::pin!(derived.get_user("1", None));
     let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
     let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
         panic!("a missing credential must fail before anything is sent");

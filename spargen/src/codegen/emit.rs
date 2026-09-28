@@ -165,6 +165,17 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
                 self
             }
 
+            /// Unregister the credential for a named security scheme; a scheme never registered
+            /// is left as it is. Operations pick the first `security` alternative whose schemes
+            /// are all registered and never fall through past it when attaching fails, so this
+            /// is how a caller reaches a later alternative: `client.clone().without_credential(..)`
+            /// derives a client that no longer selects the earlier one.
+            #[must_use]
+            pub fn without_credential(mut self, scheme: &str) -> Self {
+                self.core.remove_credential(scheme);
+                self
+            }
+
             #(#methods)*
         }
     }
@@ -1100,6 +1111,13 @@ pub(crate) fn emit_blocking_client(
                 credential: support::Credential,
             ) -> Self {
                 self.inner = self.inner.with_credential(scheme, credential);
+                self
+            }
+
+            /// Unregister the credential for a named security scheme (mirrors the async client).
+            #[must_use]
+            pub fn without_credential(mut self, scheme: &str) -> Self {
+                self.inner = self.inner.without_credential(scheme);
                 self
             }
 
