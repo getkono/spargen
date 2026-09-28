@@ -1222,20 +1222,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      unrepresentable intersection",
                 );
             };
-            let intersection = match self.indistinguishable_union_variant(intersection) {
-                // Every branch of a union sibling intersected to one and the same type: the
-                // branches differ only in keywords the lowered shape does not carry, such as a
-                // branch of nothing but `required` (#140). Emitting them as a union gives a `oneOf`
-                // whose exactly-one check fails on every value, so the position takes that one
-                // type and the ignored branch distinctions are reported, not dropped in silence.
+            // Only a `$ref` whose own sibling is a `oneOf`/`anyOf` is collapsed. A `$ref` to a union
+            // beside a non-union sibling is an intersection this check was never meant for, and it
+            // keeps the shape it has always generated.
+            let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
+            let collapsed = has_union_sibling
+                .then(|| self.indistinguishable_union_variant(intersection))
+                .flatten();
+            let intersection = match collapsed {
+                // Every branch of the intersected union is one and the same type: the branches
+                // differ only in keywords the lowered shape does not carry, such as a branch of
+                // nothing but `required` (#140). Emitting them as a union gives a `oneOf` whose
+                // exactly-one check fails on every value, so the position takes that one type and
+                // the ignored branch distinctions are reported, not dropped in silence.
                 Some(mut common) => {
                     // A union carries its nullability on the union, not on its variants.
                     common.nullable = intersection.nullable;
                     Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
                         .message(
-                            "the `oneOf`/`anyOf` beside this `$ref` has branches that differ only \
-                             in keywords the generated type does not carry, so which branch a \
-                             value matches is not enforced",
+                            "this `$ref` and its `oneOf`/`anyOf` sibling intersect to a union whose \
+                             branches differ only in keywords the generated type does not carry, \
+                             so which branch a value matches is not enforced",
                         )
                         .remedy("keep producer-side validation for the union's branch constraints")
                         .emit(self.diags);

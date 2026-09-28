@@ -530,6 +530,65 @@ components:
     }
 }
 
+/// The collapse above is reserved for a `$ref` whose own sibling is a `oneOf`/`anyOf`. A `$ref` to a
+/// union component beside a non-union sibling (`U: anyOf[...]`, `P: {$ref: U, const: x}`) is an
+/// intersection this change does not touch: its branches may intersect to one type, but it must
+/// keep generating exactly what it did before — no `W001` at the `$ref`, and the same union shape.
+#[test]
+fn a_ref_to_a_union_with_a_non_union_sibling_is_not_collapsed() {
+    for keyword in ["oneOf", "anyOf"] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    U:
+      {keyword}:
+        - {{ type: string, minLength: 1 }}
+        - {{ type: string, maxLength: 9 }}
+    P: {{ $ref: '#/components/schemas/U', const: x }}
+    Holder:
+      type: object
+      properties:
+        p: {{ $ref: '#/components/schemas/P' }}
+      required: [p]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{keyword} via {entry}: {report:#?}"
+            );
+            assert!(
+                !report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/P"
+                }),
+                "{keyword} via {entry}: a `$ref` with no union sibling must not be collapsed or \
+                 warned about: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        assert!(
+            types.contains("pub enum P "),
+            "{keyword}: `P` must keep the union shape it generated before: {types}"
+        );
+    }
+}
+
 /// A nullable alias on a cycle — `B: oneOf: [<A>, null]` with `A.next: {$ref: B}` — is recognised
 /// as a back-edge to `A` only when its real member is a bare `$ref`. A member carrying a
 /// `oneOf`/`anyOf` beside its `$ref` is an intersection, not another name for `A`: taking it as the
