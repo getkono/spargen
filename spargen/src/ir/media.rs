@@ -396,14 +396,14 @@ impl Responses {
     ///
     /// The entries are the lowered non-success statuses of `by_status` plus the sentinel a declared
     /// `default` contributes, not everything the document declares: the count and the variants
-    /// follow what lowering kept. `default` is *offered* here as `Range(0)` whenever it is declared — including when it is
-    /// also the operation's sole success source (see [`Self::success`]), which then types both
-    /// sides with that one body, as the specification does: `default` documents every undeclared
-    /// status, of either class — but it reaches the shape only through the body count above. (A
-    /// bodied *streaming* `default` cannot be typed on both sides — the success side would stream
-    /// and this side decode it whole — so lowering rejects it; see
-    /// [`Self::stream_outside_single_success`].) A bodyless `default` therefore becomes the catch-all unit variant of an `Enum` and is dropped
-    /// from a `None` or a `Single`.
+    /// follow what lowering kept. `default` is *offered* here as `Range(0)` whenever it is
+    /// declared — including when it is also the operation's sole success source (see
+    /// [`Self::success`]), which then types both sides with that one body, as the specification
+    /// does: `default` documents every undeclared status, of either class — but it reaches the
+    /// shape only through the body count above. (A bodied *streaming* `default` cannot be typed on
+    /// both sides — the success side would stream and this side decode it whole — so lowering
+    /// rejects it; see [`Self::stream_outside_single_success`].) A bodyless `default` therefore
+    /// becomes the catch-all unit variant of an `Enum` and is dropped from a `None` or a `Single`.
     pub(crate) fn error(&self) -> ErrorShape {
         let mut entries: Vec<(StatusSpec, Option<Ty>)> = Vec::new();
         for (status, response) in &self.by_status {
