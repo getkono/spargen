@@ -1206,6 +1206,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     },
                 );
             }
+            // A sibling carrying only object or only array applicators names no `type`, and
+            // `lower_schema` reaches its object and array arms through `type`, so it would lower to
+            // `TypeKind::Any` — which intersects as identity, discarding the keywords with no
+            // diagnostic (#140). The applicators establish the category they apply to, as an
+            // untyped `properties` already does, and say nothing about `null` (the same reading
+            // `lower_union_sibling` takes), so the target's nullability survives the intersection.
+            match implied_applicator_category(&sibling) {
+                Some(ImpliedCategory::Only(category)) => {
+                    sibling.types.types = vec![category, JsonType::Null];
+                }
+                Some(ImpliedCategory::Conflicting) => {
+                    return self.reject_ref_sibling_intersection(
+                        schema,
+                        "this `$ref`'s siblings carry both object keywords (`properties`, \
+                         `patternProperties`, `required`, `additionalProperties`) and array \
+                         keywords (`items`, `prefixItems`) with no `type` to choose between them, \
+                         so no single Rust type represents what they constrain",
+                    );
+                }
+                None => {}
+            }
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
             let Some(intersection) =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
@@ -2162,6 +2183,53 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else {
             self.lower_pattern_additional(schema, hint)?
         };
+        // A `required` name no `properties` entry declares is still required: the instance must
+        // carry that key. Consuming `required` only as a per-property flag dropped such a name,
+        // so the generated type accepted and could emit an object without it (#140). It becomes
+        // a required field typed by what the object says of an undeclared key: the
+        // `additionalProperties` schema when there is one, nothing at all when there is not —
+        // `patternProperties` alone cannot be matched against the name here, so its value type
+        // would be a guess — and uninhabited under `additionalProperties: false`, which forbids
+        // the very key `required` demands.
+        let mut seen: HashSet<&str> = schema.properties.keys().map(String::as_str).collect();
+        for name in &schema.required {
+            if !seen.insert(name.as_str()) {
+                continue;
+            }
+            let ty = match (&additional, schema.additional_properties.as_deref()) {
+                (AdditionalProps::Deny, _) => self.insert_type(
+                    &format!("{hint}{name}"),
+                    TypeKind::Never,
+                    Docs::default(),
+                    None,
+                ),
+                (AdditionalProps::Typed(ty), Some(SchemaOr::Schema(_))) => {
+                    // The map value dropped its `Box` because the map already provides the
+                    // indirection a cycle-closing reference needs. A plain field has none, so it
+                    // is boxed again exactly when the value closes a cycle: its target is still
+                    // being lowered, which is what makes the `ensure_*` paths box it.
+                    let mut ty = **ty;
+                    ty.boxed = self.is_in_progress_root(ty.id);
+                    ty
+                }
+                _ => self.insert_type(
+                    &format!("{hint}{name}"),
+                    TypeKind::Any,
+                    Docs::default(),
+                    None,
+                ),
+            };
+            fields.push(Field {
+                name: PropertyName { wire: name.clone() },
+                ty,
+                required: true,
+                deprecated: false,
+                read_only: false,
+                write_only: false,
+                default: None,
+                xml: XmlField::default(),
+            });
+        }
         Some((fields, additional))
     }
 
@@ -6684,6 +6752,46 @@ fn schema_is_object_like(schema: &Schema) -> bool {
         || schema.additional_properties.is_some()
         || !schema.required.is_empty()
         || schema.types.types.contains(&JsonType::Object)
+}
+
+/// The category a schema's object or array applicators imply, for a schema that establishes none
+/// of its own. See [`implied_applicator_category`].
+enum ImpliedCategory {
+    /// Only object applicators, or only array applicators: the category they apply to.
+    Only(JsonType),
+    /// Both kinds, and nothing to choose between them.
+    Conflicting,
+}
+
+/// The category a `$ref` sibling's applicators establish when the sibling names no `type` and
+/// carries no other keyword that lowers to a shape of its own (`enum`, `const`, a composition, a
+/// binary encoding, a `$ref`).
+///
+/// The object applicators are `properties`, `patternProperties`, `required` and
+/// `additionalProperties`; the array applicators are `items` and `prefixItems`. `None` when the
+/// schema carries neither kind, or already names or implies its shape some other way.
+fn implied_applicator_category(schema: &Schema) -> Option<ImpliedCategory> {
+    let establishes_elsewhere = !schema.types.types.is_empty()
+        || schema.reference.is_some()
+        || schema.enum_values.is_some()
+        || schema.const_value.is_some()
+        || !schema.all_of.is_empty()
+        || !schema.one_of.is_empty()
+        || !schema.any_of.is_empty()
+        || schema.content_encoding.is_some()
+        || schema.format.as_deref() == Some("binary");
+    if establishes_elsewhere {
+        return None;
+    }
+    // `types` is empty here, so this is exactly the object applicators.
+    let object = schema_is_object_like(schema);
+    let array = schema.items.is_some() || !schema.prefix_items.is_empty();
+    match (object, array) {
+        (true, false) => Some(ImpliedCategory::Only(JsonType::Object)),
+        (false, true) => Some(ImpliedCategory::Only(JsonType::Array)),
+        (true, true) => Some(ImpliedCategory::Conflicting),
+        (false, false) => None,
+    }
 }
 
 /// Whether a non-object schema still imposes a scalar/leaf constraint (a non-null primitive type,
