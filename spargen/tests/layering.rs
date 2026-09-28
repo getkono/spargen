@@ -296,6 +296,99 @@ fn test_only_declarations(tail: &str) -> BTreeSet<String> {
     names
 }
 
+/// The comment lines of `head` (a runtime source above its `#[cfg(test)]` marker) that break the
+/// rule `embedded_comments_name_no_test_only_item_undisclosed` states, each as `LINE: TEXT` with
+/// the test-only items it names.
+///
+/// A comment block is a run of consecutive comment lines, and both the disclosure and the phrase
+/// "test module" are matched against the block's joined, whitespace-normalised text, so neither
+/// depends on where the prose happens to wrap. A block that mentions the phrase reports every one
+/// of its lines; otherwise a line is reported only when it names a test-only item itself.
+fn comment_violations(head: &str, test_only: &BTreeSet<String>) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut block: Vec<(usize, &str)> = Vec::new();
+    let lines: Vec<&str> = head.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            block.push((index + 1, trimmed));
+        }
+        let block_ends = !trimmed.starts_with("//") || index + 1 == lines.len();
+        if !block_ends || block.is_empty() {
+            continue;
+        }
+        let text = block
+            .iter()
+            .flat_map(|(_, line)| {
+                line.trim_start_matches('/')
+                    .trim_start_matches('!')
+                    .split_whitespace()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !text.contains(STRIPPED_DISCLOSURE) {
+            let mentions_test_module = text.to_ascii_lowercase().contains("test module");
+            for (number, line) in &block {
+                let named: Vec<&str> = code_names(line)
+                    .filter(|word| test_only.contains(*word))
+                    .collect();
+                if !named.is_empty() || mentions_test_module {
+                    violations.push(format!("{number}: {line}  (names {named:?})"));
+                }
+            }
+        }
+        block.clear();
+    }
+    violations
+}
+
+/// The rule's matching, pinned on fixtures rather than on whatever the runtime sources say today:
+/// the phrase and the disclosure are read across the lines a comment block wraps over.
+#[test]
+fn comment_violations_read_each_comment_block_as_one_text() {
+    let test_only: BTreeSet<String> = ["helper_fn".to_owned()].into();
+
+    let wrapped = "/// The contract is held by the test\n/// module below.\nfn embedded() {}\n";
+    assert_eq!(
+        comment_violations(wrapped, &test_only),
+        [
+            "1: /// The contract is held by the test  (names [])",
+            "2: /// module below.  (names [])",
+        ],
+        "the phrase \"test module\" wrapped across two lines must still be caught"
+    );
+
+    let one_line = "// See the TEST MODULE.\nfn embedded() {}\n";
+    assert_eq!(
+        comment_violations(one_line, &test_only),
+        ["1: // See the TEST MODULE.  (names [])"]
+    );
+
+    let named = "// Checked by `helper_fn`.\n// Nothing else here.\nfn embedded() {}\n";
+    assert_eq!(
+        comment_violations(named, &test_only),
+        ["1: // Checked by `helper_fn`.  (names [\"helper_fn\"])"],
+        "without the phrase, only the line that names the item is reported"
+    );
+
+    let (first, rest) = STRIPPED_DISCLOSURE
+        .split_once(' ')
+        .expect("the disclosure has more than one word");
+    let disclosed = format!(
+        "// Checked by `helper_fn` in the test module. {first}\n// {rest}.\nfn embedded() {{}}\n"
+    );
+    assert!(
+        comment_violations(&disclosed, &test_only).is_empty(),
+        "a disclosure wrapped across lines still covers its block"
+    );
+
+    let apart = "// the test\nfn embedded() {}\n// module\n";
+    assert!(
+        comment_violations(apart, &test_only).is_empty(),
+        "separate comment blocks are not joined across code"
+    );
+}
+
 /// Everything above `#[cfg(test)]` in a runtime source ships verbatim in every generated client,
 /// and the test module below it does not (`generated_output_carries_no_test_module`). So a comment
 /// up there that names a test-only item, or points at "the test module", is true in this
@@ -345,38 +438,12 @@ fn embedded_comments_name_no_test_only_item_undisclosed() {
         let head = source
             .split_once("#[cfg(test)]")
             .map_or(source.as_str(), |(head, _)| head);
-        // A comment block is a run of consecutive comment lines; the disclosure covers its block.
-        let mut block: Vec<(usize, &str)> = Vec::new();
-        let lines: Vec<&str> = head.lines().collect();
-        for (index, line) in lines.iter().enumerate() {
-            let trimmed = line.trim_start();
-            if trimmed.starts_with("//") {
-                block.push((index + 1, trimmed));
-            }
-            let block_ends = !trimmed.starts_with("//") || index + 1 == lines.len();
-            if !block_ends || block.is_empty() {
-                continue;
-            }
-            let text = block
-                .iter()
-                .map(|(_, line)| line.trim_start_matches('/').trim_start_matches('!').trim())
-                .collect::<Vec<_>>()
-                .join(" ");
-            if !text.contains(STRIPPED_DISCLOSURE) {
-                for (number, line) in &block {
-                    let named: Vec<&str> = code_names(line)
-                        .filter(|word| test_only.contains(*word))
-                        .collect();
-                    if !named.is_empty() || line.to_ascii_lowercase().contains("test module") {
-                        violations.push(format!(
-                            "{}:{number}: {line}  (names {named:?})",
-                            path.strip_prefix(&root).unwrap_or(path).display()
-                        ));
-                    }
-                }
-            }
-            block.clear();
-        }
+        let file = path.strip_prefix(&root).unwrap_or(path).display();
+        violations.extend(
+            comment_violations(head, &test_only)
+                .into_iter()
+                .map(|violation| format!("{file}:{violation}")),
+        );
     }
     assert!(
         violations.is_empty(),
