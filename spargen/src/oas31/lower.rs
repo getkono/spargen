@@ -1222,6 +1222,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      unrepresentable intersection",
                 );
             };
+            let intersection = match self.indistinguishable_union_variant(intersection) {
+                // Every branch of a union sibling intersected to one and the same type: the
+                // branches differ only in keywords the lowered shape does not carry, such as a
+                // branch of nothing but `required` (#140). Emitting them as a union gives a `oneOf`
+                // whose exactly-one check fails on every value, so the position takes that one
+                // type and the ignored branch distinctions are reported, not dropped in silence.
+                Some(mut common) => {
+                    // A union carries its nullability on the union, not on its variants.
+                    common.nullable = intersection.nullable;
+                    Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+                        .message(
+                            "the `oneOf`/`anyOf` beside this `$ref` has branches that differ only \
+                             in keywords the generated type does not carry, so which branch a \
+                             value matches is not enforced",
+                        )
+                        .remedy("keep producer-side validation for the union's branch constraints")
+                        .emit(self.diags);
+                    common
+                }
+                None => intersection,
+            };
             let kind = self.graph.get(intersection.id)?.kind.clone();
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
@@ -3106,6 +3127,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Docs::default(),
             None,
         ))
+    }
+
+    /// The one type every variant of `ty` shares, when `ty` is a union of two or more variants that
+    /// are all the same type. No value can tell such variants apart, so the union adds nothing to
+    /// its common type — and a `oneOf` of them rejects every value its common type accepts.
+    fn indistinguishable_union_variant(&self, ty: Ty) -> Option<Ty> {
+        let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) else {
+            return None;
+        };
+        let (first, rest) = union.variants.split_first()?;
+        (!rest.is_empty() && rest.iter().all(|variant| same_ty(variant.ty, first.ty)))
+            .then_some(first.ty)
     }
 
     fn intersect_union(

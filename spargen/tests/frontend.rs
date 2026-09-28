@@ -452,6 +452,141 @@ fn a_ref_with_a_union_sibling_is_intersected_with_its_target() {
     }
 }
 
+/// A union sibling whose branches intersect with the target to one and the same type — here
+/// branches of nothing but `required`, which lower to no shape of their own (#140) — must not be
+/// emitted as a union. Every branch would be the target, so a `oneOf` of them rejects every value
+/// and an `anyOf` of them is the target itself. The position keeps the target's shape and the
+/// branch distinctions it cannot carry are reported as `W001` at the `$ref`, through `generate` and
+/// `check` alike, for `oneOf` and `anyOf`, as a component and as a property.
+#[test]
+fn a_ref_with_a_union_sibling_whose_branches_collapse_keeps_the_target_and_warns() {
+    for keyword in ["oneOf", "anyOf"] {
+        let site = format!(
+            "{{ $ref: '#/components/schemas/Base', {keyword}: [ {{ required: [a] }}, {{ required: \
+             [b] }} ] }}"
+        );
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    Base:
+      type: object
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+        inline: {site}
+      required: [pick, inline]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{keyword} via {entry}: {report:#?}"
+            );
+            for pointer in [
+                "/components/schemas/Pick",
+                "/components/schemas/Holder/properties/inline",
+            ] {
+                assert!(
+                    report.diagnostics().iter().any(|d| {
+                        d.code == Code::ValidationKeywordIgnored && d.pointer.as_str() == pointer
+                    }),
+                    "{keyword} via {entry}: W001 must point at `{pointer}`: {report:#?}"
+                );
+            }
+        }
+        let types = types_module(&code);
+        assert_eq!(
+            declared_fields(&types, "Pick"),
+            ["a", "b"],
+            "{keyword}: `Pick` must keep `Base`'s shape: {types}"
+        );
+        let inline = field_type(&types, "pub inline")
+            .unwrap_or_else(|| panic!("{keyword}: no `inline` field: {types}"));
+        assert_eq!(
+            declared_fields(&types, &inline),
+            ["a", "b"],
+            "{keyword}: the `inline` property must keep `Base`'s shape: {types}"
+        );
+    }
+}
+
+/// A nullable alias on a cycle — `B: oneOf: [<A>, null]` with `A.next: {$ref: B}` — is recognised
+/// as a back-edge to `A` only when its real member is a bare `$ref`. A member carrying a
+/// `oneOf`/`anyOf` beside its `$ref` is an intersection, not another name for `A`: taking it as the
+/// alias boxed a plain `A` and dropped the member's union with no diagnostic. Here the union
+/// (`anyOf: [{type: integer}]`) even contradicts the object `A`. As an intersection, the member's
+/// `$ref` closes the cycle back to `A`, so it is `E013` at the member — in either declaration
+/// order, through `generate` and `check` alike, for `oneOf` and `anyOf` beside the `$ref`.
+#[test]
+fn a_nullable_alias_member_with_a_union_beside_its_ref_is_not_a_cycle_alias() {
+    for keyword in ["oneOf", "anyOf"] {
+        let a = "    A:\n      type: object\n      properties:\n        next: { $ref: \
+                 '#/components/schemas/B' }\n";
+        let b = format!(
+            "    B:\n      oneOf:\n        - $ref: '#/components/schemas/A'\n          {keyword}: \
+             [{{ type: integer }}]\n        - type: 'null'\n"
+        );
+        for (order, schemas) in [
+            ("A first", format!("{a}{b}")),
+            ("B first", format!("{b}{a}")),
+        ] {
+            let spec = format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/A' }} }}
+components:
+  schemas:
+{schemas}"##
+            );
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{keyword}, {order}, via {entry}: the member's union must not be dropped by \
+                     taking it as an alias: {report:#?}\n{spec}"
+                );
+                assert!(
+                    report.diagnostics().iter().any(|d| {
+                        d.code == Code::AllOfIrreconcilable
+                            && d.pointer.as_str() == "/components/schemas/B/oneOf/0"
+                    }),
+                    "{keyword}, {order}, via {entry}: E013 must point at the member: {report:#?}"
+                );
+            }
+        }
+    }
+}
+
 /// The control: `not` beside a `$ref` was never silent — it is validation-only and says so with
 /// `W001` — and admitting the union keywords to the shape gate must leave it exactly that, in every
 /// position, with the position still typed as the target.
