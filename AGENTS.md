@@ -78,7 +78,7 @@ them byte for byte, and `ci_installs_exactly_the_tool_versions_mise_pins` holds 
 installs to the exact version mise's `[tools]` pins (and every pin but `hk`, which CI never runs,
 to being installed by CI, and every job that runs a pinned tool to installing it itself) — so
 `deny` runs mise's cargo-deny rather than one an action bundles, and `the_deny_gate_states_the_feature_scope_it_audits` holds the shared command to
-`--all-features` and a bare `check`. "Every CI job" is every job of every workflow
+`--all-features`, `--locked`, and a bare `check`. "Every CI job" is every job of every workflow
 under `.github/workflows/`: each file is either a gate workflow whose jobs are all paired or a
 listed non-gate workflow with its reason (only `release-plz.yml`, which publishes), and an
 unclassified file fails. Each gate workflow's `on:`, `concurrency:` and `permissions:` are pinned
@@ -89,7 +89,8 @@ change what a task runs without appearing in its command. `the_msrv_gate_runs_on
 holds both sides of `msrv` to the workspace `rust-version` (`cargo +1.88.0 …` and
 `dtolnay/rust-toolchain@1.88.0`), since `rust-toolchain.toml` would otherwise select its own
 release. CI's `test` job is `mise run test` followed by `mise run bench-build`; `bench` is held to
-`benchmarks.yml`. The only differences are named exceptions in that test's `PAIRINGS` table, each
+`benchmarks.yml`, and `deny` to `deny.yml`, which runs it on `ci.yml`'s triggers plus a daily
+schedule (see "Lockfiles and advisories" below). The only differences are named exceptions in that test's `PAIRINGS` table, each
 pinned literally on both sides: `commits` checks the pull request's `base.sha..head.sha` where
 `commit-range` checks `origin/master..HEAD` (only the range is rewritten; the rest must match), the
 `package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only,
@@ -114,6 +115,35 @@ job of its own) — never run in a hook; they are too slow, so a green pre-push 
 once to install them.
 
 CI additionally gates what no local task can: `commits` checks exactly the pull request's range.
+
+## Lockfiles and advisories
+
+Four lockfiles are committed: the workspace `Cargo.lock` and one per example workspace. The
+supply-chain audit is **not hermetic** — cargo-deny fetches the RustSec database on every run and
+`yanked = "deny"` reads the registry as it is now — so an advisory can turn every open pull request
+red with nothing committed. Three things hold the audit to the committed artefact:
+
+- `deny` runs with `--locked`, so a lockfile that does not match the manifests fails the audit
+  instead of being silently rewritten and the rewrite audited.
+- `deny.yml` runs it daily on `master` (and on `workflow_dispatch`), so the repository finds a new
+  advisory before a contributor's unrelated pull request does. GitHub sends a failed scheduled run
+  to whoever last changed the workflow's `cron`, and disables a schedule after 60 days without
+  repository activity; re-enable it from the Actions tab.
+- The `example` gate's first step asserts that no example lockfile holds a TLS crate (`rustls`,
+  `native-tls`, `openssl`, `webpki`, or any `*-tls`), which is the premise `deny.toml` reasons
+  about TLS advisories on: generated output carries its own default-features-off `reqwest`.
+
+A red `deny` for an advisory or yank the diff did not introduce is the **maintainers'** to fix, not
+the author's of whichever pull request showed it first. It is fixed the day it is seen, in a
+`fix(deps):` pull request of its own that bumps the affected crate
+(`cargo update -p <crate> --precise <patched>`, in each lockfile that carries it) or, where no
+patched release exists, adds an `[advisories] ignore` entry to `deny.toml` stating why the
+advisory does not reach this graph and what lifts it. That pull request merges first, and open
+pull requests then merge `master` in; none of them carries the fix. Otherwise a lockfile changes
+only with the manifest change that needs it, and the workspace one also in release-plz's release
+pull request. That pull request does not touch the example lockfiles, so their `spargen` version
+stamp goes stale on each release and a local `mise run example` rewrites it; that rewrite is not
+part of any change and is not committed with one.
 
 Standing invariants:
 

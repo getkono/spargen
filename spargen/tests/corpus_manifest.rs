@@ -472,14 +472,25 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
             "`mise run deny` runs `{command}`, which does not pass `--all-features`, so the \
              audited graph has no TLS stack in it"
         );
+        // Without `--locked`, cargo-deny's `cargo metadata` rewrites a lockfile that does not
+        // match the manifests and audits the rewrite: a skewed `Cargo.lock` (rustls 0.23.45 with
+        // rustls-webpki 0.103.13) reported green and was silently corrected, and a deleted one
+        // was regenerated and reported `advisories ok` (#146). With it, both fail -- the deleted
+        // lockfile with "cannot create the lock file ... because --locked was passed". `--frozen`
+        // would also hold the lockfile, but it implies `--offline`, a graph-narrowing flag below.
+        assert!(
+            globals.contains(&"--locked"),
+            "`mise run deny` runs `{command}`, which does not pass `--locked`, so a lockfile that \
+             does not match the manifests is rewritten and the rewrite is audited instead of the \
+             committed `Cargo.lock`"
+        );
         for word in globals {
             let flag = flag_of(word);
             assert!(
                 !GRAPH_NARROWING_FLAGS.contains(&flag),
                 "`mise run deny` runs `{command}`, whose `{flag}` shrinks the graph cargo-deny \
                  resolves rather than the checks it runs over it; `--all-features {flag} …` \
-                 still contains `--all-features` and still drops RUSTSEC-2026-0285. Strictly \
-                 stricter values such as `--all-features --locked` are deliberately still accepted"
+                 still contains `--all-features` and still drops RUSTSEC-2026-0285"
             );
         }
         assert!(
@@ -586,11 +597,20 @@ struct GateWorkflow {
 /// Every workflow under `.github/workflows/` (`.yml` or `.yaml`) is one of these or one of
 /// [`NON_GATE_WORKFLOWS`]; an unclassified file fails, so a new workflow cannot run a gate no
 /// pairing sees.
-const GATE_WORKFLOWS: [GateWorkflow; 2] = [
+const GATE_WORKFLOWS: [GateWorkflow; 3] = [
     GateWorkflow {
         file: "ci.yml",
         on: "push:\n  branches: [master]\npull_request:",
         concurrency: Some("group: ci-${{ github.ref }}\ncancel-in-progress: true"),
+        permissions: None,
+    },
+    // `ci.yml`'s triggers plus a daily schedule on `master` (and a manual one): the audit is
+    // non-hermetic, so a new advisory must be found on `master` rather than by whichever open pull
+    // request runs next (#146). Dropping `schedule:` fails here.
+    GateWorkflow {
+        file: "deny.yml",
+        on: "push:\n  branches: [master]\npull_request:\nschedule:\n  - cron: \"17 6 * * *\"\nworkflow_dispatch:",
+        concurrency: Some("group: deny-${{ github.ref }}\ncancel-in-progress: true"),
         permissions: None,
     },
     GateWorkflow {
@@ -745,6 +765,7 @@ const PAIRINGS: &[Pairing] = &[
         ..PAIR
     }),
     Pairing::Identical(Pair {
+        workflow: "deny.yml",
         job: "deny",
         tasks: &["deny"],
         ci_only: &[
