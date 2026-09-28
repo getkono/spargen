@@ -10641,9 +10641,9 @@ paths:
     get:
       responses:
         "204": {{ description: No Content }}
+x-elsewhere:
+  Bearer: {{ type: http, scheme: bearer }}
 components:
-  schemas:
-    Token: {{ type: string }}
   securitySchemes:
 {schemes}"##
         )
@@ -10670,7 +10670,10 @@ components:
         ),
         (
             "a reference outside the security scheme components",
-            spec_with("    A: { $ref: \"#/components/schemas/Token\" }\n"),
+            // The target is a well-formed Security Scheme, so only its location is wrong: a
+            // target that is not a Security Scheme at all is rejected earlier, as `E011`, by
+            // the metaschema, which validates every `$ref` target at its position.
+            spec_with("    A: { $ref: \"#/x-elsewhere/Bearer\" }\n"),
             "does not point into this document's `#/components/securitySchemes/`",
         ),
     ];
@@ -10702,6 +10705,13 @@ components:
     for report in [generate(&one_hop), check(&one_hop)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    }
+
+    // A target that is not a Security Scheme at all never reaches the location check.
+    let not_a_scheme = spec_with("    A: { $ref: \"#/x-elsewhere/Bearer/type\" }\n");
+    for report in [generate(&not_a_scheme), check(&not_a_scheme)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
     }
 }
 
@@ -15052,10 +15062,12 @@ paths:
 // --- additionalOperations method tokens -----------------------------------------------------
 //
 // The official document schema pins these keys to an RFC 9110 token and forbids restating a fixed
-// field, but it validates the *root* document only. A Path Item reached by `$ref` into another
-// file never meets it, so both fixtures below route through a sub-file — the path that was
-// previously unguarded, and on which a non-token key reached codegen and was emitted as
+// field. It once validated the *root* document only, so a Path Item reached by `$ref` into another
+// file never met it; both fixtures below route through a sub-file — the path that was once
+// unguarded, and on which a non-token key reached codegen and was emitted as
 // `Method::from_bytes(..).expect(..)`, panicking inside the consumer's client at request time.
+// The token rule is now the schema's, applied to the sub-file (#234); the case-insensitive
+// fixed-field rule is spargen's own, since the schema names the fixed fields in upper case only.
 
 #[test]
 fn e011_additional_operations_method_must_be_an_http_token() {
@@ -15267,9 +15279,9 @@ fn the_parity_fixtures_span_both_verdicts() {
 }
 
 /// Write a root document whose only Path Item is a `$ref` to a sibling file holding `path_item`,
-/// then run both entry points over it. The indirection is the point: `lower_frontend` validates
-/// `bundle.root()` against the metaschema and nothing else, so a Path Item reached by `$ref` never
-/// meets it. Returns `(generate, check)` so a fixture can assert the two agree, the way
+/// then run both entry points over it. The indirection is the point: the metaschema once validated
+/// the root document and nothing else, so a Path Item reached by `$ref` never met it, and these
+/// fixtures pin that it now does (#234). Returns `(generate, check)` so a fixture can assert the two agree, the way
 /// `PARITY_FIXTURES` does for inline specs — which those cannot, being single-file by construction.
 fn generate_and_check_refd_path_item(path_item: &str) -> (Report, Report) {
     let (generated, checked, _) = generate_and_check_refd_path_item_with_code(path_item);
@@ -15295,8 +15307,8 @@ fn generate_and_check_refd_path_item_with_code(path_item: &str) -> (Report, Repo
     (generated, checked, code)
 }
 
-/// A root document whose Responses map carries `entries` verbatim, written inline so the
-/// metaschema — which `lower_frontend` runs over `bundle.root()` and nothing else — does see it.
+/// A root document whose Responses map carries `entries` verbatim, written inline: the twin of a
+/// [`generate_and_check_refd_path_item`] fixture, so the two placements can be compared.
 fn inline_spec_with_response_entries(entries: &str) -> String {
     format!(
         "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\npaths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200': {{ description: ok }}\n{entries}"
@@ -15307,7 +15319,7 @@ fn inline_spec_with_response_entries(entries: &str) -> String {
 ///
 /// `references/3.2.0.md` closes the grammar — *"Only the following range definitions are allowed:
 /// `1XX`, `2XX`, `3XX`, `4XX`, and `5XX`"* — and the metaschema spells it `^[1-5](?:[0-9]{2}|XX)$`.
-/// Before the key was checked at parse time, `0XX` lowered to `StatusSpec::Range(0)`, which is the
+/// Before the key was checked behind a `$ref`, `0XX` lowered to `StatusSpec::Range(0)`, which is the
 /// sentinel `default` itself lowers to: the operation's error enum got **two** `Default` variants
 /// and `rustc` refused the emitted module with `E0428` — at outcome `Generated`, with zero
 /// diagnostics. That is the fourth, silent behavior the contract forbids, on a construct the
@@ -15323,8 +15335,8 @@ fn e011_out_of_grammar_response_key_behind_a_ref_is_rejected() {
     assert!(has_code(&checked, Code::InvalidInput), "{checked:#?}");
 }
 
-/// The other faces of the same defect, each reached through a `$ref` so the metaschema never sees
-/// it. `02XX` lowered to the same `StatusSpec` as `2XX`, and `0200`/`+200` to the same one as
+/// The other faces of the same defect, each reached through a `$ref`, where the metaschema once
+/// never looked. `02XX` lowered to the same `StatusSpec` as `2XX`, and `0200`/`+200` to the same one as
 /// `200` — a duplication `E022` cannot catch, because these are distinct map keys. `6XX`-`9XX`
 /// lowered to a match arm no status can reach. `XX`, `2xx` and `banana` were dropped with no
 /// diagnostic at all, handing the caller a client with no arm for a response they wrote down.
@@ -15362,10 +15374,10 @@ fn e011_every_out_of_grammar_response_key_is_rejected_behind_a_ref() {
     }
 }
 
-/// The parity property the parse-time check exists to establish: the *same* out-of-grammar key
-/// written inline — where the metaschema does see it — reaches the same verdict under the same
-/// code. Should the vendored metaschema's pattern and the hand-written grammar ever diverge, this
-/// fixture and the one above stop agreeing, which is the only signal that divergence would give.
+/// The parity property for this one construct: the *same* out-of-grammar key written inline
+/// reaches the same verdict under the same code as behind a `$ref`. Both placements are now
+/// decided by the one vendored pattern, so they cannot drift apart;
+/// `a_construct_reaches_the_same_verdict_inline_and_behind_a_ref` states the property in general.
 #[test]
 fn an_out_of_grammar_response_key_rejects_identically_inline_and_behind_a_ref() {
     let inline = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200': { description: ok }\n        '0XX': { description: out of grammar }\n        default: { description: fallback }\n";
@@ -15385,8 +15397,8 @@ fn an_out_of_grammar_response_key_rejects_identically_inline_and_behind_a_ref() 
 
 /// The keys the metaschema *does* admit keep working behind a `$ref`: both response-key shapes it
 /// allows, the `default` sentinel, and a specification extension, which `specification-extensions`
-/// admits under `^x-` and which is therefore skipped before the grammar is applied. Without this
-/// the grammar check could over-reject with every other suite still green.
+/// admits under `^x-` and which parsing therefore skips. Without this, validating the referenced
+/// file could over-reject with every other suite still green.
 ///
 /// The verdict is asserted exactly rather than as "not rejected", and the diagnostics are asserted
 /// empty: a change that started *warning* on in-grammar keys would otherwise pass here. And each
@@ -15491,9 +15503,8 @@ fn a_specification_extension_is_skipped_whatever_its_value_shape() {
 }
 
 /// The skip is `^x-`, exactly as the metaschema spells it — case-sensitively. `X-note` is not a
-/// specification extension: `unevaluatedProperties: false` rejects it inline, and behind a `$ref`,
-/// where the metaschema never looks, the grammar check is what rejects it. Both under `E011`, so
-/// the verdict does not depend on placement.
+/// specification extension: `unevaluatedProperties: false` rejects it inline and behind a `$ref`
+/// alike, under `E011`, so the verdict does not depend on placement.
 #[test]
 fn an_uppercase_extension_key_is_not_a_specification_extension() {
     let (generated, checked) = generate_and_check_refd_path_item(
@@ -16769,4 +16780,434 @@ fn every_parity_fixture_that_reports_is_labelled() {
         labelled >= 7,
         "only {labelled} parity fixtures are labelled; the convention has been disarmed"
     );
+}
+
+// --- placement independence: an inline document and its `$ref`-split twins -------------------
+//
+// The metaschema used to run over the root document only, so a construct it closes was rejected
+// when written inline and accepted once moved behind a `$ref` into a sibling file (#234). The two
+// instances found that way — Responses keys and `additionalOperations` tokens — were each patched
+// by transcribing one rule out of the metaschema into Rust. The property below is the general one:
+// every fixture is written inline, then mechanically split at one Reference-able position into
+// three twins — a whole-file `$ref`, a JSON Pointer into a file, and a two-hop chain through a
+// file that is itself a Reference — and all four must reach the same verdict under the same codes,
+// through both `generate` and `check`.
+
+/// One inline document and the position to split it at.
+struct Placement {
+    name: &'static str,
+    document: serde_json::Value,
+    /// RFC 6901 pointer to the Reference-able value moved out of the root.
+    split_at: &'static str,
+    /// Whether the inline document is rejected. Asserted on the inline document itself, so a
+    /// fixture cannot quietly stop exercising the violation it is named for.
+    rejects: bool,
+}
+
+/// A root document with one `GET /pet` operation, plus any further top-level members.
+fn placement_document(
+    version: &str,
+    get: serde_json::Value,
+    extra: serde_json::Value,
+) -> serde_json::Value {
+    let mut document = serde_json::json!({
+        "openapi": version,
+        "info": { "title": "T", "version": "1.0.0" },
+        "servers": [{ "url": "https://e.com" }],
+        "paths": { "/pet": { "get": get } },
+    });
+    if let (Some(document), Some(extra)) = (document.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            document.insert(key.clone(), value.clone());
+        }
+    }
+    document
+}
+
+fn ok_get() -> serde_json::Value {
+    serde_json::json!({
+        "operationId": "getPet",
+        "responses": { "200": { "description": "ok" } },
+    })
+}
+
+/// One fixture per Reference-able position the metaschema closes something at, plus valid twins
+/// that pin the other direction: validating a referenced file must not over-reject what the same
+/// construct inline accepts — a chained Reference included.
+fn placement_fixtures() -> Vec<Placement> {
+    use serde_json::json;
+    let none = json!({});
+    vec![
+        Placement {
+            name: "out-of-grammar Responses key in a Path Item",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": {
+                "200": { "description": "ok" }, "0XX": { "description": "bad" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet",
+            rejects: true,
+        },
+        Placement {
+            name: "unknown field in a Response",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": {
+                "200": { "description": "ok", "bogus": 1 } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/responses/200",
+            rejects: true,
+        },
+        Placement {
+            name: "Parameter without `in`",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet",
+                "parameters": [{ "name": "q", "schema": { "type": "string" } }],
+                "responses": { "200": { "description": "ok" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/parameters/0",
+            rejects: true,
+        },
+        // In 3.1 a Parameter's and a Header's `examples` are admitted only under the
+        // `dependentSchemas: { schema: … }` branch of their definitions, so this is the one route
+        // by which validation reaches a Reference there.
+        Placement {
+            name: "OpenAPI 3.1 Parameter Example with an unknown field",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet",
+                "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string" },
+                "examples": { "a": { "value": "x", "bogus": 1 } } }],
+                "responses": { "200": { "description": "ok" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/parameters/0/examples/a",
+            rejects: true,
+        },
+        Placement {
+            name: "OpenAPI 3.1 Header Example with an unknown field",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": { "200": {
+                "description": "ok", "headers": { "X-Rate": { "schema": { "type": "integer" },
+                "examples": { "a": { "value": 1, "bogus": 1 } } } } } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/responses/200/headers/X-Rate/examples/a",
+            rejects: true,
+        },
+        Placement {
+            name: "Request Body without `content`",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "requestBody": { "description": "none" },
+                "responses": { "200": { "description": "ok" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/requestBody",
+            rejects: true,
+        },
+        Placement {
+            name: "Header with neither `schema` nor `content`",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": { "200": {
+                "description": "ok", "headers": { "X-Rate": { "description": "rate" } } } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/responses/200/headers/X-Rate",
+            rejects: true,
+        },
+        Placement {
+            name: "Security Scheme without `type`",
+            document: placement_document(
+                "3.1.0",
+                ok_get(),
+                json!({ "components": { "securitySchemes": {
+                "key": { "name": "k", "in": "header" } } } }),
+            ),
+            split_at: "/components/securitySchemes/key",
+            rejects: true,
+        },
+        Placement {
+            name: "component Response with an unknown field, reached through a component ref",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": {
+                "200": { "$ref": "#/components/responses/Ok" } } }),
+                json!({ "components": { "responses": {
+                "Ok": { "description": "ok", "bogus": 1 } } } }),
+            ),
+            split_at: "/components/responses/Ok",
+            rejects: true,
+        },
+        Placement {
+            name: "Callback Path Item with an unknown field",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet",
+                "callbacks": { "onEvent": { "{$request.body#/url}": { "bogus": 1 } } },
+                "responses": { "200": { "description": "ok" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/callbacks/onEvent",
+            rejects: true,
+        },
+        Placement {
+            name: "OpenAPI 3.2 `additionalOperations` key that is not a method token",
+            document: json!({
+                "openapi": "3.2.0",
+                "info": { "title": "T", "version": "1.0.0" },
+                "servers": [{ "url": "https://e.com" }],
+                "paths": { "/pet": { "additionalOperations": { "pu rge": {
+                "operationId": "purge", "responses": { "204": { "description": "ok" } } } } } },
+            }),
+            split_at: "/paths/~1pet",
+            rejects: true,
+        },
+        Placement {
+            name: "OpenAPI 3.2 Media Type with an unknown field",
+            document: placement_document(
+                "3.2.0",
+                json!({ "operationId": "getPet", "responses": { "200": { "description": "ok",
+                "content": { "application/json": {
+                "schema": { "type": "string" }, "bogus": 1 } } } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/responses/200/content/application~1json",
+            rejects: true,
+        },
+        Placement {
+            name: "a valid Response, split without changing the verdict",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": { "200": { "description": "ok",
+                "headers": { "X-Rate": { "schema": { "type": "integer" } } },
+                "content": { "application/json": { "schema": { "type": "string" } } } } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/responses/200",
+            rejects: false,
+        },
+        Placement {
+            name: "a valid Path Item, split without changing the verdict",
+            document: placement_document("3.1.0", ok_get(), none.clone()),
+            split_at: "/paths/~1pet",
+            rejects: false,
+        },
+        Placement {
+            name: "a valid Parameter, split without changing the verdict",
+            document: placement_document(
+                "3.2.0",
+                json!({ "operationId": "getPet",
+                "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string" } }],
+                "responses": { "200": { "description": "ok" } } }),
+                none,
+            ),
+            split_at: "/paths/~1pet/get/parameters/0",
+            rejects: false,
+        },
+    ]
+}
+
+/// A value moved out of the root, as `(label, root reference, files to write)`.
+type Twin = (&'static str, String, Vec<(&'static str, serde_json::Value)>);
+
+const CHAINED: &str = "a two-hop chain through a Reference";
+const IN_ROOT: &str = "#/x-shared/item";
+
+/// The ways a value can be moved out of the root document.
+fn placement_twins(value: &serde_json::Value) -> Vec<Twin> {
+    vec![
+        (
+            "a whole-file $ref",
+            "./fragment.json".to_owned(),
+            vec![("fragment.json", value.clone())],
+        ),
+        (
+            "a JSON Pointer into a file",
+            "./fragment.json#/shared/item".to_owned(),
+            vec![(
+                "fragment.json",
+                serde_json::json!({ "shared": { "item": value.clone() } }),
+            )],
+        ),
+        // A fragment is a URI fragment, so a key holding a space is percent-encoded in it, and one
+        // holding a `/` is `~1`-escaped as well. Lowering decodes both; validation must address
+        // the same node, or the target is lowered without ever being validated.
+        (
+            "a percent-encoded JSON Pointer into a file",
+            "./fragment.json#/shared/an%20item~1b".to_owned(),
+            vec![(
+                "fragment.json",
+                serde_json::json!({ "shared": { "an item/b": value.clone() } }),
+            )],
+        ),
+        // A pointer into the root's own specification extension: the one place in the root the
+        // whole-document validation admits anything at all, so the target must be validated at
+        // the position its reference implies there too. The root rewrite below moves the value in.
+        (
+            "a JSON Pointer into the root document's own extension",
+            IN_ROOT.to_owned(),
+            Vec::new(),
+        ),
+        (
+            CHAINED,
+            "./hop.json".to_owned(),
+            vec![
+                ("hop.json", serde_json::json!({ "$ref": "./fragment.json" })),
+                ("fragment.json", value.clone()),
+            ],
+        ),
+    ]
+}
+
+/// Write `files` into a fresh directory and run both entry points over its `openapi.json`.
+fn run_placement(files: &[(&str, serde_json::Value)]) -> (Report, Report) {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    for (name, value) in files {
+        std::fs::write(dir.join(name), serde_json::to_vec_pretty(value).unwrap()).unwrap();
+    }
+    let generated = spargen::generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
+    let checked = spargen::check(&Spec::new(dir.join("openapi.json")));
+    (generated, checked)
+}
+
+fn distinct_codes(report: &Report) -> Vec<&'static str> {
+    let mut codes = codes(report);
+    codes.dedup();
+    codes
+}
+
+/// An inline document and each of its `$ref`-split twins reach the same verdict under the same
+/// diagnostic codes, through both `generate` and `check`.
+#[test]
+fn a_construct_reaches_the_same_verdict_inline_and_behind_a_ref() {
+    let mut divergent = Vec::new();
+    for fixture in placement_fixtures() {
+        let (inline_generated, inline_checked) =
+            run_placement(&[("openapi.json", fixture.document.clone())]);
+        assert_eq!(
+            inline_generated.outcome() == Outcome::Rejected,
+            fixture.rejects,
+            "{}: inline: {inline_generated:#?}",
+            fixture.name
+        );
+        if fixture.rejects {
+            assert!(
+                has_code(&inline_generated, Code::InvalidInput),
+                "{}: inline: {inline_generated:#?}",
+                fixture.name
+            );
+        }
+        let moved = fixture
+            .document
+            .pointer(fixture.split_at)
+            .unwrap_or_else(|| panic!("{}: nothing at {}", fixture.name, fixture.split_at))
+            .clone();
+        for (label, reference, mut files) in placement_twins(&moved) {
+            // A chain is held to the property only where the inline document rejects: there the
+            // metaschema decides the verdict before lowering runs. On a valid document the verdict
+            // is lowering's, which does not follow every chain — Path Items deliberately (`E004`,
+            // #135), Parameters by defect (#274).
+            if label == CHAINED && !fixture.rejects {
+                continue;
+            }
+            let mut root = fixture.document.clone();
+            *root.pointer_mut(fixture.split_at).unwrap() = serde_json::json!({ "$ref": reference });
+            if reference == IN_ROOT {
+                root.as_object_mut().unwrap().insert(
+                    "x-shared".to_owned(),
+                    serde_json::json!({ "item": moved.clone() }),
+                );
+            }
+            files.push(("openapi.json", root));
+            let (generated, checked) = run_placement(&files);
+            for (entry, inline, split) in [
+                ("generate", &inline_generated, &generated),
+                ("check", &inline_checked, &checked),
+            ] {
+                if split.outcome() != inline.outcome()
+                    || distinct_codes(split) != distinct_codes(inline)
+                {
+                    divergent.push(format!(
+                        "{} through {label}: `{entry}` reached {:?} {:?}, inline {:?} {:?}\n\
+                         split: {split:#?}",
+                        fixture.name,
+                        split.outcome(),
+                        distinct_codes(split),
+                        inline.outcome(),
+                        distinct_codes(inline),
+                    ));
+                }
+            }
+        }
+    }
+    // Collected rather than asserted one at a time, so a regression names every placement it
+    // reaches rather than the first.
+    assert!(divergent.is_empty(), "{}", divergent.join("\n\n"));
+}
+
+/// Where a violation in a referenced file is reported: at the offending node's pointer *within the
+/// file it is written in* — not at the reference, and not at a root-document pointer that does not
+/// exist — with a message naming the reference that reached it and the definition it was held to.
+#[test]
+fn a_violation_behind_a_ref_is_sited_in_the_file_that_holds_it() {
+    let root = placement_document(
+        "3.1.0",
+        serde_json::json!({ "operationId": "getPet", "responses": {
+        "200": { "$ref": "./fragment.json#/shared/item" } } }),
+        serde_json::json!({}),
+    );
+    let fragment = serde_json::json!({ "shared": { "item": { "description": "ok", "bogus": 1 } } });
+    let (generated, checked) =
+        run_placement(&[("openapi.json", root), ("fragment.json", fragment)]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let sited: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Code::InvalidInput)
+            .collect();
+        assert_eq!(sited.len(), 1, "{report:#?}");
+        assert_eq!(sited[0].pointer.as_str(), "/shared/item", "{report:#?}");
+        assert!(
+            sited[0]
+                .message
+                .contains("reached through `$ref: ./fragment.json#/shared/item`")
+                && sited[0].message.contains("validated as `response`"),
+            "{report:#?}"
+        );
+    }
+}
+
+/// A Reference cycle across files (`r.json#/A` → `#/B` → `#/A`) terminates. Validation follows a
+/// chain hop by hop through a queue whose only stop is the set of targets already validated at a
+/// location, so a cycle must end at the first repeat rather than spin forever. Every hop is a valid
+/// Reference Object, so validation itself reports nothing; the verdict on the cycle is lowering's,
+/// and is deliberately not pinned here.
+#[test]
+fn a_cross_file_reference_cycle_terminates() {
+    let root = placement_document(
+        "3.1.0",
+        serde_json::json!({ "operationId": "getPet", "responses": {
+        "200": { "$ref": "./r.json#/A" } } }),
+        serde_json::json!({}),
+    );
+    let cycle = serde_json::json!({ "A": { "$ref": "#/B" }, "B": { "$ref": "#/A" } });
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(run_placement(&[("openapi.json", root), ("r.json", cycle)]));
+    });
+    let (generated, checked) = receiver
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("a cross-file Reference cycle did not terminate within 60 s");
+    for report in [&generated, &checked] {
+        assert!(!has_code(report, Code::InvalidInput), "{report:#?}");
+    }
 }
