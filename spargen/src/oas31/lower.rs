@@ -4636,11 +4636,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 super::deserialize::parse_header_object,
                                 self.diags,
                             ) {
-                                Some(resolved) => Some(resolved),
-                                None => self.reject_unfollowable_reference(
+                                Ok(resolved) => Some(resolved),
+                                Err(miss) => self.reject_unfollowable_reference(
                                     &reference.provenance,
                                     "header",
                                     &reference.reference,
+                                    miss,
                                 ),
                             };
                         }
@@ -4688,11 +4689,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             super::deserialize::parse_parameter,
                             self.diags,
                         ) {
-                            Some(resolved) => Some(resolved),
-                            None => self.reject_unfollowable_reference(
+                            Ok(resolved) => Some(resolved),
+                            Err(miss) => self.reject_unfollowable_reference(
                                 &reference.provenance,
                                 "parameter",
                                 &reference.reference,
+                                miss,
                             ),
                         };
                     };
@@ -4740,11 +4742,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             super::deserialize::parse_request_body,
                             self.diags,
                         ) {
-                            Some(resolved) => Some(resolved),
-                            None => self.reject_unfollowable_reference(
+                            Ok(resolved) => Some(resolved),
+                            Err(miss) => self.reject_unfollowable_reference(
                                 &reference.provenance,
                                 "request body",
                                 &reference.reference,
+                                miss,
                             ),
                         };
                     };
@@ -4787,11 +4790,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             super::deserialize::parse_response,
                             self.diags,
                         ) {
-                            Some(resolved) => Some(resolved),
-                            None => self.reject_unfollowable_reference(
+                            Ok(resolved) => Some(resolved),
+                            Err(miss) => self.reject_unfollowable_reference(
                                 &reference.provenance,
                                 "response",
                                 &reference.reference,
+                                miss,
                             ),
                         };
                     };
@@ -4854,21 +4858,40 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
-    /// A reference outside `#/components/<kind>/` that the input bundle could not follow: the
-    /// resolver cannot tell an absent target from a fragment form it declines, so the message says
-    /// both, in the one wording `E004`'s explain text reserves for that.
+    /// A reference outside `#/components/<kind>/` that the input bundle could not follow, reported
+    /// in the words of the way it failed: the resolver separates a reference it cannot place from
+    /// a pointer with nothing at it, and a target that exists but does not parse has already been
+    /// rejected by its parser, at the target, so it gets no second diagnostic here — the same
+    /// disposition a malformed Path Item or schema target gets.
     fn reject_unfollowable_reference<T>(
         &mut self,
         provenance: &crate::diag::Provenance,
         kind: &str,
         reference: &str,
+        miss: super::resolve::ComponentMiss,
     ) -> Option<T> {
-        // E004 case: unsupported-or-unresolved
-        Diagnostic::error(Code::UnresolvedRef, provenance.clone())
-            .message(format!(
-                "unsupported or unresolved {kind} reference `{reference}`"
-            ))
-            .emit(self.diags);
+        use super::resolve::ComponentMiss;
+        match miss {
+            // The bundle cannot tell a file it does not hold from a fragment form it declines to
+            // walk, so the message says both, in the one wording `E004` reserves for that.
+            ComponentMiss::Unclassifiable => {
+                // E004 case: unsupported-or-unresolved
+                Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+                    .message(format!(
+                        "unsupported or unresolved {kind} reference `{reference}`"
+                    ))
+                    .emit(self.diags);
+            }
+            ComponentMiss::AbsentTarget => {
+                // E004 case: absent-target
+                Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+                    .message(format!(
+                        "{kind} reference target `{reference}` was not found in the input bundle"
+                    ))
+                    .emit(self.diags);
+            }
+            ComponentMiss::Unparsable => {}
+        }
         None
     }
 
@@ -4912,15 +4935,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     self.diags,
                 );
                 match resolved {
-                    Some(resolved) => {
+                    Ok(resolved) => {
                         current = resolved;
                         continue;
                     }
-                    None => {
+                    Err(miss) => {
                         return self.reject_unfollowable_reference(
                             &reference.provenance,
                             "Media Type Object",
                             &reference.reference,
+                            miss,
                         );
                     }
                 }
@@ -5677,7 +5701,7 @@ fn resolve_external_security_schemes(
             .span
             .map(|span| span.file)
             .unwrap_or(crate::diag::FileId(0));
-        let Some(object) = resolver.resolve_component(
+        let Ok(object) = resolver.resolve_component(
             &reference,
             from,
             super::deserialize::parse_security_scheme,

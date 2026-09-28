@@ -378,29 +378,63 @@ components:
         );
     }
 
-    // A reference outside `#/components/<kind>/` that the bundle cannot follow: the resolver
-    // cannot tell a missing target from a form it declines, which is exactly the one wording the
-    // explain text reserves for that.
-    let unclassifiable = valid
-        .replace(
-            "- $ref: '#/components/parameters/P'",
-            "- $ref: '#/nowhere/parameter'",
-        )
-        .replace(
-            "requestBody: { $ref: '#/components/requestBodies/B' }",
-            "requestBody: { $ref: '#/nowhere/body' }",
-        )
-        .replace(
-            "'200': { $ref: '#/components/responses/R' }",
-            "'200': { $ref: '#/nowhere/response' }",
+    // A reference outside `#/components/<kind>/` whose JSON Pointer names nothing: the resolver
+    // knows the target is absent, so the message says so in the absent-target wording rather
+    // than the one the explain text reserves for a reference it cannot place.
+    let at = |parameter: &str, body: &str, response: &str| {
+        valid
+            .replace(
+                "- $ref: '#/components/parameters/P'",
+                &format!("- $ref: '{parameter}'"),
+            )
+            .replace(
+                "requestBody: { $ref: '#/components/requestBodies/B' }",
+                &format!("requestBody: {{ $ref: '{body}' }}"),
+            )
+            .replace(
+                "'200': { $ref: '#/components/responses/R' }",
+                &format!("'200': {{ $ref: '{response}' }}"),
+            )
+    };
+    let absent = at(
+        "#/nowhere/parameter",
+        "#/nowhere/body",
+        "#/nowhere/response",
+    );
+    for (entry, report) in [("generate", generate(&absent)), ("check", check(&absent))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let messages = messages_for(&report, Code::UnresolvedRef);
+        for (kind, target) in [
+            ("parameter", "#/nowhere/parameter"),
+            ("request body", "#/nowhere/body"),
+            ("response", "#/nowhere/response"),
+        ] {
+            assert!(
+                messages.iter().any(|m| *m
+                    == format!(
+                        "{kind} reference target `{target}` was not found in the input bundle"
+                    )),
+                "{entry}: {kind}: {messages:#?}"
+            );
+        }
+        assert!(
+            messages
+                .iter()
+                .all(|m| !m.contains("unsupported or unresolved")),
+            "{entry}: an absent target is not an unclassifiable reference: {messages:#?}"
         );
+    }
+
+    // A named-anchor fragment the bundle cannot place at a JSON Pointer: here, and only here,
+    // the resolver cannot tell an absent target from a form it declines to walk.
+    let unclassifiable = at("#parameter", "#body", "#response");
     let report = generate(&unclassifiable);
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let messages = messages_for(&report, Code::UnresolvedRef);
     for (kind, target) in [
-        ("parameter", "#/nowhere/parameter"),
-        ("request body", "#/nowhere/body"),
-        ("response", "#/nowhere/response"),
+        ("parameter", "#parameter"),
+        ("request body", "#body"),
+        ("response", "#response"),
     ] {
         assert!(
             messages
@@ -409,6 +443,17 @@ components:
             "{kind}: {messages:#?}"
         );
     }
+
+    // A target that exists but is not an object is the parser's to reject, at the target
+    // (`E011`); the alias walker adds no `E004` on top of it.
+    let unparsable = at("#/info/title", "#/info/title", "#/info/title");
+    let report = generate(&unparsable);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
+    assert!(
+        messages_for(&report, Code::UnresolvedRef).is_empty(),
+        "{report:#?}"
+    );
 
     // Control: an undeclared component keeps the plain `unresolved` wording.
     let undeclared = valid.replace(
@@ -421,6 +466,92 @@ components:
             .contains(&"unresolved parameter reference `#/components/parameters/Missing`"),
         "{report:#?}"
     );
+}
+
+/// The Header and Media Type Object alias walkers report each `E004` case in its own words too:
+/// an undeclared component as `unresolved … reference` naming the reference as written, a
+/// pointer with nothing at it as `not found in the input bundle`, and only a reference the
+/// bundle cannot place as `unsupported or unresolved`.
+#[test]
+fn e004_header_and_media_type_walkers_report_each_case_in_its_own_words() {
+    let valid = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /item:
+    get:
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Rate: { $ref: '#/components/headers/Rate' }
+          content:
+            application/json: { $ref: '#/components/mediaTypes/ItemJson' }
+components:
+  headers:
+    Rate: { schema: { type: integer } }
+  mediaTypes:
+    ItemJson: { schema: { type: string } }
+"##;
+    let report = generate(valid);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+
+    let at = |header: &str, media: &str| {
+        valid
+            .replace(
+                "{ $ref: '#/components/headers/Rate' }",
+                &format!("{{ $ref: '{header}' }}"),
+            )
+            .replace(
+                "{ $ref: '#/components/mediaTypes/ItemJson' }",
+                &format!("{{ $ref: '{media}' }}"),
+            )
+    };
+    for (case, spec, expected) in [
+        (
+            "undeclared component",
+            at(
+                "#/components/headers/Missing",
+                "#/components/mediaTypes/Missing",
+            ),
+            [
+                "unresolved header reference `#/components/headers/Missing`",
+                "unresolved Media Type Object reference `#/components/mediaTypes/Missing`",
+            ],
+        ),
+        (
+            "absent target",
+            at("#/nowhere/header", "#/nowhere/media"),
+            [
+                "header reference target `#/nowhere/header` was not found in the input bundle",
+                "Media Type Object reference target `#/nowhere/media` was not found in the input \
+                 bundle",
+            ],
+        ),
+        (
+            "unclassifiable reference",
+            at("#header", "#media"),
+            [
+                "unsupported or unresolved header reference `#header`",
+                "unsupported or unresolved Media Type Object reference `#media`",
+            ],
+        ),
+    ] {
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{case}/{entry}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::UnresolvedRef);
+            for message in expected {
+                assert!(
+                    messages.contains(&message),
+                    "{case}/{entry}: expected {message:?} in {messages:#?}"
+                );
+            }
+        }
+    }
 }
 
 /// A `$ref` to a component schema that was never declared is an error, not a construct to drop
