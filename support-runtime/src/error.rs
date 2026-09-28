@@ -670,8 +670,8 @@ mod tests {
     /// **What this actually enforces, and what it does not.** The match being exhaustive means a
     /// variant added to `RequestError` cannot compile without being *classified* here and in every
     /// other match over the enum. Whether it is *listed* in `every_request_variant` — and so
-    /// whether anything it claims is ever compared against anything — is enforced only in part.
-    /// Each of these was run:
+    /// whether anything it claims is ever compared against anything — this module enforces only in
+    /// part, and a test outside it closes the rest. Each of these was run:
     ///
     /// - Adding a variant, classifying it everywhere, giving it the next free index, and raising
     ///   `REQUEST_VARIANTS` to match: **caught**, at compile time — the array is then one element
@@ -679,29 +679,22 @@ mod tests {
     /// - Padding that array with a duplicate of some other variant to make it compile: **caught**,
     ///   by the bijection test — two entries take one index, and another index is unoccupied.
     /// - Adding a variant, classifying it, giving it the next free index, and leaving
-    ///   `REQUEST_VARIANTS` alone: **not caught**. Nothing ever evaluates this function on a value
-    ///   of the new variant, because no such value is ever constructed.
+    ///   `REQUEST_VARIANTS` alone: **not caught here**. Nothing in this module ever evaluates this
+    ///   function on a value of the new variant, because no such value is ever constructed. It is
+    ///   **caught** by `every_error_variant_is_counted_by_its_enumeration` in
+    ///   `spargen/tests/layering.rs`, which counts the top-level variants of `RequestError` and
+    ///   `Error` in this file's text and requires `REQUEST_VARIANTS` and `ERROR_VARIANTS` to equal
+    ///   them. With the count held to the enum, the first case then forces the value to be listed.
     ///
-    /// That last case is not closed here, but it is closable, and an earlier version of this
-    /// paragraph was wrong to say otherwise. No *language* construct yields a variant count on
-    /// stable — `std::mem::variant_count` is nightly, and a `const` assertion over an exhaustive
-    /// match cannot help, because constructing one value of each variant *is* the list the guard
-    /// is trying to force. Two routes reach a count anyway, both run at the declared MSRV floor
-    /// and both leaving generated output untouched: a `support-runtime/build.rs` emitting the
-    /// counts as consts into `OUT_DIR`, `include!`d inside this test module; and an assertion in
-    /// `spargen/tests/`, in the idiom `layering.rs` already uses to read `support-runtime/src/*`
-    /// textually. Issue #144 tracks landing one of them.
-    ///
-    /// What stays rejected is declaring the enum through a macro that emits the count alongside
-    /// it: that ships a `macro_rules!` definition of a public type into every generated client.
-    /// Two more that look like routes and are not: `strum::EnumCount`'s attribute would sit above
-    /// the test-module marker the embed splits on, so it would ship; and
-    /// `#[cfg_attr(test, derive(..))]` ships too, and activates when the *consumer* runs
-    /// `cargo test`.
-    ///
-    /// So until that guard lands, raising `REQUEST_VARIANTS` is a convention the enum's own doc
-    /// states, and the two mechanical guards above catch every way of getting it wrong once it is
-    /// raised.
+    /// The count is read from the text because no *language* construct yields it on stable:
+    /// `std::mem::variant_count` is nightly, and a `const` assertion over an exhaustive match
+    /// cannot help, because constructing one value of each variant *is* the list the guard is
+    /// trying to force. Reading it in `spargen/tests/` adds nothing to the embedded runtime or to
+    /// generated output. Rejected: declaring the enum through a macro that emits the count
+    /// alongside it, which ships a `macro_rules!` definition of a public type into every generated
+    /// client; `strum::EnumCount`, whose attribute would sit above the test-module marker the embed
+    /// splits on, so it would ship; and `#[cfg_attr(test, derive(..))]`, which ships too and
+    /// activates when the *consumer* runs `cargo test`.
     fn request_variant_index(error: &RequestError) -> usize {
         match error {
             RequestError::MissingCredential { .. } => 0,

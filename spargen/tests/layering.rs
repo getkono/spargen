@@ -272,6 +272,111 @@ fn the_embed_list_names_every_runtime_source() {
     );
 }
 
+/// The names of the top-level variants of `header`'s enum body in `source`: every identifier that
+/// opens a comma-separated item at the body's own depth. Line comments are dropped first, so doc
+/// text cannot contribute a name, and a variant's attributes, fields and payload all sit one
+/// bracket deeper than its name, so none of them does either.
+fn enum_variants(source: &str, header: &str) -> Vec<String> {
+    let start = source
+        .find(header)
+        .unwrap_or_else(|| panic!("`{header}` is declared in support-runtime/src/error.rs"))
+        + header.len();
+    let body: String = source[start..]
+        .lines()
+        .map(|line| line.split_once("//").map_or(line, |(code, _)| code))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let mut variants = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    // Whether the item being read has produced its name yet.
+    let mut named = false;
+    for ch in body.chars() {
+        if depth == 0 && !named && (ch.is_alphanumeric() || ch == '_') {
+            current.push(ch);
+            continue;
+        }
+        if !current.is_empty() {
+            variants.push(std::mem::take(&mut current));
+            named = true;
+        }
+        match ch {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' if depth == 0 => break,
+            ')' | ']' | '}' => depth -= 1,
+            ',' if depth == 0 => named = false,
+            _ => {}
+        }
+    }
+    variants
+}
+
+/// The value of `const NAME: usize = N;` in `source`.
+fn declared_count(source: &str, name: &str) -> usize {
+    let marker = format!("const {name}: usize = ");
+    let at = source
+        .find(&marker)
+        .unwrap_or_else(|| panic!("`{marker}` is declared in support-runtime/src/error.rs"))
+        + marker.len();
+    source[at..]
+        .split(';')
+        .next()
+        .and_then(|literal| literal.trim().parse().ok())
+        .unwrap_or_else(|| panic!("`{name}` is an integer literal"))
+}
+
+/// `every_request_variant` and `every_variant` are arrays of `REQUEST_VARIANTS` and
+/// `ERROR_VARIANTS` entries, and the in-crate bijection tests hold each list to exactly one value
+/// per index below its count. What neither can see is a variant added to the enum while the count
+/// stays put: the new variant is then never constructed, so every exhaustiveness test reading the
+/// list passes over an incomplete one. No stable language construct yields a variant count, so the
+/// count is taken from the declaration text here, where nothing reaches generated output.
+#[test]
+fn every_error_variant_is_counted_by_its_enumeration() {
+    let source = read(&workspace_root().join("support-runtime/src/error.rs"));
+    for (header, count, list) in [
+        (
+            "pub enum RequestError {",
+            "REQUEST_VARIANTS",
+            "every_request_variant",
+        ),
+        ("pub enum Error<E> {", "ERROR_VARIANTS", "every_variant"),
+    ] {
+        let variants = enum_variants(&source, header);
+        let declared = declared_count(&source, count);
+        assert_eq!(
+            variants.len(),
+            declared,
+            "`{header}` declares {} variants ({variants:?}) but `{count}` is {declared}: set \
+             `{count}` to the variant count and list a value of each variant in `{list}`",
+            variants.len()
+        );
+    }
+}
+
+#[test]
+fn the_variant_counter_reads_names_not_payloads() {
+    let source = "
+        pub enum Sample<E> {
+            /// A doc comment, with a comma, naming NotAVariant.
+            #[allow(dead_code)]
+            Unit,
+            Tuple(Vec<(u8, E)>, String), // trailing, comment
+            Struct {
+                /// field doc
+                field: [u8; 2],
+                other: Option<E>,
+            },
+            Last}
+        pub enum After { Ignored }
+    ";
+    assert_eq!(
+        enum_variants(source, "pub enum Sample<E> {"),
+        ["Unit", "Tuple", "Struct", "Last"]
+    );
+}
+
 #[test]
 fn generated_output_carries_no_test_module() {
     const SPEC: &str = r#"
