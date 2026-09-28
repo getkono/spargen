@@ -8801,6 +8801,59 @@ components:
     assert!(has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
 }
 
+/// The union path intersects the enclosing schema's sibling constraints with every branch, and a
+/// branch whose intersection is `None` is dropped with `W011`. So before the two pairs above had
+/// arms, a tuple branch under a sibling `type: array`, and a binary branch under a sibling
+/// `type: string`, were dropped as excluded although the sibling admits them — and the union
+/// silently lost a member (`U` became `Vec<String>`, or `uuid::Uuid`). Both branches now survive,
+/// with no `W011`, so the union keeps both variants; and a union whose only branches were those
+/// used to be `E007` and now generates the lone surviving branch.
+#[test]
+fn a_sibling_constraint_keeps_a_tuple_or_binary_union_branch_it_admits() {
+    let spec = |union: &str| {
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\n\
+             paths: {{}}\ncomponents:\n  schemas:\n    U: {union}\n"
+        )
+    };
+    for (label, union) in [
+        (
+            "tuple under type: array",
+            "{ type: array, oneOf: [{ type: array, prefixItems: [{ type: number }, { type: number }], \
+             items: false }, { type: array, items: { type: string } }] }",
+        ),
+        (
+            "binary under type: string",
+            "{ type: string, anyOf: [{ contentEncoding: base64 }, { type: string, format: uuid }] }",
+        ),
+    ] {
+        let (report, code) = generate_with_code(&spec(union));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::DeclarationHasNoEffect),
+            "{label}: a branch the sibling admits was dropped as excluded: {report:#?}"
+        );
+        assert_eq!(
+            enum_variants(&types_module(&code), "U").len(),
+            2,
+            "{label}: both branches must survive as variants: {}",
+            types_module(&code)
+        );
+    }
+
+    // A union whose every other branch the sibling excludes: the admitted branch is what remains.
+    let (report, code) = generate_with_code(&spec(
+        "{ type: string, oneOf: [{ format: binary }, { type: integer }] }",
+    ));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        expand_aliases(&types_module(&code), "U"),
+        "bytes::Bytes",
+        "{}",
+        types_module(&code)
+    );
+}
+
 /// A union whose only non-null member has no typed intersection with the enclosing schema's own
 /// sibling constraints has no representable variant left. The multi-variant path already rejects
 /// that with `E007` once every variant is excluded, so the one-member collapse reports the same
