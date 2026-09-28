@@ -130,13 +130,11 @@ pub fn build_url_with_query_string_on(
 /// credentials the caller's registration did not select, silently, on a call they had expressed a
 /// different intent for; an error they can see is the better failure.
 ///
-/// A caller who wants the *other* alternative cannot get there by adjusting registrations on a
-/// built client. Registration is insert-only: [`ClientCore::set_credential`] is the only writer,
-/// there is no remove, clear, or replace-with-nothing operation at any layer, and [`Credential`]
-/// has no variant meaning "none" — so a credential cannot be withdrawn once registered. Nor does
-/// registering the fallback as well help, because selection stops at the first satisfiable
-/// alternative and the first one stays satisfied. The way to reach a later alternative is to
-/// build a client that is not registered for the earlier one.
+/// A caller who wants the *other* alternative unregisters a scheme of the earlier one with
+/// [`ClientCore::remove_credential`] (the generated client's `without_credential`); selection then
+/// passes over the earlier alternative and reaches the later one on the next call. Registering the
+/// fallback as well is not enough on its own, because selection stops at the first satisfiable
+/// alternative and the earlier one stays satisfied until one of its schemes is removed.
 pub async fn attach_auth(
     core: &ClientCore,
     request: RequestBuilder,
@@ -940,19 +938,19 @@ mod tests {
     /// alternative is fully registered and would have succeeded. Both ways of failing after
     /// selection are pinned, because falling through is a silent behaviour — the caller would get
     /// a 200 carrying credentials their registration did not select, with nothing to observe.
+    const FIRST_THEN_FALLBACK: &[&[AuthScheme]] = &[
+        &[AuthScheme {
+            name: "primary",
+            kind: AuthKind::Bearer,
+        }],
+        &[AuthScheme {
+            name: "fallback",
+            kind: AuthKind::ApiKeyQuery("api_key"),
+        }],
+    ];
+
     #[test]
     fn a_failure_after_selection_does_not_fall_through_to_a_later_alternative() {
-        const FIRST_THEN_FALLBACK: &[&[AuthScheme]] = &[
-            &[AuthScheme {
-                name: "primary",
-                kind: AuthKind::Bearer,
-            }],
-            &[AuthScheme {
-                name: "fallback",
-                kind: AuthKind::ApiKeyQuery("api_key"),
-            }],
-        ];
-
         // A registered fallback that would satisfy the second alternative outright.
         let register_fallback = |core: &mut ClientCore| {
             core.set_credential("fallback", Credential::ApiKey(SecretString::from("k3y")));
@@ -1001,6 +999,45 @@ mod tests {
         );
         let source = std::error::Error::source(&error).unwrap();
         assert!(source.to_string().contains("`primary`"), "{source}");
+    }
+
+    /// The remedy for the test above: with no fall-through, the caller reaches the later
+    /// alternative by unregistering the earlier one. The same client that failed on its selected
+    /// alternative then attaches the fallback — and only the fallback, since the removed scheme's
+    /// credential must not ride along.
+    #[test]
+    fn removing_the_selected_credential_falls_through_to_a_later_alternative() {
+        let mut core = core();
+        core.set_credential(
+            "primary",
+            Credential::Provider(Arc::new(|| {
+                Box::pin(async { Err(AuthError::new("refresh rejected")) }) as TokenFuture
+            })),
+        );
+        core.set_credential("fallback", Credential::ApiKey(SecretString::from("k3y")));
+        // Before removal the failing primary is selected, as the test above pins.
+        assert!(poll_ready(attach_auth(&core, get(&core), FIRST_THEN_FALLBACK)).is_err());
+
+        assert!(matches!(
+            core.remove_credential("primary"),
+            Some(Credential::Provider(_))
+        ));
+        let request = poll_ready(attach_auth(&core, get(&core), FIRST_THEN_FALLBACK))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().query(), Some("api_key=k3y"));
+        assert!(request.headers().get("authorization").is_none());
+
+        // Removing every alternative's scheme leaves nothing satisfiable: the call fails as
+        // `MissingCredential`, never by sending without credentials.
+        core.remove_credential("fallback");
+        let error = poll_ready(attach_auth(&core, get(&core), FIRST_THEN_FALLBACK)).unwrap_err();
+        let Error::RequestConstruction(RequestError::MissingCredential { alternatives }) = error
+        else {
+            panic!("expected MissingCredential, got {error:?}");
+        };
+        assert_eq!(alternatives, [vec!["primary"], vec!["fallback"]]);
     }
 
     #[test]
