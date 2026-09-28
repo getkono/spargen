@@ -933,11 +933,8 @@ mod tests {
         assert!(!called.load(Ordering::SeqCst), "the provider was called");
     }
 
-    /// Selection is on registration, not on success, and there is no fall-through: once an
-    /// alternative is chosen, a failure while attaching it fails the call even though a later
-    /// alternative is fully registered and would have succeeded. Both ways of failing after
-    /// selection are pinned, because falling through is a silent behaviour — the caller would get
-    /// a 200 carrying credentials their registration did not select, with nothing to observe.
+    /// A bearer alternative, then an apiKey-in-query fallback: the requirement both
+    /// fall-through tests below select over.
     const FIRST_THEN_FALLBACK: &[&[AuthScheme]] = &[
         &[AuthScheme {
             name: "primary",
@@ -949,6 +946,11 @@ mod tests {
         }],
     ];
 
+    /// Selection is on registration, not on success, and there is no fall-through: once an
+    /// alternative is chosen, a failure while attaching it fails the call even though a later
+    /// alternative is fully registered and would have succeeded. Both ways of failing after
+    /// selection are pinned, because falling through is a silent behaviour — the caller would get
+    /// a 200 carrying credentials their registration did not select, with nothing to observe.
     #[test]
     fn a_failure_after_selection_does_not_fall_through_to_a_later_alternative() {
         // A registered fallback that would satisfy the second alternative outright.
