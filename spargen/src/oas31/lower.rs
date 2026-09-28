@@ -2995,13 +2995,59 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .collect::<Option<Vec<_>>>()?;
                 Some(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
             }
+            // A homogeneous array against a tuple: every tuple position must also satisfy the
+            // array's item schema, and the length is the tuple's. So the intersection is the tuple
+            // with each position narrowed by the item — `{$ref: Coord, type: array}` over a
+            // `prefixItems` `Coord` is `Coord`. A position with no intersection leaves no tuple
+            // (unlike the array-array arm, a fixed-length tuple has no empty value to fall back on).
+            (TypeKind::Array(item), TypeKind::Tuple(positions)) => {
+                self.intersect_array_tuple(**item, positions, b, hint)
+            }
+            (TypeKind::Tuple(positions), TypeKind::Array(item)) => {
+                self.intersect_array_tuple(**item, positions, a, hint)
+            }
             (TypeKind::Struct(left), TypeKind::Struct(right)) => {
                 self.intersect_structs(left, right, hint)
             }
             (TypeKind::Union(union), _) => self.intersect_union(a, union, b, hint),
             (_, TypeKind::Union(union)) => self.intersect_union(b, union, a, hint),
             (TypeKind::Bytes, TypeKind::Bytes) => Some(non_nullable(a)),
+            // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
+            // string conjoined with it is the binary content: `{$ref: Data, format: binary}` over a
+            // string `Data` lowers exactly as the inline `{type: string, format: binary}` does. Only
+            // the unformatted string: `uuid` and the date formats carry a decoded representation of
+            // their own that `Bytes` cannot also be.
+            (TypeKind::Bytes, TypeKind::Primitive(Prim::String)) => Some(non_nullable(a)),
+            (TypeKind::Primitive(Prim::String), TypeKind::Bytes) => Some(non_nullable(b)),
             _ => None,
+        }
+    }
+
+    /// The intersection of a homogeneous array whose items are `item` with the tuple `tuple`, whose
+    /// positions are `positions`: the tuple, each position intersected with `item`. Returns the
+    /// tuple itself when no position narrowed, and `None` when any position has no intersection.
+    fn intersect_array_tuple(
+        &mut self,
+        item: Ty,
+        positions: &[Ty],
+        tuple: Ty,
+        hint: &str,
+    ) -> Option<Ty> {
+        let items = positions
+            .iter()
+            .enumerate()
+            .map(|(index, position)| {
+                self.intersect_types(*position, item, &format!("{hint}Item{index}"))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        if items
+            .iter()
+            .zip(positions)
+            .all(|(narrowed, position)| same_ty(*narrowed, *position))
+        {
+            Some(non_nullable(tuple))
+        } else {
+            Some(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
         }
     }
 
