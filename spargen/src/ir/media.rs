@@ -687,6 +687,66 @@ mod tests {
     }
 
     #[test]
+    fn success_enum_sorts_exact_codes_ascending_whatever_the_document_order() {
+        // Issue #138: a key that orders only by class (exact, range, default) is a stable sort
+        // that keeps document order within each class, so only exacts listed out of order can
+        // observe "exact code ascending"; this case states it on purpose rather than leaving it
+        // to a fixture that happens to list a `204` before a `200`. (The success side can hold at most one
+        // range — `2XX` is the only success selector the frontend admits — so range order is
+        // pinned on the error side below.)
+        let responses = Responses {
+            by_status: vec![
+                (StatusSpec::Range(2), resp(Some(1))),
+                (StatusSpec::Exact(204), resp(None)),
+                (StatusSpec::Exact(201), resp(Some(2))),
+                (StatusSpec::Exact(200), resp(Some(3))),
+            ],
+            default: None,
+        };
+        match responses.success() {
+            SuccessShape::Enum(entries) => assert_eq!(
+                statuses(&entries),
+                vec![
+                    StatusSpec::Exact(200),
+                    StatusSpec::Exact(201),
+                    StatusSpec::Exact(204),
+                    StatusSpec::Range(2),
+                ]
+            ),
+            other => panic!("expected Enum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn error_enum_sorts_exact_codes_then_ranges_ascending_whatever_the_document_order() {
+        // Issue #138: exacts and ranges both in descending document order, `default` first. The
+        // error side is where two ranges share one sort (`4XX` and `5XX` are both error
+        // selectors), so this is the only place "range ascending" is observable.
+        let responses = Responses {
+            by_status: vec![
+                (StatusSpec::Range(5), resp(Some(1))),
+                (StatusSpec::Range(4), resp(Some(2))),
+                (StatusSpec::Exact(409), resp(None)),
+                (StatusSpec::Exact(404), resp(Some(3))),
+            ],
+            default: Some(resp(Some(4))),
+        };
+        match responses.error() {
+            ErrorShape::Enum(entries) => assert_eq!(
+                statuses(&entries),
+                vec![
+                    StatusSpec::Exact(404),
+                    StatusSpec::Exact(409),
+                    StatusSpec::Range(4),
+                    StatusSpec::Range(5),
+                    StatusSpec::Range(0),
+                ]
+            ),
+            other => panic!("expected Enum, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn single_bodied_success_with_bodyless_sibling_is_an_enum() {
         // Issue #121: the common `T`-plus-`204` case is two documented outcomes. A plain `T` would
         // decode the `204`'s empty body as a malformed `T`, so the bodyless status gets its own
