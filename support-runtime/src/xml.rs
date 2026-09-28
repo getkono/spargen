@@ -261,4 +261,48 @@ mod tests {
             other => panic!("expected a Decode error, got {other:?}"),
         }
     }
+
+    /// A zero-length body has no root element, so the XML codec rejects it as `Decode`, keeping the
+    /// status and the (empty, untruncated) body — through the single-body codec and the per-arm
+    /// `decode_xml_body` a multi-status enum uses.
+    #[test]
+    fn xml_codec_rejects_a_zero_length_success_body() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        fn poll_ready<F: Future>(future: F) -> F::Output {
+            let mut future = std::pin::pin!(future);
+            match future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            {
+                Poll::Ready(value) => value,
+                Poll::Pending => panic!("future was not immediately ready"),
+            }
+        }
+
+        assert!(decode_xml_body::<Point>(b"").is_err());
+        assert!(decode_xml_body::<String>(b"").is_err());
+        let core = crate::ClientCore::new("https://example.com").unwrap();
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(204)
+                .body("")
+                .expect("valid synthetic response"),
+        );
+        match poll_ready(super::decode_success_xml::<Point>(&core, response)) {
+            Err(crate::Error::Decode {
+                status,
+                path,
+                body,
+                truncated,
+            }) => {
+                assert_eq!(status.as_u16(), 204);
+                assert!(!path.is_empty());
+                assert!(body.is_empty());
+                assert!(!truncated);
+            }
+            other => panic!("expected a Decode error for an empty body, got {other:?}"),
+        }
+    }
 }

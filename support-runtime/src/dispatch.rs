@@ -271,7 +271,8 @@ pub async fn send(core: &ClientCore, request: Request) -> Result<Response, Error
 
 /// Decode a success response body into `T`, wrapping it with status and headers. Monomorphized once
 /// per body type. Decode failures become [`Error::Decode`] with the serde path and a body capped
-/// at `max_error_body`.
+/// at `max_error_body`. A zero-length body is not a JSON value, so it is always [`Error::Decode`],
+/// whatever `T` is.
 pub async fn decode_success<T>(
     core: &ClientCore,
     response: Response,
@@ -327,7 +328,8 @@ where
     }
 }
 
-/// Decode a raw binary success body without attempting JSON deserialization.
+/// Decode a raw binary success body without attempting JSON deserialization. Every byte sequence
+/// is a valid binary body, so a zero-length one is an empty `Bytes`, never an error.
 pub async fn decode_success_bytes(
     _core: &ClientCore,
     response: Response,
@@ -342,11 +344,14 @@ pub async fn decode_success_bytes(
 /// multi-status response variants use exactly the same textual codec as single-body responses.
 ///
 /// An empty body is the zero-length text and is not special-cased: it becomes
-/// `Value::String("")`, so `T = String` decodes it to `""` by design, and a typed `T` (a string
-/// enum or format) accepts it only if `""` is one of its values. This is unlike the JSON and XML
-/// codecs, where an empty body is not a document and always fails. A documented bodyless status
-/// is a unit variant of the response enum on the success side and on an error side with several
-/// documented bodies, and is not decoded there. On an error side with one documented body it is
+/// `Value::String("")`, so whether it decodes is `T`'s decision. `String` decodes it to `""` by
+/// design (as do `format: uuid`/`date-time`/`date`, which lower to `String` with the `uuid`/`time`
+/// features off), and so do an untyped schema's `Value` and a string enum with an empty variant; a
+/// string enum without one, `uuid::Uuid`, and the RFC 3339 `DateTime` / `Date` newtypes reject it
+/// with a decode failure. This is unlike the JSON and XML codecs, where an empty body is not a
+/// document and always fails. A documented bodyless status is a unit variant of the response enum
+/// on the success side and on an error side with several documented bodies, and is not decoded
+/// there. On an error side with one documented body it is
 /// `Error::UnexpectedStatus`, unless that body is documented under a range (`4XX`) or `default`
 /// that also covers the bodyless status: the status then matches the range or `default` entry, so
 /// [`classify_error_text`] decodes its body here, and an empty one yields `Error::Api("")` for
@@ -1914,5 +1919,133 @@ mod tests {
             }
             other => panic!("expected a capped Decode error, got {other:?}"),
         }
+    }
+
+    /// Assert `result` is a `Decode` carrying the zero-length body of the `status` it failed on.
+    fn assert_empty_body_decode<T: std::fmt::Debug>(
+        result: Result<ResponseValue<T>, Error<Infallible>>,
+        status: u16,
+    ) {
+        match result {
+            Err(Error::Decode {
+                status: got,
+                path,
+                body,
+                truncated,
+            }) => {
+                assert_eq!(got.as_u16(), status);
+                assert!(!path.is_empty(), "a Decode error must say why");
+                assert!(body.is_empty(), "an empty body retained as {body:?}");
+                assert!(!truncated, "an empty body reported as truncated");
+            }
+            other => panic!("expected a Decode error for an empty body, got {other:?}"),
+        }
+    }
+
+    /// A zero-length success body is not a JSON value, so the JSON codec rejects it as `Decode`
+    /// whatever `T` is — even a `T` (`String`, `Value`) that would accept an empty *text* body.
+    #[test]
+    fn json_codec_rejects_a_zero_length_success_body() {
+        assert_empty_body_decode(
+            poll_ready(super::decode_success::<Created>(
+                &core(),
+                raw_response(200, ""),
+            )),
+            200,
+        );
+        assert_empty_body_decode(
+            poll_ready(super::decode_success::<String>(
+                &core(),
+                raw_response(204, ""),
+            )),
+            204,
+        );
+        assert_empty_body_decode(
+            poll_ready(super::decode_success::<serde_json::Value>(
+                &core(),
+                raw_response(204, ""),
+            )),
+            204,
+        );
+    }
+
+    /// A zero-length binary body is an empty `Bytes`: every byte sequence is a valid binary body.
+    #[test]
+    fn binary_codec_returns_a_zero_length_success_body_as_empty_bytes() {
+        let value = poll_ready(decode_success_bytes(&core(), raw_response(204, ""))).unwrap();
+        assert_eq!(value.status().as_u16(), 204);
+        assert!(value.into_inner().is_empty());
+    }
+
+    #[derive(serde::Deserialize, Debug, PartialEq)]
+    enum TextChoiceWithEmpty {
+        #[serde(rename = "")]
+        Empty,
+        #[serde(rename = "ready")]
+        Ready,
+    }
+
+    /// The text codec decodes a zero-length body as the string `""`, so whether it succeeds is
+    /// `T`'s decision, not the codec's. Pinned for each textual `T` the generator can emit, through
+    /// both the single-body codec and the per-arm `decode_text_body` a multi-status enum uses.
+    #[test]
+    fn text_codec_decodes_a_zero_length_success_body_as_the_empty_string() {
+        // Accepts `""`: `String` — also what `format: uuid`/`date-time`/`date` lower to with the
+        // `uuid`/`time` features off — an untyped `{}` schema, and an enum with an empty variant.
+        assert_eq!(decode_text_body::<String>(b"").unwrap(), "");
+        assert_eq!(
+            decode_text_body::<serde_json::Value>(b"").unwrap(),
+            serde_json::Value::String(String::new())
+        );
+        assert_eq!(
+            decode_text_body::<TextChoiceWithEmpty>(b"").unwrap(),
+            TextChoiceWithEmpty::Empty
+        );
+        let value = poll_ready(decode_success_text::<String>(
+            &core(),
+            raw_response(204, ""),
+        ))
+        .unwrap();
+        assert_eq!(value.status().as_u16(), 204);
+        assert_eq!(value.into_inner(), "");
+        let value = poll_ready(decode_success_text::<serde_json::Value>(
+            &core(),
+            raw_response(200, ""),
+        ))
+        .unwrap();
+        assert_eq!(value.into_inner(), serde_json::Value::String(String::new()));
+
+        // Rejects `""`: an enum with no empty variant.
+        assert!(decode_text_body::<TextChoice>(b"").is_err());
+        assert_empty_body_decode(
+            poll_ready(decode_success_text::<TextChoice>(
+                &core(),
+                raw_response(204, ""),
+            )),
+            204,
+        );
+    }
+
+    /// With the `time` feature on, `format: date-time`/`date` lower to the RFC 3339 newtypes, which
+    /// reject `""` — the same schemas that decode an empty body as `""` with the feature off.
+    #[cfg(feature = "time")]
+    #[test]
+    fn text_codec_rejects_a_zero_length_body_for_the_rfc3339_newtypes() {
+        assert!(decode_text_body::<crate::DateTime>(b"").is_err());
+        assert!(decode_text_body::<crate::Date>(b"").is_err());
+        assert_empty_body_decode(
+            poll_ready(decode_success_text::<crate::DateTime>(
+                &core(),
+                raw_response(204, ""),
+            )),
+            204,
+        );
+        assert_empty_body_decode(
+            poll_ready(decode_success_text::<crate::Date>(
+                &core(),
+                raw_response(200, ""),
+            )),
+            200,
+        );
     }
 }
