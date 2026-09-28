@@ -14884,10 +14884,12 @@ paths:
 // --- additionalOperations method tokens -----------------------------------------------------
 //
 // The official document schema pins these keys to an RFC 9110 token and forbids restating a fixed
-// field, but it validates the *root* document only. A Path Item reached by `$ref` into another
-// file never meets it, so both fixtures below route through a sub-file — the path that was
-// previously unguarded, and on which a non-token key reached codegen and was emitted as
+// field. It once validated the *root* document only, so a Path Item reached by `$ref` into another
+// file never met it; both fixtures below route through a sub-file — the path that was once
+// unguarded, and on which a non-token key reached codegen and was emitted as
 // `Method::from_bytes(..).expect(..)`, panicking inside the consumer's client at request time.
+// The token rule is now the schema's, applied to the sub-file (#234); the case-insensitive
+// fixed-field rule is spargen's own, since the schema names the fixed fields in upper case only.
 
 #[test]
 fn e011_additional_operations_method_must_be_an_http_token() {
@@ -15099,9 +15101,9 @@ fn the_parity_fixtures_span_both_verdicts() {
 }
 
 /// Write a root document whose only Path Item is a `$ref` to a sibling file holding `path_item`,
-/// then run both entry points over it. The indirection is the point: `lower_frontend` validates
-/// `bundle.root()` against the metaschema and nothing else, so a Path Item reached by `$ref` never
-/// meets it. Returns `(generate, check)` so a fixture can assert the two agree, the way
+/// then run both entry points over it. The indirection is the point: the metaschema once validated
+/// the root document and nothing else, so a Path Item reached by `$ref` never met it, and these
+/// fixtures pin that it now does (#234). Returns `(generate, check)` so a fixture can assert the two agree, the way
 /// `PARITY_FIXTURES` does for inline specs — which those cannot, being single-file by construction.
 fn generate_and_check_refd_path_item(path_item: &str) -> (Report, Report) {
     let (generated, checked, _) = generate_and_check_refd_path_item_with_code(path_item);
@@ -15127,8 +15129,8 @@ fn generate_and_check_refd_path_item_with_code(path_item: &str) -> (Report, Repo
     (generated, checked, code)
 }
 
-/// A root document whose Responses map carries `entries` verbatim, written inline so the
-/// metaschema — which `lower_frontend` runs over `bundle.root()` and nothing else — does see it.
+/// A root document whose Responses map carries `entries` verbatim, written inline: the twin of a
+/// [`generate_and_check_refd_path_item`] fixture, so the two placements can be compared.
 fn inline_spec_with_response_entries(entries: &str) -> String {
     format!(
         "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\npaths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200': {{ description: ok }}\n{entries}"
@@ -15139,7 +15141,7 @@ fn inline_spec_with_response_entries(entries: &str) -> String {
 ///
 /// `references/3.2.0.md` closes the grammar — *"Only the following range definitions are allowed:
 /// `1XX`, `2XX`, `3XX`, `4XX`, and `5XX`"* — and the metaschema spells it `^[1-5](?:[0-9]{2}|XX)$`.
-/// Before the key was checked at parse time, `0XX` lowered to `StatusSpec::Range(0)`, which is the
+/// Before the key was checked behind a `$ref`, `0XX` lowered to `StatusSpec::Range(0)`, which is the
 /// sentinel `default` itself lowers to: the operation's error enum got **two** `Default` variants
 /// and `rustc` refused the emitted module with `E0428` — at outcome `Generated`, with zero
 /// diagnostics. That is the fourth, silent behavior the contract forbids, on a construct the
@@ -15155,8 +15157,8 @@ fn e011_out_of_grammar_response_key_behind_a_ref_is_rejected() {
     assert!(has_code(&checked, Code::InvalidInput), "{checked:#?}");
 }
 
-/// The other faces of the same defect, each reached through a `$ref` so the metaschema never sees
-/// it. `02XX` lowered to the same `StatusSpec` as `2XX`, and `0200`/`+200` to the same one as
+/// The other faces of the same defect, each reached through a `$ref`, where the metaschema once
+/// never looked. `02XX` lowered to the same `StatusSpec` as `2XX`, and `0200`/`+200` to the same one as
 /// `200` — a duplication `E022` cannot catch, because these are distinct map keys. `6XX`-`9XX`
 /// lowered to a match arm no status can reach. `XX`, `2xx` and `banana` were dropped with no
 /// diagnostic at all, handing the caller a client with no arm for a response they wrote down.
@@ -15194,10 +15196,10 @@ fn e011_every_out_of_grammar_response_key_is_rejected_behind_a_ref() {
     }
 }
 
-/// The parity property the parse-time check exists to establish: the *same* out-of-grammar key
-/// written inline — where the metaschema does see it — reaches the same verdict under the same
-/// code. Should the vendored metaschema's pattern and the hand-written grammar ever diverge, this
-/// fixture and the one above stop agreeing, which is the only signal that divergence would give.
+/// The parity property for this one construct: the *same* out-of-grammar key written inline
+/// reaches the same verdict under the same code as behind a `$ref`. Both placements are now
+/// decided by the one vendored pattern, so they cannot drift apart;
+/// `a_construct_reaches_the_same_verdict_inline_and_behind_a_ref` states the property in general.
 #[test]
 fn an_out_of_grammar_response_key_rejects_identically_inline_and_behind_a_ref() {
     let inline = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200': { description: ok }\n        '0XX': { description: out of grammar }\n        default: { description: fallback }\n";
@@ -15217,8 +15219,8 @@ fn an_out_of_grammar_response_key_rejects_identically_inline_and_behind_a_ref() 
 
 /// The keys the metaschema *does* admit keep working behind a `$ref`: both response-key shapes it
 /// allows, the `default` sentinel, and a specification extension, which `specification-extensions`
-/// admits under `^x-` and which is therefore skipped before the grammar is applied. Without this
-/// the grammar check could over-reject with every other suite still green.
+/// admits under `^x-` and which parsing therefore skips. Without this, validating the referenced
+/// file could over-reject with every other suite still green.
 ///
 /// The verdict is asserted exactly rather than as "not rejected", and the diagnostics are asserted
 /// empty: a change that started *warning* on in-grammar keys would otherwise pass here. And each
@@ -15323,9 +15325,8 @@ fn a_specification_extension_is_skipped_whatever_its_value_shape() {
 }
 
 /// The skip is `^x-`, exactly as the metaschema spells it — case-sensitively. `X-note` is not a
-/// specification extension: `unevaluatedProperties: false` rejects it inline, and behind a `$ref`,
-/// where the metaschema never looks, the grammar check is what rejects it. Both under `E011`, so
-/// the verdict does not depend on placement.
+/// specification extension: `unevaluatedProperties: false` rejects it inline and behind a `$ref`
+/// alike, under `E011`, so the verdict does not depend on placement.
 #[test]
 fn an_uppercase_extension_key_is_not_a_specification_extension() {
     let (generated, checked) = generate_and_check_refd_path_item(
