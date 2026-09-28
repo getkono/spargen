@@ -10641,9 +10641,9 @@ paths:
     get:
       responses:
         "204": {{ description: No Content }}
+x-elsewhere:
+  Bearer: {{ type: http, scheme: bearer }}
 components:
-  schemas:
-    Token: {{ type: string }}
   securitySchemes:
 {schemes}"##
         )
@@ -10670,7 +10670,10 @@ components:
         ),
         (
             "a reference outside the security scheme components",
-            spec_with("    A: { $ref: \"#/components/schemas/Token\" }\n"),
+            // The target is a well-formed Security Scheme, so only its location is wrong: a
+            // target that is not a Security Scheme at all is rejected earlier, as `E011`, by
+            // the metaschema, which validates every `$ref` target at its position.
+            spec_with("    A: { $ref: \"#/x-elsewhere/Bearer\" }\n"),
             "does not point into this document's `#/components/securitySchemes/`",
         ),
     ];
@@ -10702,6 +10705,13 @@ components:
     for report in [generate(&one_hop), check(&one_hop)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
+    }
+
+    // A target that is not a Security Scheme at all never reaches the location check.
+    let not_a_scheme = spec_with("    A: { $ref: \"#/x-elsewhere/Bearer/type\" }\n");
+    for report in [generate(&not_a_scheme), check(&not_a_scheme)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::InvalidInput), "{report:#?}");
     }
 }
 
