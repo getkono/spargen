@@ -228,6 +228,233 @@ fn each_runtime_source_carries_its_test_module_last_and_only_once() {
     }
 }
 
+/// The sentence an embedded comment block must carry to name a test-only item. It is the one
+/// honest way to point a maintainer at a test from above the split marker: it tells the consumer
+/// reading the embedded copy that the names are absent there, rather than sending them to look.
+const STRIPPED_DISCLOSURE: &str =
+    "That test module is stripped when this file is embedded into a generated client";
+
+/// Every identifier in `text`, in order, as Rust lexes one (ASCII is all the runtime uses).
+fn identifiers(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| word.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_'))
+}
+
+/// The identifiers a comment line uses as code: every one inside a backtick code span (which is
+/// how rustdoc names an item, intra-doc links included), and outside one only those carrying an
+/// underscore. Test helpers are often plain English words (`string`, `calls`), so a bare word in
+/// prose is not read as a reference to one.
+fn code_names(line: &str) -> impl Iterator<Item = &str> {
+    line.split('`').enumerate().flat_map(|(index, part)| {
+        let in_span = index % 2 == 1;
+        identifiers(part).filter(move |word| in_span || word.contains('_'))
+    })
+}
+
+/// The names a test module declares as items: what a maintainer-facing sentence would direct the
+/// reader to. Only a line that *starts* with an item keyword (after visibility and qualifiers)
+/// counts, so prose in a comment ("the type of …") or a string literal declares nothing. `tests`
+/// itself is left out, since it is also an English word; the "test module" phrase rule covers a
+/// reference to the module.
+fn test_only_declarations(tail: &str) -> BTreeSet<String> {
+    const QUALIFIERS: &[&str] = &["pub", "crate", "super", "async", "unsafe", "const"];
+    const INTRODUCERS: &[&str] = &[
+        "fn",
+        "const",
+        "static",
+        "struct",
+        "enum",
+        "type",
+        "trait",
+        "mod",
+        "macro_rules",
+    ];
+    let mut names = BTreeSet::new();
+    for line in tail.lines() {
+        if line.trim_start().starts_with("//") {
+            continue;
+        }
+        let mut words = identifiers(line).peekable();
+        // `const fn` names the function, so a qualifier is skipped only while an introducer (or
+        // another qualifier) still follows it.
+        while let Some(word) = words.next() {
+            let next = words.peek().copied();
+            if QUALIFIERS.contains(&word)
+                && next
+                    .is_some_and(|next| QUALIFIERS.contains(&next) || INTRODUCERS.contains(&next))
+            {
+                continue;
+            }
+            if INTRODUCERS.contains(&word) {
+                if let Some(name) = next.filter(|name| *name != "tests") {
+                    names.insert(name.to_owned());
+                }
+            }
+            break;
+        }
+    }
+    names
+}
+
+/// The comment lines of `head` (a runtime source above its `#[cfg(test)]` marker) that break the
+/// rule `embedded_comments_name_no_test_only_item_undisclosed` states, each as `LINE: TEXT` with
+/// the test-only items it names.
+///
+/// A comment block is a run of consecutive comment lines, and both the disclosure and the phrase
+/// "test module" are matched against the block's joined, whitespace-normalised text, so neither
+/// depends on where the prose happens to wrap. A block that mentions the phrase reports every one
+/// of its lines; otherwise a line is reported only when it names a test-only item itself.
+fn comment_violations(head: &str, test_only: &BTreeSet<String>) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut block: Vec<(usize, &str)> = Vec::new();
+    let lines: Vec<&str> = head.lines().collect();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("//") {
+            block.push((index + 1, trimmed));
+        }
+        let block_ends = !trimmed.starts_with("//") || index + 1 == lines.len();
+        if !block_ends || block.is_empty() {
+            continue;
+        }
+        let text = block
+            .iter()
+            .flat_map(|(_, line)| {
+                line.trim_start_matches('/')
+                    .trim_start_matches('!')
+                    .split_whitespace()
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !text.contains(STRIPPED_DISCLOSURE) {
+            let mentions_test_module = text.to_ascii_lowercase().contains("test module");
+            for (number, line) in &block {
+                let named: Vec<&str> = code_names(line)
+                    .filter(|word| test_only.contains(*word))
+                    .collect();
+                if !named.is_empty() || mentions_test_module {
+                    violations.push(format!("{number}: {line}  (names {named:?})"));
+                }
+            }
+        }
+        block.clear();
+    }
+    violations
+}
+
+/// The rule's matching, pinned on fixtures rather than on whatever the runtime sources say today:
+/// the phrase and the disclosure are read across the lines a comment block wraps over.
+#[test]
+fn comment_violations_read_each_comment_block_as_one_text() {
+    let test_only: BTreeSet<String> = ["helper_fn".to_owned()].into();
+
+    let wrapped = "/// The contract is held by the test\n/// module below.\nfn embedded() {}\n";
+    assert_eq!(
+        comment_violations(wrapped, &test_only),
+        [
+            "1: /// The contract is held by the test  (names [])",
+            "2: /// module below.  (names [])",
+        ],
+        "the phrase \"test module\" wrapped across two lines must still be caught"
+    );
+
+    let one_line = "// See the TEST MODULE.\nfn embedded() {}\n";
+    assert_eq!(
+        comment_violations(one_line, &test_only),
+        ["1: // See the TEST MODULE.  (names [])"]
+    );
+
+    let named = "// Checked by `helper_fn`.\n// Nothing else here.\nfn embedded() {}\n";
+    assert_eq!(
+        comment_violations(named, &test_only),
+        ["1: // Checked by `helper_fn`.  (names [\"helper_fn\"])"],
+        "without the phrase, only the line that names the item is reported"
+    );
+
+    let (first, rest) = STRIPPED_DISCLOSURE
+        .split_once(' ')
+        .expect("the disclosure has more than one word");
+    let disclosed = format!(
+        "// Checked by `helper_fn` in the test module. {first}\n// {rest}.\nfn embedded() {{}}\n"
+    );
+    assert!(
+        comment_violations(&disclosed, &test_only).is_empty(),
+        "a disclosure wrapped across lines still covers its block"
+    );
+
+    let apart = "// the test\nfn embedded() {}\n// module\n";
+    assert!(
+        comment_violations(apart, &test_only).is_empty(),
+        "separate comment blocks are not joined across code"
+    );
+}
+
+/// Everything above `#[cfg(test)]` in a runtime source ships verbatim in every generated client,
+/// and the test module below it does not (`generated_output_carries_no_test_module`). So a comment
+/// up there that names a test-only item, or points at "the test module", is true in this
+/// repository and false in the copy a consumer reads: the item it sends them to does not exist
+/// there. Such a comment block is allowed only when it says so, by carrying
+/// [`STRIPPED_DISCLOSURE`].
+///
+/// A test-only item is one a test module declares and no embedded code line mentions; a name that
+/// embedded code also uses exists, in some form, in the consumer's copy. `lib.rs` is not embedded
+/// (the generated `support` module replaces it), so neither its code nor its comments count.
+#[test]
+fn embedded_comments_name_no_test_only_item_undisclosed() {
+    let root = workspace_root();
+    let dir = root.join("support-runtime/src");
+    let mut sources: Vec<(PathBuf, String)> = std::fs::read_dir(&dir)
+        .expect("support-runtime/src exists")
+        .map(|entry| entry.expect("readable directory entry").path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "rs"))
+        .filter(|path| path.file_name().is_none_or(|name| name != "lib.rs"))
+        .map(|path| {
+            let source = read(&path);
+            (path, source)
+        })
+        .collect();
+    sources.sort();
+
+    let mut test_only = BTreeSet::new();
+    let mut embedded_code = BTreeSet::new();
+    for (_, source) in &sources {
+        let (head, tail) = source
+            .split_once("#[cfg(test)]")
+            .unwrap_or((source.as_str(), ""));
+        test_only.extend(test_only_declarations(tail));
+        for line in head.lines() {
+            let code = line.split_once("//").map_or(line, |(code, _)| code);
+            embedded_code.extend(identifiers(code).map(str::to_owned));
+        }
+    }
+    let test_only: BTreeSet<String> = test_only.difference(&embedded_code).cloned().collect();
+    assert!(
+        !test_only.is_empty(),
+        "no test-only item was found, so this check has stopped reading the test modules"
+    );
+
+    let mut violations = Vec::new();
+    for (path, source) in &sources {
+        let head = source
+            .split_once("#[cfg(test)]")
+            .map_or(source.as_str(), |(head, _)| head);
+        let file = path.strip_prefix(&root).unwrap_or(path).display();
+        violations.extend(
+            comment_violations(head, &test_only)
+                .into_iter()
+                .map(|violation| format!("{file}:{violation}")),
+        );
+    }
+    assert!(
+        violations.is_empty(),
+        "these comments sit above `#[cfg(test)]`, so they ship in every generated client, but they \
+         name a test-only item or the test module, neither of which exists in that copy. Reword \
+         them, or state it in the same comment block with the sentence \
+         {STRIPPED_DISCLOSURE:?}:\n{}",
+        violations.join("\n")
+    );
+}
+
 #[test]
 fn the_embed_list_names_every_runtime_source() {
     let root = workspace_root();

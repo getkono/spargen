@@ -147,8 +147,8 @@ pub async fn attach_auth(
     // `MissingCredential` naming no schemes at all. Generated output never produces an empty slice
     // — `emit.rs` omits the call entirely for an operation with no `security` — but this function
     // is public in the runtime crate and reachable from sibling code in whichever module `include!`s
-    // a generated client, so this is a contract, not dead code, and
-    // `no_requirement_attaches_nothing` holds it to that.
+    // a generated client, so this is a contract, not dead code, and spargen's own runtime tests
+    // (which are not embedded) hold it to that.
     if requirements.is_empty() {
         return Ok(request);
     }
