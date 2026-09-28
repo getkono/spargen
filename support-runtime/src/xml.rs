@@ -25,7 +25,8 @@ where
 
 /// Decode an XML success response body into `T`, wrapping it with status and headers. The XML
 /// analogue of [`crate::decode_success`]; a parse failure (invalid UTF-8 or malformed XML) becomes
-/// [`Error::Decode`] with the quick-xml error path and a body capped at `max_error_body`.
+/// [`Error::Decode`] with the quick-xml error path and a body capped at `max_error_body`. A
+/// zero-length body has no root element, so it is always [`Error::Decode`].
 pub async fn decode_success_xml<T>(
     core: &ClientCore,
     response: Response,
@@ -256,6 +257,7 @@ mod tests {
         }
 
         assert!(decode_xml_body::<Point>(b"").is_err());
+        assert!(decode_xml_body::<String>(b"").is_err());
         let core = crate::ClientCore::new("https://example.com").unwrap();
         let response = reqwest::Response::from(
             http::Response::builder()

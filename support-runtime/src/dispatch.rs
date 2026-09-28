@@ -271,7 +271,8 @@ pub async fn send(core: &ClientCore, request: Request) -> Result<Response, Error
 
 /// Decode a success response body into `T`, wrapping it with status and headers. Monomorphized once
 /// per body type. Decode failures become [`Error::Decode`] with the serde path and a body capped
-/// at `max_error_body`.
+/// at `max_error_body`. A zero-length body is not a JSON value, so it is always [`Error::Decode`],
+/// whatever `T` is.
 pub async fn decode_success<T>(
     core: &ClientCore,
     response: Response,
@@ -300,7 +301,8 @@ where
 
 /// Decode a raw UTF-8 success body as the JSON string value described by a textual OpenAPI media
 /// type. Converting through `Value::String` keeps generated string enums and string formats typed
-/// while avoiding JSON's quote requirement on the wire.
+/// while avoiding JSON's quote requirement on the wire. A zero-length body decodes as the string
+/// `""`, so whether it succeeds is `T`'s decision: see [`decode_text_body`].
 pub async fn decode_success_text<T>(
     core: &ClientCore,
     response: Response,
@@ -325,7 +327,8 @@ where
     }
 }
 
-/// Decode a raw binary success body without attempting JSON deserialization.
+/// Decode a raw binary success body without attempting JSON deserialization. Every byte sequence
+/// is a valid binary body, so a zero-length one is an empty `Bytes`, never an error.
 pub async fn decode_success_bytes(
     _core: &ClientCore,
     response: Response,
@@ -338,6 +341,13 @@ pub async fn decode_success_bytes(
 
 /// Deserialize a raw UTF-8 body through a JSON string value. Exposed to the generated shim so
 /// multi-status response variants use exactly the same textual codec as single-body responses.
+///
+/// A zero-length body is the string `""`, and deliberately so: an empty textual body *is* the empty
+/// string, not a missing one. Whether it decodes is therefore `T`'s decision, and differs by `T`:
+/// `String` (which is also what `format: uuid`/`date-time`/`date` lower to with the `uuid`/`time`
+/// features off), an untyped schema's `Value`, and a string enum with an empty variant accept it;
+/// a string enum without one, `uuid::Uuid`, and the RFC 3339 `DateTime` / `Date` newtypes reject
+/// it.
 pub fn decode_text_body<T>(body: &[u8]) -> Result<T, String>
 where
     T: DeserializeOwned,
