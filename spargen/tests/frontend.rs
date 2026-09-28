@@ -9904,6 +9904,126 @@ fn the_ref_sibling_rejection_does_not_creep_into_the_shapes_that_still_generate(
     );
 }
 
+/// A component whose root is a `$ref` carrying only siblings that bear no shape — an annotation such
+/// as `description`/`title`, or a validation keyword such as `maxLength` — is an alias for its
+/// target, exactly as the bare `{$ref: T}` component is. It used to panic in release builds
+/// (`component root was not the last inserted def`) when the target was declared first, and when
+/// the target was declared second it passed the assertion by lifting the TARGET's def out from
+/// under the target's own component entry, and the IR invariant check then rejected a valid
+/// document (`response body references missing type`).
+///
+/// Every existing no-shape fixture put the `$ref` in a response body, which never reserves a
+/// component root, so none of them could reach this. Both declaration orders are driven because
+/// they fail in different ways, and the output is compared with the bare-`$ref` spelling of the
+/// same alias: the siblings must change nothing the generated types say.
+#[test]
+fn a_component_root_ref_with_only_shapeless_siblings_is_an_alias_for_its_target() {
+    const HEAD: &str = r##"openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /alias:
+    get:
+      operationId: getAlias
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alias' }
+  /target:
+    get:
+      operationId: getTarget
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Target' }
+components:
+  schemas:
+"##;
+    let targets = [
+        "{ type: string }",
+        "{ type: object, required: [id], properties: { id: { type: integer } } }",
+    ];
+    let siblings = ["description: hello", "title: Hello", "maxLength: 5"];
+
+    for target in targets {
+        for sibling in siblings {
+            for target_first in [true, false] {
+                let target_line = format!("    Target: {target}\n");
+                let spec = |alias: &str| {
+                    let alias_line = format!("    Alias: {alias}\n");
+                    if target_first {
+                        format!("{HEAD}{target_line}{alias_line}")
+                    } else {
+                        format!("{HEAD}{alias_line}{target_line}")
+                    }
+                };
+                let with_sibling = spec(&format!(
+                    "{{ $ref: '#/components/schemas/Target', {sibling} }}"
+                ));
+                let bare = spec("{ $ref: '#/components/schemas/Target' }");
+                let what = format!(
+                    "`{sibling}` beside a `$ref` to `{target}`, target first: {target_first}"
+                );
+
+                let checked = check(&with_sibling);
+                assert_ne!(
+                    checked.outcome(),
+                    Outcome::Rejected,
+                    "{what} was rejected by check: {checked:#?}"
+                );
+                let (report, code) = generate_with_code(&with_sibling);
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{what} was rejected by generate: {report:#?}"
+                );
+                let (bare_report, bare_code) = generate_with_code(&bare);
+                assert_ne!(bare_report.outcome(), Outcome::Rejected, "{bare_report:#?}");
+                assert_eq!(
+                    types_module(&code),
+                    types_module(&bare_code),
+                    "{what} must lower exactly as the bare `$ref` alias does"
+                );
+                if sibling.starts_with("maxLength") {
+                    assert!(
+                        has_code(&report, Code::ValidationKeywordIgnored),
+                        "{what}: a validation-only sibling must still be acknowledged: {report:#?}"
+                    );
+                }
+            }
+        }
+    }
+
+    // A self-referential alias names no type at all. The bare spelling reports the cycle as `E004`;
+    // a sibling beside it must not change that into a generated placeholder or a panic.
+    for alias in [
+        "{ $ref: '#/components/schemas/Loop' }",
+        "{ $ref: '#/components/schemas/Loop', description: hello }",
+    ] {
+        let spec = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          \
+             description: ok\n          content:\n            application/json:\n              \
+             schema: {{ $ref: '#/components/schemas/Loop' }}\ncomponents:\n  schemas:\n    Loop: {alias}\n"
+        );
+        for report in [check(&spec), generate(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{alias}`: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::UnresolvedRef),
+                "`{alias}` must report the alias cycle as E004: {report:#?}"
+            );
+        }
+    }
+}
+
 /// When a `$ref` is BOTH unresolvable and carries a contradictory sibling, exactly one code must
 /// win and it must be `E004`: `ensure_component` returns `None` before the intersection is reached,
 /// so the missing component is reported and the sibling never gets a second, confusing diagnostic

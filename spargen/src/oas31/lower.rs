@@ -579,30 +579,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 RefOr::Ref(reference) => reference.clone(),
                 RefOr::Item(_) => return None,
             };
-            if !self.component_alias_stack.insert(name.to_owned()) {
-                // E004 case: cycle
-                Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
-                    .message(format!(
-                        "schema component alias `{name}` forms a reference cycle"
-                    ))
-                    .emit(self.diags);
-                return None;
-            }
-            let ty = if let Some(target) = reference.reference.strip_prefix("#/components/schemas/")
-            {
-                self.ensure_component(target, Some(&reference.reference), &reference.provenance)
-            } else if is_remote_ref(&reference.reference) {
-                self.ensure_remote(&reference.reference)
-            } else {
-                self.ensure_resolved(&reference.reference, &reference.provenance, name)
-            };
-            self.component_alias_stack.remove(name);
-            if let Some(ty) = ty {
-                self.components
-                    .insert(name.to_owned(), (ty.id, ty.nullable));
-            }
-            return ty;
+            return self.chain_component_alias(name, &reference.reference, &reference.provenance);
         };
+        // A `$ref` whose siblings bear no shape — `description`, `title`, a validation keyword such
+        // as `maxLength` — is the same alias spelled with annotations beside it: the parser keeps any
+        // sibling key as an inline schema, but `lower_schema_inner`'s `$ref` arm returns the TARGET
+        // for it without inserting anything. Through the reserve/pop machinery below that is two
+        // faults, one per declaration order: a target lowered earlier leaves this frame's
+        // reservation as the last insert and the invariant assertion aborts the process; a target
+        // lowered inside this frame is the last insert, so its def is lifted into this reservation
+        // and the target's own component entry is left naming an id that no longer holds it.
+        // Chaining exactly as the bare spelling does gives both the one answer that spelling gives,
+        // cycle check included. The siblings are still acknowledged where they always were: the
+        // audit reports an ignored validation keyword (`W001`) independently of lowering.
+        if let Some(reference) = schema.reference.as_deref() {
+            let mut sibling = schema.clone();
+            sibling.reference = None;
+            if !schema_has_shape_constraint(&sibling) {
+                let reference = reference.to_owned();
+                let provenance = schema.provenance.clone();
+                return self.chain_component_alias(name, &reference, &provenance);
+            }
+        }
         // A component whose whole body is `oneOf`/`anyOf` over one `$ref` and one or more `null`
         // members names no shape of its own: it is a **nullable alias** for its target, the union
         // spelling of `B: {$ref: A}` with a null branch added. Recognised here, before anything is
@@ -661,6 +659,39 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let nullable = ty.nullable;
         self.components.insert(name.to_owned(), (root_id, nullable));
         Some(ty)
+    }
+
+    /// Resolve the component `name`, whose root is an alias for `reference`, to the target's type and
+    /// record it under `name`. An alias has no body of its own, so nothing is reserved for it; the
+    /// alias stack is what makes a chain of aliases that loops back terminate, as `E004`.
+    fn chain_component_alias(
+        &mut self,
+        name: &str,
+        reference: &str,
+        at: &crate::diag::Provenance,
+    ) -> Option<Ty> {
+        if !self.component_alias_stack.insert(name.to_owned()) {
+            // E004 case: cycle
+            Diagnostic::error(Code::UnresolvedRef, at.clone())
+                .message(format!(
+                    "schema component alias `{name}` forms a reference cycle"
+                ))
+                .emit(self.diags);
+            return None;
+        }
+        let ty = if let Some(target) = reference.strip_prefix("#/components/schemas/") {
+            self.ensure_component(target, Some(reference), at)
+        } else if is_remote_ref(reference) {
+            self.ensure_remote(reference)
+        } else {
+            self.ensure_resolved(reference, at, name)
+        };
+        self.component_alias_stack.remove(name);
+        if let Some(ty) = ty {
+            self.components
+                .insert(name.to_owned(), (ty.id, ty.nullable));
+        }
+        ty
     }
 
     /// Acknowledge a sub-file's own component declaration that a same-named root declaration
