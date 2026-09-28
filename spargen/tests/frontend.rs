@@ -7684,27 +7684,62 @@ paths:
 fn e009_streaming_body_in_a_multi_status_success_enum_is_rejected() {
     // Streaming is scoped to the single bodied success: beside a second bodied success status the
     // operation lowers to a success enum whose arms decode whole bodies, so the stream would be
-    // read as one JSON document.
-    assert_stream_position_rejected(
-        r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
+    // read as one JSON document (#134: the SSE body `data: {"n":1}` came back as `Decode`). One
+    // fixture per streaming framing, each spelled the way its version lowers it to a stream (3.1
+    // `schema`, 3.2 `itemSchema`), with the stream on either side of the JSON status so the gate
+    // does not depend on which arm the enum decodes first.
+    let item = "{ type: object, required: [n], properties: { n: { type: integer } } }";
+    let json = "{ type: object, required: [m], properties: { m: { type: string } } }";
+    for (version, keyword) in [("3.1.0", "schema"), ("3.2.0", "itemSchema")] {
+        for media in [
+            "text/event-stream",
+            "application/x-ndjson",
+            "application/json-seq",
+        ] {
+            for (stream_status, json_status) in [("200", "201"), ("201", "200")] {
+                let spec = format!(
+                    r##"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
 paths:
   /events:
     get:
       responses:
-        "200":
+        "{stream_status}":
           description: Stream
           content:
-            text/event-stream:
-              schema: { type: string }
-        "202":
-          description: Accepted
+            {media}:
+              {keyword}: {item}
+        "{json_status}":
+          description: Made
           content:
             application/json:
-              schema: { type: string }
-"##,
-    );
+              schema: {json}
+"##
+                );
+                // The same stream alone, beside a bodyless status instead of the second bodied
+                // one, is the supported shape: it proves this media lowers to a stream here, so
+                // the rejection below is the multi-status gate and not a failure to recognise it.
+                let control = spec.replace(
+                    &format!(
+                        "\"{json_status}\":\n          description: Made\n          content:\n            \
+                         application/json:\n              schema: {json}\n"
+                    ),
+                    &format!("\"{json_status}\": {{ description: Made }}\n"),
+                );
+                assert_ne!(control, spec, "the control must drop the second body");
+                let (report, code) = generate_with_code(&control);
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{media} {version}: {report:#?}"
+                );
+                assert!(code.contains("EventStream<"), "{media} {version}: {code}");
+
+                assert_stream_position_rejected(&spec);
+            }
+        }
+    }
 }
 
 #[test]
