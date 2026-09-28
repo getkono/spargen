@@ -591,11 +591,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // and the target's own component entry is left naming an id that no longer holds it.
         // Chaining exactly as the bare spelling does gives both the one answer that spelling gives,
         // cycle check included. The siblings are still acknowledged where they always were: the
-        // audit reports an ignored validation keyword (`W001`) independently of lowering.
+        // audit reports an ignored validation keyword (`W001`) independently of lowering. A
+        // `default` is the one sibling this frame used to carry (as a doc note on the root's own
+        // def); an alias has no def to carry it, so it is reported as `W005` in the parser's words
+        // for the bare `$ref`+`default` spelling rather than dropped silently.
         if let Some(reference) = schema.reference.as_deref() {
             let mut sibling = schema.clone();
             sibling.reference = None;
             if !schema_has_shape_constraint(&sibling) {
+                if let Some(default) = &schema.default {
+                    let at = crate::diag::Provenance::new(
+                        schema.provenance.pointer.push("default"),
+                        Some(default.span),
+                    );
+                    Diagnostic::warning(Code::SchemaDefaultNotApplied, at)
+                        .message(
+                            "a schema `default` declared alongside `$ref` is dropped when the \
+                             reference resolves and is not applied",
+                        )
+                        .remedy(
+                            "move the default onto the referenced schema, or set the value \
+                             explicitly",
+                        )
+                        .emit(self.diags);
+                }
                 let reference = reference.to_owned();
                 let provenance = schema.provenance.clone();
                 return self.chain_component_alias(name, &reference, &provenance);

@@ -9947,7 +9947,14 @@ components:
         "{ type: string }",
         "{ type: object, required: [id], properties: { id: { type: integer } } }",
     ];
-    let siblings = ["description: hello", "title: Hello", "maxLength: 5"];
+    // `default` rides beside `description` because alone it is the bare spelling: the parser folds a
+    // lone `$ref`+`default` into the alias and reports it as `W005` there.
+    let siblings = [
+        "description: hello",
+        "title: Hello",
+        "maxLength: 5",
+        "description: hello, default: x",
+    ];
 
     for target in targets {
         for sibling in siblings {
@@ -9994,6 +10001,18 @@ components:
                         "{what}: a validation-only sibling must still be acknowledged: {report:#?}"
                     );
                 }
+                // The alias has no type of its own to document a default on, so it is dropped —
+                // and must say so, as the bare `$ref`+`default` spelling does.
+                assert_eq!(
+                    has_code(&report, Code::SchemaDefaultNotApplied),
+                    sibling.contains("default"),
+                    "{what}: `W005` must fire exactly when a default is dropped: {report:#?}"
+                );
+                assert_eq!(
+                    has_code(&checked, Code::SchemaDefaultNotApplied),
+                    sibling.contains("default"),
+                    "{what}: check must agree with generate on `W005`: {checked:#?}"
+                );
             }
         }
     }
