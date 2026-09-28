@@ -16935,3 +16935,36 @@ fn a_construct_reaches_the_same_verdict_inline_and_behind_a_ref() {
     // reaches rather than the first.
     assert!(divergent.is_empty(), "{}", divergent.join("\n\n"));
 }
+
+/// Where a violation in a referenced file is reported: at the offending node's pointer *within the
+/// file it is written in* — not at the reference, and not at a root-document pointer that does not
+/// exist — with a message naming the reference that reached it and the definition it was held to.
+#[test]
+fn a_violation_behind_a_ref_is_sited_in_the_file_that_holds_it() {
+    let root = placement_document(
+        "3.1.0",
+        serde_json::json!({ "operationId": "getPet", "responses": {
+        "200": { "$ref": "./fragment.json#/shared/item" } } }),
+        serde_json::json!({}),
+    );
+    let fragment = serde_json::json!({ "shared": { "item": { "description": "ok", "bogus": 1 } } });
+    let (generated, checked) =
+        run_placement(&[("openapi.json", root), ("fragment.json", fragment)]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let sited: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Code::InvalidInput)
+            .collect();
+        assert_eq!(sited.len(), 1, "{report:#?}");
+        assert_eq!(sited[0].pointer.as_str(), "/shared/item", "{report:#?}");
+        assert!(
+            sited[0]
+                .message
+                .contains("reached through `$ref: ./fragment.json#/shared/item`")
+                && sited[0].message.contains("validated as `response`"),
+            "{report:#?}"
+        );
+    }
+}
