@@ -10041,6 +10041,78 @@ components:
             );
         }
     }
+
+    // The guard hands the alias to `chain_component_alias`, which routes a relative-file target
+    // through `ensure_resolved` rather than `ensure_component`: a file target must lower exactly as
+    // its bare spelling does too, in both declaration orders of the root document's two uses.
+    let lib = "components:\n  schemas:\n    \
+               Target: { type: object, required: [id], properties: { id: { type: integer } } }\n";
+    let file_target = "./lib.yaml#/components/schemas/Target";
+    for sibling in ["description: hello", "description: hello, default: x"] {
+        for target_first in [true, false] {
+            let run = |alias: &str| {
+                let temp = tempfile::tempdir().unwrap();
+                let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+                let alias_path = "  /alias:\n    get:\n      operationId: getAlias\n      \
+                    responses:\n        '200':\n          description: ok\n          content:\n            \
+                    application/json:\n              schema: { $ref: '#/components/schemas/Alias' }\n";
+                let target_path = format!(
+                    "  /target:\n    get:\n      operationId: getTarget\n      \
+                     responses:\n        '200':\n          description: ok\n          content:\n            \
+                     application/json:\n              schema: {{ $ref: '{file_target}' }}\n"
+                );
+                let paths = if target_first {
+                    format!("{target_path}{alias_path}")
+                } else {
+                    format!("{alias_path}{target_path}")
+                };
+                std::fs::write(
+                    dir.join("openapi.yaml"),
+                    format!(
+                        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\n\
+                         servers: [{{ url: 'https://e.com' }}]\npaths:\n{paths}\
+                         components:\n  schemas:\n    Alias: {alias}\n"
+                    ),
+                )
+                .unwrap();
+                std::fs::write(dir.join("lib.yaml"), lib).unwrap();
+                let out = dir.join("client.rs");
+                let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+                let code = std::fs::read_to_string(&out).unwrap_or_default();
+                let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+                (generated, checked, code)
+            };
+            let what = format!(
+                "`{sibling}` beside a `$ref` to a relative-file target, target first: {target_first}"
+            );
+            let (generated, checked, code) =
+                run(&format!("{{ $ref: '{file_target}', {sibling} }}"));
+            let (bare_generated, _, bare_code) = run(&format!("{{ $ref: '{file_target}' }}"));
+            for (entry, report) in [
+                ("generate", &generated),
+                ("check", &checked),
+                ("bare generate", &bare_generated),
+            ] {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{what}: {entry}: {report:#?}"
+                );
+            }
+            assert_eq!(
+                types_module(&code),
+                types_module(&bare_code),
+                "{what} must lower exactly as the bare `$ref` alias does"
+            );
+            for (entry, report) in [("generate", &generated), ("check", &checked)] {
+                assert_eq!(
+                    has_code(report, Code::SchemaDefaultNotApplied),
+                    sibling.contains("default"),
+                    "{what}: {entry}: `W005` must fire exactly when a default is dropped: {report:#?}"
+                );
+            }
+        }
+    }
 }
 
 /// When a `$ref` is BOTH unresolvable and carries a contradictory sibling, exactly one code must
