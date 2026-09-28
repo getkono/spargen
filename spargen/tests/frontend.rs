@@ -280,6 +280,203 @@ components:
     assert!(code.contains("pub extra"), "{code}");
 }
 
+/// The three positions a `$ref` with a union sibling is exercised at: a request body, a response
+/// body, and a component property. Each is `(label, document, JSON Pointer of the `$ref` site)`,
+/// with `SITE` standing for the schema `{ $ref: '#/components/schemas/Name', <sibling> }` and
+/// `Name` a plain string.
+fn ref_union_sibling_documents(site: &str) -> Vec<(&'static str, String, &'static str)> {
+    let name = "    Name: { type: string }\n";
+    let request = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    post:
+      operationId: send
+      requestBody:
+        required: true
+        content:
+          application/json: {{ schema: {site} }}
+      responses:
+        '204': {{ description: ok }}
+components:
+  schemas:
+{name}"##
+    );
+    let response = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {site} }}
+components:
+  schemas:
+{name}"##
+    );
+    let property = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        label: {site}
+      required: [label]
+{name}"##
+    );
+    vec![
+        (
+            "request body",
+            request,
+            "/paths/~1p/post/requestBody/content/application~1json/schema",
+        ),
+        (
+            "response body",
+            response,
+            "/paths/~1p/get/responses/200/content/application~1json/schema",
+        ),
+        (
+            "component property",
+            property,
+            "/components/schemas/Holder/properties/label",
+        ),
+    ]
+}
+
+/// A `oneOf`/`anyOf` beside a `$ref` constrains the instance exactly as a `type` beside it does:
+/// `$ref` is a 2020-12 applicator, so the value must satisfy the target AND the union. The
+/// shape-constraint gate used to leave both keywords out, so a `$ref` whose only sibling was a union
+/// took the bare-reference exit and the union was dropped with no diagnostic at all — `spargen
+/// check` was clean and the position was typed as the plain target.
+///
+/// A union whose every branch contradicts the target admits no value, so it is `E013` at the
+/// `$ref` site, through `check` and `generate` alike, in every position.
+#[test]
+fn a_ref_whose_union_sibling_contradicts_its_target_is_rejected() {
+    for keyword in ["oneOf", "anyOf"] {
+        let site =
+            format!("{{ $ref: '#/components/schemas/Name', {keyword}: [ {{ type: integer }} ] }}");
+        for (position, spec, pointer) in ref_union_sibling_documents(&site) {
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{keyword} in a {position} via {entry}: the sibling must not be dropped in \
+                     silence: {report:#?}\n{spec}"
+                );
+                assert!(
+                    report
+                        .diagnostics()
+                        .iter()
+                        .any(|d| d.code == Code::AllOfIrreconcilable
+                            && d.pointer.as_str() == pointer),
+                    "{keyword} in a {position} via {entry}: E013 must point at `{pointer}`: \
+                     {report:#?}"
+                );
+            }
+        }
+    }
+}
+
+/// The satisfiable counterpart: the union sibling narrows the target rather than being discarded.
+/// Of `[{type: string, enum: [red, green]}, {type: integer}]` beside a string `Name`, only the enum
+/// branch meets the target, so the position is that two-member enum — not `String`, which is what
+/// the dropped sibling used to leave, and not a union still carrying the integer branch.
+#[test]
+fn a_ref_with_a_union_sibling_is_intersected_with_its_target() {
+    for keyword in ["oneOf", "anyOf"] {
+        let site = format!(
+            "{{ $ref: '#/components/schemas/Name', {keyword}: [ {{ type: string, enum: [red, \
+             green] }}, {{ type: integer }} ] }}"
+        );
+        for (position, spec, _) in ref_union_sibling_documents(&site) {
+            let (report, code) = generate_with_code(&spec);
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{keyword} in a {position}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report.diagnostics().is_empty(),
+                "{keyword} in a {position}: {report:#?}"
+            );
+            let checked = check(&spec);
+            assert!(
+                checked.diagnostics().is_empty(),
+                "{keyword} in a {position} via check: {checked:#?}"
+            );
+            let types = types_module(&code);
+            // The Rust type the position is bound to, read from where the position is used.
+            let bound: String = match position {
+                "request body" => types
+                    .split("body: &types::")
+                    .nth(1)
+                    .and_then(|rest| rest.split([',', ')', '\n']).next())
+                    .map(str::to_owned),
+                "response body" => types
+                    .split("ResponseValue<types::")
+                    .nth(1)
+                    .and_then(|rest| rest.split('>').next())
+                    .map(str::to_owned),
+                _ => field_type(&types, "pub label"),
+            }
+            .unwrap_or_else(|| panic!("{keyword} in a {position}: no bound type found: {types}"));
+            assert_eq!(
+                enum_variants(&types, &bound),
+                ["Red", "Green"],
+                "{keyword} in a {position}: `{bound}` must be the enum branch alone: {types}"
+            );
+        }
+    }
+}
+
+/// The control: `not` beside a `$ref` was never silent — it is validation-only and says so with
+/// `W001` — and admitting the union keywords to the shape gate must leave it exactly that, in every
+/// position, with the position still typed as the target.
+#[test]
+fn a_ref_with_a_not_sibling_still_reports_it_as_validation_only() {
+    let site = "{ $ref: '#/components/schemas/Name', not: { enum: [forbidden] } }";
+    for (position, spec, _) in ref_union_sibling_documents(site) {
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{position} via {entry}: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::ValidationKeywordIgnored),
+                "{position} via {entry}: `not` must still be reported: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{position} via {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn schema_component_alias_chains_resolve_and_cycles_reject() {
     let valid = r##"
@@ -9007,6 +9204,8 @@ SIBLING
         ),
         ("format: binary", "{ type: integer }", "format: binary"),
         ("allOf", "{ type: string }", "allOf: [{ type: integer }]"),
+        ("oneOf", "{ type: string }", "oneOf: [{ type: integer }]"),
+        ("anyOf", "{ type: string }", "anyOf: [{ type: integer }]"),
     ];
 
     // The fixture's table and the published text must name the same keywords, in the same order.

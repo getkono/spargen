@@ -6699,6 +6699,13 @@ fn schema_imposes_scalar(schema: &Schema) -> bool {
         || !schema.any_of.is_empty()
 }
 
+/// Whether a schema's keywords bear a shape that must be composed with whatever it sits beside — a
+/// `$ref` target, a union's branches, or an alias's single member — rather than being discarded.
+///
+/// `oneOf`/`anyOf` count exactly as `allOf` does: in 2020-12 each is an applicator constraining the
+/// instance, so a union beside a `$ref` narrows the target like a `type` beside it would, and
+/// [`schema_imposes_scalar`] already treats them so. Leaving them out made a `$ref` whose only
+/// sibling was a union take the bare-reference exit, discarding the union with no diagnostic.
 fn schema_has_shape_constraint(schema: &Schema) -> bool {
     !schema.types.types.is_empty()
         || schema_is_object_like(schema)
@@ -6710,6 +6717,8 @@ fn schema_has_shape_constraint(schema: &Schema) -> bool {
         || schema.format.as_deref() == Some("binary")
         || schema.reference.is_some()
         || !schema.all_of.is_empty()
+        || !schema.one_of.is_empty()
+        || !schema.any_of.is_empty()
 }
 
 /// The provenance of an `allOf` member for diagnostics — the schema's own provenance, or the
