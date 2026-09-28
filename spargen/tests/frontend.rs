@@ -10488,6 +10488,55 @@ components:
     assert_ne!(check(spec).outcome(), Outcome::Rejected);
 }
 
+/// Every `E004` diagnostic's pointer, asserting the report rejected and carries at least one.
+fn e004_pointers<'a>(report: &'a Report, what: &str) -> Vec<&'a str> {
+    assert_eq!(report.outcome(), Outcome::Rejected, "{what}\n{report:#?}");
+    let pointers: Vec<_> = report
+        .diagnostics()
+        .iter()
+        .filter(|d| d.code == Code::UnresolvedRef)
+        .map(|d| d.pointer.as_str())
+        .collect();
+    assert!(!pointers.is_empty(), "{what}: expected E004\n{report:#?}");
+    pointers
+}
+
+#[test]
+fn e004_a_chained_path_item_ref_is_rejected_at_the_path() {
+    // One hop is what the specification requires and what spargen follows
+    // (`path_item_ref_resolves_into_operations`); a Path Item `$ref` whose target is itself a
+    // `$ref` is declined rather than followed without a cycle guard. Nothing reached this site
+    // before, so the decision could change unseen.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: "https://e.com" }]
+paths:
+  /u:
+    $ref: "#/components/pathItems/A"
+components:
+  pathItems:
+    A: { $ref: "#/components/pathItems/B" }
+    B:
+      get:
+        operationId: getU
+        responses:
+          "204": { description: No Content }
+"##;
+    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+        let pointers = e004_pointers(&report, entry);
+        assert!(
+            pointers.contains(&"/paths/~1u"),
+            "{entry}: E004 must point at the referencing path, not {pointers:?}"
+        );
+        assert!(
+            messages_for(&report, Code::UnresolvedRef).iter().any(|m| m
+                .contains("resolves to another Path Item `$ref`; chained Path Item references")),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
 #[test]
 fn e015_items_beside_prefix_items() {
     let spec = r##"
@@ -10569,6 +10618,90 @@ components:
             has_code(&report, Code::UnknownSecurityScheme),
             "{report:#?}"
         );
+    }
+}
+
+#[test]
+fn e004_a_security_scheme_ref_that_cannot_be_followed_says_why() {
+    // A security scheme `$ref` is followed one hop into this document's
+    // `#/components/securitySchemes/`. Each way that fails used to share one message,
+    // "unresolved security scheme reference", which was false on its face for an alias whose
+    // target the document plainly declares — so each case pins its own wording, and none of the
+    // declared-target cases may call itself unresolved.
+    let spec_with = |schemes: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: "https://e.com" }}]
+security:
+  - A: []
+paths:
+  /x:
+    get:
+      responses:
+        "204": {{ description: No Content }}
+components:
+  schemas:
+    Token: {{ type: string }}
+  securitySchemes:
+{schemes}"##
+        )
+    };
+    let cases = [
+        (
+            "an alias to an alias",
+            spec_with(
+                "    A: { $ref: \"#/components/securitySchemes/B\" }\n    B: { $ref: \"#/components/securitySchemes/C\" }\n    C: { type: http, scheme: bearer }\n",
+            ),
+            "resolves to another security scheme `$ref`; chained security scheme references are \
+             not resolved",
+        ),
+        (
+            "an alias to itself",
+            spec_with("    A: { $ref: \"#/components/securitySchemes/A\" }\n"),
+            "resolves to another security scheme `$ref`; chained security scheme references are \
+             not resolved",
+        ),
+        (
+            "an alias to an undeclared scheme",
+            spec_with("    A: { $ref: \"#/components/securitySchemes/Missing\" }\n"),
+            "no scheme named `Missing` is declared",
+        ),
+        (
+            "a reference outside the security scheme components",
+            spec_with("    A: { $ref: \"#/components/schemas/Token\" }\n"),
+            "does not point into this document's `#/components/securitySchemes/`",
+        ),
+    ];
+    for (what, spec, wording) in &cases {
+        for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+            let pointers = e004_pointers(&report, what);
+            assert!(
+                pointers.contains(&"/components/securitySchemes/A"),
+                "{what} via {entry}: E004 must point at the aliasing scheme, not {pointers:?}"
+            );
+            let messages = messages_for(&report, Code::UnresolvedRef);
+            assert!(
+                messages.iter().any(|m| m.contains(wording)),
+                "{what} via {entry}: expected `{wording}` in {messages:?}"
+            );
+            if !wording.contains("no scheme named") {
+                assert!(
+                    messages.iter().all(|m| !m.contains("unresolved")),
+                    "{what} via {entry}: a target that is present is not unresolved: {messages:?}"
+                );
+            }
+        }
+    }
+
+    // The negative control: the one hop the specification requires still resolves.
+    let one_hop = spec_with(
+        "    A: { $ref: \"#/components/securitySchemes/B\" }\n    B: { type: http, scheme: bearer }\n",
+    );
+    for report in [generate(&one_hop), check(&one_hop)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
     }
 }
 
