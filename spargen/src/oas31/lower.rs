@@ -4603,10 +4603,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 RefOr::Item(header) => return Some(header),
                 RefOr::Ref(reference) => {
                     if !seen.insert(reference.reference.clone()) {
-                        Diagnostic::error(Code::UnresolvedRef, reference.provenance)
-                            .message("header reference cycle cannot be resolved")
-                            .emit(self.diags);
-                        return None;
+                        return self.reject_alias_cycle(&reference.provenance, "header");
                     }
                     let alias = reference
                         .reference
@@ -4615,13 +4612,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     match alias {
                         Some(Some(target)) => current = target,
                         Some(None) => {
-                            Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
-                                .message(format!(
-                                    "unresolved header reference `{}`",
-                                    reference.reference
-                                ))
-                                .emit(self.diags);
-                            return None;
+                            return self.reject_component_alias(
+                                &reference.provenance,
+                                "header",
+                                &reference.reference,
+                            );
                         }
                         // Not a component alias: a multi-file description may reference a whole
                         // file, which resolves through the input bundle exactly as a Parameter or
@@ -4639,18 +4634,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 self.diags,
                             ) {
                                 Some(resolved) => Some(resolved),
-                                None => {
-                                    Diagnostic::error(
-                                        Code::UnresolvedRef,
-                                        reference.provenance.clone(),
-                                    )
-                                    .message(format!(
-                                        "unresolved header reference `{}`",
-                                        reference.reference
-                                    ))
-                                    .emit(self.diags);
-                                    None
-                                }
+                                None => self.reject_unfollowable_reference(
+                                    &reference.provenance,
+                                    "header",
+                                    &reference.reference,
+                                ),
                             };
                         }
                     }
@@ -4680,11 +4668,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 RefOr::Ref(reference) => {
                     self.note_reference_docs(reference);
                     if !seen.insert(reference.reference.clone()) {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "parameter",
-                            "cycle",
-                        );
+                        return self.reject_alias_cycle(&reference.provenance, "parameter");
                     }
                     let Some(name) = reference.reference.strip_prefix("#/components/parameters/")
                     else {
@@ -4702,7 +4686,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             self.diags,
                         ) {
                             Some(resolved) => Some(resolved),
-                            None => self.reject_component_alias(
+                            None => self.reject_unfollowable_reference(
                                 &reference.provenance,
                                 "parameter",
                                 &reference.reference,
@@ -4734,11 +4718,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 RefOr::Ref(reference) => {
                     self.note_reference_docs(reference);
                     if !seen.insert(reference.reference.clone()) {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "request body",
-                            "cycle",
-                        );
+                        return self.reject_alias_cycle(&reference.provenance, "request body");
                     }
                     let Some(name) = reference
                         .reference
@@ -4758,7 +4738,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             self.diags,
                         ) {
                             Some(resolved) => Some(resolved),
-                            None => self.reject_component_alias(
+                            None => self.reject_unfollowable_reference(
                                 &reference.provenance,
                                 "request body",
                                 &reference.reference,
@@ -4787,11 +4767,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 RefOr::Ref(reference) => {
                     self.note_reference_docs(reference);
                     if !seen.insert(reference.reference.clone()) {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "response",
-                            "cycle",
-                        );
+                        return self.reject_alias_cycle(&reference.provenance, "response");
                     }
                     let Some(name) = reference.reference.strip_prefix("#/components/responses/")
                     else {
@@ -4809,7 +4785,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             self.diags,
                         ) {
                             Some(resolved) => Some(resolved),
-                            None => self.reject_component_alias(
+                            None => self.reject_unfollowable_reference(
                                 &reference.provenance,
                                 "response",
                                 &reference.reference,
@@ -4848,14 +4824,47 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .emit(self.diags);
     }
 
+    /// A reference into `#/components/<kind>/` naming an entry the document does not declare.
     fn reject_component_alias<T>(
         &mut self,
         provenance: &crate::diag::Provenance,
         kind: &str,
         reference: &str,
     ) -> Option<T> {
+        // E004 case: undeclared-component
         Diagnostic::error(Code::UnresolvedRef, provenance.clone())
             .message(format!("unresolved {kind} reference `{reference}`"))
+            .emit(self.diags);
+        None
+    }
+
+    /// A chain of `{kind}` reference hops that returns to a reference it already followed.
+    fn reject_alias_cycle<T>(
+        &mut self,
+        provenance: &crate::diag::Provenance,
+        kind: &str,
+    ) -> Option<T> {
+        // E004 case: cycle
+        Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+            .message(format!("{kind} reference cycle cannot be resolved"))
+            .emit(self.diags);
+        None
+    }
+
+    /// A reference outside `#/components/<kind>/` that the input bundle could not follow: the
+    /// resolver cannot tell an absent target from a fragment form it declines, so the message says
+    /// both, in the one wording `E004`'s explain text reserves for that.
+    fn reject_unfollowable_reference<T>(
+        &mut self,
+        provenance: &crate::diag::Provenance,
+        kind: &str,
+        reference: &str,
+    ) -> Option<T> {
+        // E004 case: unsupported-or-unresolved
+        Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+            .message(format!(
+                "unsupported or unresolved {kind} reference `{reference}`"
+            ))
             .emit(self.diags);
         None
     }
@@ -4880,10 +4889,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Parameter, Response, and Request Body paths already give it.
             self.note_reference_docs(&reference);
             if !seen.insert(reference.reference.clone()) {
-                Diagnostic::error(Code::UnresolvedRef, reference.provenance)
-                    .message("media type reference cycle cannot be resolved")
-                    .emit(self.diags);
-                return None;
+                return self.reject_alias_cycle(&reference.provenance, "media type");
             }
             let Some(name) = reference.reference.strip_prefix("#/components/mediaTypes/") else {
                 // Not a component alias: a multi-file description may reference a whole file,
@@ -4908,21 +4914,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         continue;
                     }
                     None => {
-                        Diagnostic::error(Code::UnresolvedRef, reference.provenance)
-                            .message(format!(
-                                "unsupported or unresolved Media Type Object reference `{}`",
-                                reference.reference
-                            ))
-                            .emit(self.diags);
-                        return None;
+                        return self.reject_unfollowable_reference(
+                            &reference.provenance,
+                            "Media Type Object",
+                            &reference.reference,
+                        );
                     }
                 }
             };
             let Some(target) = self.document.components.media_types.get(name) else {
-                Diagnostic::error(Code::UnresolvedRef, reference.provenance)
-                    .message(format!("unresolved Media Type Object component `{name}`"))
-                    .emit(self.diags);
-                return None;
+                return self.reject_component_alias(
+                    &reference.provenance,
+                    "Media Type Object",
+                    &reference.reference,
+                );
             };
             current = target.clone();
         }

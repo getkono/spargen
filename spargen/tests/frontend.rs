@@ -315,6 +315,114 @@ components:
     assert!(has_code(&report, Code::UnresolvedRef), "{report:#?}");
 }
 
+/// `E004`'s explain text promises that each message is more specific than its list of cases, and
+/// that only a reference spargen could not classify reads `unsupported or unresolved`. The
+/// Parameter, Request Body and Response alias walkers broke both: a cycle among their components
+/// reported ``unresolved parameter reference `cycle` `` — naming a reference nobody wrote, and calling
+/// a declared-but-circular target unresolved — and a non-component reference the bundle could not
+/// follow read as a plain `unresolved`, indistinguishable from an undeclared component.
+#[test]
+fn e004_alias_walkers_name_a_cycle_and_an_unclassifiable_reference_as_what_they_are() {
+    let valid = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /item:
+    post:
+      parameters:
+        - $ref: '#/components/parameters/P'
+      requestBody: { $ref: '#/components/requestBodies/B' }
+      responses:
+        '200': { $ref: '#/components/responses/R' }
+components:
+  parameters:
+    P: { $ref: '#/components/parameters/Q' }
+    Q: { name: q, in: query, schema: { type: string } }
+  requestBodies:
+    B: { $ref: '#/components/requestBodies/C' }
+    C: { content: { application/json: { schema: { type: string } } } }
+  responses:
+    R: { $ref: '#/components/responses/S' }
+    S: { description: ok }
+"##;
+    let report = generate(valid);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+
+    let cycles = valid
+        .replace(
+            "Q: { name: q, in: query, schema: { type: string } }",
+            "Q: { $ref: '#/components/parameters/P' }",
+        )
+        .replace(
+            "C: { content: { application/json: { schema: { type: string } } } }",
+            "C: { $ref: '#/components/requestBodies/B' }",
+        )
+        .replace(
+            "S: { description: ok }",
+            "S: { $ref: '#/components/responses/R' }",
+        );
+    for (entry, report) in [("generate", generate(&cycles)), ("check", check(&cycles))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let messages = messages_for(&report, Code::UnresolvedRef);
+        for kind in ["parameter", "request body", "response"] {
+            assert!(
+                messages
+                    .iter()
+                    .any(|m| *m == format!("{kind} reference cycle cannot be resolved")),
+                "{entry}: a {kind} alias cycle must say it is a cycle: {messages:#?}"
+            );
+        }
+        assert!(
+            messages.iter().all(|m| !m.contains("`cycle`")),
+            "{entry}: no message may name a reference `cycle`: {messages:#?}"
+        );
+    }
+
+    // A reference outside `#/components/<kind>/` that the bundle cannot follow: the resolver
+    // cannot tell a missing target from a form it declines, which is exactly the one wording the
+    // explain text reserves for that.
+    let unclassifiable = valid
+        .replace(
+            "- $ref: '#/components/parameters/P'",
+            "- $ref: '#/nowhere/parameter'",
+        )
+        .replace(
+            "requestBody: { $ref: '#/components/requestBodies/B' }",
+            "requestBody: { $ref: '#/nowhere/body' }",
+        )
+        .replace(
+            "'200': { $ref: '#/components/responses/R' }",
+            "'200': { $ref: '#/nowhere/response' }",
+        );
+    let report = generate(&unclassifiable);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let messages = messages_for(&report, Code::UnresolvedRef);
+    for (kind, target) in [
+        ("parameter", "#/nowhere/parameter"),
+        ("request body", "#/nowhere/body"),
+        ("response", "#/nowhere/response"),
+    ] {
+        assert!(
+            messages
+                .iter()
+                .any(|m| *m == format!("unsupported or unresolved {kind} reference `{target}`")),
+            "{kind}: {messages:#?}"
+        );
+    }
+
+    // Control: an undeclared component keeps the plain `unresolved` wording.
+    let undeclared = valid.replace(
+        "- $ref: '#/components/parameters/P'",
+        "- $ref: '#/components/parameters/Missing'",
+    );
+    let report = generate(&undeclared);
+    assert!(
+        messages_for(&report, Code::UnresolvedRef)
+            .contains(&"unresolved parameter reference `#/components/parameters/Missing`"),
+        "{report:#?}"
+    );
+}
+
 /// A `$ref` to a component schema that was never declared is an error, not a construct to drop
 /// quietly. Every construct that reaches `LowerCtx::ensure_component` must report `E004`: before
 /// this was pinned, an `application/octet-stream` request body whose schema `$ref`ed a missing
