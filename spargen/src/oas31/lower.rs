@@ -2187,22 +2187,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // carry that key. Consuming `required` only as a per-property flag dropped such a name,
         // so the generated type accepted and could emit an object without it (#140). It becomes
         // a required field typed by what the object says of an undeclared key: the
-        // `additionalProperties` schema when there is one, nothing at all when there is not —
-        // `patternProperties` alone cannot be matched against the name here, so its value type
-        // would be a guess — and uninhabited under `additionalProperties: false`, which forbids
-        // the very key `required` demands.
-        let mut seen: HashSet<&str> = schema.properties.keys().map(String::as_str).collect();
-        for name in &schema.required {
-            if !seen.insert(name.as_str()) {
-                continue;
-            }
+        // `additionalProperties` schema when there is one, and nothing at all otherwise.
+        // `patternProperties` cannot be matched against the name at generation time, so its
+        // value type would be a guess. `additionalProperties: false` is read the way the rest of
+        // lowering reads it — it closes the object to the fields the generated type declares, as
+        // `deny_unknown_fields` — and this field is one of them; reading it strictly instead
+        // (every undeclared key forbidden, so the object is uninhabited) would reject the common
+        // `allOf: [{$ref: Base}, {additionalProperties: false, required: [id]}]`, which that same
+        // reading generates when `Base` declares `id`.
+        for name in undeclared_required(schema) {
             let ty = match (&additional, schema.additional_properties.as_deref()) {
-                (AdditionalProps::Deny, _) => self.insert_type(
-                    &format!("{hint}{name}"),
-                    TypeKind::Never,
-                    Docs::default(),
-                    None,
-                ),
                 (AdditionalProps::Typed(ty), Some(SchemaOr::Schema(_))) => {
                     // The map value dropped its `Box` because the map already provides the
                     // indirection a cycle-closing reference needs. A plain field has none, so it
@@ -2220,7 +2214,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ),
             };
             fields.push(Field {
-                name: PropertyName { wire: name.clone() },
+                name: PropertyName { wire: name },
                 ty,
                 required: true,
                 deprecated: false,
@@ -2378,11 +2372,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut fields: IndexMap<String, Field> = IndexMap::new();
         let mut required: Vec<String> = Vec::new();
         let mut additional = AdditionalProps::Allow;
+        // The merged fields no member has declared yet, only required (see `synthesized`).
+        let mut placeholders: HashSet<String> = HashSet::new();
         for contribution in &contributions {
             let Contribution::Object {
                 fields: member_fields,
                 additional: member_additional,
                 required: member_required,
+                synthesized: member_synthesized,
             } = contribution
             else {
                 continue;
@@ -2439,10 +2436,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             );
                             return self.reject_all_of(schema, &message);
                         };
+                        let required = existing.required || field.required;
+                        // A field that exists only because an earlier member required its name
+                        // carries no metadata; the first member to declare the property supplies
+                        // it, exactly as it would have with the requirement written after it.
+                        if !member_synthesized.contains(&field.name.wire)
+                            && placeholders.remove(&field.name.wire)
+                        {
+                            *existing = field.clone();
+                        }
                         existing.ty = intersection;
-                        existing.required = existing.required || field.required;
+                        existing.required = required;
                     }
                     None => {
+                        if member_synthesized.contains(&field.name.wire) {
+                            placeholders.insert(field.name.wire.clone());
+                        }
                         fields.insert(field.name.wire.clone(), field.clone());
                     }
                 }
@@ -2490,6 +2499,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fields: member_fields,
                 additional: member_additional,
                 required: schema.required.clone(),
+                synthesized: undeclared_required(schema),
             });
         }
         Some(())
@@ -2602,10 +2612,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|field| field.name.wire.clone())
                     .collect();
                 let additional = structure.additional.clone();
+                // A copied field is taken as declared. The component's type does not record which
+                // keyword put a field there, so one its own undeclared `required` name produced
+                // keeps its empty metadata over a later member's declaration of that property.
+                // The type still intersects exactly; only that declaration's default, flags and
+                // `xml` hints are not carried.
                 out.push(Contribution::Object {
                     fields,
                     additional,
                     required,
+                    synthesized: Vec::new(),
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -2624,6 +2640,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fields,
                 additional,
                 required: schema.required.clone(),
+                synthesized: undeclared_required(schema),
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
@@ -6739,6 +6756,10 @@ enum Contribution {
         fields: Vec<Field>,
         additional: AdditionalProps,
         required: Vec<String>,
+        /// The fields this member carries only because it `required` a name its own `properties`
+        /// do not declare ([`undeclared_required`]). Such a field has no metadata of its own, so
+        /// when another member declares the property, the declared field's metadata is kept.
+        synthesized: Vec<String>,
     },
     Scalar(Ty),
 }
@@ -6752,6 +6773,20 @@ fn schema_is_object_like(schema: &Schema) -> bool {
         || schema.additional_properties.is_some()
         || !schema.required.is_empty()
         || schema.types.types.contains(&JsonType::Object)
+}
+
+/// The `required` names a schema's own `properties` do not declare, deduplicated, in source order.
+/// [`LowerCtx::object_body`] carries each as a required field of its own; the `allOf` merge also
+/// needs the list to tell such a field from a declared one, since only a declared one carries the
+/// property's metadata.
+fn undeclared_required(schema: &Schema) -> Vec<String> {
+    let mut seen: HashSet<&str> = schema.properties.keys().map(String::as_str).collect();
+    schema
+        .required
+        .iter()
+        .filter(|name| seen.insert(name.as_str()))
+        .cloned()
+        .collect()
 }
 
 /// The category a schema's object or array applicators imply, for a schema that establishes none

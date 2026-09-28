@@ -9403,15 +9403,48 @@ fn a_required_name_no_property_declares_is_still_required() {
         ),
         "pub a: i64,"
     );
-    // `additionalProperties: false` forbids the key `required` demands: uninhabited, not dropped.
-    let denied = field(
-        "{ type: object, additionalProperties: false, required: [a] }",
-        "a",
+    // `additionalProperties: false` closes the object to the fields the type declares, as it does
+    // everywhere else in lowering, and the required name is one of them.
+    assert_eq!(
+        field(
+            "{ type: object, additionalProperties: false, required: [a] }",
+            "a"
+        ),
+        "pub a: serde_json::Value,"
     );
+    // So the closed `allOf` spelling of "require a property the base declares" keeps generating,
+    // with the base's type for it.
+    assert_eq!(
+        field(
+            "{ allOf: [{ type: object, properties: { a: { type: string } } }, \
+             { additionalProperties: false, required: [a] }] }",
+            "a"
+        ),
+        "pub a: String,"
+    );
+
+    // A member that only requires the name comes FIRST here, so its metadata-less field is the one
+    // the merge meets first. The later declaration's metadata must still reach the field.
+    let (report, code) = generate_with_code(&format!(
+        "{HEAD}    Thing:\n      allOf:\n        - {{ type: object, required: [a] }}\n        - \
+         {{ type: object, properties: {{ a: {{ type: string, deprecated: true }} }} }}\n"
+    ));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    let lines: Vec<&str> = types.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("pub a: "))
+        .unwrap_or_else(|| panic!("no `a` field:\n{types}"));
     assert!(
-        !denied.contains("serde_json::Value") && !denied.contains("Option<"),
-        "{denied}"
+        lines[..at]
+            .iter()
+            .rev()
+            .take_while(|line| line.starts_with("#[") || line.starts_with("///"))
+            .any(|line| line.contains("Deprecated per the spec")),
+        "the declaring member's `deprecated` was lost to the requiring member's placeholder:\n{types}"
     );
+    assert!(!lines[at].contains("Option<"), "{types}");
 
     // The `allOf` spelling reaches the same `object_body`, so a member's undeclared requirement
     // survives the merge too.
