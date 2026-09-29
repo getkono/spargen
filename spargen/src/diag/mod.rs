@@ -158,3 +158,34 @@ impl DiagnosticBuilder {
         diags.emit(self.build());
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_test_fn;
+
+    #[test]
+    fn is_test_fn_accepts_a_function_its_test_attribute_immediately_precedes() {
+        assert!(is_test_fn("#[test]\nfn pinned() {}\n", "pinned"));
+        assert!(is_test_fn(
+            "mod tests {\n    #[test]\n    fn pinned() {}\n}\n",
+            "pinned"
+        ));
+    }
+
+    #[test]
+    fn is_test_fn_rejects_every_name_that_is_not_a_test() {
+        // Every caller only ever asks about names it expects to be tests, so without these cases
+        // the predicate could accept anything and no fixture citation would notice (#202).
+        // A helper with no attribute at all.
+        assert!(!is_test_fn("fn helper() {}\n", "helper"));
+        // A helper that follows a test: the nearest `#[test]` above it belongs to another item.
+        assert!(!is_test_fn(
+            "#[test]\nfn pinned() {}\n\nfn helper() {}\n",
+            "helper"
+        ));
+        // A name that is only a prefix of the test's.
+        assert!(!is_test_fn("#[test]\nfn pinned_more() {}\n", "pinned"));
+        // A name the source never declares.
+        assert!(!is_test_fn("#[test]\nfn pinned() {}\n", "absent"));
+    }
+}
