@@ -218,7 +218,8 @@ impl InputBundle {
     /// resolves back to `file` through [`Self::file_id_for_path`].
     ///
     /// Relative, so a rule auto-carve derives — and the omit fingerprint stamped into generated
-    /// output — does not depend on where the checkout lives.
+    /// output — does not depend on where the checkout lives. The one exception is a file reached by
+    /// an absolute-path `$ref`, whose location the description itself fixes.
     pub(crate) fn root_relative_path(&self, file: FileId) -> Option<&str> {
         let path = &self.file(file)?.path;
         Some(

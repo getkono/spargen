@@ -625,9 +625,13 @@ pub(crate) const MAX_CARVE_ROUNDS: usize = 64;
 ///   [`OmitRule::Pointer`] (`lib.yaml#/components/schemas/Node`), since a path- or component-named
 ///   rule is read against the root document and would match nothing there (`E019`). Removing it
 ///   dangles the `$ref`s that reached it, and the next round carves those;
-/// * a sub-file pointer outside `paths`/`components` — a bare schema or path item file, which has
-///   no construct that can be omitted without reshaping it — is carved at every `$ref` site in the
-///   bundle whose target encloses it, followed back file by file until each reaches a construct.
+/// * a sub-file pointer outside `paths`/`components` — a bare schema or path item file — is
+///   carved through each `$ref` site in the bundle whose target encloses it. Where that site sits
+///   where a Path Item belongs and the pointer lies in one of the target's methods, the file does
+///   hold an omittable construct, that operation, and it is carved alone as a file-scoped pointer
+///   (`pi.yaml#/get`). Otherwise (a schema file, or a path item's own `parameters`) nothing in the
+///   file can be omitted without reshaping it, and the site itself is carved, followed back file
+///   by file until each reaches a construct.
 ///
 /// `bundle` is the one the diagnostics were produced from, with the current omit profile already
 /// applied, so every rule derived here names a construct that is still present.
@@ -683,14 +687,34 @@ impl Carver<'_> {
             self.push(rule);
             return;
         }
-        let referrers: Vec<(FileId, JsonPointer)> = self
+        let referrers: Vec<(FileId, JsonPointer, usize, bool)> = self
             .sites
             .get_or_init(|| reference_sites(bundle))
             .iter()
             .filter(|site| site.target_file == file && is_prefix(&site.target_tokens, &tokens))
-            .map(|site| (site.file, site.pointer.clone()))
+            .map(|site| {
+                (
+                    site.file,
+                    site.pointer.clone(),
+                    site.target_tokens.len(),
+                    is_path_item_position(&pointer_tokens(&site.pointer)),
+                )
+            })
             .collect();
-        for (referrer, at) in referrers {
+        for (referrer, at, target_depth, path_item) in referrers {
+            // A `$ref` where a Path Item belongs makes its target a path item, whose methods are
+            // operations of their own: carve the rejected one alone, in this file, rather than the
+            // whole path the `$ref` sits at.
+            if path_item {
+                if let Some(depth) = operation_depth(&tokens[target_depth..]) {
+                    if let Some(rule) =
+                        file_scoped_pointer(bundle, file, &tokens[..target_depth + depth])
+                    {
+                        self.push(rule);
+                        continue;
+                    }
+                }
+            }
             self.carve_at(referrer, &at);
         }
     }
@@ -786,8 +810,34 @@ fn file_scoped_enclosing(
     tokens: &[String],
 ) -> Option<OmitRule> {
     let enclosing = enclosing(tokens)?;
+    file_scoped_pointer(bundle, file, &tokens[..enclosing.depth])
+}
+
+/// Whether a `$ref` at `tokens` sits where a Path Item belongs — a `paths` entry, a
+/// `components.pathItems` entry, or a webhook — so that whatever it resolves to is read as one.
+fn is_path_item_position(tokens: &[String]) -> bool {
+    match tokens {
+        [collection, _] => collection == "paths" || collection == "webhooks",
+        [components, kind, _] => components == "components" && kind == "pathItems",
+        _ => false,
+    }
+}
+
+/// How many leading tokens of a pointer relative to a Path Item name one of its operations — a
+/// fixed-field method, or an OpenAPI 3.2 `additionalOperations` method — mirroring [`enclosing`]'s
+/// mapping below `/paths/<path>`; `None` for a path-item-level pointer.
+fn operation_depth(tokens: &[String]) -> Option<usize> {
+    match tokens {
+        [additional, _, ..] if additional == "additionalOperations" => Some(2),
+        [method, ..] if method.parse::<OmitMethod>().is_ok() => Some(1),
+        _ => None,
+    }
+}
+
+/// The file-scoped pointer rule that omits exactly the construct `tokens` names in `file`.
+fn file_scoped_pointer(bundle: &InputBundle, file: FileId, tokens: &[String]) -> Option<OmitRule> {
     let path = bundle.root_relative_path(file)?;
-    let pointer: String = tokens[..enclosing.depth]
+    let pointer: String = tokens
         .iter()
         .map(|token| format!("/{}", escape_glob_meta(&escape_pointer_token(token))))
         .collect();

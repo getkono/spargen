@@ -1310,7 +1310,7 @@ components:
     spec
 }
 
-/// A sub-file that is a bare schema (or a bare path item) declares no `paths` or `components` of
+/// A sub-file that is a bare schema declares no `paths` or `components` of
 /// its own, so no construct inside it can be omitted without editing the schema's shape. The
 /// rejection is instead carved at every construct that references it — here transitively, through
 /// `schemas/wrapper.yaml` referencing `schemas/node.yaml` — ending at the root operations that
@@ -1392,4 +1392,229 @@ properties:
     assert!(generated.contains("fn get_good"), "{generated}");
     assert!(generated.contains("fn get_also_good"), "{generated}");
     assert!(!generated.contains("fn get_uses_wrapper"), "{generated}");
+}
+
+/// A sub-file that declares `paths` of its own is carved at the same three depths the root is: a
+/// rejected method as that one operation, a rejected `additionalOperations` method as that one
+/// method, and a path-item-level rejection as the whole path item — whose root `$ref` is then left
+/// dangling and carved as the root path on the next round. The healthy sibling method in each
+/// path item survives.
+#[test]
+fn carve_scopes_a_sub_file_paths_rejection_to_its_operation_method_or_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses: { "204": { description: OK } }
+  /x: { $ref: "./lib.yaml#/paths/~1x" }
+  /y: { $ref: "./lib.yaml#/paths/~1y" }
+  /z: { $ref: "./lib.yaml#/paths/~1z" }
+"##,
+    );
+    write_spec(
+        temp.path(),
+        "lib.yaml",
+        r##"
+paths:
+  /x:
+    get:
+      operationId: getX
+      responses:
+        "200":
+          description: OK
+          content:
+            application/sdp: { schema: { type: string } }
+    post:
+      operationId: postX
+      responses: { "204": { description: OK } }
+  /y:
+    get:
+      operationId: getY
+      responses: { "204": { description: OK } }
+    additionalOperations:
+      PURGE:
+        operationId: purgeY
+        responses:
+          "200":
+            description: OK
+            content:
+              application/sdp: { schema: { type: string } }
+  /z:
+    parameters: [ { $ref: "#/components/parameters/Missing" } ]
+    get:
+      operationId: getZ
+      responses: { "204": { description: OK } }
+"##,
+    );
+    let out = temp.path().join("client.rs");
+
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let mut carved = w009_messages(&report);
+    carved.sort_unstable();
+    assert_eq!(
+        carved,
+        [
+            "omitted construct matched by `path /z`",
+            "omitted construct matched by `pointer lib.yaml#/paths/~1x/get`",
+            "omitted construct matched by `pointer lib.yaml#/paths/~1y/additionalOperations/PURGE`",
+            "omitted construct matched by `pointer lib.yaml#/paths/~1z`",
+        ],
+        "each sub-file rejection is carved at its own depth: {report:#?}"
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    for survivor in ["fn get_good", "fn post_x", "fn get_y"] {
+        assert!(generated.contains(survivor), "{survivor}: {generated}");
+    }
+    for carved in ["fn get_x", "fn purge_y", "fn get_z"] {
+        assert!(!generated.contains(carved), "{carved}: {generated}");
+    }
+}
+
+/// A bare path item file has no `paths` of its own, but each method in it is still an operation
+/// that can be removed alone: every `$ref` that reaches the file sits where a Path Item belongs,
+/// so the rejected `get` is carved as `pi.yaml#/get` and the healthy `post` beside it survives.
+/// Carving the root path the `$ref` sits at instead would take `postZ` with it. A rejection at the
+/// path-item level of such a file (`pi-params.yaml`'s dangling parameter) has no smaller construct
+/// than the path item, so it is still followed back to the root path that reaches it.
+#[test]
+fn carve_scopes_a_bare_path_item_file_rejection_to_its_operation() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_spec(
+        temp.path(),
+        "openapi.yaml",
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses: { "204": { description: OK } }
+  /z: { $ref: "./pi.yaml" }
+  /w: { $ref: "./pi-params.yaml" }
+"##,
+    );
+    write_spec(
+        temp.path(),
+        "pi.yaml",
+        r##"
+get:
+  operationId: getZ
+  responses:
+    "200":
+      description: OK
+      content:
+        application/json:
+          schema: { $ref: "#/$defs/Missing" }
+post:
+  operationId: postZ
+  responses: { "204": { description: OK } }
+"##,
+    );
+    write_spec(
+        temp.path(),
+        "pi-params.yaml",
+        r##"
+parameters: [ { $ref: "#/$defs/Missing" } ]
+get:
+  operationId: getW
+  responses: { "204": { description: OK } }
+"##,
+    );
+    let out = temp.path().join("client.rs");
+
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let mut carved = w009_messages(&report);
+    carved.sort_unstable();
+    assert_eq!(
+        carved,
+        [
+            "omitted construct matched by `path /w`",
+            "omitted construct matched by `pointer pi.yaml#/get`",
+        ],
+        "the bad operation alone is carved from the path item file: {report:#?}"
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(generated.contains("fn get_good"), "{generated}");
+    assert!(
+        generated.contains("fn post_z"),
+        "the healthy sibling survives: {generated}"
+    );
+    assert!(!generated.contains("fn get_z"), "{generated}");
+    assert!(!generated.contains("fn get_w"), "{generated}");
+}
+
+/// A sub-file the description names by an absolute path lies outside the root document's
+/// directory, so the derived rule names it by that absolute path — the one location the
+/// description itself fixes — and the rule still resolves back to that file.
+#[test]
+fn carve_names_a_sub_file_outside_the_root_directory_by_its_stored_path() {
+    let root = tempfile::tempdir().unwrap();
+    let shared = tempfile::tempdir().unwrap();
+    let lib = write_spec(
+        shared.path(),
+        "lib.yaml",
+        r##"
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        missing: { $ref: "#/components/schemas/Missing" }
+"##,
+    );
+    let lib = lib.to_str().unwrap();
+    let spec = write_spec(
+        root.path(),
+        "openapi.yaml",
+        &format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [ {{ url: https://example.com }} ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses: {{ "204": {{ description: OK }} }}
+  /uses-node:
+    get:
+      operationId: getUsesNode
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: {{ $ref: "{lib}#/components/schemas/Node" }}
+"##
+        ),
+    );
+    let out = root.path().join("client.rs");
+
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let mut carved = w009_messages(&report);
+    carved.sort_unstable();
+    assert_eq!(
+        carved,
+        [
+            "omitted construct matched by `get /uses-node`".to_owned(),
+            format!("omitted construct matched by `pointer {lib}#/components/schemas/Node`"),
+        ],
+        "{report:#?}"
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(generated.contains("fn get_good"), "{generated}");
+    assert!(!generated.contains("fn get_uses_node"), "{generated}");
 }
