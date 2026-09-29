@@ -507,6 +507,116 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
     );
 }
 
+/// The published workspace crates that ship a binary, by package name. `cargo package` puts
+/// `Cargo.lock` into every `.crate`, but only a binary's is ever resolved against: `cargo install
+/// --locked` installs its pins, while a library's lockfile is ignored by everything that depends on
+/// it.
+fn published_binary_crates() -> BTreeSet<String> {
+    let root: toml::Table = toml::from_str(&read("Cargo.toml")).expect("Cargo.toml parses");
+    let members = root["workspace"]["members"]
+        .as_array()
+        .expect("the workspace lists its members");
+    let mut binaries = BTreeSet::new();
+    for member in members {
+        let member = member.as_str().expect("workspace members are paths");
+        let manifest: toml::Table = toml::from_str(&read(&format!("{member}/Cargo.toml")))
+            .unwrap_or_else(|error| panic!("`{member}/Cargo.toml` must parse: {error}"));
+        let package = &manifest["package"];
+        if package.get("publish").and_then(toml::Value::as_bool) == Some(false) {
+            continue;
+        }
+        let dir = workspace_root().join(member);
+        if manifest.contains_key("bin")
+            || dir.join("src/main.rs").exists()
+            || dir.join("src/bin").is_dir()
+        {
+            let name = package["name"].as_str().expect("a package has a name");
+            binaries.insert(name.to_owned());
+        }
+    }
+    binaries
+}
+
+#[test]
+fn the_published_lockfile_audit_covers_every_shipped_binary() {
+    // `deny` audits the committed `Cargo.lock`; a fix there reaches crates.io only when a release
+    // carries it, and until then `cargo install spargen --features cli --locked` installed the
+    // shipped `rustls 0.23.41` (RUSTSEC-2026-0285) with every check green (#178). `mise run
+    // deny-published` (CI's `deny-published` job, byte for byte) audits the shipped lockfile.
+    // This holds it to every published crate that ships a binary, so a second binary crate
+    // cannot be published unaudited, and holds each audit to the lockfile as shipped.
+    let tasks = mise_tasks();
+    let commands = mise_commands(&tasks, "deny-published");
+    let script = commands.join("\n");
+    let downloaded: BTreeSet<String> = script
+        .split("https://static.crates.io/crates/")
+        .skip(1)
+        .map(|rest| rest.split('/').next().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        downloaded,
+        published_binary_crates(),
+        "`mise run deny-published` must download the latest `.crate` of exactly the published \
+         crates that ship a binary: their `Cargo.lock` is what `cargo install --locked` installs"
+    );
+
+    let mut audited = BTreeSet::new();
+    for command in &commands {
+        let words: Vec<&str> = command.split_whitespace().collect();
+        if !words.starts_with(&["cargo", "deny"]) {
+            continue;
+        }
+        let check = words
+            .iter()
+            .position(|word| *word == "check")
+            .unwrap_or_else(|| panic!("`{command}` is not a `cargo deny check`"));
+        let (globals, which) = (&words[2..check], &words[check + 1..]);
+        let manifest = globals
+            .iter()
+            .position(|word| *word == "--manifest-path")
+            .and_then(|at| globals.get(at + 1))
+            .unwrap_or_else(|| panic!("`{command}` names no `--manifest-path`"));
+        let krate = manifest
+            .strip_prefix("target/deny-published/")
+            .and_then(|rest| rest.strip_suffix("/Cargo.toml"))
+            .unwrap_or_else(|| {
+                panic!("`{command}` audits `{manifest}`, not a crate extracted by this task")
+            });
+        audited.insert(krate.to_owned());
+        // `--locked`: cargo-deny's `cargo metadata` would otherwise re-resolve a lockfile that no
+        // longer matches and audit the re-resolution, which is not what `--locked` installs.
+        // `--all-features`: the TLS stack reaches the graph only through features (#147).
+        // `--config deny.toml`: the same advisory policy, ignores and `yanked` included, as `deny`.
+        for required in ["--locked", "--all-features"] {
+            assert!(
+                globals.contains(&required),
+                "`{command}` does not pass `{required}`"
+            );
+        }
+        assert!(
+            globals
+                .windows(2)
+                .any(|pair| pair == ["--config", "deny.toml"]),
+            "`{command}` does not audit under the repository's `deny.toml`"
+        );
+        for word in globals {
+            let flag = flag_of(word);
+            assert!(
+                !GRAPH_NARROWING_FLAGS.contains(&flag),
+                "`{command}`'s `{flag}` shrinks the graph cargo-deny resolves"
+            );
+        }
+        assert!(
+            which.is_empty() || which.contains(&"advisories") || which.contains(&"all"),
+            "`{command}` narrows `check` to {which:?}, which drops `advisories`"
+        );
+    }
+    assert_eq!(
+        audited, downloaded,
+        "every crate `mise run deny-published` downloads must be audited, and only those"
+    );
+}
+
 /// How a CI job and the mise tasks relate. Every job in the [`GATE_WORKFLOWS`] and every task in
 /// `mise.toml` is named by exactly one row of [`PAIRINGS`], so a new job or task cannot arrive
 /// unclassified. There is no "not yet identical" row: every job is held to its tasks, and every
@@ -773,6 +883,21 @@ const PAIRINGS: &[Pairing] = &[
             STABLE,
             provision("uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-deny@0.20.2"),
         ],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
+        workflow: "deny.yml",
+        job: "deny-published",
+        tasks: &["deny-published"],
+        ci_only: &[
+            CHECKOUT,
+            STABLE,
+            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-deny@0.20.2"),
+        ],
+        // The published artefact changes only when a release publishes, never with a pull
+        // request's diff; failing pull requests on it would block the release pull request that
+        // carries the fix (#178). Locally the task runs whenever it is asked for.
+        job_if: Some("github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"),
         ..PAIR
     }),
     Pairing::Identical(Pair {

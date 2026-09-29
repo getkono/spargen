@@ -4,8 +4,9 @@ name: Supply chain
 # the RustSec database fresh each run, and `yanked = "deny"` reads the registry as it is now. A new
 # advisory therefore turns every open pull request red while `master`'s last status stays green,
 # and before this schedule it was found by whichever contributor's unrelated pull request hit it
-# first (#146). The daily run finds it on `master` itself; CLAUDE.md says who responds. The job is
-# the same gate pull requests and pushes run, in its own workflow so the schedule re-runs only it.
+# first (#146). The daily run finds it on `master` itself; CLAUDE.md says who responds. The `deny`
+# job is the same gate pull requests and pushes run, in its own workflow so the schedule re-runs
+# only it; `deny-published` audits the lockfile the latest release ships, on the schedule only.
 on:
   push:
     branches: [master]
@@ -44,3 +45,29 @@ jobs:
       # that instead (#146). `the_deny_gate_states_the_feature_scope_it_audits` holds the command
       # to both flags, to a bare `check`, and to no graph-narrowing flag.
       - run: cargo deny --all-features --locked check
+
+  # The lockfile the latest `spargen` release ships, not the committed one: `cargo install spargen
+  # --features cli --locked` installs its pins, and a fix on `master` reaches it only when a release
+  # carries it (#178). Scheduled and manual runs only: a pull request cannot change a published
+  # artefact, and failing every pull request on it would block the release pull request that
+  # carries the fix. `mise run deny-published`'s commands, byte for byte.
+  deny-published:
+    name: cargo-deny (published spargen)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2
+      - run: |
+          rm -rf target/deny-published
+          mkdir -p target/deny-published/spargen
+          curl -sSf -A 'getkono/spargen deny-published (https://github.com/getkono/spargen)' -o target/deny-published/crate.json https://crates.io/api/v1/crates/spargen
+          version=$(jq -er .crate.max_stable_version target/deny-published/crate.json)
+          curl -sSfL -o target/deny-published/spargen.crate "https://static.crates.io/crates/spargen/spargen-$version.crate"
+          tar -xzf target/deny-published/spargen.crate -C target/deny-published/spargen --strip-components=1
+          printf '\n[workspace]\n' >> target/deny-published/spargen/Cargo.toml
+          echo "auditing the Cargo.lock published in spargen $version"
+      - run: cargo deny --manifest-path target/deny-published/spargen/Cargo.toml --config deny.toml --all-features --locked check advisories
