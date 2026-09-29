@@ -5586,6 +5586,54 @@ Pet:
     assert!(code.contains("pub id"), "{code}");
 }
 
+/// A reference naming a local `$self` identity through a path spelled differently from the one
+/// `$self` gives (`../canonical/api.yaml` resolved against `canonical/api.yaml` is
+/// `canonical/../canonical/api.yaml`) is that document, not a file to load from disk (#220). No
+/// file exists at `canonical/api.yaml`, so a spelling-sensitive comparison fails the load.
+#[test]
+fn a_reference_naming_a_relative_self_by_another_spelling_is_that_document() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::create_dir(dir.join("canonical")).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.2.0
+$self: canonical/api.yaml
+info: { title: T, version: 1.0.0 }
+paths:
+  /pet:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '../canonical/api.yaml#/components/schemas/Pet' }
+components:
+  schemas:
+    Pet:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##,
+    )
+    .unwrap();
+    let spec = dir.join("openapi.yaml");
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(spec.clone(), out.clone()));
+    let checked = spargen::check(&Spec::new(spec));
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::DeclarationHasNoEffect),
+            "{entry}: {report:#?}"
+        );
+    }
+    let code = std::fs::read_to_string(out).unwrap();
+    assert_eq!(code.matches("pub struct Pet").count(), 1, "{code}");
+}
+
 /// A remote-`$ref` spec fixture referencing a single vendored schema, plus a helper to lay it out
 /// in a tempdir with a hand-written lock + vendored file (no network) and run `generate`/`check`.
 mod remote {
