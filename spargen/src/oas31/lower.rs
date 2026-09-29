@@ -877,6 +877,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             "`#/components/schemas/{name}` here reads the root document's `{name}`; the `{name}` \
              declared in `{path}` is shadowed by it and has no effect on this reference"
         );
+        // W011 case: shadowed-component
         Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
             .message(message)
             .remedy(
@@ -967,7 +968,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `None` for a target that is finished, absent, or was never a reservation — every one of
     /// which the ordinary lowering path handles and reports for itself. It resolves no node and
     /// lowers nothing, so asking costs the lowering that follows nothing; the one thing it does
-    /// besides look up is raise [`Code::DeclarationHasNoEffect`] when it answers `Some` for a name
+    /// besides look up is raise the shadowed-component `W011` when it answers `Some` for a name
     /// a sub-file also declares, because answering `Some` is answering *instead of*
     /// [`Self::ensure_component`], which is where that warning otherwise lives.
     fn open_reservation_for_ref(
@@ -1396,7 +1397,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // The local noun is "schema", not "component": a local target need not be a
                 // component at all (`./lib.yaml#/bag/Tree`, or `#/bag/Tree` inside a sub-file), and
                 // a two-way predicate cannot tell that case apart, so the wording must hold for it.
-                return self.reject_ref_sibling_intersection(
+                return self.reject_ref_sibling_cycle(
                     schema,
                     if is_remote_ref(reference) {
                         "this remote `$ref` closes a reference cycle back to the schema that \
@@ -1419,11 +1420,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // — and the message must not claim the first when it may be the second. Either way
                 // it is reported rather than dropped: dropping would silently delete a body,
                 // parameter or property from the generated client.
-                return self.reject_ref_sibling_intersection(
-                    schema,
-                    "the `$ref` target and this schema's own sibling keywords have an empty or \
-                     unrepresentable intersection",
-                );
+                return self.reject_ref_sibling_intersection(schema);
             };
             let kind = self.graph.get(intersection.id)?.kind.clone();
             let mut ty = self.insert_schema_type(schema, hint, kind);
@@ -1639,7 +1636,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 (false, true) => (schema.one_of.iter().collect(), UnionMode::OneOf),
                 (true, false) => (schema.any_of.iter().collect(), UnionMode::AnyOf),
                 (false, false) => {
-                    return self.reject_union(
+                    return self.reject_unrepresentable_union(
                     schema,
                     "a single schema node declares both `oneOf` and `anyOf`; their intersected \
                      applicator semantics are not representable as one generated union",
@@ -1695,7 +1692,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if self.member_closes_a_cycle(member, &schema.provenance)
                     && !self.member_is_this_union(member, &schema.provenance)
                 {
-                    return self.reject_ref_sibling_intersection(
+                    return self.reject_ref_sibling_cycle(
                         schema,
                         "this union member's `$ref` closes a reference cycle back to the schema \
                          that encloses it, so the enclosing schema's own sibling keywords would \
@@ -1732,7 +1729,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in `tests/frontend.rs`
             // asserts the reported error codes are **exactly** `[E007]` on both its spellings.
             if self.reservation_at(&schema.provenance) == Some(inner.id) {
-                return self.reject_union(
+                return self.reject_self_referential_union(
                     schema,
                     "a union member is a direct recursive `$ref` to the union being lowered, so \
                      the member is the union itself and decoding it would never terminate",
@@ -1744,7 +1741,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // cannot compose with one. Reported with the same wording the other two spellings use,
             // because it is the same fact about the same document.
             if sibling.is_some() && self.is_in_progress_root(inner.id) {
-                return self.reject_ref_sibling_intersection(
+                return self.reject_ref_sibling_cycle(
                     schema,
                     "this union member's `$ref` closes a reference cycle back to the schema that \
                      encloses it, so the enclosing schema's own sibling keywords would have to be \
@@ -1772,7 +1769,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // mis-assembled.
             if self.is_reservation(inner.id) {
                 if self.reservation_at(&schema.provenance).is_some() {
-                    return self.reject_union(
+                    return self.reject_self_referential_union(
                         schema,
                         "this schema's whole body is a union whose only non-null member is a \
                          `$ref` that closes a reference cycle, so the schema names no shape of its \
@@ -1808,7 +1805,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // The message says "empty or unrepresentable" for the same reason Site A's
                     // does: `None` covers both, and the sole non-null member is named because there
                     // is exactly one, so the author needs no index to find it.
-                    return self.reject_union(
+                    return self.reject_branchless_union(
                         schema,
                         "the union's sole non-null member and the enclosing schema's own sibling \
                          keywords have an empty or unrepresentable intersection, leaving the union \
@@ -1857,7 +1854,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the member is a *different* type — and rejecting it refuses the most common recursive
             // construct there is, which `docs/support-matrix.md` lists as supported.
             if self.reservation_at(&schema.provenance) == Some(ty.id) {
-                return self.reject_union(
+                return self.reject_self_referential_union(
                     schema,
                     "a union member is a direct recursive `$ref` to the union being lowered, so \
                      the member is the union itself and decoding it would never terminate",
@@ -1868,7 +1865,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
             // `oneOf` still boxes its back-edge and generates.
             if sibling.is_some() && self.is_in_progress_root(ty.id) {
-                return self.reject_ref_sibling_intersection(
+                return self.reject_ref_sibling_cycle(
                     schema,
                     "this union member's `$ref` closes a reference cycle back to the schema that \
                      encloses it, so the enclosing schema's own sibling keywords would have to be \
@@ -1884,6 +1881,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // The sibling constraints make this branch impossible; JSON Schema simply
                     // removes it from the union's accepted set. Acknowledge it, because a variant
                     // vanishing from the generated enum is otherwise invisible.
+                    // W011 case: excluded-union-branch
                     Diagnostic::warning(Code::DeclarationHasNoEffect, schema.provenance.clone())
                         .message(format!(
                             "union member {index} cannot satisfy the enclosing schema's own \
@@ -1926,7 +1924,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if null_from_member && sibling.is_none_or(|sibling| self.ty_accepts_null(sibling.ty)) {
                 return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
             }
-            return self.reject_union(
+            return self.reject_branchless_union(
                 schema,
                 "union sibling constraints make every variant impossible",
             );
@@ -1964,7 +1962,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .unwrap_or(target);
                 !members.contains(&name)
             }) {
-                return self.reject_union(
+                return self.reject_unrepresentable_union(
                     schema,
                     &format!(
                         "`discriminator.mapping` maps `{tag}` to `{target}`, which names none of \
@@ -1983,7 +1981,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .strip_prefix("#/components/schemas/")
                     .unwrap_or(target);
                 if !ref_names.iter().any(|name| name.as_deref() == Some(bare)) {
-                    return self.reject_union(
+                    return self.reject_unrepresentable_union(
                         schema,
                         &format!(
                             "`discriminator.defaultMapping` names `{target}`, which is not one of \
@@ -2316,16 +2314,43 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(keys)
     }
 
-    fn reject_union<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+    /// A union whose applicators or discriminator describe a combination no generated enum can
+    /// carry: `oneOf` beside `anyOf`, or a discriminator whose `mapping`/`defaultMapping` names no
+    /// member.
+    fn reject_unrepresentable_union<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        // E007 case: unrepresentable-applicators
         Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
             .message(message.to_owned())
             .remedy(
-                // The remedy has to serve every situation this rejecter carries, and the two
-                // cycle situations are not answered by a discriminator or by disjointness: what
-                // the author has to change there is the self-reference itself.
-                "add a discriminator, restructure the variants to be disjoint, break the reference \
-                 cycle where a member refers to the union it is written in, or omit this API \
-                 segment with spargen::omit!",
+                "split the applicators into separate schemas, make every discriminator mapping name \
+                 a member of the union, or omit this API segment with spargen::omit!",
+            )
+            .emit(self.diags);
+        None
+    }
+
+    /// A union that resolves to itself, so its generated `Deserialize` would re-enter itself on the
+    /// same input with no base case.
+    fn reject_self_referential_union<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        // E007 case: resolves-to-itself
+        Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(
+                "break the reference cycle where a member refers to the union it is written in, or \
+                 omit this API segment with spargen::omit!",
+            )
+            .emit(self.diags);
+        None
+    }
+
+    /// A union the enclosing schema's own sibling keywords leave with no branch at all.
+    fn reject_branchless_union<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        // E007 case: no-branch-left
+        Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(
+                "reconcile the enclosing schema's sibling keywords with the union's members, or \
+                 omit this API segment with spargen::omit!",
             )
             .emit(self.diags);
         None
@@ -2478,10 +2503,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         // Object-vs-scalar mix has no single representable type.
         if has_object && !scalars.is_empty() {
-            return self.reject_all_of(
-                schema,
-                "an `allOf` mixes object and scalar members, which cannot form one type",
-            );
+            return self.reject_all_of_object_scalar_mix(schema);
         }
 
         // All-scalar allOf: recursively intersect compatible members (for example integer with
@@ -2505,10 +2527,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     member,
                     &format!("{hint}Intersection{index}"),
                 ) else {
-                    return self.reject_all_of(
-                        schema,
-                        "`allOf` scalar members have an empty or unrepresentable intersection",
-                    );
+                    return self.reject_all_of_scalars(schema);
                 };
                 intersection = merged;
             }
@@ -2560,17 +2579,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     let unlowered = [&additional, member_additional].into_iter().any(|policy| {
                         matches!(policy, AdditionalProps::Typed(ty) if self.is_reservation(ty.id))
                     });
-                    return self.reject_all_of(
-                        schema,
-                        if unlowered {
+                    if unlowered {
+                        return self.reject_all_of_cycle(
+                            schema.provenance.clone(),
                             "an `allOf` member's `additionalProperties` value schema is a `$ref` \
                              that closes a reference cycle back to the schema being lowered, whose \
                              body is not yet known, so the merged overflow map has no computable \
-                             value type"
-                        } else {
-                            "`allOf` members declare conflicting `additionalProperties`"
-                        },
-                    );
+                             value type",
+                        );
+                    }
+                    return self.reject_all_of_additional(schema);
                 }
             }
             for field in member_fields {
@@ -2596,7 +2614,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                      being lowered, so its intersection cannot be computed",
                                     field.name.wire
                                 );
-                                return self.reject_all_of(schema, &message);
+                                return self
+                                    .reject_all_of_cycle(schema.provenance.clone(), &message);
                             }
                             // The same rule `intersect_structs` applies to a `$ref` and its
                             // siblings, so the four equivalent spellings of one conjunction agree:
@@ -2633,11 +2652,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(name) = uninhabited.iter().find(|name| {
             required.contains(name) || fields.get(*name).is_some_and(|field| field.required)
         }) {
-            let message = format!(
-                "property `{name}` appears in multiple `allOf` members with conflicting types, \
-                 and a member requires it"
-            );
-            return self.reject_all_of(schema, &message);
+            return self.reject_all_of_required_property(schema, name);
         }
 
         // Apply the required union, then keep required fields consistent: a serde default only fires
@@ -2696,8 +2711,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // A `true`/`{}` member imposes no constraint.
             SchemaOr::Bool(true) => return Some(()),
             SchemaOr::Bool(false) => {
-                return self
-                    .reject_all_of_unit(member_provenance(member), "an `allOf` member is `false`");
+                return self.reject_all_of_false_member(member_provenance(member));
             }
             SchemaOr::Schema(schema) => schema.as_ref(),
         };
@@ -2745,7 +2759,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // whose fields are not yet known — irreconcilable (distinct from a member with
             // recursive *fields*, which lowers fine).
             if self.in_progress.contains_key(name) {
-                return self.reject_all_of_unit(
+                return self.reject_all_of_cycle(
                     schema.provenance.clone(),
                     "an `allOf` member is a direct recursive `$ref` to the component being \
                      lowered",
@@ -2768,7 +2782,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // are not yet known (irreconcilable), otherwise its shared type contributes its fields.
         if is_remote_ref(reference) {
             if self.remote_in_progress.contains_key(reference) {
-                return self.reject_all_of_unit(
+                return self.reject_all_of_cycle(
                     schema.provenance.clone(),
                     "an `allOf` member is a direct recursive remote `$ref` to the schema being \
                      lowered",
@@ -2796,7 +2810,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // chain length for what is a cycle of length one. The component and remote arms above
         // refuse to read an in-progress member; this one now does too.
         if self.resolved_target_in_progress(&target.provenance) {
-            return self.reject_all_of_unit(
+            return self.reject_all_of_cycle(
                 schema.provenance.clone(),
                 "an `allOf` member is a direct recursive `$ref` to the schema being lowered",
             );
@@ -2848,7 +2862,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // arm is the whole guard the callers used to hold.
         match self.graph.get(ty.id).map(|def| &def.kind) {
             Some(TypeKind::Reserved) => {
-                return self.reject_all_of_unit(provenance.clone(), recursive)
+                return self.reject_all_of_cycle(provenance.clone(), recursive)
             }
             Some(TypeKind::Struct(structure)) => {
                 let fields = structure.fields.clone();
@@ -2923,39 +2937,104 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ty
     }
 
-    fn reject_all_of(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
-        self.reject_all_of_unit(schema.provenance.clone(), message);
-        None
-    }
-
-    /// Report that a `$ref` target and its own sibling keywords have no single typed intersection.
-    /// `$ref` is a 2020-12 applicator, so this is the same class of irreconcilable composition
-    /// [`Self::reject_all_of`] reports — `E013` covers both spellings — but the remedy names the
-    /// construct the author actually wrote. The name says *which site* rather than *why*: the
-    /// underlying `None` covers an empty intersection and an inhabited but unrepresentable one, and
-    /// the caller's message must distinguish no further than that.
-    fn reject_ref_sibling_intersection(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
+    /// An `allOf` that mixes object and scalar members, which no single type can be.
+    fn reject_all_of_object_scalar_mix<T>(&mut self, schema: &Schema) -> Option<T> {
+        // E013 case: object-scalar-mix
         Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(message.to_owned())
-            .remedy(
-                "restructure the schema so the `$ref` target and its sibling keywords describe one \
-                 representable type, or omit this API segment with spargen::omit!",
-            )
+            .message("an `allOf` mixes object and scalar members, which cannot form one type")
+            .remedy(ALL_OF_REMEDY)
             .emit(self.diags);
         None
     }
 
-    fn reject_all_of_unit(
+    /// An all-scalar `allOf` whose members have no common value or no single representable type.
+    fn reject_all_of_scalars<T>(&mut self, schema: &Schema) -> Option<T> {
+        // E013 case: scalar-members
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message("`allOf` scalar members have an empty or unrepresentable intersection")
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// `allOf` members whose `additionalProperties` value schemas have no common type.
+    fn reject_all_of_additional<T>(&mut self, schema: &Schema) -> Option<T> {
+        // E013 case: additional-values
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message("`allOf` members declare conflicting `additionalProperties`")
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// A property repeated across `allOf` members with types that cannot meet, which a member
+    /// requires, so every instance must carry a value no type admits.
+    fn reject_all_of_required_property<T>(&mut self, schema: &Schema, name: &str) -> Option<T> {
+        // E013 case: required-property
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(format!(
+                "property `{name}` appears in multiple `allOf` members with conflicting types, and \
+                 a member requires it"
+            ))
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// An `allOf` member that is the boolean schema `false`, which admits no value, so neither
+    /// does the composition.
+    fn reject_all_of_false_member<T>(&mut self, provenance: crate::diag::Provenance) -> Option<T> {
+        // E013 case: false-member
+        Diagnostic::error(Code::AllOfIrreconcilable, provenance)
+            .message("an `allOf` member is `false`")
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// An `allOf` whose merge would have to read a `$ref` target still being lowered: a member that
+    /// is a direct recursive reference, or a property or `additionalProperties` value two members
+    /// both constrain that is typed by one. Its body is not known yet, so the composition can be
+    /// computed neither against it nor by discarding it.
+    fn reject_all_of_cycle<T>(
         &mut self,
         provenance: crate::diag::Provenance,
         message: &str,
-    ) -> Option<()> {
+    ) -> Option<T> {
+        // E013 case: cycle
         Diagnostic::error(Code::AllOfIrreconcilable, provenance)
             .message(message.to_owned())
-            .remedy(
-                "restructure the composition so members agree, or omit this API segment with \
-                 spargen::omit!",
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// Report that a `$ref` target and its own sibling keywords have no single typed intersection.
+    /// `$ref` is a 2020-12 applicator, so this is the same class of irreconcilable composition an
+    /// `allOf` reports — `E013` covers both spellings — but the remedy names the construct the
+    /// author actually wrote. The underlying `None` covers an empty intersection and an inhabited
+    /// but unrepresentable one, for any of the reasons an `allOf` merge has, so the message must
+    /// distinguish no further than that.
+    fn reject_ref_sibling_intersection(&mut self, schema: &Schema) -> Option<Ty> {
+        // E013 case: scalar-members, required-property, additional-values, object-scalar-mix
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(
+                "the `$ref` target and this schema's own sibling keywords have an empty or \
+                 unrepresentable intersection",
             )
+            .remedy(REF_SIBLING_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// Report that a `$ref` carrying shape-bearing siblings — or a union member, when the union
+    /// has siblings of its own — closes a reference cycle back to the schema enclosing it, so the
+    /// siblings would have to be intersected with a target whose definition depends on the result.
+    fn reject_ref_sibling_cycle(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
+        // E013 case: cycle
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(REF_SIBLING_REMEDY)
             .emit(self.diags);
         None
     }
@@ -3766,6 +3845,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 "accept" | "content-type" | "authorization"
             )
         {
+            // W011 case: reserved-header-parameter
             Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
                 .message(format!(
                     "header parameter `{}` is ignored: the specification reserves `Accept`, \
@@ -3889,6 +3969,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Deprecated in 3.2, and inert for a typed client: an absent optional parameter is simply
         // not sent, so there is never a case where the client would send an empty string instead.
         if parameter.allow_empty_value {
+            // W011 case: allow-empty-value
             Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
                 .message(
                     "`allowEmptyValue` has no effect: an optional parameter the caller omits is \
@@ -3901,6 +3982,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if parameter.allow_reserved
             && (location == ParamLoc::Header || matches!(style, ParamStyle::Cookie))
         {
+            // W011 case: allow-reserved-parameter
             Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
                 .message(
                     "`allowReserved` has no effect here: this parameter is sent without \
@@ -4224,6 +4306,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         if let Some((field, at)) = positional {
             if media == MediaType::FormUrlEncoded {
+                // W011 case: positional-encoding-form
                 Diagnostic::warning(Code::DeclarationHasNoEffect, at)
                     .message(format!(
                         "`{field}` has no effect on `{media_name}`: the specification scopes it to \
@@ -4273,6 +4356,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // An `encoding` key naming no property has nothing to apply to.
         for name in object.encoding.keys() {
             if !fields.iter().any(|(wire, _)| wire == name) {
+                // W011 case: encoding-unknown-property
                 Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
                     .message(format!(
                         "`encoding` entry `{name}` names no property of the body schema, so it is \
@@ -4393,6 +4477,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // Multipart part values are never percent-encoded, so `allowReserved` is inert.
                 let allow_reserved = encoding.allow_reserved.unwrap_or(false);
                 if allow_reserved && media == MediaType::Multipart {
+                    // W011 case: allow-reserved-multipart
                     Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
                         .message(
                             "`allowReserved` has no effect on `multipart/form-data`: part values \
@@ -4621,6 +4706,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Vec::new();
         }
         if media != MediaType::Multipart {
+            // W011 case: encoding-headers-non-multipart
             Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
                 .message(format!(
                     "`encoding.{name}.headers` applies only to `multipart` content"
@@ -4657,6 +4743,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match literal {
                 Some(value) => headers.push((header_name.clone(), value)),
                 None => {
+                    // W011 case: encoding-header-no-value
                     Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
                         .message(format!(
                             "`encoding.{name}.headers.{header_name}` pins no value, so there is \
@@ -4895,6 +4982,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // The specification says a documented `Content-Type` header SHALL be ignored: the
             // media type is already the operation's, and a second source would only disagree.
             if name.eq_ignore_ascii_case("content-type") {
+                // W011 case: response-content-type
                 Diagnostic::warning(Code::DeclarationHasNoEffect, response.provenance.clone())
                     .message(
                         "a documented `Content-Type` response header is ignored; the operation's \
@@ -4913,6 +5001,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     continue;
                 };
                 let Some(shape) = self.header_shape(ty) else {
+                    // W011 case: response-header-untyped
                     Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
                         .message(format!(
                             "response header `{name}` has a shape `simple` serialization cannot \
@@ -4937,6 +5026,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // rare form: `Content-Range` on a ranged response is routinely documented this way,
                 // and refusing it cost a typed accessor for no reason.
                 if !matches!(media, MediaType::Json | MediaType::Text) {
+                    // W011 case: response-header-untyped
                     Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
                         .message(format!(
                             "response header `{name}` uses a `content` media type spargen cannot \
@@ -4954,6 +5044,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .emit(self.diags);
                 }
                 let Some(schema) = object.schema.as_ref() else {
+                    // W011 case: response-header-untyped
                     Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
                         .message(format!(
                             "response header `{name}` declares `content` without a schema, so no \
@@ -4973,6 +5064,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // representable: a list or an object under `text/plain` says nothing about how
                     // the value is framed, and `simple` is not that framing.
                     let Some(shape @ crate::ir::HeaderShape::Scalar) = self.header_shape(ty) else {
+                        // W011 case: response-header-untyped
                         Diagnostic::warning(
                             Code::DeclarationHasNoEffect,
                             header.provenance.clone(),
@@ -5263,6 +5355,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if reference.summary.is_none() && reference.description.is_none() {
             return;
         }
+        // W011 case: reference-docs
         Diagnostic::warning(Code::DeclarationHasNoEffect, reference.provenance.clone())
             .message(format!(
                 "the `summary`/`description` on the reference to `{}` documents this use site, \
@@ -5432,6 +5525,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|(_, at)| ("itemEncoding", at.clone()))
             });
         if let Some((field, at)) = declared {
+            // W011 case: encoding-on-other-media
             Diagnostic::warning(Code::DeclarationHasNoEffect, at)
                 .message(format!(
                     "`{field}` has no effect on `{media_name}`: it applies only to `multipart` \
@@ -5878,6 +5972,16 @@ fn same_ty(left: Ty, right: Ty) -> bool {
     left.id == right.id && left.nullable == right.nullable && left.boxed == right.boxed
 }
 
+/// The remedy every `allOf` rejection (`E013`) gives.
+const ALL_OF_REMEDY: &str =
+    "restructure the composition so members agree, or omit this API segment with spargen::omit!";
+
+/// The remedy every `$ref`-sibling intersection rejection (`E013`) gives, naming the construct the
+/// author wrote rather than an `allOf` they did not.
+const REF_SIBLING_REMEDY: &str = "restructure the schema so the `$ref` target and its sibling \
+                                  keywords describe one representable type, or omit this API \
+                                  segment with spargen::omit!";
+
 fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
     use Prim::{Bool, Date, DateTime, String, Uuid, F64, I32, I64};
     Some(match (left, right) {
@@ -5933,6 +6037,7 @@ fn lower_security_requirement(requirement: &SecurityRequirement) -> crate::ir::S
 fn lower_server_override(servers: &[super::Server], diags: &mut Diagnostics) -> Option<String> {
     let (first, rest) = servers.split_first()?;
     for extra in rest {
+        // W011 case: extra-servers
         Diagnostic::warning(Code::DeclarationHasNoEffect, extra.provenance.clone())
             .message(format!(
                 "`servers` entry `{}` past the first has no effect here: the specification \
@@ -6003,6 +6108,7 @@ fn lower_server(server: &super::Server, diags: &mut Diagnostics) -> Option<Serve
             return None;
         }
         if !seen.contains(name.as_str()) {
+            // W011 case: unused-server-variable
             Diagnostic::warning(Code::DeclarationHasNoEffect, server.provenance.clone())
                 .message(format!(
                     "server variable `{name}` is declared but does not appear in `{}`",
@@ -6080,6 +6186,7 @@ fn resolve_path_item(
         return Some(item.clone());
     };
     if let Some(sibling) = item.reference_siblings.first() {
+        // E016 case: path-item-ref-siblings
         Diagnostic::error(Code::SpecUndefinedBehavior, reference.provenance.clone())
             .message(format!(
                 "a Path Item `$ref` declared alongside `{sibling}` has undefined behavior, so \
@@ -6275,6 +6382,7 @@ fn lower_security_schemes(
             "oauth2" => SecurityScheme::OAuth2,
             "openIdConnect" => SecurityScheme::OpenIdConnect,
             "mutualTLS" => {
+                // W011 case: mutual-tls
                 Diagnostic::warning(Code::DeclarationHasNoEffect, scheme.provenance.clone())
                     .message(format!(
                         "`mutualTLS` scheme `{name}` is satisfied by the client certificate on the \
@@ -7491,7 +7599,9 @@ mod tests {
     /// intersection, in its three groups: those that establish a shape, those that refine one, and
     /// `required`.
     fn published_sibling_keywords() -> (Vec<String>, Vec<String>, Vec<String>) {
-        let explain = Code::AllOfIrreconcilable.explain();
+        // Named by its code string: a `Code::<Variant>` mention of an enumerating code is read as
+        // an emission site by `diag`'s case-marker test, and this reads the text, emitting nothing.
+        let explain = "E013".parse::<Code>().expect("E013 is a code").explain();
         let establishing = backticked_in_sentence(explain, "A sibling bears a shape of its own ");
         // The refiners are the spans before the verb; the rest of that sentence names the `type`
         // that gives them a shape, which is not one of them.

@@ -1155,7 +1155,7 @@ mod tests {
                 Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance.clone())
                     .message("a rejection")
                     .build(),
-                Diagnostic::warning(Code::DeclarationHasNoEffect, provenance)
+                Diagnostic::warning(Code::ServerInitiatedFlowIgnored, provenance)
                     .message("a warning")
                     .build(),
             ],
