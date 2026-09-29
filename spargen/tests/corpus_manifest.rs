@@ -458,6 +458,11 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
     let mut example_audits: BTreeSet<String> = BTreeSet::new();
     for command in &commands {
         let words: Vec<&str> = command.split_whitespace().collect();
+        // The lockfile-complete audit and the database fetch and revision line it reads are held
+        // by `the_lockfile_audit_reads_every_committed_lockfile`.
+        if lockfile_audit_step(&words).is_some() {
+            continue;
+        }
         let skip = if words.starts_with(&["cargo", "deny"]) {
             2
         } else if words.first() == Some(&"cargo-deny") {
@@ -610,7 +615,7 @@ fn the_published_lockfile_audit_covers_every_shipped_binary() {
     let mut audited = BTreeSet::new();
     for command in &commands {
         let words: Vec<&str> = command.split_whitespace().collect();
-        if !words.starts_with(&["cargo", "deny"]) {
+        if !words.starts_with(&["cargo", "deny"]) || lockfile_audit_step(&words).is_some() {
             continue;
         }
         let check = words
@@ -661,6 +666,225 @@ fn the_published_lockfile_audit_covers_every_shipped_binary() {
     assert_eq!(
         audited, downloaded,
         "every crate `mise run deny-published` downloads must be audited, and only those"
+    );
+}
+
+/// One step of the lockfile-complete advisory audit an audit task runs (#187).
+#[derive(Debug, PartialEq)]
+enum LockfileAuditStep<'a> {
+    /// `cargo deny fetch db`: refresh the RustSec checkout under `deny.toml`'s `db-path`.
+    Fetch,
+    /// `git -C <checkout> log -1 --format=…`: print the commit that checkout is at.
+    Revision(&'a str),
+    /// `cargo audit …`: audit every entry of one lockfile.
+    Audit,
+}
+
+/// Which lockfile-audit step a command's words are, if any.
+fn lockfile_audit_step<'a>(words: &[&'a str]) -> Option<LockfileAuditStep<'a>> {
+    if words.starts_with(&["cargo", "deny", "fetch"]) {
+        Some(LockfileAuditStep::Fetch)
+    } else if words.starts_with(&["cargo", "audit"]) || words.first() == Some(&"cargo-audit") {
+        Some(LockfileAuditStep::Audit)
+    } else if words.first() == Some(&"git") {
+        Some(LockfileAuditStep::Revision(
+            words
+                .windows(2)
+                .find(|pair| pair[0] == "-C")
+                .map_or("", |pair| pair[1]),
+        ))
+    } else {
+        None
+    }
+}
+
+/// `cargo audit` flags that narrow what it reports: `--no-yanked` drops the yank check this audit
+/// exists for, `--target-arch`/`--target-os` drop advisories scoped to other platforms, and
+/// `--stale` accepts a database cargo-audit would refuse. `--ignore` is held to `deny.toml`'s
+/// `[advisories] ignore` instead.
+const LOCKFILE_AUDIT_NARROWING_FLAGS: [&str; 4] =
+    ["--no-yanked", "--target-arch", "--target-os", "--stale"];
+
+/// The lockfiles `task`'s `cargo audit` commands read, after holding the task to the audit's
+/// shape: one `cargo deny fetch db`, then one line printing the fetched checkout's commit, then
+/// every `cargo audit`, each over that checkout without fetching, denying every warning kind, and
+/// ignoring exactly what `deny.toml` ignores.
+fn lockfile_audits(task: &str) -> BTreeSet<String> {
+    let deny: toml::Table = toml::from_str(&read("deny.toml")).expect("deny.toml parses");
+    let advisories = deny["advisories"]
+        .as_table()
+        .expect("deny.toml has `[advisories]`");
+    let db_path = advisories
+        .get("db-path")
+        .and_then(toml::Value::as_str)
+        .expect("deny.toml's `[advisories]` names a `db-path` the audit can read the revision of");
+    assert!(
+        db_path.starts_with("target/"),
+        "deny.toml's `db-path = {db_path:?}` is outside the gitignored `target/`"
+    );
+    let ignored: BTreeSet<String> = advisories
+        .get("ignore")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|entry| match entry {
+            toml::Value::String(id) => id.clone(),
+            toml::Value::Table(entry) => entry["id"]
+                .as_str()
+                .expect("an `[advisories] ignore` entry names its `id`")
+                .to_owned(),
+            other => panic!("unexpected `[advisories] ignore` entry {other}"),
+        })
+        .collect();
+    // cargo-audit reads `.cargo/audit.toml` on its own, so an ignore or `--no-yanked` there would
+    // narrow the audit without appearing in any command.
+    assert!(
+        !workspace_root().join(".cargo/audit.toml").exists(),
+        "`.cargo/audit.toml` configures cargo-audit outside the gate's commands; state it on them"
+    );
+
+    let tasks = mise_tasks();
+    let mut fetched = false;
+    let mut checkout: Option<String> = None;
+    let mut files = BTreeSet::new();
+    for command in mise_commands(&tasks, task) {
+        let words: Vec<&str> = command.split_whitespace().collect();
+        match lockfile_audit_step(&words) {
+            None => {}
+            Some(LockfileAuditStep::Fetch) => {
+                assert_eq!(
+                    words,
+                    ["cargo", "deny", "fetch", "db"],
+                    "`mise run {task}` runs `{command}`; the audit fetches the database only, \
+                     under the root `deny.toml`"
+                );
+                assert!(
+                    !fetched && checkout.is_none() && files.is_empty(),
+                    "`mise run {task}` fetches the database more than once, or after printing or \
+                     auditing against it"
+                );
+                fetched = true;
+            }
+            Some(LockfileAuditStep::Revision(path)) => {
+                assert!(
+                    fetched && checkout.is_none() && files.is_empty(),
+                    "`mise run {task}` must print the database revision once, after `cargo deny \
+                     fetch db` and before any `cargo audit`"
+                );
+                assert!(
+                    path.strip_prefix(db_path)
+                        .and_then(|rest| rest.strip_prefix("/advisory-db-"))
+                        .is_some_and(|hash| !hash.is_empty() && !hash.contains('/')),
+                    "`mise run {task}` prints the revision of `{path}`, which is not cargo-deny's \
+                     RustSec checkout under `db-path = {db_path:?}`"
+                );
+                assert!(
+                    words.windows(2).any(|pair| pair == ["log", "-1"]) && command.contains("%H"),
+                    "`mise run {task}` runs `{command}`, which does not print the checkout's \
+                     commit hash"
+                );
+                checkout = Some(path.to_owned());
+            }
+            Some(LockfileAuditStep::Audit) => {
+                let checkout = checkout.as_deref().unwrap_or_else(|| {
+                    panic!(
+                        "`mise run {task}` runs `{command}` before printing the database revision \
+                         it audits against"
+                    )
+                });
+                let value = |flag: &str| {
+                    words
+                        .windows(2)
+                        .find(|pair| pair[0] == flag)
+                        .map(|pair| pair[1])
+                };
+                assert_eq!(
+                    value("--db"),
+                    Some(checkout),
+                    "`{command}` must read the checkout whose revision was printed, `{checkout}`"
+                );
+                assert!(
+                    words.contains(&"--no-fetch"),
+                    "`{command}` fetches its own database, so its revision is not the printed one"
+                );
+                assert_eq!(
+                    value("--deny"),
+                    Some("warnings"),
+                    "`{command}` must deny every warning kind (yanked, unmaintained, unsound), as \
+                     deny.toml's `[advisories]` does"
+                );
+                for word in &words {
+                    let flag = flag_of(word);
+                    assert!(
+                        !LOCKFILE_AUDIT_NARROWING_FLAGS.contains(&flag),
+                        "`{command}`'s `{flag}` narrows what the lockfile audit reports"
+                    );
+                }
+                let ignores: BTreeSet<String> = words
+                    .windows(2)
+                    .filter(|pair| pair[0] == "--ignore")
+                    .map(|pair| pair[1].to_owned())
+                    .collect();
+                assert_eq!(
+                    ignores, ignored,
+                    "`{command}` must ignore exactly the advisories deny.toml's `[advisories] \
+                     ignore` does: one policy, not two"
+                );
+                let file = value("--file")
+                    .unwrap_or_else(|| panic!("`{command}` names no `--file`"))
+                    .trim_start_matches("./");
+                assert!(
+                    files.insert(file.to_owned()),
+                    "`mise run {task}` audits `{file}` twice"
+                );
+            }
+        }
+    }
+    files
+}
+
+#[test]
+fn the_lockfile_audit_reads_every_committed_lockfile() {
+    // cargo-deny audits the dependency graph it activates, and filters out every lockfile entry
+    // no feature activates. Cargo locks the target of a weak `dep?/feature` without enabling it,
+    // so reqwest's `quinn?/ring` put quinn, `rand 0.10` and a yanked `chacha20 0.10.1` into
+    // `Cargo.lock`: 278 entries, 261 audited, and `yanked = "deny"` green over the yank at every
+    // feature scope (#187). `cargo audit` reads every entry of the file it is given; this holds
+    // `deny` to running it over every committed lockfile, and `deny-published` over every shipped
+    // one, each against the database revision the task prints, so a green run's log names the
+    // advisory-database state it was reached against. CI's jobs run these commands byte for byte
+    // (`every_mise_task_runs_exactly_what_its_ci_job_runs`).
+    let mut committed = BTreeSet::from(["Cargo.lock".to_owned()]);
+    for entry in std::fs::read_dir(workspace_root().join("examples")).expect("examples/ is listed")
+    {
+        let dir = entry.expect("an examples/ entry is readable").path();
+        if dir.join("Cargo.lock").is_file() {
+            let name = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("UTF-8 names");
+            committed.insert(format!("examples/{name}/Cargo.lock"));
+        }
+    }
+    assert!(
+        committed.len() >= 4,
+        "found only {committed:?}; the scan is not finding the example lockfiles"
+    );
+    assert_eq!(
+        lockfile_audits("deny"),
+        committed,
+        "`mise run deny` must run `cargo audit` over every committed lockfile, and only those"
+    );
+
+    let shipped: BTreeSet<String> = published_binary_crates()
+        .into_iter()
+        .map(|krate| format!("target/deny-published/{krate}/Cargo.lock"))
+        .collect();
+    assert_eq!(
+        lockfile_audits("deny-published"),
+        shipped,
+        "`mise run deny-published` must run `cargo audit` over the lockfile of every published \
+         binary it extracts, and only those"
     );
 }
 
@@ -1013,7 +1237,9 @@ const PAIRINGS: &[Pairing] = &[
         ci_only: &[
             CHECKOUT,
             STABLE,
-            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-deny@0.20.2"),
+            provision(
+                "uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-deny@0.20.2,cargo-audit@0.22.2",
+            ),
         ],
         ..PAIR
     }),
@@ -1024,7 +1250,9 @@ const PAIRINGS: &[Pairing] = &[
         ci_only: &[
             CHECKOUT,
             STABLE,
-            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-deny@0.20.2"),
+            provision(
+                "uses: taiki-e/install-action@v2\nwith:\n  tool: cargo-deny@0.20.2,cargo-audit@0.22.2",
+            ),
         ],
         // The published artefact changes only when a release publishes, never with a pull
         // request's diff; failing pull requests on it would block the release pull request that
