@@ -3946,7 +3946,7 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
 }
 
 /// A back-edge into a component whose nullability only its lowered body knows carries that
-/// nullability, not the reserve-time guess — in the root document and in a sub-file alike.
+/// nullability, not the reserve-time guess — in the root document, a sub-file, and a vendored remote.
 ///
 /// `N` is "a node with a required `next` that is another `N`, or null". Its `"null"` lives in a
 /// `oneOf` member, which `schema_is_nullable` never reads, so while `N`'s body is open the only
@@ -3972,8 +3972,9 @@ components:
             next: { $ref: '#/components/schemas/N' }
         - { type: 'null' }
 "##;
-    let root = format!(
-        r##"
+    let document = |components: &str| {
+        format!(
+            r##"
 openapi: 3.1.0
 info: {{ title: T, version: 1.0.0 }}
 servers: [{{ url: 'https://e.com' }}]
@@ -3986,8 +3987,10 @@ paths:
           description: ok
           content:
             application/json: {{ schema: {{ $ref: '#/components/schemas/W' }} }}
-{COMPONENTS}"##
-    );
+{components}"##
+        )
+    };
+    let root = document(COMPONENTS);
     let (generated, root_code) = generate_with_code(&root);
     let checked = check(&root);
     let (split_generated, split_checked, split_code) =
@@ -4013,6 +4016,105 @@ paths:
              nullability, as the control does: {code}"
         );
     }
+
+    // The vendored-remote spelling: `N` is a whole remote document whose `next` refers back to
+    // that document by URL, so the back-edge is `ensure_remote`'s own. Its type is named for the
+    // URL, so the field types are compared with each other rather than with a literal name.
+    use sha2::{Digest, Sha256};
+    const URL: &str = "https://api.example.com/schemas/node.yaml";
+    const VENDORED: &str = "api.example.com/schemas/node.yaml";
+    let node = format!(
+        "oneOf:\n  - type: object\n    required: [next]\n    properties:\n      next: {{ $ref: '{URL}' }}\n  - {{ type: 'null' }}\n"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        document(&format!(
+            "components:\n  schemas:\n    W:\n      type: object\n      required: [n]\n      properties:\n        n: {{ $ref: '{URL}' }}\n"
+        )),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("spargen.lock"),
+        format!(
+            "version = 1\n\n[[remote]]\nurl = \"{URL}\"\nsha256 = \"{:x}\"\npath = \"{VENDORED}\"\n",
+            Sha256::digest(node.as_bytes())
+        ),
+    )
+    .unwrap();
+    let vendored = dir.join(".spargen/vendor").join(VENDORED);
+    std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
+    std::fs::write(&vendored, &node).unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    assert_ne!(report.outcome(), Outcome::Rejected, "remote: {report:#?}");
+    let control = field_type(&code, "pub n:").expect("remote: `W.n` is emitted");
+    let target = control
+        .strip_prefix("Option<")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or_else(|| panic!("remote: the control is optional: {control}\n{code}"));
+    assert_eq!(
+        field_type(&code, "pub next:"),
+        Some(format!("Option<Box<{target}>>")),
+        "remote: the back-edge taken while the remote target was open must carry its lowered \
+         nullability, as the control does: {code}"
+    );
+}
+
+/// The mirror of [`a_back_edge_into_a_union_nullable_component_is_optional`]: the reserve-time
+/// guess says nullable and the body says otherwise, and the back-edge follows the body.
+///
+/// `N`'s type array admits `"null"`, which is all `schema_is_nullable` reads, but its `oneOf` has
+/// no null branch, so `null` matches no member and fails the union: `N` is not nullable, and the
+/// finished reference `W.n` is a plain `N`. The back-edge `next` read the guess and was
+/// `Option<Box<N>>`, which accepts a `null` the schema rejects.
+#[test]
+fn a_back_edge_into_a_component_whose_body_denies_null_is_not_optional() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/W' } }
+components:
+  schemas:
+    W:
+      type: object
+      required: [n]
+      properties:
+        n: { $ref: '#/components/schemas/N' }
+    N:
+      type: [object, 'null']
+      oneOf:
+        - type: object
+          required: [next]
+          properties:
+            next: { $ref: '#/components/schemas/N' }
+"##;
+    let (generated, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_eq!(
+        field_type(&code, "pub n:").as_deref(),
+        Some("N"),
+        "the control: {code}"
+    );
+    assert_eq!(
+        field_type(&code, "pub next:").as_deref(),
+        Some("Box<N>"),
+        "the back-edge must follow the body, not the type array's guess: {code}"
+    );
 }
 
 /// The `A`/`B` mutual-recursion skeleton of `a_nullable_alias_under_mutual_recursion_generates`,
