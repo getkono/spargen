@@ -8,6 +8,7 @@ hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
 "aqua:rustsec/rustsec/cargo-audit" = "0.22.2"  # advisory + yank audit of every lockfile entry
 "cargo:cargo-hack" = "0.6.39"               # feature-combination builds
 "cargo:mdbook" = "0.5.4"                    # documentation site builder
+"aqua:release-plz/release-plz" = "0.3.160"  # the changelog/version oracle release-plz.yml runs
 
 [tasks.fmt]
 description = "Format the whole workspace"
@@ -116,6 +117,32 @@ echo "auditing the Cargo.lock published in spargen $version"
   "git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'",
   "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file target/deny-published/spargen/Cargo.lock",
   "cargo deny --manifest-path target/deny-published/spargen/Cargo.toml --config deny.toml --all-features --locked check advisories",
+]
+
+[tasks.release-preview]
+# `spargen/CHANGELOG.md` ships inside the published `.crate`, and release-plz's embedded git-cliff
+# writes it: which commits it lists is decided by the tool, not by anything committed here (#190).
+# This runs that tool, at the version release-plz.yml's action is pinned to run
+# (`ci_installs_exactly_the_tool_versions_mise_pins`), and prints what the next release pull
+# request would change: the version bumps and the changelog section, so a change's changelog
+# impact is read off the log instead of argued. `release-plz update` has no dry-run mode and
+# rewrites the tree it runs in, so it runs in a clone under `target/`, which also means it reads
+# committed history only (uncommitted edits are not in the preview). The clone's `origin` is a
+# local path, so `--repo-url` restores the compare and pull-request links the real run writes.
+# release-plz refuses a detached HEAD (`cannot determine current branch`), and a clone of CI's
+# pull-request merge ref, which matches no branch, is detached, so the clone is put on a fresh
+# local branch with no upstream (release-plz then assumes `origin`) whatever the source was on.
+# LFS content is skipped: no packaged file is an LFS object. Like `deny`, the verdict is not
+# hermetic: release-plz compares against the crates.io release and dates the section today. CI's
+# `release-preview` job runs these commands byte for byte, so a `release-plz.toml` or commit
+# history the release job would choke on fails a pull request rather than `master`.
+description = "Preview the version bumps and CHANGELOG section the next release pull request writes"
+run = [
+  "rm -rf target/release-preview",
+  "GIT_LFS_SKIP_SMUDGE=1 git clone --quiet --no-local . target/release-preview",
+  "git -C target/release-preview switch --quiet --create release-preview",
+  "cd target/release-preview && release-plz update --repo-url https://github.com/getkono/spargen",
+  "git -C target/release-preview --no-pager diff",
 ]
 
 [tasks.bench]

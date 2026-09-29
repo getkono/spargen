@@ -62,6 +62,7 @@ mise run example    # both petstore examples over a local mock server
 mise run github-api # the full GitHub client: native strict clippy + wasm32
 mise run deny       # supply-chain audit
 mise run deny-published  # advisory audit of the Cargo.lock the latest release ships
+mise run release-preview  # release-plz update in a scratch clone: the next release's CHANGELOG
 mise run docs       # build the mdBook site (fails on broken links/includes)
 mise run doc-links  # rustdoc over the workspace, warnings denied, private items included
 ```
@@ -101,8 +102,9 @@ pinned literally on both sides: `commits` checks the pull request's `base.sha..h
 `commit-range` checks `origin/master..HEAD` (only the range is rewritten; the rest must match), the
 `package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only,
 `benchmarks.yml` adds `set -o pipefail` and `| tee bench-results.txt` to capture the artifact, and
-CI installs `cargo-deny`, `cargo-audit`, `cargo-hack`, `mdbook` and `convco` itself where mise's `[tools]` does, at
-the same versions. The Rust toolchain is pinned the same way: `rust-toolchain.toml`'s `channel`
+CI installs `cargo-deny`, `cargo-audit`, `cargo-hack`, `mdbook`, `convco` and `release-plz` itself where mise's `[tools]` does, at
+the same versions (`release-plz.yml`'s action is held to the same `release-plz` pin through its
+`version:` input, so the preview runs the binary that writes the published CHANGELOG). The Rust toolchain is pinned the same way: `rust-toolchain.toml`'s `channel`
 is a concrete release (not `stable`), it selects the toolchain for every local `cargo` call and so
 for every `mise run` gate, and every `dtolnay/rust-toolchain@` step in every workflow installs that
 same release — `ci_installs_the_rust_toolchain_this_file_pins` holds them equal. Two named
@@ -115,7 +117,7 @@ pin is bumped by hand, in a PR of its own that changes `rust-toolchain.toml`'s `
 passes clippy and fmt on the new release; locally, `rustup` installs the new release on the first
 `cargo` call in the checkout. The rest — `check`, `bench-build`,
 `msrv`, `package`, `runtime-dependencies`, `powerset`, `corpus-smoke`, `example`, `github-api`,
-`deny-published`, `docs`, and the rustdoc link check `doc-links` runs (a step inside the `docs` job, not a
+`deny-published`, `release-preview`, `docs`, and the rustdoc link check `doc-links` runs (a step inside the `docs` job, not a
 job of its own) — never run in a hook; they are too slow, so a green pre-push is not a green CI.
 `msrv` needs `rustup toolchain install 1.88.0`, and `package` a clean tree. Run `mise run hooks`
 once to install them.
