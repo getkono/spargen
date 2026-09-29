@@ -45,6 +45,11 @@ jobs:
       # that instead (#146). `the_deny_gate_states_the_feature_scope_it_audits` holds the command
       # to both flags, to a bare `check`, and to no graph-narrowing flag.
       - run: cargo deny --all-features --locked check
+      # Each example workspace's lockfile, under the same policy (#184). No `--locked`, like every
+      # gate that compiles them: their `spargen` path-package stamp goes stale on each release.
+      - run: cargo deny --manifest-path examples/github-api/Cargo.toml --config deny.toml --all-features check
+      - run: cargo deny --manifest-path examples/petstore/Cargo.toml --config deny.toml --all-features check
+      - run: cargo deny --manifest-path examples/petstore-macro/Cargo.toml --config deny.toml --all-features check
 
   # The lockfile the latest `spargen` release ships, not the committed one: `cargo install spargen
   # --features cli --locked` installs its pins, and a fix on `master` reaches it only when a release

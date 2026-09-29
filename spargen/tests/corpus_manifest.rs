@@ -413,14 +413,17 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
     //
     // Every command must be a cargo-deny audit, and the task must set no `env` (`CARGO_TARGET_DIR`
     // or `CARGO_NET_OFFLINE` change what cargo-deny resolves; `mise_tasks` already rejects `dir`).
-    // The narrowing rules apply to each command that audits the *root* manifest -- no
-    // `--manifest-path`, or one naming the root `Cargo.toml` -- and at least one must: applying
-    // them to every command would turn "no command may narrow the gate" into "every command must
-    // be maximal", which reds #184's cheapest shape (a second audit per example workspace with
-    // `check advisories`). A root audit must pass `--all-features`, no graph-narrowing flag, and
-    // a bare `check`, since `check licenses` drops `advisories`. The deny-list is a **list, not a
-    // proof** (#238): it rejects the graph-narrowing flags measured to hide this tree's live
-    // advisory, and cannot establish that some other flag does not narrow.
+    // Every committed lockfile is audited: the root one -- no `--manifest-path`, or one naming the
+    // root `Cargo.toml` -- and each example workspace's, which gating jobs compile (for wasm32
+    // too) and whose resolves carry crates the root one never reaches (#184). Each audit must
+    // pass `--all-features`, no graph-narrowing flag, and a bare `check`, since `check licenses`
+    // drops `advisories` and `check advisories` drops the licence, ban and source checks the
+    // examples were outside of. The root audit must also pass `--locked`; an example audit must
+    // not need to (its `spargen` path-package stamp goes stale on every release, so no gate that
+    // compiles an example is locked), and must pass `--config deny.toml`, so it runs under the one
+    // policy rather than whatever cargo-deny would discover beside the example. The deny-list is
+    // a **list, not a proof** (#238): it rejects the graph-narrowing flags measured to hide this
+    // tree's live advisory, and cannot establish that some other flag does not narrow.
     let tasks = mise_tasks();
     assert!(
         mise_env(&tasks, "deny").is_empty(),
@@ -433,7 +436,26 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
         "`mise run deny` runs nothing, so neither gate audits the dependency graph"
     );
 
+    // Every example workspace that commits a lockfile, by manifest path.
+    let mut examples: BTreeSet<String> = BTreeSet::new();
+    for entry in std::fs::read_dir(workspace_root().join("examples")).expect("examples/ is listed")
+    {
+        let dir = entry.expect("an examples/ entry is readable").path();
+        if dir.join("Cargo.toml").is_file() && dir.join("Cargo.lock").is_file() {
+            let name = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("UTF-8 names");
+            examples.insert(format!("examples/{name}/Cargo.toml"));
+        }
+    }
+    assert!(
+        examples.len() >= 3,
+        "found only {examples:?} under examples/; the scan is not finding the example workspaces"
+    );
+
     let mut root_audits = 0usize;
+    let mut example_audits: BTreeSet<String> = BTreeSet::new();
     for command in &commands {
         let words: Vec<&str> = command.split_whitespace().collect();
         let skip = if words.starts_with(&["cargo", "deny"]) {
@@ -454,35 +476,55 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
         let which = &words[check + 1..];
 
         let mut manifest = None;
+        let mut config = None;
         let mut rest = globals.iter();
         while let Some(word) = rest.next() {
             if *word == "--manifest-path" {
                 manifest = rest.next().copied();
             } else if let Some(path) = word.strip_prefix("--manifest-path=") {
                 manifest = Some(path);
+            } else if *word == "--config" {
+                config = rest.next().copied();
+            } else if let Some(path) = word.strip_prefix("--config=") {
+                config = Some(path);
             }
         }
-        if manifest.is_some_and(|path| path.trim_start_matches("./") != "Cargo.toml") {
-            continue;
+        let manifest = manifest.map_or("Cargo.toml", |path| path.trim_start_matches("./"));
+        if manifest == "Cargo.toml" {
+            root_audits += 1;
+            // Without `--locked`, cargo-deny's `cargo metadata` rewrites a lockfile that does not
+            // match the manifests and audits the rewrite: a skewed `Cargo.lock` (rustls 0.23.45
+            // with rustls-webpki 0.103.13) reported green and was silently corrected, and a
+            // deleted one was regenerated and reported `advisories ok` (#146). With it, both fail
+            // -- the deleted lockfile with "cannot create the lock file ... because --locked was
+            // passed". `--frozen` would also hold the lockfile, but it implies `--offline`, a
+            // graph-narrowing flag below.
+            assert!(
+                globals.contains(&"--locked"),
+                "`mise run deny` runs `{command}`, which does not pass `--locked`, so a lockfile \
+                 that does not match the manifests is rewritten and the rewrite is audited \
+                 instead of the committed `Cargo.lock`"
+            );
+        } else if examples.contains(manifest) {
+            example_audits.insert(manifest.to_owned());
+            assert_eq!(
+                config.map(|path| path.trim_start_matches("./")),
+                Some("deny.toml"),
+                "`mise run deny` runs `{command}`, which does not pass `--config deny.toml`, so \
+                 the example is audited under whatever policy cargo-deny finds beside it rather \
+                 than the repository's one"
+            );
+        } else {
+            panic!(
+                "`mise run deny` runs `{command}`, whose `--manifest-path {manifest}` is neither \
+                 the root `Cargo.toml` nor an example workspace's"
+            );
         }
-        root_audits += 1;
 
         assert!(
             globals.contains(&"--all-features"),
             "`mise run deny` runs `{command}`, which does not pass `--all-features`, so the \
              audited graph has no TLS stack in it"
-        );
-        // Without `--locked`, cargo-deny's `cargo metadata` rewrites a lockfile that does not
-        // match the manifests and audits the rewrite: a skewed `Cargo.lock` (rustls 0.23.45 with
-        // rustls-webpki 0.103.13) reported green and was silently corrected, and a deleted one
-        // was regenerated and reported `advisories ok` (#146). With it, both fail -- the deleted
-        // lockfile with "cannot create the lock file ... because --locked was passed". `--frozen`
-        // would also hold the lockfile, but it implies `--offline`, a graph-narrowing flag below.
-        assert!(
-            globals.contains(&"--locked"),
-            "`mise run deny` runs `{command}`, which does not pass `--locked`, so a lockfile that \
-             does not match the manifests is rewritten and the rewrite is audited instead of the \
-             committed `Cargo.lock`"
         );
         for word in globals {
             let flag = flag_of(word);
@@ -504,6 +546,11 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
         "no `mise run deny` command audits the root `Cargo.toml`: every one names a \
          `--manifest-path` elsewhere, so the workspace this gate exists to audit is audited by \
          nothing"
+    );
+    assert_eq!(
+        example_audits, examples,
+        "`mise run deny` must audit every example workspace's committed lockfile: gating jobs \
+         compile them, and their resolves carry crates the root one never reaches (#184)"
     );
 }
 

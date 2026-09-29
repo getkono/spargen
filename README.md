@@ -194,7 +194,7 @@ mise run hooks        # install git hooks
 | `mise run bench` | Criterion benchmarks over the generation pipeline |
 | `mise run github-api` | Generate and compile the full pinned GitHub API client (native strict Clippy + wasm) |
 | `mise run example` | Run the end-to-end petstore example |
-| `mise run deny` | Supply-chain audit (licenses, advisories, bans) |
+| `mise run deny` | Supply-chain audit (licenses, advisories, bans, sources) of every committed lockfile |
 | `mise run deny-published` | Advisory audit of the `Cargo.lock` the latest `spargen` release ships on crates.io |
 | `mise run docs` | Build the mdBook site (fails on broken links or includes) |
 | `mise run doc-links` | Rustdoc over the workspace, warnings denied, private items included |
