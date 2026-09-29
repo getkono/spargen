@@ -319,14 +319,26 @@ pub(crate) struct ReqwestFetcher;
 #[cfg(feature = "remote-fetch")]
 impl RemoteFetch for ReqwestFetcher {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
-        let response = reqwest::blocking::get(url)
-            .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|error| with_causes(&error))?;
-        response
-            .bytes()
-            .map(|bytes| bytes.to_vec())
-            .map_err(|error| with_causes(&error))
+        // What `reqwest::blocking::get` does: a default client per fetch.
+        fetch_with(reqwest::blocking::Client::builder(), url)
     }
+}
+
+/// Fetch `url` with a client built from `builder`: the whole of [`ReqwestFetcher`]'s fetch but the
+/// builder. The builder is the trust seam — the TLS test in this module adds its self-signed root
+/// to it and otherwise runs exactly the path `spargen lock` runs, so the handshake, the root
+/// store, and ALPN under the linked reqwest/rustls stack are reached by a test.
+#[cfg(feature = "remote-fetch")]
+fn fetch_with(builder: reqwest::blocking::ClientBuilder, url: &str) -> Result<Vec<u8>, String> {
+    let response = builder
+        .build()
+        .and_then(|client| client.get(url).send())
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .map_err(|error| with_causes(&error))?;
+    response
+        .bytes()
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| with_causes(&error))
 }
 
 /// `error` followed by each error in its `source()` chain, `: `-separated.
@@ -529,6 +541,203 @@ mod tests {
         for vendored in &report.refs {
             let on_disk = std::fs::read(report.vendor_dir.join(&vendored.path)).unwrap();
             assert_eq!(sha256_hex(&on_disk), vendored.sha256);
+        }
+    }
+
+    /// The linked reqwest/rustls stack itself (#292): `spargen lock`'s fetch path completing a TLS
+    /// handshake against a local HTTPS server. `tests/vendor_remote.rs` drives the binary over
+    /// plain HTTP only, because the fetcher trusts only the bundled `webpki-roots` and a local
+    /// server's certificate is self-signed; here the certificate's root is added to the client
+    /// builder through `fetch_with`, and nothing else differs from `ReqwestFetcher`.
+    #[cfg(feature = "remote-fetch")]
+    mod tls {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::thread::JoinHandle;
+        use std::time::{Duration, Instant};
+
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        use super::*;
+
+        const DOCUMENT: &[u8] = b"type: string\n";
+        /// Bounds every wait on the peer, so a client that never connects fails the test
+        /// instead of hanging it.
+        const TIMEOUT: Duration = Duration::from_secs(30);
+
+        /// `ReqwestFetcher` with one extra trusted root.
+        struct TrustingFetcher(reqwest::Certificate);
+
+        impl RemoteFetch for TrustingFetcher {
+            fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+                fetch_with(
+                    reqwest::blocking::Client::builder().add_root_certificate(self.0.clone()),
+                    url,
+                )
+            }
+        }
+
+        /// What the server saw of the one connection it accepted.
+        struct Served {
+            request_line: String,
+            alpn: Option<Vec<u8>>,
+        }
+
+        /// A self-signed certificate for `127.0.0.1` and its PKCS#8 key.
+        fn self_signed() -> (CertificateDer<'static>, Vec<u8>) {
+            let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
+                .expect("mint a self-signed certificate");
+            (
+                certified.cert.der().clone(),
+                certified.key_pair.serialize_der(),
+            )
+        }
+
+        /// Accept one connection on `listener`, complete a TLS handshake offering `h2` and
+        /// `http/1.1`, and answer its request with `DOCUMENT`. The error is the handshake's.
+        fn serve_one(
+            listener: TcpListener,
+            cert: CertificateDer<'static>,
+            key: Vec<u8>,
+        ) -> JoinHandle<Result<Served, String>> {
+            let provider = Arc::new(rustls::crypto::ring::default_provider());
+            let mut config = rustls::ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .expect("ring supports the default protocol versions")
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
+                )
+                .expect("the minted key matches its certificate");
+            config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+            let config = Arc::new(config);
+
+            std::thread::spawn(move || {
+                listener.set_nonblocking(true).unwrap();
+                let deadline = Instant::now() + TIMEOUT;
+                let tcp = loop {
+                    match listener.accept() {
+                        Ok((tcp, _)) => break tcp,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() > deadline {
+                                return Err("no client connected".to_owned());
+                            }
+                            std::thread::yield_now();
+                        }
+                        Err(error) => return Err(error.to_string()),
+                    }
+                };
+                tcp.set_nonblocking(false).unwrap();
+                tcp.set_read_timeout(Some(TIMEOUT)).unwrap();
+                tcp.set_write_timeout(Some(TIMEOUT)).unwrap();
+                let connection = rustls::ServerConnection::new(config).unwrap();
+                let mut tls = rustls::StreamOwned::new(connection, tcp);
+
+                // Reading drives the handshake; its failure surfaces here.
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let read = tls.read(&mut chunk).map_err(|error| error.to_string())?;
+                    if read == 0 {
+                        return Err("the client closed before sending a request".to_owned());
+                    }
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                let alpn = tls.conn.alpn_protocol().map(<[u8]>::to_vec);
+                let request = String::from_utf8_lossy(&request);
+                let request_line = request.lines().next().unwrap_or_default().to_owned();
+
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    DOCUMENT.len()
+                );
+                tls.write_all(head.as_bytes())
+                    .and_then(|()| tls.write_all(DOCUMENT))
+                    .and_then(|()| tls.flush())
+                    .map_err(|error| error.to_string())?;
+                tls.conn.send_close_notify();
+                // Best effort: the client may already have closed once it read the body.
+                let _ = tls.flush();
+                Ok(Served { request_line, alpn })
+            })
+        }
+
+        /// A spec whose one remote `$ref` is `url`.
+        fn spec_referencing(url: &str) -> (tempfile::TempDir, Utf8PathBuf) {
+            let temp = tempfile::tempdir().unwrap();
+            let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+            let spec = dir.join("openapi.yaml");
+            std::fs::write(
+                &spec,
+                format!(
+                    "openapi: 3.1.0\n\
+                     components:\n\
+                     \x20 schemas:\n\
+                     \x20   Pet:\n\
+                     \x20     $ref: \"{url}\"\n"
+                ),
+            )
+            .unwrap();
+            (temp, spec)
+        }
+
+        /// With the server's root trusted, the handshake completes, ALPN settles on HTTP/1.1
+        /// (the only protocol reqwest is built to speak here), and the document is vendored and
+        /// pinned byte for byte.
+        #[test]
+        fn vendors_a_document_over_a_completed_tls_handshake() {
+            let (cert, key) = self_signed();
+            let root = reqwest::Certificate::from_der(&cert).expect("a DER certificate");
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("https://{}/pet.yaml", listener.local_addr().unwrap());
+            let server = serve_one(listener, cert, key);
+            let (_temp, spec) = spec_referencing(&url);
+
+            let mut diags = Diagnostics::default();
+            let report = vendor(&spec, &TrustingFetcher(root), &mut diags);
+            let served = server.join().expect("the server thread does not panic");
+            let report = report.unwrap_or_else(|_| panic!("vendor failed: {:?}", diags.items()));
+            assert!(!diags.has_errors(), "{:?}", diags.items());
+            let served = served.expect("the server completes the handshake");
+
+            assert_eq!(served.request_line, "GET /pet.yaml HTTP/1.1");
+            assert_eq!(served.alpn.as_deref(), Some(&b"http/1.1"[..]));
+            let urls: Vec<&str> = report.refs.iter().map(|r| r.url.as_str()).collect();
+            assert_eq!(urls, [url.as_str()]);
+            let vendored = &report.refs[0];
+            let on_disk = std::fs::read(report.vendor_dir.join(&vendored.path)).unwrap();
+            assert_eq!(on_disk, DOCUMENT);
+            assert_eq!(vendored.sha256, sha256_hex(DOCUMENT));
+        }
+
+        /// The production fetcher does not trust that root: the same server fails certificate
+        /// verification, reported as `E025` carrying the TLS cause, and nothing is vendored. So
+        /// the root the passing test adds is what makes it pass, and the fetcher's own root store
+        /// holds only what it bundles.
+        #[test]
+        fn the_production_fetcher_rejects_a_self_signed_server_with_e025() {
+            let (cert, key) = self_signed();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("https://{}/pet.yaml", listener.local_addr().unwrap());
+            let server = serve_one(listener, cert, key);
+            let (_temp, spec) = spec_referencing(&url);
+
+            let mut diags = Diagnostics::default();
+            let outcome = vendor(&spec, &ReqwestFetcher, &mut diags);
+            let served = server.join().expect("the server thread does not panic");
+            assert!(outcome.is_err());
+            assert!(served.is_err(), "the handshake must fail on the server too");
+
+            let codes: Vec<Code> = diags.items().iter().map(|diag| diag.code).collect();
+            assert_eq!(codes, [Code::RemoteFetchFailed], "{:?}", diags.items());
+            let message = &diags.items()[0].message;
+            assert!(message.contains(&url), "{message}");
+            assert!(
+                message.contains("UnknownIssuer"),
+                "the certificate-verification cause must be carried: {message}"
+            );
         }
     }
 }

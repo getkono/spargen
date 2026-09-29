@@ -51,7 +51,7 @@ reqwest = { workspace = true, features = [
     "blocking",
     "rustls-tls",
 ], optional = true }
-# Never named in code: a version floor on the rustls reqwest's `rustls-tls` links. reqwest
+# Never named in library code (the dev-dependency below is what the TLS test names): a version floor on the rustls reqwest's `rustls-tls` links. reqwest
 # requires only `0.23.4`, and Cargo ignores a dependency's lockfile, so without this a consumer
 # enabling `remote-fetch` from `build.rs` resolves rustls itself and may pick a release an
 # advisory names. Default features stay off so this adds no feature (and no second crypto
@@ -70,6 +70,17 @@ insta = { workspace = true }
 criterion = { workspace = true }
 # SHA-256 for the corpus integrity gate (`tests/corpus_manifest.rs`). Dev-only.
 sha2 = { workspace = true }
+# The TLS handshake test in `src/source/vendor.rs` (#292): `rcgen` mints its self-signed
+# certificate and `rustls` serves it. Dev-only, and both on `ring`, the one crypto provider
+# reqwest's `rustls-tls` already links, so no second provider enters any graph. `rcgen` stays on
+# 0.13: 0.14's `ring` feature names `x509-parser?/verify`, a weak dependency Cargo locks without
+# compiling, which would put eleven never-built entries into `Cargo.lock` for `cargo audit` to
+# judge (the #187 shape).
+rcgen = { version = "0.13.2", default-features = false, features = ["ring"] }
+rustls = { version = "0.23.45", default-features = false, features = [
+    "ring",
+    "std",
+] }
 
 [[bin]]
 name = "spargen"
