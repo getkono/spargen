@@ -3815,7 +3815,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
         // A structured-suffix range such as `application/*+json` ranks with the concrete types its
         // suffix covers, so it could win a tie or a rank and then be refused below as a range. While
-        // a sibling can be sent, it is withheld from the choice and reported as not generated.
+        // a sibling can be sent, it is withheld from the choice and reported as not selected.
         let (candidates, withheld) = request_media_candidates(&body.content);
         let ChosenMedia {
             media: media_name,
@@ -3829,9 +3829,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             |object: &&super::MediaTypeObject| media_object_is_opaque(object),
         )?;
         let lowered = self.lower_chosen_request_body(body, media_name, object)?;
-        // Both `W014`s claim the selection "is generated", so they are emitted only now that every
-        // gate above has accepted it: the alternatives `choose_media` passed over, then the
-        // withheld suffix ranges — each true, always in this order.
+        // Both `W014`s are emitted only now that every gate above has accepted the selection: a
+        // refused one is reported by its `E009` alone, since no method narrows to a body that is
+        // not lowered. First the alternatives `choose_media` passed over, then the withheld suffix
+        // ranges — always in this order.
         let withheld = alternative_media_ignored(media_name, &withheld, &body.provenance);
         for warning in narrowing.into_iter().chain(withheld) {
             self.diags.emit(warning);
@@ -4468,8 +4469,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                  narrowing,
              }| {
                 let lowered = self.lower_chosen_response_body(response, media_name, object)?;
-                // `W014` claims the selection "is generated": emitted only once the gates in
-                // `lower_chosen_response_body` have accepted it.
+                // `W014` is emitted only once the gates in `lower_chosen_response_body` have
+                // accepted the selection; a refused one is reported by its `E009` alone.
                 if let Some(narrowing) = narrowing {
                     self.diags.emit(narrowing);
                 }
@@ -6326,8 +6327,8 @@ enum BodyPosition {
 struct ChosenMedia<'a, T> {
     media: &'a str,
     value: &'a T,
-    /// Built but not emitted. `W014` says the selection "is generated", which is only true once the
-    /// caller's own gates accept it, so the caller emits this when — and only when — the selected
+    /// Built but not emitted. The narrowing `W014` discloses is only real once the caller's own
+    /// gates accept the selection, so the caller emits this when — and only when — the selected
     /// entry lowers. A selection those gates then reject is reported by its `E009` alone.
     narrowing: Option<Diagnostic>,
 }
@@ -6429,8 +6430,12 @@ fn choose_media<'a, T>(
     None
 }
 
-/// The `W014` saying `media` is generated and `ignored` is not, or `None` when nothing was ignored.
+/// The `W014` saying `media` is selected and `ignored` is not, or `None` when nothing was ignored.
 /// Built rather than emitted: see [`ChosenMedia::narrowing`].
+///
+/// The message asserts only what is decided here — which entry was selected — and never that it
+/// "is generated": whether anything is generated depends on the rest of the document and on the
+/// entry point (`check` generates nothing), neither of which this site can see (#174).
 fn alternative_media_ignored(
     media: &str,
     ignored: &[&str],
@@ -6442,7 +6447,7 @@ fn alternative_media_ignored(
     Some(
         Diagnostic::warning(Code::AlternativeMediaIgnored, provenance.clone())
             .message(format!(
-                "`{media}` is generated; the alternative media type(s) `{}` are not",
+                "`{media}` is selected; the alternative media type(s) `{}` are not",
                 ignored.join("`, `")
             ))
             .remedy(
