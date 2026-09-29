@@ -18738,6 +18738,147 @@ components:
     }
 }
 
+/// Two types with no typed intersection are not always an empty intersection. `uuid` and
+/// `contentEncoding: base64` are both annotations on a string in 2020-12, so every string satisfies
+/// both and `["x"]` is a valid instance of an array whose two item schemas are those; there is
+/// simply no single Rust type for the meet. Only a *provably empty* meet — `uuid` against
+/// `integer`, disjoint JSON types — may be typed uninhabited, because only then are the instances
+/// the uninhabited type still admits (`[]`, an object omitting the property) exactly the valid ones.
+///
+/// Every site that used to read "no typed intersection" as "empty" is driven here: the array item
+/// (under `allOf` and under a `$ref` with siblings), an optional property (under a `$ref` with
+/// siblings and under `allOf`), the null-only collapse of two nullable sides, a union branch the
+/// enclosing schema's siblings meet, a branch of a referenced union, and a tuple position under
+/// array items. Each typed the inhabited
+/// case as uninhabited, as `()`, or dropped the branch, and generated. Each now rejects with
+/// `E013`, and the provably empty control beside it keeps generating as before.
+#[test]
+fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+    // `OTHER` is the second side's schema: the unrepresentable `base64` string, or the disjoint
+    // `integer` control.
+    let cases: &[(&str, &str, &str)] = &[
+        (
+            "array items under `allOf`",
+            "allOf:\n                  - { type: object, properties: { ids: { type: array, items: { $ref: '#/components/schemas/Id' } } } }\n                  - { type: object, properties: { ids: { type: array, items: OTHER } } }",
+            "components:\n  schemas:\n    Id: { type: string, format: uuid }\n",
+        ),
+        (
+            "array items under a `$ref` with siblings",
+            "{ $ref: '#/components/schemas/Ids', type: array, items: OTHER }",
+            "components:\n  schemas:\n    Ids: { type: array, items: { type: string, format: uuid } }\n",
+        ),
+        (
+            "an optional property under a `$ref` with siblings",
+            "{ $ref: '#/components/schemas/Obj', type: object, properties: { a: OTHER } }",
+            "components:\n  schemas:\n    Obj: { type: object, properties: { a: { type: string, format: uuid } } }\n",
+        ),
+        (
+            "an optional property under `allOf`",
+            "allOf:\n                  - { type: object, properties: { a: { type: string, format: uuid } } }\n                  - { type: object, properties: { a: OTHER } }",
+            "components:\n  schemas:\n    Unused: { type: string }\n",
+        ),
+    ];
+    for (what, body, components) in cases {
+        for (other, inhabited) in [
+            ("{ type: string, contentEncoding: base64 }", true),
+            ("{ type: integer }", false),
+        ] {
+            let spec = format!(
+                "{HEAD}{}{components}",
+                PATH.replace("BODY", &body.replace("OTHER", other))
+            );
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                if inhabited {
+                    assert_eq!(
+                        report.outcome(),
+                        Outcome::Rejected,
+                        "{what}: a uuid/base64 meet is inhabited but has no Rust type, so {entry} \
+                         must reject it rather than type it uninhabited: {report:#?}"
+                    );
+                    assert!(
+                        has_code(&report, Code::AllOfIrreconcilable),
+                        "{what}: {entry} must report E013: {report:#?}"
+                    );
+                } else {
+                    assert_ne!(
+                        report.outcome(),
+                        Outcome::Rejected,
+                        "{what}: a uuid/integer meet is provably empty, so {entry} must keep \
+                         generating: {report:#?}"
+                    );
+                }
+            }
+            if !inhabited {
+                let (_, code) = generate_with_code(&spec);
+                assert!(
+                    code.contains("no JSON value can inhabit schema"),
+                    "{what}: the empty meet must still be typed uninhabited: {code}"
+                );
+            }
+        }
+    }
+
+    // The sites that do not fall back to `Never`, but read the same answer in other ways: the
+    // null-only collapse of two nullable sides typed the position `()`, and a union branch the
+    // siblings could not be typed against was dropped (with a `W011` claiming it cannot satisfy
+    // them, or with nothing at all under a `$ref`), leaving a lone `uuid` for a union that also
+    // admits every other string. And a tuple position that cannot meet is not an empty tuple:
+    // `prefixItems` does not require the array to reach it, so `[]` satisfies both `[string]` and
+    // `[integer]` tuples, and an outer array of them is not only `[]`.
+    let components = "components:\n  schemas:\n    N: { type: [string, 'null'], format: uuid }\n    \
+                      U: { anyOf: [{ type: string, contentEncoding: base64 }, { type: string }] }\n    \
+                      Pairs: { type: array, items: { type: array, prefixItems: [{ type: string }], items: false } }\n";
+    for (what, body) in [
+        (
+            "array items that are tuples whose positions do not meet",
+            "{ $ref: '#/components/schemas/Pairs', type: array, items: { type: array, prefixItems: [{ type: integer }], items: false } }",
+        ),
+        (
+            "two nullable sides whose non-null shapes have no Rust type",
+            "{ $ref: '#/components/schemas/N', type: [string, 'null'], contentEncoding: base64 }",
+        ),
+        (
+            "a union branch under the enclosing schema's siblings",
+            "{ type: string, format: uuid, anyOf: [{ type: string, contentEncoding: base64 }, { type: string }] }",
+        ),
+        (
+            "a branch of a referenced union under a `$ref`'s siblings",
+            "{ $ref: '#/components/schemas/U', type: string, format: uuid }",
+        ),
+    ] {
+        let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what}: {entry} must reject rather than narrow: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::AllOfIrreconcilable),
+                "{what}: {entry} must report E013: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::DeclarationHasNoEffect),
+                "{what}: {entry} must not claim a branch cannot satisfy the siblings: {report:#?}"
+            );
+        }
+    }
+}
+
 /// A null-only union MEMBER and a `"null"` in the enclosing `type` array are not the same fact, and
 /// only one of them can rescue an empty intersection.
 ///
