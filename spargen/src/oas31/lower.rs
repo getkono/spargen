@@ -2635,8 +2635,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             // Name what the body lowers to for the schema it came from, not for whichever use
             // reached it first — once one expansion serves every use, a per-use hint would make
-            // the generated names depend on lowering order (as in `ensure_resolved`).
-            let hint = resolved_hint(&target.provenance, hint);
+            // the generated names depend on lowering order. The `Member` suffix keeps it off the
+            // hint `ensure_resolved` gives the same target when it is also a direct `$ref`: that
+            // lowers a second copy of the body, and two copies on one hint would leave the bare
+            // name (`Basemeta`, or a scalar target's own `Code`) to whichever lowering ran first.
+            let hint = format!("{}Member", resolved_hint(&target.provenance, hint));
             let mut contributed = Vec::new();
             self.gather_inline(&target, &hint, &mut contributed)?;
             self.resolved_contributions.insert(key, contributed.clone());

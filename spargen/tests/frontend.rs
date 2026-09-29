@@ -3053,6 +3053,93 @@ components:
     }
 }
 
+/// One schema that is both a file-referenced `allOf` member and a direct `$ref` is lowered twice —
+/// once to its own type by `ensure_resolved`, once flattened as a member — and the two copies must
+/// not compete for one name.
+///
+/// The member's body is named for the target, so a hint equal to the one `ensure_resolved` gives
+/// the direct type would put two types on one name, and the naming scope hands the bare name to
+/// whichever lowering reaches it first. Reordering two properties would then move `Basemeta` (and,
+/// for a scalar target, `Code` itself) from the direct type to the member's copy. Both orders must
+/// generate the same set of names, with the direct type and its nested types on the bare ones.
+#[test]
+fn a_schema_used_as_file_referenced_all_of_member_and_direct_ref_names_both_copies_stably() {
+    let lib = r##"
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        direct: { $ref: './lib.yaml#/components/schemas/Base' }
+        wrapped: { allOf: [{ $ref: './lib.yaml#/components/schemas/Base' }] }
+        code: { $ref: './lib.yaml#/components/schemas/Code' }
+        wrappedCode: { allOf: [{ $ref: './lib.yaml#/components/schemas/Code' }] }
+    Base:
+      type: object
+      properties:
+        meta: { type: object, properties: { tag: { type: string } } }
+    Code:
+      type: string
+      enum: [a, b]
+"##;
+    let direct_first = "        direct: { $ref: './lib.yaml#/components/schemas/Base' }\n        \
+                        wrapped: { allOf: [{ $ref: './lib.yaml#/components/schemas/Base' }] }\n        \
+                        code: { $ref: './lib.yaml#/components/schemas/Code' }\n        \
+                        wrappedCode: { allOf: [{ $ref: './lib.yaml#/components/schemas/Code' }] }\n";
+    let member_first = "        wrappedCode: { allOf: [{ $ref: './lib.yaml#/components/schemas/Code' }] }\n        \
+                        wrapped: { allOf: [{ $ref: './lib.yaml#/components/schemas/Base' }] }\n        \
+                        code: { $ref: './lib.yaml#/components/schemas/Code' }\n        \
+                        direct: { $ref: './lib.yaml#/components/schemas/Base' }\n";
+    assert!(lib.contains(direct_first));
+    let mut names = Vec::new();
+    for order in [lib.to_owned(), lib.replace(direct_first, member_first)] {
+        let (generated, checked, code) = split("./lib.yaml#/components/schemas/Holder", &order);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        }
+        let types = types_module(&code);
+        let field_type = |owner: &str, field: &str| {
+            types
+                .lines()
+                .map(str::trim_start)
+                .skip_while(|line| !line.starts_with(&format!("pub struct {owner} ")))
+                .take_while(|line| !line.starts_with('}'))
+                .find_map(|line| line.strip_prefix(&format!("pub {field}: ")))
+                .map(|ty| ty.trim_end_matches(',').to_owned())
+        };
+        assert_eq!(
+            field_type("Holder", "direct").as_deref(),
+            Some("Option<Base>"),
+            "{types}"
+        );
+        assert_eq!(
+            field_type("Base", "meta").as_deref(),
+            Some("Option<Basemeta>"),
+            "{types}"
+        );
+        assert_eq!(
+            field_type("Holder", "code").as_deref(),
+            Some("Option<Code>"),
+            "{types}"
+        );
+        let wrapped_meta = field_type("Holderwrapped", "meta").expect("the member's `meta`");
+        assert_ne!(wrapped_meta, "Option<Basemeta>", "{types}");
+        let mut declared: Vec<String> = types
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                line.strip_prefix("pub struct ")
+                    .or_else(|| line.strip_prefix("pub enum "))
+            })
+            .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
+            .map(str::to_owned)
+            .collect();
+        declared.sort();
+        names.push((declared, wrapped_meta, field_type("Holder", "wrappedCode")));
+    }
+    assert_eq!(names[0], names[1], "lowering order renamed a type");
+}
+
 /// A **root-only** document — no sub-files, no remote refs — whose `allOf` member reaches the
 /// component being lowered through a component **alias**.
 ///
