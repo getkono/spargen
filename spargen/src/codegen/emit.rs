@@ -3436,7 +3436,8 @@ mod tests {
     use crate::diag::{Diagnostics, JsonPointer, Provenance};
     use crate::ir::{
         Api, Docs, Info, MediaType, Method, Operation, OperationId, PathSegment, PathTemplate,
-        Prim, Response, Responses, StatusSpec, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+        Prim, Response, Responses, Server, StatusSpec, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+        UrlSegment,
     };
 
     /// The error type emitted for `get /message`, whose only documented error is a `400` carrying
@@ -3579,5 +3580,136 @@ mod tests {
             super::runtime_status_spec(StatusSpec::Range(0)).to_string(),
             super::runtime_status_spec(StatusSpec::Default).to_string()
         );
+    }
+
+    /// The name of every `fn` in each inherent `impl <self_ty>` block among `items`, nested modules
+    /// included, appended to `into`.
+    fn inherent_methods(items: &[syn::Item], self_ty: &str, into: &mut Vec<String>) {
+        for item in items {
+            match item {
+                syn::Item::Impl(block) if block.trait_.is_none() => {
+                    let syn::Type::Path(path) = &*block.self_ty else {
+                        continue;
+                    };
+                    if !path.path.is_ident(self_ty) {
+                        continue;
+                    }
+                    into.extend(block.items.iter().filter_map(|item| match item {
+                        syn::ImplItem::Fn(method) => Some(method.sig.ident.to_string()),
+                        _ => None,
+                    }));
+                }
+                syn::Item::Mod(module) => {
+                    if let Some((_, items)) = &module.content {
+                        inherent_methods(items, self_ty, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Issue #286: operation methods share `impl Client` and `impl BlockingClient` with the fixed
+    /// constructors and accessors, so `name::CLIENT_METHODS` must be exactly the fixed methods
+    /// emitted there, and an operation spelling each of them must yield rather than duplicate it.
+    /// The API declares a server so `with_default_server` is emitted.
+    #[test]
+    fn client_methods_are_exactly_the_fixed_methods_and_operations_yield_to_them() {
+        let operation = |id: &str| Operation {
+            id: OperationId(id.to_owned()),
+            method: Method::Get,
+            path: PathTemplate {
+                raw: format!("/{id}"),
+                segments: vec![PathSegment::Literal(format!("/{id}"))],
+            },
+            params: Vec::new(),
+            request_body: None,
+            responses: Responses {
+                by_status: vec![(
+                    StatusSpec::Exact(204),
+                    Response {
+                        body: None,
+                        media: None,
+                        stream: None,
+                        headers: Vec::new(),
+                    },
+                )],
+                default: None,
+            },
+            security: Vec::new(),
+            deprecated: false,
+            docs: Docs::default(),
+            server: None,
+            provenance: Provenance::new(JsonPointer::root().push(id), None),
+        };
+        let api = Api {
+            info: Info {
+                title: "T".to_owned(),
+                version: "1".to_owned(),
+                description: None,
+            },
+            servers: vec![Server {
+                name: None,
+                url: "https://api.example.com".to_owned(),
+                segments: vec![UrlSegment::Literal("https://api.example.com".to_owned())],
+                variables: IndexMap::new(),
+                description: None,
+            }],
+            operations: crate::name::CLIENT_METHODS
+                .iter()
+                .map(|method| operation(method))
+                .collect(),
+            types: TypeGraph::default(),
+            security_schemes: IndexMap::new(),
+        };
+        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let options = CodegenOptions::default();
+        let client: syn::File = syn::parse2(super::emit_client(&api, &names, &options))
+            .expect("the emitted client parses");
+        let blocking: syn::File = syn::parse2(super::emit_blocking_client(&api, &names, &options))
+            .expect("the emitted blocking client parses");
+
+        let operation_methods: std::collections::BTreeSet<String> = names
+            .operations
+            .values()
+            .map(|ident| ident.as_str().to_owned())
+            .collect();
+        let mut fixed = std::collections::BTreeSet::new();
+        for (file, self_ty) in [(&client, "Client"), (&blocking, "BlockingClient")] {
+            let mut methods = Vec::new();
+            inherent_methods(&file.items, self_ty, &mut methods);
+            let unique: std::collections::BTreeSet<&String> = methods.iter().collect();
+            assert_eq!(
+                unique.len(),
+                methods.len(),
+                "`impl {self_ty}` defines a method twice: {methods:?}"
+            );
+            for method in &operation_methods {
+                assert!(
+                    methods.contains(method),
+                    "`impl {self_ty}` lacks operation method `{method}`: {methods:?}"
+                );
+            }
+            fixed.extend(
+                methods
+                    .into_iter()
+                    .filter(|method| !operation_methods.contains(method)),
+            );
+        }
+        let reserved: std::collections::BTreeSet<String> = crate::name::CLIENT_METHODS
+            .iter()
+            .map(|method| (*method).to_owned())
+            .collect();
+        assert_eq!(
+            fixed, reserved,
+            "`name::CLIENT_METHODS` must list exactly the fixed methods of `Client` and \
+             `BlockingClient`"
+        );
+        for method in crate::name::CLIENT_METHODS {
+            assert!(
+                !operation_methods.contains(*method),
+                "operation `{method}` kept the bare spelling of a fixed client method"
+            );
+        }
     }
 }

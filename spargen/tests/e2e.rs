@@ -220,6 +220,79 @@ fn an_operation_named_after_a_runtime_type_still_compiles() {
     );
 }
 
+/// One operation per fixed inherent method of `Client` and `BlockingClient` (issue #286). The spec
+/// declares a server, so `with_default_server` is emitted too, and the fixture is checked with the
+/// `blocking` feature on, so the `BlockingClient` methods (`inner` among them) are compiled.
+const CLIENT_METHOD_COLLISION_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: https://api.example.com
+paths:
+  /new:
+    get: { operationId: new, responses: { "204": { description: ok } } }
+  /with-default-server:
+    get: { operationId: withDefaultServer, responses: { "204": { description: ok } } }
+  /with-client:
+    get: { operationId: withClient, responses: { "204": { description: ok } } }
+  /with-backend:
+    get: { operationId: withBackend, responses: { "204": { description: ok } } }
+  /core:
+    get: { operationId: core, responses: { "204": { description: ok } } }
+  /with-credential:
+    get: { operationId: withCredential, responses: { "204": { description: ok } } }
+  /inner:
+    get: { operationId: inner, responses: { "204": { description: ok } } }
+"#;
+
+/// An `operationId` spelling one of the client's own inherent methods must still produce a module
+/// that compiles. Operation methods share `impl Client` (and `impl BlockingClient`) with the
+/// constructors and accessors, so `operationId: withCredential` otherwise emits a second
+/// `pub fn with_credential`, which is `E0592`.
+#[test]
+fn an_operation_named_after_a_client_method_still_compiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, CLIENT_METHOD_COLLISION_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "client_method_collide");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    for method in [
+        "new",
+        "with_default_server",
+        "with_client",
+        "with_backend",
+        "core",
+        "with_credential",
+        "inner",
+    ] {
+        assert!(
+            generated.contains(&format!("pub async fn {method}_")),
+            "operation `{method}` must yield to the client method of that name:\n{generated}"
+        );
+    }
+
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "an operationId matching a fixed client method must still generate compiling code"
+    );
+}
+
 /// A spec whose only binary payload is one documented error body. `ErrorShape::Single` over a
 /// `TypeKind::Bytes` is the shape where generated code and the dependency contract can most easily
 /// disagree: the body never travels through serde (it is classified by `classify_error_bytes`), so

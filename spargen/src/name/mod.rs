@@ -61,6 +61,23 @@ pub(crate) struct Names {
     pub(crate) response_header_fields: HashMap<(OperationId, String, String), Ident>,
 }
 
+/// The fixed inherent methods codegen emits on `Client` and `BlockingClient`, beside one method
+/// per operation. Operation method names are allocated after these are reserved, so an
+/// `operationId` that spells one of them (`withCredential`, `new`, …) is disambiguated instead of
+/// emitting a duplicate definition. `with_default_server` is emitted only when the specification
+/// declares a server and `inner` only on `BlockingClient`; both are reserved unconditionally, so
+/// an operation's method name does not change when a server is added. `codegen`'s tests hold this
+/// list to exactly the methods it emits.
+pub(crate) const CLIENT_METHODS: &[&str] = &[
+    "new",
+    "with_default_server",
+    "with_client",
+    "with_backend",
+    "core",
+    "with_credential",
+    "inner",
+];
+
 /// Generator-owned bindings emitted inside one operation method.
 #[derive(Debug)]
 pub(crate) struct OperationBindings {
@@ -190,7 +207,12 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
         }
     }
 
+    // Operation methods share `impl Client` and `impl BlockingClient` with the fixed methods, so
+    // those spellings are taken before any operation asks for one.
     let mut operation_scope = Scope::default();
+    for method in CLIENT_METHODS {
+        operation_scope.reserve(method, IdentRole::Method);
+    }
     let mut params_scope = Scope::default();
     for operation in &api.operations {
         names.operations.insert(
