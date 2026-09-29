@@ -1406,6 +1406,22 @@ fn absent_optional_fields_use_schema_defaults() {
 }
 
 #[test]
+fn an_uninhabited_optional_field_drops_its_members_default() {
+    // Absent, the field stays absent: no default provider fabricates a value no type admits.
+    let merged: basic_client::types::ConflictDefault = serde_json::from_str("{}").unwrap();
+    assert!(merged.x.is_none());
+    let sibling: basic_client::types::ConflictDefaultSibling = serde_json::from_str("{}").unwrap();
+    assert!(sibling.x.is_none());
+    // Present, no value decodes: neither member's type is the field's.
+    assert!(serde_json::from_str::<basic_client::types::ConflictDefault>(r#"{"x": "a"}"#).is_err());
+    assert!(serde_json::from_str::<basic_client::types::ConflictDefault>(r#"{"x": 1}"#).is_err());
+    assert!(
+        serde_json::from_str::<basic_client::types::ConflictDefaultSibling>(r#"{"x": "a"}"#)
+            .is_err()
+    );
+}
+
+#[test]
 fn pattern_properties_capture_into_typed_overflow_map() {
     // The declared `host` field is typed; every non-declared property is captured by the flatten
     // `BTreeMap<String, String>` overflow that `patternProperties` lowered to.
@@ -3782,6 +3798,26 @@ components:
             empty_only:
               type: array
               items: { type: "null" }
+    # An optional property whose member types cannot meet is typed uninhabited, and the applied
+    # `default` one member declares for it must not survive: a serde default provider returning
+    # `Some("a")` for an uninhabited field does not compile. Both spellings of the conjunction —
+    # inline `allOf` members, and a `$ref` with sibling `properties` — are held here.
+    ConflictDefaultTarget:
+      type: object
+      properties:
+        x: { type: string, default: a }
+    ConflictDefault:
+      allOf:
+        - type: object
+          properties:
+            x: { type: string, default: a }
+        - type: object
+          properties:
+            x: { type: integer }
+    ConflictDefaultSibling:
+      $ref: "#/components/schemas/ConflictDefaultTarget"
+      properties:
+        x: { type: integer }
     StringLiteral:
       type: string
       enum: [special]
