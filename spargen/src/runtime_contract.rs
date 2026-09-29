@@ -474,11 +474,22 @@ pub(crate) struct Audit {
 }
 
 pub(crate) fn cargo_directives(manifests: &[Utf8PathBuf]) {
-    for manifest in manifests {
-        if !manifest.as_str().contains(['\n', '\r']) {
-            println!("cargo:rerun-if-changed={manifest}");
-        }
+    for directive in rerun_directives(manifests) {
+        println!("{directive}");
     }
+}
+
+/// One `cargo:rerun-if-changed` line per audited manifest.
+///
+/// Cargo reads build-script output line by line and has no escape for a line break, so a path
+/// carrying one cannot be named: written out, everything after the break would reach Cargo as a
+/// directive of its own. Such a path is left out rather than split.
+fn rerun_directives(manifests: &[Utf8PathBuf]) -> Vec<String> {
+    manifests
+        .iter()
+        .filter(|manifest| !manifest.as_str().contains(['\n', '\r']))
+        .map(|manifest| format!("cargo:rerun-if-changed={manifest}"))
+        .collect()
 }
 
 /// One dependency the consuming package must declare, as spargen derived it from the lowered API.
@@ -742,12 +753,9 @@ fn audit_in(
     let root = workspace_root(manifest_path, &manifest);
     // Only a *separate* workspace manifest is read and reported: a self-rooted one is this very
     // file, already parsed above and already in `manifests`.
-    let separate = root
-        .path
-        .as_deref()
-        .filter(|_| !root.is_self)
-        .and_then(|path| {
-            manifests.push(path.to_path_buf());
+    let separate = match &root {
+        WorkspaceRoot::Separate(path) => {
+            manifests.push(path.clone());
             match read_toml(path, "workspace manifest") {
                 Ok(value) => Some(value),
                 Err(message) => {
@@ -755,27 +763,31 @@ fn audit_in(
                     None
                 }
             }
-        });
-    let workspace = if root.is_self {
-        Some(&manifest)
-    } else {
-        separate.as_ref()
+        }
+        WorkspaceRoot::SelfRooted(_) | WorkspaceRoot::NotFound { .. } => None,
+    };
+    let workspace = match &root {
+        WorkspaceRoot::SelfRooted(_) => Some(&manifest),
+        WorkspaceRoot::Separate(_) | WorkspaceRoot::NotFound { .. } => separate.as_ref(),
     };
     // Three outcomes, not two: a root that resolved, a root that was found and could not be read
     // (already reported just above), and no root at all. Their remedies differ, so an unresolvable
     // inheritance has to be able to tell them apart.
-    let origin = match (&root.path, workspace.is_some()) {
-        (Some(path), true) => WorkspaceOrigin::Resolved(path),
+    let origin = match &root {
+        WorkspaceRoot::SelfRooted(path) => WorkspaceOrigin::Resolved(path),
+        WorkspaceRoot::Separate(path) if separate.is_some() => WorkspaceOrigin::Resolved(path),
         // Read and failed, so `read_toml` has already reported why on its own line.
-        (Some(path), false) => WorkspaceOrigin::Unreadable(path),
+        WorkspaceRoot::Separate(path) => WorkspaceOrigin::Unreadable(path),
         // No root was found. A candidate the walk could not parse is not thereby a root — it may
         // be a sibling crate or a stray file far outside the project — so it never replaces "not
         // found"; it rides along as a hint, carrying its own reason because nothing else is going
         // to print one.
-        (None, _) => WorkspaceOrigin::NotFound {
-            searched_from: &root.searched_from,
-            skipped: root
-                .unreadable
+        WorkspaceRoot::NotFound {
+            searched_from,
+            unreadable,
+        } => WorkspaceOrigin::NotFound {
+            searched_from,
+            skipped: unreadable
                 .as_ref()
                 .map(|(path, reason)| (path.as_path(), reason.as_str())),
         },
@@ -847,27 +859,36 @@ fn read_toml(path: &Utf8Path, kind: &str) -> Result<toml::Value, String> {
 }
 
 /// Which manifest a `workspace = true` dependency resolves its declaration against.
-struct WorkspaceRoot {
-    /// The manifest carrying `[workspace.dependencies]`, when one was found.
-    path: Option<Utf8PathBuf>,
-    /// Whether that manifest is the consumer manifest itself — `[package]` and `[workspace]` in
-    /// one file. It is already parsed, so it must not be read a second time.
-    is_self: bool,
-    /// The absolutized consumer manifest the search ran from. A diagnostic that names the caller's
-    /// raw spelling would say "resolved nothing from `./Cargo.toml`", which tells the reader
-    /// nothing at all.
-    searched_from: Utf8PathBuf,
-    /// The nearest ancestor manifest that exists and does not parse, with the failure that stopped
-    /// it, when the search ended without a root.
-    ///
-    /// A hint appended to "no workspace manifest was found", never a replacement for it: it names
-    /// a file the reader can open and says what is wrong with it, conditionally, because nothing
-    /// here knows it was the workspace root — the walk gave up on it precisely because it could
-    /// not tell, and it may as well be a sibling crate or a stray file far above the project. It
-    /// is never treated as a manifest and never joins `manifests`: treating it as a root would
-    /// turn an ordinary crate that happens to sit under an unparseable `Cargo.toml` into a hard
-    /// `E023`, and naming it as one sends the reader to repair a file unrelated to their build.
-    unreadable: Option<(Utf8PathBuf, String)>,
+///
+/// Each outcome carries only what is read from it: the path searched from exists only where no
+/// root was found, the one place it is named. It was once a field of every outcome, and on the
+/// others it was never read, so nothing could observe what it held (#202).
+enum WorkspaceRoot {
+    /// The consumer manifest itself — `[package]` and `[workspace]` in one file — at its
+    /// absolutized path. It is already parsed and already in `manifests`, so it must not be read or
+    /// recorded a second time.
+    SelfRooted(Utf8PathBuf),
+    /// A separate manifest carrying `[workspace.dependencies]`, still to be read.
+    Separate(Utf8PathBuf),
+    /// None was found.
+    NotFound {
+        /// The absolutized consumer manifest the search ran from. A diagnostic that names the
+        /// caller's raw spelling would say "found nothing above `Cargo.toml`", which tells the
+        /// reader nothing at all.
+        searched_from: Utf8PathBuf,
+        /// The nearest ancestor manifest that exists and does not parse, with the failure that
+        /// stopped it.
+        ///
+        /// A hint appended to "no workspace manifest was found", never a replacement for it: it
+        /// names a file the reader can open and says what is wrong with it, conditionally, because
+        /// nothing here knows it was the workspace root — the walk gave up on it precisely because
+        /// it could not tell, and it may as well be a sibling crate or a stray file far above the
+        /// project. It is never treated as a manifest and never joins `manifests`: treating it as a
+        /// root would turn an ordinary crate that happens to sit under an unparseable `Cargo.toml`
+        /// into a hard `E023`, and naming it as one sends the reader to repair a file unrelated to
+        /// their build.
+        unreadable: Option<(Utf8PathBuf, String)>,
+    },
 }
 
 /// Locate the workspace manifest a `workspace = true` dependency inherits from.
@@ -886,40 +907,33 @@ struct WorkspaceRoot {
 /// ancestors to walk, which would report every inherited dependency as unresolvable. Absolutizing
 /// is lexical and keeps any `..`, since folding those away changes which file a path names when a
 /// component is a symlink; the walk therefore climbs the path as written, not as the filesystem
-/// would resolve it.
+/// would resolve it. For the same reason it is never canonicalized: Cargo climbs the manifest path
+/// it hands the build, symlinks unresolved, so a canonical walk from a member reached through a
+/// symlinked directory would find a different root than Cargo did.
 fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> WorkspaceRoot {
     let absolute = std::path::absolute(manifest_path)
         .ok()
         .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
         .unwrap_or_else(|| manifest_path.to_path_buf());
     if manifest.get("workspace").is_some() {
-        return WorkspaceRoot {
-            // Absolutized for the same reason `searched_from` is: this path is what an
-            // unresolvable inheritance names, and `./Cargo.toml` tells the reader nothing. It is
-            // not added to `manifests` — a self-rooted manifest is the consumer manifest, already
-            // recorded — so naming it fully cannot duplicate a `rerun-if-changed` directive.
-            path: Some(absolute.clone()),
-            is_self: true,
-            searched_from: absolute,
-            unreadable: None,
-        };
+        // Absolutized for the same reason `searched_from` is: this path is what an unresolvable
+        // inheritance names, and `./Cargo.toml` tells the reader nothing. It is not added to
+        // `manifests` — a self-rooted manifest is the consumer manifest, already recorded — so
+        // naming it fully cannot duplicate a `rerun-if-changed` directive.
+        return WorkspaceRoot::SelfRooted(absolute);
     }
-    let separate = |path| WorkspaceRoot {
-        path,
-        is_self: false,
-        searched_from: absolute.clone(),
-        unreadable: None,
-    };
     if let Some(relative) = manifest
         .get("package")
         .and_then(|value| value.get("workspace"))
         .and_then(toml::Value::as_str)
     {
-        return separate(
-            absolute
-                .parent()
-                .map(|parent| parent.join(relative).join("Cargo.toml")),
-        );
+        return match absolute.parent() {
+            Some(parent) => WorkspaceRoot::Separate(parent.join(relative).join("Cargo.toml")),
+            None => WorkspaceRoot::NotFound {
+                searched_from: absolute,
+                unreadable: None,
+            },
+        };
     }
     let mut directory = absolute.parent().and_then(Utf8Path::parent);
     // The nearest candidate that exists and does not parse. Remembered, never acted on: a valid
@@ -937,7 +951,7 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
                     toml::from_str::<toml::Value>(&contents).map_err(|error| error.to_string())
                 }) {
                 Ok(value) if value.get("workspace").is_some() => {
-                    return separate(Some(candidate));
+                    return WorkspaceRoot::Separate(candidate);
                 }
                 // A manifest that parses but declares no `[workspace]` is an ordinary member or an
                 // unrelated crate: keep climbing.
@@ -948,13 +962,11 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
         directory = candidate_dir.parent();
     }
     // Nothing on the path declared `[workspace]`, so there is no root to audit. The unreadable
-    // candidate rides along as `unreadable` rather than as `path`: it adds a hint to the
-    // not-found message an unresolvable inheritance prints, and nothing else. Handing it back as a
-    // root would have it audited and recorded as a dependency of the build, turning an ordinary
-    // crate that merely sits beneath a broken `Cargo.toml` into a hard `E023`.
-    WorkspaceRoot {
-        path: None,
-        is_self: false,
+    // candidate rides along as `unreadable` rather than as a root: it adds a hint to the not-found
+    // message an unresolvable inheritance prints, and nothing else. Handing it back as a root
+    // would have it audited and recorded as a dependency of the build, turning an ordinary crate
+    // that merely sits beneath a broken `Cargo.toml` into a hard `E023`.
+    WorkspaceRoot::NotFound {
         searched_from: absolute,
         unreadable,
     }
@@ -3076,6 +3088,93 @@ serde_json.workspace = true
     }
 
     #[test]
+    fn a_relative_manifest_path_with_no_root_names_the_absolute_path_searched_from() {
+        // "No workspace manifest was found above `Cargo.toml`" names no directory at all. The
+        // search runs from the absolutized path, and the message must name that one; reporting
+        // the caller's spelling instead left every test green (#202).
+        let directory = tempfile::tempdir().unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        std::fs::write(
+            member_dir.join("Cargo.toml"),
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let _lock = WORKING_DIRECTORY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreWorkingDirectory(std::env::current_dir().unwrap());
+        std::env::set_current_dir(&member_dir).unwrap();
+        // How the platform spells the temporary directory is its own business (`/tmp` may be a
+        // symlink), so the expected path is the working directory as the process reports it.
+        let searched_from =
+            Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap().join("Cargo.toml"))
+                .unwrap();
+
+        let result = audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
+        assert!(!result.diagnostics.is_empty());
+        for diagnostic in &result.diagnostics {
+            assert_eq!(
+                manifest_named_after(
+                    &diagnostic.message,
+                    "no workspace manifest was found above `"
+                ),
+                Some(searched_from.as_str()),
+                "{}",
+                diagnostic.message
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_walk_climbs_a_symlinked_member_path_as_written() {
+        // Absolutization is lexical: `std::path::absolute`, not `canonicalize`. Swapping one for
+        // the other left every test green (#202), and they disagree exactly here — a member reached
+        // through a symlinked directory. Cargo climbs the path it was given, which is the path it
+        // hands the build as `CARGO_MANIFEST_DIR`, so the root is the one above the link, not the
+        // one above where the link points.
+        let directory = tempfile::tempdir().unwrap();
+        let lexical = directory.path().join("lexical");
+        let physical = directory.path().join("physical");
+        std::fs::create_dir_all(physical.join("client")).unwrap();
+        std::fs::create_dir(&lexical).unwrap();
+        std::os::unix::fs::symlink(physical.join("client"), lexical.join("client")).unwrap();
+        let lexical_root = Utf8PathBuf::from_path_buf(lexical.join("Cargo.toml")).unwrap();
+        let physical_root = Utf8PathBuf::from_path_buf(physical.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &lexical_root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        // A root above the link's target that declares nothing, so resolving against it cannot
+        // pass for resolving against the lexical one.
+        std::fs::write(
+            &physical_root,
+            "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n",
+        )
+        .unwrap();
+        let member = Utf8PathBuf::from_path_buf(lexical.join("client").join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        assert_eq!(
+            result.manifests,
+            vec![lexical_root, member],
+            "the workspace root must be the one above the link as written"
+        );
+    }
+
+    #[test]
     fn a_self_rooted_manifest_names_an_absolute_path_when_an_entry_is_missing() {
         // The layout the relative-path fix exists for: a single-crate repository whose `[package]`
         // and `[workspace]` share one file, reached through a relative manifest path. The
@@ -3529,6 +3628,46 @@ serde_json.workspace = true
     }
 
     #[test]
+    fn a_root_declaring_optional_does_not_satisfy_the_rule_that_tokio_be_optional() {
+        // The other half of the fixture above. `optional` is read from the member in both
+        // directions, and that fixture holds only the forbidden one: reading the root as well on
+        // the required side — so a root `optional = true` excuses a member that leaves it out —
+        // left every test green (#202). Cargo rejects `optional` in `[workspace.dependencies]`,
+        // so this, too, pins a rule rather than a layout Cargo loads.
+        let directory = tempfile::tempdir().unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
+                 tokio = {{ version = \"1.53.1\", features = [\"rt\"], optional = true }}\n",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[features]\n\
+                 blocking = [\"dep:tokio\"]\n\n{CORE_INHERITED}\n\
+                 [target.'cfg(not(target_arch=\"wasm32\"))'.dependencies]\n\
+                 tokio = {{ workspace = true }}\n"
+            ),
+        )
+        .unwrap();
+        for target in [TargetContext::Unknown, linux()] {
+            let result = audit_in(&member, &RuntimeRequirements::default(), &target);
+            assert_eq!(
+                messages(&result.diagnostics),
+                "`tokio` must be optional because it is enabled only by the generated `blocking` \
+                 feature"
+            );
+        }
+    }
+
+    #[test]
     fn a_self_rooted_manifest_reached_by_a_relative_path_is_recorded_once() {
         // A self-rooted manifest is the consumer manifest, already read and already recorded, so
         // resolution must not read it a second time or record it again. Reached by an absolute
@@ -3559,6 +3698,26 @@ serde_json.workspace = true
             result.manifests,
             vec![Utf8PathBuf::from("Cargo.toml")],
             "the consumer manifest must be recorded once, under the spelling it was given"
+        );
+    }
+
+    #[test]
+    fn a_manifest_path_with_a_line_break_is_never_written_as_a_directive() {
+        // Deleting the guard left the whole suite green (#202). Written out, the text after the
+        // break would reach Cargo as a directive of its own, so a crafted directory name could
+        // inject one. Every other path is still named, in the order given.
+        let manifests = [
+            Utf8PathBuf::from("/work/client/Cargo.toml"),
+            Utf8PathBuf::from("/work/x\ncargo:rustc-cfg=injected/Cargo.toml"),
+            Utf8PathBuf::from("/work/y\rcargo:rustc-cfg=injected/Cargo.toml"),
+            Utf8PathBuf::from("/work/Cargo.toml"),
+        ];
+        assert_eq!(
+            rerun_directives(&manifests),
+            [
+                "cargo:rerun-if-changed=/work/client/Cargo.toml",
+                "cargo:rerun-if-changed=/work/Cargo.toml",
+            ]
         );
     }
 
