@@ -756,16 +756,17 @@ fn audit_in(
     let origin = match (&root.path, workspace.is_some()) {
         (Some(path), true) => WorkspaceOrigin::Resolved(path),
         // Read and failed, so `read_toml` has already reported why on its own line.
-        (Some(path), false) => WorkspaceOrigin::Unreadable { path, reason: None },
-        // No root was read. A candidate the walk could not parse is still the better answer than
-        // "nothing found" — it names a file to open — but it stays a message and nothing more, so
-        // it has to carry its own reason: nothing else is going to print one.
-        (None, _) => match &root.unreadable {
-            Some((path, reason)) => WorkspaceOrigin::Unreadable {
-                path,
-                reason: Some(reason),
-            },
-            None => WorkspaceOrigin::NotFound(&root.searched_from),
+        (Some(path), false) => WorkspaceOrigin::Unreadable(path),
+        // No root was found. A candidate the walk could not parse is not thereby a root — it may
+        // be a sibling crate or a stray file far outside the project — so it never replaces "not
+        // found"; it rides along as a hint, carrying its own reason because nothing else is going
+        // to print one.
+        (None, _) => WorkspaceOrigin::NotFound {
+            searched_from: &root.searched_from,
+            skipped: root
+                .unreadable
+                .as_ref()
+                .map(|(path, reason)| (path.as_path(), reason.as_str())),
         },
     };
 
@@ -848,12 +849,13 @@ struct WorkspaceRoot {
     /// The nearest ancestor manifest that exists and does not parse, with the failure that stopped
     /// it, when the search ended without a root.
     ///
-    /// Strictly a better *message* than "no workspace manifest was found": it names a file the
-    /// reader can open, and says what is wrong with it. It is never treated as a manifest and
-    /// never joins `manifests`, because nothing here knows it was the workspace root — the walk
-    /// gave up on it precisely because it could not tell. Treating it as a root would turn an
-    /// ordinary crate that happens to sit under an unparseable `Cargo.toml` into a hard `E023`,
-    /// which is a far worse answer than a vague one.
+    /// A hint appended to "no workspace manifest was found", never a replacement for it: it names
+    /// a file the reader can open and says what is wrong with it, conditionally, because nothing
+    /// here knows it was the workspace root — the walk gave up on it precisely because it could
+    /// not tell, and it may as well be a sibling crate or a stray file far above the project. It
+    /// is never treated as a manifest and never joins `manifests`: treating it as a root would
+    /// turn an ordinary crate that happens to sit under an unparseable `Cargo.toml` into a hard
+    /// `E023`, and naming it as one sends the reader to repair a file unrelated to their build.
     unreadable: Option<(Utf8PathBuf, String)>,
 }
 
@@ -934,10 +936,10 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
         directory = candidate_dir.parent();
     }
     // Nothing on the path declared `[workspace]`, so there is no root to audit. The unreadable
-    // candidate rides along as `unreadable` rather than as `path`: it sharpens the message an
-    // unresolvable inheritance prints, and nothing else. Handing it back as a root would have it
-    // audited and recorded as a dependency of the build, turning an ordinary crate that merely
-    // sits beneath a broken `Cargo.toml` into a hard `E023`.
+    // candidate rides along as `unreadable` rather than as `path`: it adds a hint to the
+    // not-found message an unresolvable inheritance prints, and nothing else. Handing it back as a
+    // root would have it audited and recorded as a dependency of the build, turning an ordinary
+    // crate that merely sits beneath a broken `Cargo.toml` into a hard `E023`.
     WorkspaceRoot {
         path: None,
         is_self: false,
@@ -964,17 +966,19 @@ enum WorkspaceOrigin<'a> {
     Resolved(&'a Utf8Path),
     /// One was found but could not be read or parsed.
     ///
-    /// `reason` carries the read failure for the walk's fallback, where nothing else reports it:
-    /// that candidate is never audited as a manifest, so no separate parse diagnostic accompanies
-    /// it and this message is the only place the failure appears. It is `None` for a root named by
-    /// `package.workspace`, which *is* audited, and whose failure is therefore already reported as
-    /// its own diagnostic — repeating it here would print it twice.
-    Unreadable {
-        path: &'a Utf8Path,
-        reason: Option<&'a str>,
+    /// Only a root the audit actually read reaches here — one `package.workspace` named, or one
+    /// the walk parsed that then failed on the audit's own read — so its failure is already
+    /// reported as a diagnostic of its own, and repeating the reason here would print it twice.
+    Unreadable(&'a Utf8Path),
+    /// None was found, having searched upwards from `searched_from`.
+    NotFound {
+        searched_from: &'a Utf8Path,
+        /// The nearest ancestor manifest the walk skipped because it could not be read, with the
+        /// failure. Rendered as a conditional hint, never as "its workspace manifest": nothing
+        /// established it was one. It carries its reason because this message is the only place
+        /// the failure appears — the candidate is never audited as a manifest.
+        skipped: Option<(&'a Utf8Path, &'a str)>,
     },
-    /// None was found, having searched upwards from this manifest path.
-    NotFound(&'a Utf8Path),
 }
 
 fn check_dependency(
@@ -1249,18 +1253,24 @@ fn check_declaration<'v>(
             WorkspaceOrigin::Resolved(path) => {
                 format!("`{path}` declares no `{}` there", dependency.name)
             }
-            WorkspaceOrigin::Unreadable { path, reason: None } => {
+            WorkspaceOrigin::Unreadable(path) => {
                 format!("its workspace manifest `{path}` could not be read")
             }
-            WorkspaceOrigin::Unreadable {
-                path,
-                reason: Some(reason),
+            WorkspaceOrigin::NotFound {
+                searched_from,
+                skipped: None,
             } => {
-                format!("its workspace manifest `{path}` could not be read: {reason}")
-            }
-            WorkspaceOrigin::NotFound(searched_from) => {
                 format!("no workspace manifest was found above `{searched_from}`")
             }
+            // Not found, first and unconditionally: the skipped file is only a possible cause,
+            // so it is named conditionally and never as "its workspace manifest".
+            WorkspaceOrigin::NotFound {
+                searched_from,
+                skipped: Some((path, reason)),
+            } => format!(
+                "no workspace manifest was found above `{searched_from}`; if the workspace root \
+                 is `{path}`, it could not be read: {reason}"
+            ),
         };
         diagnostics.push(diagnostic(format!(
             "`{}` inherits from `[workspace.dependencies]`, but {origin}{location}",
@@ -2564,8 +2574,8 @@ serde_json.workspace = true
     /// it in the test.** It does not make the body true. A clause that is false today stays false
     /// with both guards green — the promise that a root which cannot be *found* is reported
     /// differently from one that cannot be *read* was exactly that, pinned here and mirrored in
-    /// the expected file while contradicting `workspace_root`, until it was narrowed to what the
-    /// resolver does — and a maintainer who re-types a change into the expected file has made this
+    /// the expected file while contradicting `workspace_root`, until the resolver was made to keep
+    /// it (#171) — and a maintainer who re-types a change into the expected file has made this
     /// test agree with it, not verified it. Holding the prose to the code is a wider question than this one code, and is **#137**.
     #[test]
     fn the_e023_explain_text_states_the_inheritance_rules_this_module_enforces() {
@@ -2686,40 +2696,39 @@ serde_json.workspace = true
             unresolved_outcomes,
         );
 
-        // The no-root-found outcome, which the clause above deliberately does not claim precision
-        // for. `workspace_root` keeps the *first* unparseable candidate the walk met and the
-        // renderer prints it as "its workspace manifest", though nothing established it was one —
-        // so the text promises only that the nearest unreadable ancestor is named, and says in the
-        // same breath that an unrelated broken `Cargo.toml` above the project may be the file it
-        // named. Making the stronger promise true is **#171**: its remedy reports not-found and
-        // demotes that file to a hint, which reds `a_corrupt_ancestor_...` (it asserts the message
-        // does *not* say "no workspace manifest was found above") and leaves
-        // `the_nearest_corrupt_ancestor_...` green, because that one asserts only nearest-over-far,
-        // which the remedy preserves.
+        // The no-root-found outcome. `workspace_root` keeps the *first* unparseable candidate the
+        // walk met, but nothing established it was the root — it may be a sibling crate or a stray
+        // file far above the project — so `check_declaration` reports not-found first and renders
+        // that candidate only as a conditional hint, never as "its workspace manifest" (#171).
+        // Each clause below is observed by the fixtures it cites: not-found with no candidate at
+        // all, not-found with one, and nearest-over-far with two.
+        promises(
+            "when no root is found at all it says that no workspace manifest was found",
+            &[
+                "an_unresolvable_inheritance_says_where_the_lookup_went",
+                "a_corrupt_ancestor_is_only_a_hint_when_no_workspace_root_was_found",
+            ],
+        );
         promises(
             "names the nearest ancestor manifest that failed to read",
             &[
-                "a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found",
+                "a_corrupt_ancestor_is_only_a_hint_when_no_workspace_root_was_found",
                 "the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found",
             ],
         );
-
-        // How a reader tells the two limbs apart, which is the whole point of naming the same noun
-        // in both. The renderings genuinely differ and the text now says how: the no-root limb
-        // appends its reason to the inheritance sentence, because the walk never read that
-        // candidate as a manifest and nothing else will ever print why it failed; a root named by
-        // `package.workspace` *is* read, so its failure is a diagnostic of its own and the
-        // inheritance message stays bare. Both halves are rendered by `check_declaration`'s two
-        // `WorkspaceOrigin::Unreadable` arms, and the fixtures below assert the exact strings —
-        // dropping the noun phrase from either arm, or moving the reason across, reds them.
         promises(
-            "which that message appends to itself after a colon because nothing else is going to \
-             print it",
-            &["a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found"],
+            "only as a possible root together with the reason it could not be read — never as the \
+             workspace manifest",
+            &["a_corrupt_ancestor_is_only_a_hint_when_no_workspace_root_was_found"],
         );
+
+        // The other limb, which *is* the workspace manifest: a root named by `package.workspace`
+        // is read, so its failure is a diagnostic of its own and the inheritance message stays
+        // bare. The fixtures below assert the exact strings — appending the reason, or renaming
+        // the file to anything but "its workspace manifest", reds them.
         promises(
-            "its inheritance message carries no such suffix and a read-failure diagnostic naming \
-             the same file stands above it",
+            "its inheritance message carries no reason of its own and a read-failure diagnostic \
+             naming the same file stands above it",
             &[
                 "a_workspace_root_that_cannot_be_read_is_not_reported_as_missing",
                 "a_package_workspace_naming_a_directory_without_a_manifest_is_a_workspace_read_failure",
@@ -3097,29 +3106,14 @@ serde_json.workspace = true
     }
 
     #[test]
-    fn a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found() {
-        // The commonest layout reaches its root through the walk rather than through
-        // `package.workspace`, and the walk used to skip any candidate it could not parse and keep
-        // climbing — collapsing the three-way distinction back to "nothing found" for exactly the
-        // case where a file the reader can open is the problem.
-        //
-        // **This fixture pins behaviour that is known to be wrong, deliberately.** When no
-        // workspace root exists anywhere on the walk and any
-        // ancestor failed to parse, that ancestor is reported as "its workspace manifest", though
-        // nothing established it was one and it may be an unrelated crate outside the project.
-        // The `E023` explain text no longer promises otherwise — it says only that the nearest
-        // unreadable ancestor is named, and says in the same breath that an unrelated broken
-        // `Cargo.toml` above the project takes that place — so what is wrong here is the
-        // diagnostic, and that is **#171**.
-        //
-        // When #171 is fixed this test **must** change, and it is the **only** one its stated
-        // remedy reds: the second assertion below requires the message *not* to say "no workspace
-        // manifest was found above", which is precisely what the remedy makes it say. The
-        // assertion then becomes that the diagnostic says no workspace manifest was found, while
-        // still naming the unreadable candidate as a hint rather than as the root. Its apparent
-        // sibling `the_nearest_corrupt_ancestor_is_reported_although_no_workspace_root_was_found`
-        // is **not** the other half of a pair and must not be changed or deleted with it: that
-        // fixture asserts only nearest-over-far, which the remedy preserves.
+    fn a_corrupt_ancestor_is_only_a_hint_when_no_workspace_root_was_found() {
+        // No `[workspace]` anywhere on the walk, and one ancestor that does not parse. Nothing
+        // establishes that file is the workspace root — in a real layout it is as likely a sibling
+        // crate, `$HOME/Cargo.toml`, or a stray scratch file — so the diagnostic must say *not
+        // found*, and mention the file only as a possible cause. It once reported the file as "its
+        // workspace manifest", sending the reader to repair something unrelated to their build,
+        // after which the same `E023` recurred because the repaired file declares no `[workspace]`
+        // either (#171).
         let directory = tempfile::tempdir().unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -3133,48 +3127,38 @@ serde_json.workspace = true
         .unwrap();
 
         let result = audit(&member, &RuntimeRequirements::default());
+        // Every inherited crate is reported, each as not found and each carrying the hint — the
+        // whole message pinned as one string from the verdict through the reason, so the verdict
+        // cannot be dropped, the hint cannot be promoted back to the root, and the reason cannot
+        // move away from the file it explains with this fixture still green. The reason has to
+        // ride inline: the candidate is never audited as a manifest, so nothing else prints why
+        // it failed.
+        for dependency in ["bytes", "reqwest", "secrecy", "serde", "serde_json"] {
+            let expected = format!(
+                "`{dependency}` inherits from `[workspace.dependencies]`, but no workspace \
+                 manifest was found above `{member}`; if the workspace root is `{root}`, it could \
+                 not be read: TOML parse error"
+            );
+            assert!(
+                result
+                    .diagnostics
+                    .iter()
+                    .any(|diagnostic| diagnostic.message.starts_with(&expected)),
+                "{expected}\n{:#?}",
+                result.diagnostics
+            );
+        }
+        // The file is never called what nothing established it to be.
         assert!(
-            result.diagnostics.iter().any(|diagnostic| {
-                diagnostic.message.contains("`bytes` inherits")
-                    && diagnostic.message.contains("could not be read")
-                    && diagnostic.message.contains(root.as_str())
-                    // The candidate is never audited as a manifest, so nothing else prints why
-                    // it failed. The message has to carry the reason itself.
-                    && diagnostic.message.contains("TOML parse error")
-            }),
-            "{:#?}",
-            result.diagnostics
-        );
-        assert!(
-            !result.diagnostics.iter().any(|diagnostic| {
-                diagnostic
-                    .message
-                    .contains("no workspace manifest was found above")
-            }),
-            "{:#?}",
-            result.diagnostics
-        );
-        // The rendering the assertions above leave loose. The `E023` explain text now tells a
-        // reader to identify *this* limb by the reason arriving **inline** — appended to the
-        // inheritance sentence after a colon — so the noun phrase and that suffix are pinned as one
-        // string rather than as substrings free to drift apart. Asserting "could not be read" and
-        // "TOML parse error" separately, as the block above does, leaves the renderer free to
-        // rename the file ("the ancestor manifest `…`") or to move the reason elsewhere in the
-        // sentence with this fixture still green, and either mutation falsifies the explain text.
-        assert!(
-            result
+            !result
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains(&format!(
-                    "its workspace manifest `{root}` could not be read: TOML parse error"
-                ))),
+                .any(|diagnostic| diagnostic.message.contains("its workspace manifest")),
             "{:#?}",
             result.diagnostics
         );
-        // And the other half of that identification rule: why the reason has to ride inline at all.
-        // This candidate is never read as a manifest, so no read-failure diagnostic of its own
-        // accompanies it — which is exactly what a root named by `package.workspace` has instead,
-        // and is how the two limbs are told apart.
+        // Nothing reads it as a manifest: no read-failure diagnostic of its own — which is what a
+        // root named by `package.workspace` has instead — and no rebuild trigger on it.
         assert!(
             !result
                 .diagnostics
@@ -3183,6 +3167,7 @@ serde_json.workspace = true
             "nothing else reports this file, so the message must carry its reason: {:#?}",
             result.diagnostics
         );
+        assert_eq!(result.manifests, vec![member], "{:#?}", result.manifests);
     }
 
     #[test]
@@ -3369,7 +3354,7 @@ serde_json.workspace = true
 
     #[test]
     fn a_workspace_root_that_failed_to_parse_explains_itself_once() {
-        // `WorkspaceOrigin::Unreadable::reason` is `None` for a root named by `package.workspace`,
+        // `WorkspaceOrigin::Unreadable` carries no reason for a root named by `package.workspace`,
         // and its doc argues why: that root *is* audited, so `read_toml` already reported the parse
         // failure on its own line and "repeating it here would print it twice". Threading the real
         // reason through would do exactly that, and nothing noticed.
@@ -3415,16 +3400,11 @@ serde_json.workspace = true
         // With two broken manifests on one path and no `[workspace]` anywhere, only that choice is
         // observable, and no other fixture puts two of them on a single walk.
         //
-        // **This fixture must survive #171, and must not be deleted with it.** It is easily
-        // mistaken for a second copy of
-        // `a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found`,
-        // which does pin wording #171 will change. It is not one. Its two assertions say only
-        // that the message names the *near* broken manifest and not the far one, and #171's own
-        // stated remedy — report that no workspace manifest was found, mentioning the unreadable
-        // ancestor as a possible cause — still names the nearest such ancestor, so both
-        // assertions hold unchanged after it lands. No other fixture in this module puts two
-        // broken manifests on one walk, so deleting this one would leave the nearest-wins rule
-        // in `workspace_root` with no guard at all.
+        // It is not a second copy of
+        // `a_corrupt_ancestor_is_only_a_hint_when_no_workspace_root_was_found`, which pins the
+        // wording of the hint: this one says only that the hint names the *near* broken manifest
+        // and not the far one. No other fixture in this module puts two broken manifests on one
+        // walk, so deleting it would leave the nearest-wins rule in `workspace_root` unguarded.
         let directory = tempfile::tempdir().unwrap();
         let far = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let near_dir = directory.path().join("near");
@@ -3697,14 +3677,13 @@ serde_json.workspace = true
             "found-but-broken must not be reported as missing: {:#?}",
             result.diagnostics
         );
-        // The mirror of the rule `a_corrupt_ancestor_is_reported_as_the_workspace_manifest_although_none_was_found`
+        // The mirror of the rule `a_corrupt_ancestor_is_only_a_hint_when_no_workspace_root_was_found`
         // pins from the other side, and the rule the `E023` explain text hands the reader: a root
         // the consumer's own `package.workspace` named is read in its own right, so its failure is
         // a diagnostic standing *above* the inheritance message, and the inheritance message
-        // carries **no** `: {reason}` suffix. Both halves are asserted, because the absence is what
-        // distinguishes this limb and a renderer that started appending the reason here — or that
-        // renamed the file to anything but "its workspace manifest" — would falsify the text while
-        // every assertion above stayed green.
+        // carries **no** `: {reason}` suffix. Both halves are asserted, because a renderer that
+        // started appending the reason here — or that renamed the file to anything but "its
+        // workspace manifest" — would falsify the text while every assertion above stayed green.
         let failure = result
             .diagnostics
             .iter()
@@ -3764,8 +3743,8 @@ serde_json.workspace = true
             result.diagnostics
         );
         // And the reason must not ride inline in *any* shape, not merely without a colon. The
-        // explain text makes an inline reason the signature of the other limb, so a separator of
-        // any kind appended here falsifies it; `!contains("could not be read:")` forbade one
+        // explain text says this limb's inheritance message carries no reason of its own, so a
+        // separator of any kind appended here falsifies it; `!contains("could not be read:")` forbade one
         // spelling and left the rest — an em dash among them — free. Pinning the end of the
         // message forbids all of them. `location` is empty here: one counting table.
         assert!(
