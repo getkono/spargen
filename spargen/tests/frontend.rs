@@ -12927,7 +12927,12 @@ paths:
     assert!(code.contains("pub mod servers"), "{code}");
     assert!(code.contains("pub fn default_url()"), "{code}");
     // The `enum` variable becomes a closed type, so an illegal region cannot be constructed.
-    assert!(code.contains("pub enum RegionalRegion"), "{code}");
+    // Its variant set is the claim, so a dropped variant must fail here, not just a dropped type.
+    assert_eq!(
+        enum_variants(&code, "RegionalRegion"),
+        ["Us", "Eu"],
+        "{code}"
+    );
     assert!(code.contains("with_default_server"), "{code}");
 }
 
