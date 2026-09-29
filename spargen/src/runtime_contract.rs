@@ -474,11 +474,22 @@ pub(crate) struct Audit {
 }
 
 pub(crate) fn cargo_directives(manifests: &[Utf8PathBuf]) {
-    for manifest in manifests {
-        if !manifest.as_str().contains(['\n', '\r']) {
-            println!("cargo:rerun-if-changed={manifest}");
-        }
+    for directive in rerun_directives(manifests) {
+        println!("{directive}");
     }
+}
+
+/// One `cargo:rerun-if-changed` line per audited manifest.
+///
+/// Cargo reads build-script output line by line and has no escape for a line break, so a path
+/// carrying one cannot be named: written out, everything after the break would reach Cargo as a
+/// directive of its own. Such a path is left out rather than split.
+fn rerun_directives(manifests: &[Utf8PathBuf]) -> Vec<String> {
+    manifests
+        .iter()
+        .filter(|manifest| !manifest.as_str().contains(['\n', '\r']))
+        .map(|manifest| format!("cargo:rerun-if-changed={manifest}"))
+        .collect()
 }
 
 /// One dependency the consuming package must declare, as spargen derived it from the lowered API.
@@ -3599,6 +3610,26 @@ serde_json.workspace = true
             result.manifests,
             vec![Utf8PathBuf::from("Cargo.toml")],
             "the consumer manifest must be recorded once, under the spelling it was given"
+        );
+    }
+
+    #[test]
+    fn a_manifest_path_with_a_line_break_is_never_written_as_a_directive() {
+        // Deleting the guard left the whole suite green (#202). Written out, the text after the
+        // break would reach Cargo as a directive of its own, so a crafted directory name could
+        // inject one. Every other path is still named, in the order given.
+        let manifests = [
+            Utf8PathBuf::from("/work/client/Cargo.toml"),
+            Utf8PathBuf::from("/work/x\ncargo:rustc-cfg=injected/Cargo.toml"),
+            Utf8PathBuf::from("/work/y\rcargo:rustc-cfg=injected/Cargo.toml"),
+            Utf8PathBuf::from("/work/Cargo.toml"),
+        ];
+        assert_eq!(
+            rerun_directives(&manifests),
+            [
+                "cargo:rerun-if-changed=/work/client/Cargo.toml",
+                "cargo:rerun-if-changed=/work/Cargo.toml",
+            ]
         );
     }
 
