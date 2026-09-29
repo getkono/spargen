@@ -2761,12 +2761,12 @@ serde_json.workspace = true
 
     #[test]
     fn an_inherited_member_cannot_make_an_unconditional_crate_optional() {
-        // The mirror of `workspace_inherited_tokio_under_an_alternative_spelling_resolves`: `optional`
-        // is read from the member, so a member that adds `optional = true` to a crate generated
-        // code names unconditionally must be rejected — the inheritance resolving is not the same
-        // thing as the declaration being acceptable. Every other test that reaches this rule
-        // declares its crate directly, so nothing held it on the inheritance path, which is the
-        // path this branch is about.
+        // The mirror of `workspace_inherited_tokio_under_an_alternative_spelling_resolves`:
+        // `optional` is read from the member, so a member that adds `optional = true` to a crate
+        // generated code names unconditionally must be rejected — the inheritance resolving is not
+        // the same thing as the declaration being acceptable. Every other test that reaches this
+        // rule declares its crate directly, so nothing held it on the inheritance path, which is
+        // the path this branch is about.
         let messages = inherited_reqwest_default_feature_diagnostics(
             RootDefaults::Off,
             "reqwest = { workspace = true, optional = true }",
