@@ -2397,6 +2397,12 @@ fn a_failed_token_provider_is_a_typed_request_construction_error() {
     // through the chain, which is how an application reports *why* the refresh failed.
     assert!(!error.is_transient());
     let cause = std::error::Error::source(&error).unwrap();
+    // The request-level message is a fixed sentence naming the scheme, not the provider's text:
+    // the provider's own message is one level further down, where it is downcast below.
+    assert_eq!(
+        cause.to_string(),
+        "the token provider registered for security scheme `bearer` failed"
+    );
     let provider = std::error::Error::source(cause).unwrap();
     assert!(provider.downcast_ref::<basic_client::AuthError>().is_some());
 }
