@@ -1421,6 +1421,48 @@ fn an_uninhabited_optional_field_drops_its_members_default() {
     );
 }
 
+// An optional uninhabited field is `Option<Never>`, and serde's `Option<T>` maps a JSON `null` to
+// `None` without ever calling `T::deserialize` — so without a field-level deserializer the
+// uninhabited type is never consulted and `{"x": null}`, which no schema here admits, decodes and
+// re-serialises as `{}`. Every spelling that produces such a field is held to the same five rows:
+// absent and unknown-only documents decode (and round-trip to `{}`), and any present value —
+// `null` included — is rejected.
+fn assert_only_absence_decodes<T>(type_name: &str)
+where
+    T: serde::de::DeserializeOwned + serde::Serialize + std::fmt::Debug,
+{
+    for valid in ["{}", r#"{"zz": 1}"#] {
+        let value: T = serde_json::from_str(valid)
+            .unwrap_or_else(|error| panic!("{type_name}: {valid} must decode: {error}"));
+        assert_eq!(serde_json::to_string(&value).unwrap(), "{}", "{type_name}: {valid}");
+    }
+    for invalid in [r#"{"x": 1}"#, r#"{"x": "s"}"#, r#"{"x": null}"#] {
+        let decoded = serde_json::from_str::<T>(invalid);
+        assert!(
+            decoded.is_err(),
+            "{type_name}: {invalid} names a value no type admits, yet decoded as {decoded:?}"
+        );
+    }
+}
+
+#[test]
+fn an_uninhabited_optional_field_admits_only_absence() {
+    assert_only_absence_decodes::<basic_client::types::ConflictDefault>("ConflictDefault");
+    assert_only_absence_decodes::<basic_client::types::ConflictDefaultSibling>(
+        "ConflictDefaultSibling",
+    );
+    assert_only_absence_decodes::<basic_client::types::ForbiddenProperty>("ForbiddenProperty");
+}
+
+#[test]
+fn a_nullable_uninhabited_field_still_admits_null() {
+    // `null` is the one value a nullable `false` schema admits, so there the `Option` is the type.
+    let present: basic_client::types::NullOnlyProperty =
+        serde_json::from_str(r#"{"x": null}"#).unwrap();
+    assert!(present.x.is_none());
+    assert!(serde_json::from_str::<basic_client::types::NullOnlyProperty>(r#"{"x": 1}"#).is_err());
+}
+
 #[test]
 fn pattern_properties_capture_into_typed_overflow_map() {
     // The declared `host` field is typed; every non-declared property is captured by the flatten
@@ -3818,6 +3860,21 @@ components:
       $ref: "#/components/schemas/ConflictDefaultTarget"
       properties:
         x: { type: integer }
+    # The direct spelling of an uninhabited optional property: a `false` subschema. Absence is the
+    # only valid form, `null` included among the rejected values.
+    ForbiddenProperty:
+      type: object
+      properties:
+        x: false
+    # A nullable union over `false`: `null` is the one value it admits, so here the `Option` itself
+    # is the type and `{"x": null}` must still decode.
+    NullOnlyProperty:
+      type: object
+      properties:
+        x:
+          anyOf:
+            - false
+            - type: "null"
     StringLiteral:
       type: string
       enum: [special]
