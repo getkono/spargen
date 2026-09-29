@@ -50,9 +50,7 @@ impl MockServer {
         std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
-                if let Some(path) = answer(stream, &routes) {
-                    recorded.lock().unwrap().push(path);
-                }
+                answer(stream, &routes, &recorded);
             }
         });
         Self { base, hits }
@@ -67,8 +65,16 @@ impl MockServer {
     }
 }
 
-/// Read one request head, write the routed reply, and return the requested path.
-fn answer(mut stream: TcpStream, routes: &BTreeMap<&'static str, Reply>) -> Option<String> {
+/// Read one request head, record its path, then write the routed reply.
+///
+/// The path is recorded *before* the reply is written. Once `write_all` returns, the client may
+/// already have its response and the test may already be reading the hit list, so a path
+/// recorded after the write could be missing from that read.
+fn answer(
+    mut stream: TcpStream,
+    routes: &BTreeMap<&'static str, Reply>,
+    recorded: &Mutex<Vec<String>>,
+) -> Option<()> {
     let mut head = Vec::new();
     let mut byte = [0u8; 1];
     while !head.ends_with(b"\r\n\r\n") {
@@ -93,8 +99,8 @@ fn answer(mut stream: TcpStream, routes: &BTreeMap<&'static str, Reply>) -> Opti
         "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
-    stream.write_all(response.as_bytes()).ok()?;
-    Some(path)
+    recorded.lock().unwrap().push(path);
+    stream.write_all(response.as_bytes()).ok()
 }
 
 /// A remote schema whose own `$ref` is relative, so it must resolve against the fetched URL.
