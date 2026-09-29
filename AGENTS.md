@@ -220,6 +220,23 @@ Standing invariants:
   API; module privacy plus the layering DAG is how coupling stays controlled. The DAG is enforced
   by `spargen/tests/layering.rs`, which diffs each `//! layer-deps:` header against the module's
   real `crate::` edges.
+- A doc comment may say that something **does not exist** — no such operation, no nameable
+  type, no such variant, not among these entries — only while a test fails as soon as that
+  stops being true. Otherwise say what does exist in the present tense ("`set_credential` is the
+  only writer"), or leave the sentence out. Behavioural claims such as "never sent" do not count;
+  their tests are the ordinary ones. An absence claim is true on the day it is written, and the
+  change that makes it false is a feature landing correctly, which rewrites no prose. The rule
+  was written from two such claims (#201), and each has its test. `attach_auth`'s insert-only
+  paragraph, embedded into every generated client, is held by
+  `the_shipped_insert_only_credential_claim_still_holds` in `support-runtime/src/dispatch.rs`.
+  That test also checks for its sentence, so removing the sentence fails it until the test is
+  removed too. `Responses::success`'s "`default` is never among them" is held by its doctest.
+  That doctest does not check for the sentence, so it would outlive it. When such a test fails, rewrite the
+  sentence and retire the test with it; do not widen the test. Review enforces this rule, not a
+  gate. There is deliberately no compile-fail (`trybuild`) harness. It could prove that a
+  consumer's crate cannot name a type. It could not prove that an operation is missing at every
+  layer, which a test reading the source can check. A claim that a type cannot be named is
+  better written as the present-tense fact behind it, for example "boxed behind a private type".
 
 ## Testing strategy (by subsystem)
 
