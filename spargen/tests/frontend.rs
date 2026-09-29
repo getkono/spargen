@@ -13977,6 +13977,141 @@ paths:
     assert!(code.contains(".mime_str(\"image/png\")"), "{code}");
 }
 
+/// A `multipart/form-data` body with one property `part` of the given schema, whose Encoding
+/// Object declares the given `contentType`.
+fn multipart_part_declaring(schema: &str, content_type: &str) -> String {
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+paths:
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                part: {schema}
+            encoding:
+              part: {{ contentType: "{content_type}" }}
+      responses:
+        '204': {{ description: ok }}
+"##
+    )
+}
+
+#[test]
+fn e009_a_multipart_json_rendered_part_declaring_a_non_json_content_type() {
+    // A part whose property is not a scalar or bytes is rendered as JSON whatever its
+    // `contentType` says, so any declaration that is not JSON would put JSON bytes under a header
+    // naming another syntax — `application/xml` over an object is the case #177 reports. Unlike
+    // a string under `image/png` (a text part, whose bytes are the string the document
+    // described), no reader of the document predicts JSON here, so it is rejected rather than sent.
+    // The sent (first) element of a list is what is judged, and named.
+    let object = "{ type: object, properties: { id: { type: integer } } }";
+    let cases = [
+        (object, "application/xml", "application/xml"),
+        (object, "text/xml", "text/xml"),
+        (object, "text/plain", "text/plain"),
+        (
+            object,
+            "application/octet-stream",
+            "application/octet-stream",
+        ),
+        (object, "image/png", "image/png"),
+        // Well-formed, but naming no codec spargen has: still not JSON on the wire.
+        (object, "application/yaml", "application/yaml"),
+        (
+            object,
+            "application/xml, application/json",
+            "application/xml",
+        ),
+        (
+            "{ type: array, items: { type: string } }",
+            "text/csv",
+            "text/csv",
+        ),
+        (
+            "{ oneOf: [ { type: string }, { type: object } ] }",
+            "application/xml",
+            "application/xml",
+        ),
+        ("{}", "application/xml", "application/xml"),
+    ];
+    for (schema, declared, sent) in cases {
+        let spec = multipart_part_declaring(schema, declared);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{schema} / {declared}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::UnsupportedMediaType
+                        && d.message.contains("`part`")
+                        && d.message.contains(&format!("`contentType: {sent}`"))
+                        && d.message.contains("JSON")
+                }),
+                "{schema} / {declared}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_multipart_part_keeps_a_declared_content_type_its_bytes_agree_with() {
+    // The boundary of the rejection above: a JSON-rendered part declaring JSON (plain or a
+    // `+json` structured suffix, in any letter case, since media types are case-insensitive) is
+    // what it says, and a scalar or bytes part carries any well-formed declaration as its header —
+    // a string is the text the document described and bytes are whatever the caller supplies, so
+    // neither is re-encoded against the header.
+    let object = "{ type: object, properties: { id: { type: integer } } }";
+    let cases = [
+        (object, "application/json", "serde_json::to_string("),
+        (object, "Application/JSON", "serde_json::to_string("),
+        (object, "application/vnd.api+json", "serde_json::to_string("),
+        (
+            "{ type: array, items: { type: integer } }",
+            "application/json; charset=utf-8",
+            "serde_json::to_string(",
+        ),
+        ("{ type: string }", "application/xml", "Part::text("),
+        ("{ type: integer }", "text/csv", "Part::text("),
+        (
+            "{ type: string, contentEncoding: base64 }",
+            "application/xml",
+            "Part::bytes(",
+        ),
+    ];
+    for (schema, declared, rendering) in cases {
+        let spec = multipart_part_declaring(schema, declared);
+        assert_ne!(
+            check(&spec).outcome(),
+            Outcome::Rejected,
+            "{schema} / {declared}"
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{schema} / {declared}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{schema} / {declared}: {report:#?}"
+        );
+        assert!(code.contains(rendering), "{schema} / {declared}: {code}");
+        assert!(
+            code.contains(&format!(".mime_str(\"{declared}\")")),
+            "{schema} / {declared}: {code}"
+        );
+    }
+}
+
 #[test]
 fn w011_a_response_header_with_binary_family_content_is_acknowledged() {
     // A response header's `content` keyed `image/png` now classifies (as opaque octets) instead of
