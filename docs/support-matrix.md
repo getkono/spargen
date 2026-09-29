@@ -11,8 +11,10 @@ untyped; degradation is never silent.
 What a test holds here is narrower than the table may suggest: every diagnostic code a cell cites
 must be a declared code, and every declared code must appear in the column its severity names
 (Warned or Rejected), whatever other cells also mention it. The prose of a cell is reviewed by hand and checked by nothing, so an edit to it
-needs the same scrutiny as the behavior it describes. Where a test pins the wording of the text
-`spargen explain` prints for a code, the row defers to that text rather than restating it.
+needs the same scrutiny as the behavior it describes. Where a test pins the text `spargen explain`
+prints for a code byte for byte (as for `E023`), the row defers to that text rather than restating
+it. A body a test only requires to contain certain phrases (`E004`'s enumerated cases) is not
+pinned that way, and rows citing that code still describe the case they report.
 
 | Area | Supported | Warned | Rejected |
 | --- | --- | --- | --- |
