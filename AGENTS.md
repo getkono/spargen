@@ -61,6 +61,7 @@ mise run corpus-smoke  # pinned real-world specs
 mise run example    # both petstore examples over a local mock server
 mise run github-api # the full GitHub client: native strict clippy + wasm32
 mise run deny       # supply-chain audit
+mise run deny-published  # advisory audit of the Cargo.lock the latest release ships
 mise run docs       # build the mdBook site (fails on broken links/includes)
 mise run doc-links  # rustdoc over the workspace, warnings denied, private items included
 ```
@@ -90,7 +91,9 @@ holds both sides of `msrv` to the workspace `rust-version` (`cargo +1.88.0 …` 
 `dtolnay/rust-toolchain@1.88.0`), since `rust-toolchain.toml` would otherwise select its own
 release. CI's `test` job is `mise run test` followed by `mise run bench-build`; `bench` is held to
 `benchmarks.yml`, and `deny` to `deny.yml`, which runs it on `ci.yml`'s triggers plus a daily
-schedule (see "Lockfiles and advisories" below). The only differences are named exceptions in that test's `PAIRINGS` table, each
+schedule, and `deny-published` to the same file's job of that name, which runs only on the
+schedule and on `workflow_dispatch` (its pinned `if:` is a named exception; see "Lockfiles and
+advisories" below). The only differences are named exceptions in that test's `PAIRINGS` table, each
 pinned literally on both sides: `commits` checks the pull request's `base.sha..head.sha` where
 `commit-range` checks `origin/master..HEAD` (only the range is rewritten; the rest must match), the
 `package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only,
@@ -109,7 +112,7 @@ pin is bumped by hand, in a PR of its own that changes `rust-toolchain.toml`'s `
 passes clippy and fmt on the new release; locally, `rustup` installs the new release on the first
 `cargo` call in the checkout. The rest — `check`, `bench-build`,
 `msrv`, `package`, `runtime-dependencies`, `powerset`, `corpus-smoke`, `example`, `github-api`,
-`deny`, `docs`, and the rustdoc link check `doc-links` runs (a step inside the `docs` job, not a
+`deny`, `deny-published`, `docs`, and the rustdoc link check `doc-links` runs (a step inside the `docs` job, not a
 job of its own) — never run in a hook; they are too slow, so a green pre-push is not a green CI.
 `msrv` needs `rustup toolchain install 1.88.0`, and `package` a clean tree. Run `mise run hooks`
 once to install them.
@@ -132,6 +135,18 @@ red with nothing committed. Three things hold the audit to the committed artefac
 - The `example` gate's first step asserts that no example lockfile holds a TLS crate (`rustls`,
   `native-tls`, `openssl`, `webpki`, or any `*-tls`), which is the premise `deny.toml` reasons
   about TLS advisories on: generated output carries its own default-features-off `reqwest`.
+
+The committed lockfile is not the only one users install from. `spargen` has a `[[bin]]`, so its
+`.crate` ships a `Cargo.lock`, and `cargo install spargen --features cli --locked` installs that
+lockfile's pins; a fix on `master` reaches it only when a release carries it. `mise run
+deny-published` downloads the latest stable `spargen` release from crates.io and runs `cargo deny
+check advisories` over the `Cargo.lock` inside it (`--locked`, `--all-features`, under this
+`deny.toml`). `deny.yml`'s `deny-published` job runs it on the daily schedule and on
+`workflow_dispatch`, never on a pull request or push: no diff changes a published artefact.
+`the_published_lockfile_audit_covers_every_shipped_binary` holds it to every published crate that
+ships a binary (a library's shipped lockfile is never resolved against). A red `deny-published`
+is fixed the same way as a red `deny` below, and then by a release: merge release-plz's pull
+request once the fix is on `master`, or yank the affected version where no fix exists.
 
 A red `deny` for an advisory or yank the diff did not introduce is the **maintainers'** to fix, not
 the author's of whichever pull request showed it first. It is fixed the day it is seen, in a

@@ -55,6 +55,33 @@ run = [
 description = "Supply-chain audit (licenses, advisories, bans)"
 run = "cargo deny --all-features --locked check"
 
+[tasks.deny-published]
+# `spargen` has a `[[bin]]`, so its `.crate` ships a `Cargo.lock`, and `cargo install spargen
+# --features cli --locked` installs exactly that lockfile's pins. `deny` audits the committed
+# lockfile; this audits the published one, which a fix on `master` reaches only when a release
+# carries it (#178). The audited release is crates.io's `max_stable_version`, the one a bare
+# `cargo install --locked` picks. It is extracted under `target/`, inside this workspace, so the
+# empty `[workspace]` appended to its manifest keeps cargo from reading it as a member; that table
+# changes no resolution, and `--locked` fails the audit if the shipped lockfile would be rewritten
+# (or is missing). CI's `deny-published` job in `deny.yml` runs these commands byte for byte, only
+# on the schedule and on `workflow_dispatch`: a pull request cannot change a published artefact, so
+# failing one on it would only block the release that carries the fix.
+# `the_published_lockfile_audit_covers_every_shipped_binary` pins its shape.
+description = "Advisory audit of the Cargo.lock the latest spargen release ships on crates.io"
+run = [
+  '''
+rm -rf target/deny-published
+mkdir -p target/deny-published/spargen
+curl -sSf -A 'getkono/spargen deny-published (https://github.com/getkono/spargen)' -o target/deny-published/crate.json https://crates.io/api/v1/crates/spargen
+version=$(jq -er .crate.max_stable_version target/deny-published/crate.json)
+curl -sSfL -o target/deny-published/spargen.crate "https://static.crates.io/crates/spargen/spargen-$version.crate"
+tar -xzf target/deny-published/spargen.crate -C target/deny-published/spargen --strip-components=1
+printf '\n[workspace]\n' >> target/deny-published/spargen/Cargo.toml
+echo "auditing the Cargo.lock published in spargen $version"
+''',
+  "cargo deny --manifest-path target/deny-published/spargen/Cargo.toml --config deny.toml --all-features --locked check advisories",
+]
+
 [tasks.bench]
 description = "Run the generation benchmarks (criterion). CI uploads these as a release artifact."
 # The same bounded warm-up and measurement times `benchmarks.yml` records with, so a local run
