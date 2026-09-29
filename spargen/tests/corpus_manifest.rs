@@ -2225,6 +2225,33 @@ fn spells_test_name(span: &str) -> bool {
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
+/// The backticked spans of a table cell that cite a test: every span naming a test in `defined`
+/// exactly, whatever its shape, plus every span shaped like a test name, so a citation of a test
+/// that was renamed or removed is still collected and reported stale. The exact match comes
+/// first because `spells_test_name`'s underscore floor would otherwise drop a defined test with
+/// a short name, which the row could then never satisfy.
+fn cited_test_names<'a>(cell: &'a str, defined: &BTreeSet<String>) -> Vec<&'a str> {
+    cell.split('`')
+        .skip(1)
+        .step_by(2)
+        .filter(|span| defined.contains(*span) || spells_test_name(span))
+        .collect()
+}
+
+#[test]
+fn a_cited_test_counts_whatever_its_name_is_shaped_like() {
+    let defined: BTreeSet<String> = ["short_name", "a_long_test_name"].map(str::to_owned).into();
+    assert_eq!(
+        cited_test_names(
+            "`short_name`, `a_long_test_name`, `a_renamed_test_name`, `sha256`, `x_y`",
+            &defined
+        ),
+        ["short_name", "a_long_test_name", "a_renamed_test_name"],
+        "a defined test is cited by its exact name, and a test-shaped span by its shape; \
+         an undefined short span is not a citation"
+    );
+}
+
 #[test]
 fn the_testing_strategy_table_names_every_test_in_its_suite() {
     // CLAUDE.md's testing-strategy table is where a change learns which suite its guard belongs
@@ -2271,11 +2298,8 @@ fn the_testing_strategy_table_names_every_test_in_its_suite() {
         }
         rows += 1;
         named.extend(
-            cover
-                .split('`')
-                .skip(1)
-                .step_by(2)
-                .filter(|span| spells_test_name(span))
+            cited_test_names(cover, &defined)
+                .into_iter()
                 .map(str::to_owned),
         );
     }
