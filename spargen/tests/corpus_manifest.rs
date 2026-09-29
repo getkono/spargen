@@ -1231,6 +1231,16 @@ const PAIRINGS: &[Pairing] = &[
         ..PAIR
     }),
     Pairing::Identical(Pair {
+        job: "release-preview",
+        tasks: &["release-preview"],
+        ci_only: &[
+            provision("uses: actions/checkout@v4\nwith:\n  fetch-depth: 0"),
+            STABLE,
+            provision("uses: taiki-e/install-action@v2\nwith:\n  tool: release-plz@0.3.160"),
+        ],
+        ..PAIR
+    }),
+    Pairing::Identical(Pair {
         workflow: "deny.yml",
         job: "deny",
         tasks: &["deny"],
@@ -2040,6 +2050,15 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
                                 None => (tool.to_owned(), None),
                             }));
                         }
+                    } else if lowered.starts_with("release-plz/action@") {
+                        // The action installs release-plz itself, at its `version:` input or, when
+                        // that is absent, at a default that moves with the action's ref. It is
+                        // the binary that writes the published CHANGELOG, so it must be the one
+                        // `mise run release-preview` previews with (#190).
+                        events.push(Event::Install((
+                            "release-plz".to_owned(),
+                            step["with"]["version"].as_str().map(str::to_owned),
+                        )));
                     }
                 }
                 if let Some(run) = step["run"].as_str() {
