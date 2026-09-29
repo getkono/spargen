@@ -83,7 +83,10 @@ the version it emits, and the idioms spargen handles.
 - One `async` method per operation: required parameters positional, optional parameters in a
   per-operation `…Params` struct deriving `Default`, `Result<ResponseValue<T>, Error<E>>` out.
   String parameters and the params bundle take `impl Into<…>`, so `client.get_pet("1")` and
-  `client.list_pets(params)` need no `to_owned()` or `Some`.
+  `client.list_pets(params)` need no `to_owned()` or `Some`. An operation whose method name
+  would spell one of `Client`'s or `BlockingClient`'s fixed methods (`new`, `with_credential`,
+  …) takes a disambiguated name instead. `with_default_server` and `inner` are reserved on both
+  clients whether or not that client emits them, so declaring a server never renames an operation.
 - `Client::with_credential(scheme, credential)` registers static secrets (via
   [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
   requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.
