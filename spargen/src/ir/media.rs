@@ -131,7 +131,17 @@ pub(crate) enum StatusSpec {
 }
 
 impl StatusSpec {
-    /// Whether the selector covers only success (2xx) statuses.
+    /// Whether the selector covers only success (2xx) statuses: an exact code in `200..=299`, or
+    /// the `2XX` range. Every other selector — `1XX`, `3XX`, `4XX`, `5XX`, and each exact code in
+    /// them — is on the error side of the generated shape, `304 Not Modified` included (issue
+    /// #198). That is RFC 9110's own classification (§15.3 "Successful 2xx"; 304 is in §15.4
+    /// "Redirection 3xx"), and it is the only one the generated dispatch can honour: an emitted
+    /// method enters its success branch on the transport's `StatusCode::is_success()`, which is
+    /// exactly 2xx, so a status this predicate put on the success side would be a variant no
+    /// response could reach. A documented `304` is therefore a typed outcome of the error side —
+    /// a unit variant of the operation's error enum, or `UnexpectedStatus` carrying the status
+    /// where that side has no enum — never a decode failure; a documented `301`/`302`/`303`/
+    /// `307`/`308` reaches it only when the injected client's redirect policy does not follow it.
     pub(crate) fn is_success(self) -> bool {
         match self {
             StatusSpec::Exact(code) => (200..300).contains(&code),
@@ -217,7 +227,11 @@ impl Responses {
     /// decodes to a stream that yields nothing.
     ///
     /// The entries are the lowered success statuses of `by_status`, not everything the document
-    /// declares; `default` is never among them. It is the success source only when `by_status`
+    /// declares; `default` is never among them. A success status is a 2xx one as
+    /// [`StatusSpec::is_success`] decides it, so a documented `3XX` — `304 Not Modified` included —
+    /// is never an entry here and never promotes a lone body to the enum: `200` with a body beside
+    /// a bodyless `304` is plain `T`, and the `304` is on the error side (issue #198; the
+    /// tests below pin both, since issue #105 exists because this comment was once false). It is the success source only when `by_status`
     /// documents no success status at all (see [`Self::default_is_success_source`]) — the early
     /// return that bypasses the count above — and is offered to the error shape as the `Range(0)`
     /// sentinel whenever it is declared, subject there to the same body count (see
@@ -868,6 +882,83 @@ mod tests {
             default: None,
         };
         assert!(responses.xml_in_multi_status());
+    }
+
+    #[test]
+    fn only_2xx_selectors_are_success_and_every_other_range_prefix_is_error() {
+        // Issue #198: the predicate that splits every generated shape. The emitted method enters
+        // its success branch on the transport's `StatusCode::is_success()` — exactly 200..=299 —
+        // so this must agree with it at every code RFC 9110 defines a class for, and on every range.
+        for code in 100..=599u16 {
+            assert_eq!(
+                StatusSpec::Exact(code).is_success(),
+                (200..=299).contains(&code),
+                "exact status {code}",
+            );
+        }
+        for (prefix, success) in [(1, false), (2, true), (3, false), (4, false), (5, false)] {
+            assert_eq!(
+                StatusSpec::Range(prefix).is_success(),
+                success,
+                "range {prefix}XX"
+            );
+        }
+        // `default`'s sentinel is never a success selector; it reaches the success side only
+        // through `default_is_success_source`.
+        assert!(!StatusSpec::Range(0).is_success());
+    }
+
+    #[test]
+    fn a_documented_304_or_3xx_is_on_the_error_side_and_promotes_no_success_enum() {
+        // A bodied `200` beside a bodyless `304`: the `304` is no success entry, so the lone body
+        // stays plain `T` (a bodyless 2xx sibling would have made it an enum), and the `304` is an
+        // error-side entry — dropped from `Single` beside one bodied error, a unit variant of the
+        // error enum beside two.
+        let single = Responses {
+            by_status: vec![
+                (StatusSpec::Exact(200), resp(Some(1))),
+                (StatusSpec::Exact(304), resp(None)),
+                (StatusSpec::Exact(404), resp(Some(2))),
+            ],
+            default: None,
+        };
+        assert!(matches!(single.success(), SuccessShape::Plain(body) if body.id == TypeId(1)));
+        assert!(matches!(single.error(), ErrorShape::Single(body) if body.id == TypeId(2)));
+
+        let multi = Responses {
+            by_status: vec![
+                (StatusSpec::Exact(200), resp(Some(1))),
+                (StatusSpec::Range(3), resp(None)),
+                (StatusSpec::Exact(304), resp(None)),
+                (StatusSpec::Exact(404), resp(Some(2))),
+                (StatusSpec::Range(5), resp(Some(3))),
+            ],
+            default: None,
+        };
+        assert!(matches!(multi.success(), SuccessShape::Plain(body) if body.id == TypeId(1)));
+        match multi.error() {
+            ErrorShape::Enum(entries) => {
+                assert_eq!(
+                    statuses(&entries),
+                    vec![
+                        StatusSpec::Exact(304),
+                        StatusSpec::Exact(404),
+                        StatusSpec::Range(3),
+                        StatusSpec::Range(5),
+                    ],
+                );
+                assert!(entries[0].1.is_none() && entries[2].1.is_none());
+            }
+            other => panic!("expected an error enum, got {other:?}"),
+        }
+
+        // Only a `304` and a `default` documented: no success status is declared, so `default`
+        // is the success source, and the `304` stays an error entry rather than claiming it.
+        let conditional = Responses {
+            by_status: vec![(StatusSpec::Exact(304), resp(None))],
+            default: Some(resp(Some(1))),
+        };
+        assert!(matches!(conditional.success(), SuccessShape::Plain(body) if body.id == TypeId(1)));
     }
 
     /// The statuses of an enum shape, in the order it holds them.
