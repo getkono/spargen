@@ -18,7 +18,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(oas31)* reject Responses keys outside the specification's grammar ([#235](https://github.com/getkono/spargen/pull/235))
 - *(oas31)* [**breaking**] report an empty $ref/sibling intersection instead of dropping it ([#125](https://github.com/getkono/spargen/pull/125))
 - *(oas31)* [**breaking**] reject a $ref to an undeclared component schema with E004 ([#112](https://github.com/getkono/spargen/pull/112))
-- *(runtime-contract)* pin workspace inheritance and name the workspace manifest ([#87](https://github.com/getkono/spargen/pull/87))
 - *(runtime-contract)* say why an unreadable workspace root could not be read
 - *(oas31)* report a narrowed request body even when both sides are bytes
 - *(runtime-contract)* keep an unreadable ancestor out of the resolved root
@@ -40,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(cli)* execute spargen explain, including its --format json branch ([#225](https://github.com/getkono/spargen/pull/225))
 - state cargo-deny's --all-features scope on the step ([#224](https://github.com/getkono/spargen/pull/224))
 - *(ir)* state where a default response lands in the success shape ([#111](https://github.com/getkono/spargen/pull/111))
+- *(runtime-contract)* pin workspace inheritance, and correct the E023 explain text and support-matrix row ([#87](https://github.com/getkono/spargen/pull/87))
 - *(diag)* scope the request range wording to family ranges
 - *(oas31)* pin a concrete binary key as the sendable sibling that withholds a suffix range
 - Merge remote-tracking branch 'origin/master' into fix/82-concrete-binary-media-types
