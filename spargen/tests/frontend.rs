@@ -5358,6 +5358,117 @@ components:
     );
 }
 
+/// `json_category`'s reservation arm is **live** on a document that generates cleanly, and its
+/// answer picks the emitted `Deserialize` strategy.
+///
+/// `lower_union` refuses a member that is the union's *own* reservation, but a member that is some
+/// other open component's reservation is the ordinary recursive back edge and is kept. Here the
+/// items union is lowered while `Tree` is still reserved, so the dispatch-strategy search asks
+/// what JSON category `Tree` serialises as, and nothing is known yet. Answering `Object` (the
+/// guess that is right for most recursive schemas) made the union provably disjoint, and the
+/// emitted decoder routed the back edge on `value.is_object()`: a nested `Tree`, which is an
+/// array, would then match no variant at runtime. That mutation survived every suite before this
+/// fixture. Uncategorisable sends the union to trial matching, which decodes both branches.
+#[test]
+fn a_union_back_edge_to_an_open_component_is_not_categorised() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /t:
+    get:
+      operationId: getT
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Tree' } }
+components:
+  schemas:
+    Tree:
+      type: array
+      items:
+        oneOf:
+          - $ref: '#/components/schemas/Tree'
+          - type: string
+"##;
+    let (report, code) = generate_with_code(spec);
+    // Accepted with no diagnostics at all, which is what makes the arm reachable, not defensive.
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(codes(&report), Vec::<&str>::new(), "{report:#?}");
+
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub enum TreeItem"),
+        "the items union must be emitted as an enum: {types}"
+    );
+    // No category is claimed for the back edge: the spec has no object anywhere, so any
+    // `is_object()` predicate in the output is a guessed category for the reservation.
+    assert!(
+        !types.contains("is_object()"),
+        "a not-yet-lowered back edge must not be routed as an object: {types}"
+    );
+    // Trial matching emits a ranked candidate per variant; a disjoint decoder emits none.
+    assert!(
+        types.contains("TreeItem::Tree(inner)") && types.contains("u32, TreeItem::Tree(inner)"),
+        "the union must be decoded by trial matching: {types}"
+    );
+}
+
+/// `parameter_shape_supported_inner`'s reservation arm is reachable, but only after an upstream
+/// failure, and answering no is what keeps an unknown shape from being accepted as a parameter.
+///
+/// Parameters are lowered after every component, so no reservation is open by then. One is left
+/// behind for good when a component's lowering fails: `A` reserves its id, `B` is lowered inside
+/// it and closes the cycle back to that reservation, `B` completes and is cached, and then `A`
+/// fails on its unresolved `x`. `B`'s items still name `A`'s never-filled reservation, and the
+/// query parameter referencing `B` walks into it. The document is rejected by `E004` whatever the
+/// arm says; the arm decides whether the parameter is also refused (`E010`) or waved through on
+/// the strength of nothing. The waving-through mutation survived every suite before this fixture.
+#[test]
+fn a_parameter_reaching_a_failed_components_reservation_is_refused() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /q:
+    get:
+      operationId: getQ
+      parameters:
+        - { name: q, in: query, schema: { $ref: '#/components/schemas/B' } }
+      responses:
+        '204': { description: ok }
+components:
+  schemas:
+    A:
+      type: object
+      properties:
+        bs: { $ref: '#/components/schemas/B' }
+        x: { $ref: '#/components/schemas/Missing' }
+    B:
+      type: array
+      items: { $ref: '#/components/schemas/A' }
+"##;
+    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert_eq!(
+            codes(&report),
+            vec!["E004", "E010"],
+            "{entry}: the failed component is reported where it fails, and the parameter whose \
+             shape depends on it is refused rather than accepted: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::UnsupportedParameterStyle
+                    && d.pointer.as_str() == "/paths/~1q/get/parameters/0"
+            }),
+            "{entry}: E010 must be reported against the parameter: {report:#?}"
+        );
+    }
+}
+
 #[test]
 fn local_relative_schema_refs_resolve_from_their_own_file() {
     let temp = tempfile::tempdir().unwrap();

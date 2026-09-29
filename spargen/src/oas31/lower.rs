@@ -2129,6 +2129,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             },
             // A reservation cannot be categorised — its body has not been lowered, so nothing is
             // known about the JSON it serialises as. Uncategorisable, exactly like the others here.
+            //
+            // This arm is **live** on documents that generate cleanly. `lower_union` refuses a
+            // member that is *this* union's own reservation, but not one that is another open
+            // component's: `Tree: {type: array, items: {oneOf: [{$ref: Tree}, {type: string}]}}`
+            // lowers the items union while `Tree` is still reserved, and both `disjoint_strategy`
+            // and `discriminated_strategy` ask for the back edge's category. Guessing one (a
+            // reservation is usually an object) would emit a disjoint `Deserialize` that routes the
+            // back edge by `value.is_object()`, and a `Tree` — an array — would then match no
+            // variant at runtime. `None` sends the union to trial matching, which decodes it.
+            // Pinned by `a_union_back_edge_to_an_open_component_is_not_categorised`.
             TypeKind::Reserved
             | TypeKind::Bytes
             | TypeKind::Null
@@ -5551,6 +5561,17 @@ fn parameter_shape_supported_inner(
         // A reservation's shape is unknown, so it cannot be *proved* serialisable as a parameter.
         // This function answers "is this supported", and an unknown must answer no: saying yes
         // would let a recursive schema through as a parameter on the strength of nothing.
+        //
+        // Parameters are lowered only after every component, and each lazily resolved target
+        // fills its reservation before returning, so no reservation is open here. One still
+        // survives: a component whose lowering *failed* never fills its reservation, and a
+        // component that closed a cycle through it before the failure is cached complete, holding
+        // that dangling id. `A: {properties: {bs: {$ref: B}, x: {$ref: Missing}}}` with
+        // `B: {type: array, items: {$ref: A}}` leaves `B`'s items `Reserved` for good, and a
+        // parameter referencing `B` reaches this arm. The document is already rejected by the
+        // failure (`E004` there); answering no adds `E010` for the parameter rather than accepting
+        // a shape nobody knows. Pinned by
+        // `a_parameter_reaching_a_failed_components_reservation_is_refused`.
         TypeKind::Reserved
         | TypeKind::Struct(_)
         | TypeKind::Array(_)
