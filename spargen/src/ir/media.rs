@@ -222,6 +222,69 @@ impl Responses {
     /// return that bypasses the count above — and is offered to the error shape as the `Range(0)`
     /// sentinel whenever it is declared, subject there to the same body count (see
     /// [`Self::error`]).
+    ///
+    /// The two `default` claims above, pinned through the public pipeline (this item is private, so
+    /// the example drives `spargen::generate` and reads the emitted client):
+    ///
+    /// ```
+    /// const PET: &str = "{description: pet, content: {application/json: {schema: {$ref: '#/components/schemas/Pet'}}}}";
+    /// const PROBLEM: &str = "{description: problem, content: {application/json: {schema: {$ref: '#/components/schemas/Problem'}}}}";
+    ///
+    /// /// The emitted client for one `GET /x` (`getX`) declaring `responses`.
+    /// fn generated(responses: &[(&str, &str)]) -> String {
+    ///     let responses: String = responses
+    ///         .iter()
+    ///         .map(|(key, response)| format!("        '{key}': {response}\n"))
+    ///         .collect();
+    ///     let dir = tempfile::tempdir().unwrap();
+    ///     let spec = dir.path().join("openapi.yaml");
+    ///     let out = dir.path().join("client.rs");
+    ///     std::fs::write(&spec, format!(
+    ///         "openapi: 3.1.0\ninfo: {{title: t, version: '1'}}\npaths:\n  /x:\n    get:\n      \
+    ///          operationId: getX\n      responses:\n{responses}components:\n  schemas:\n    \
+    ///          Pet: {{type: object, properties: {{name: {{type: string}}}}}}\n    \
+    ///          Problem: {{type: object, properties: {{detail: {{type: string}}}}}}\n"
+    ///     )).unwrap();
+    ///     let build = spargen::Spec::new(camino::Utf8PathBuf::from_path_buf(spec).unwrap())
+    ///         .build(camino::Utf8PathBuf::from_path_buf(out.clone()).unwrap())
+    ///         .cargo(spargen::CargoIntegration::Off);
+    ///     spargen::generate(&build).expect_success();
+    ///     std::fs::read_to_string(out).unwrap()
+    /// }
+    ///
+    /// /// The variant names of the emitted `pub enum {name}`.
+    /// fn variants(code: &str, name: &str) -> Vec<String> {
+    ///     let head = format!("pub enum {name} {{\n");
+    ///     let start = code.find(&head).expect(&head) + head.len();
+    ///     let body = &code[start..start + code[start..].find("\n}").unwrap()];
+    ///     body.lines()
+    ///         .map(|line| line.trim().split(['(', ',']).next().unwrap().to_owned())
+    ///         .collect()
+    /// }
+    ///
+    /// /// The success type `get_x` returns inside `ResponseValue<_>`.
+    /// fn success_type(code: &str) -> &str {
+    ///     let head = "Result<support::ResponseValue<";
+    ///     let start = code.find(head).expect(head) + head.len();
+    ///     &code[start..start + code[start..].find(">, support::Error<").unwrap()]
+    /// }
+    ///
+    /// // `default` is never a success entry: beside a declared success status it enters the error
+    /// // enum alone, even where the success side is an enum it could have joined.
+    /// let code = generated(&[("200", PET), ("204", "{description: none}"), ("404", PROBLEM), ("default", PROBLEM)]);
+    /// assert_eq!(variants(&code, "GetXResponse"), ["Status200", "Status204"]);
+    /// assert_eq!(variants(&code, "GetXError"), ["Status404", "Default"]);
+    /// assert!(!code.contains("GetXResponse::Default"));
+    ///
+    /// // `default` is the success source exactly when `by_status` declares no success status:
+    /// // empty, or only non-2xx statuses such as `404`.
+    /// for responses in [&[("default", PROBLEM)][..], &[("404", PET), ("default", PROBLEM)]] {
+    ///     assert_eq!(success_type(&generated(responses)), "types::Problem");
+    /// }
+    /// // One declared success status, even a bodyless one, takes that role from it.
+    /// let code = generated(&[("204", "{description: none}"), ("default", PROBLEM)]);
+    /// assert_eq!(success_type(&code), "()");
+    /// ```
     pub(crate) fn success(&self) -> SuccessShape {
         // With no success status documented, `default` is what documents every 2xx, so it is the
         // operation's single success body.
