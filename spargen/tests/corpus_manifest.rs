@@ -617,6 +617,91 @@ fn the_published_lockfile_audit_covers_every_shipped_binary() {
     );
 }
 
+#[test]
+fn advisory_floors_are_manifest_requirements() {
+    // A lockfile bump that clears an advisory is undone by one `cargo update -p <crate> --precise
+    // <old>`, with every gate green once the advisory database stops naming it (#179). And it never
+    // reached a consumer at all: Cargo ignores a dependency's lockfile, so a `build.rs` enabling
+    // `remote-fetch` resolved rustls under reqwest's own `0.23.4` requirement. The floor therefore
+    // lives in `spargen/Cargo.toml`, where the resolver enforces it for this workspace and for
+    // every consumer, and `deny.toml` mirrors it as a `[bans] deny` entry naming the advisory.
+    // This holds each ban's floor to a direct requirement stating exactly that release.
+    let deny: toml::Table = toml::from_str(&read("deny.toml")).expect("deny.toml parses");
+    let manifest: toml::Table =
+        toml::from_str(&read("spargen/Cargo.toml")).expect("spargen/Cargo.toml parses");
+    let dependencies = manifest["dependencies"]
+        .as_table()
+        .expect("spargen/Cargo.toml has a [dependencies] table");
+    let bans = deny
+        .get("bans")
+        .and_then(|bans| bans.get("deny"))
+        .and_then(toml::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    let mut floors = BTreeMap::new();
+    for ban in bans {
+        let ban = ban.as_table().expect("a `[bans] deny` entry is a table");
+        // cargo-deny reads the version in a `crate = "name@version"` spec as one exact release:
+        // measured with cargo-deny 0.20.2, `crate = "rustls@<0.23.45"` banned 0.23.45 itself and
+        // passed 0.23.41. Only the `name` + `version` form takes a requirement.
+        if let Some(spec) = ban.get("crate").and_then(toml::Value::as_str) {
+            let version = spec.split_once('@').map(|(_, version)| version);
+            assert!(
+                version.is_none_or(|version| version.starts_with(|c: char| c.is_ascii_digit())),
+                "`[bans] deny` entry `crate = \"{spec}\"`: cargo-deny matches that version as one \
+                 exact release, not a range; state a floor as `name = ..., version = \"<X.Y.Z\"`"
+            );
+            continue;
+        }
+        let name = ban["name"]
+            .as_str()
+            .expect("a `[bans] deny` entry names its crate");
+        let Some(version) = ban.get("version").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        let floor = version.strip_prefix('<').unwrap_or_else(|| {
+            panic!(
+                "`[bans] deny` entry for `{name}` bans `{version}`, which is not a `<X.Y.Z` floor"
+            )
+        });
+        semver::Version::parse(floor).unwrap_or_else(|error| {
+            panic!("`[bans] deny` entry for `{name}`: `{floor}` is not a release: {error}")
+        });
+        let reason = ban
+            .get("reason")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            reason.contains("RUSTSEC-"),
+            "`[bans] deny` floor for `{name}` must name the advisory it enforces in `reason`"
+        );
+        assert!(
+            floors.insert(name, floor).is_none(),
+            "`deny.toml` bans more than one floor for `{name}`"
+        );
+    }
+    assert!(
+        floors.contains_key("rustls"),
+        "`deny.toml` no longer floors rustls at the release that clears RUSTSEC-2026-0285 (#179)"
+    );
+
+    for (name, floor) in floors {
+        let requirement = match dependencies.get(name) {
+            Some(toml::Value::String(requirement)) => Some(requirement.as_str()),
+            Some(toml::Value::Table(table)) => table.get("version").and_then(toml::Value::as_str),
+            _ => None,
+        };
+        assert_eq!(
+            requirement,
+            Some(floor),
+            "`deny.toml` floors `{name}` at {floor}, so `spargen/Cargo.toml` must require \
+             `{name} = \"{floor}\"` directly: the ban guards only this repository's lockfile, and \
+             only the manifest requirement reaches a consumer's resolve"
+        );
+    }
+}
+
 /// How a CI job and the mise tasks relate. Every job in the [`GATE_WORKFLOWS`] and every task in
 /// `mise.toml` is named by exactly one row of [`PAIRINGS`], so a new job or task cannot arrive
 /// unclassified. There is no "not yet identical" row: every job is held to its tasks, and every
