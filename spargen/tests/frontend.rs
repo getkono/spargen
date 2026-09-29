@@ -2916,6 +2916,230 @@ components:
     assert!(code.contains("pub second: RootOne"), "{code}");
 }
 
+/// The fan-out bound for an `allOf` member addressed by **file reference** (issue #163).
+///
+/// Such a member is not given a type of its own: `allOf` is an applicator, so the target's fields
+/// are flattened into the enclosing object. That arm used to re-expand the target at every use, so
+/// a branching reuse graph whose edges are `allOf: [$ref]` generated 2^(DEPTH+1) - 1 types — 2047
+/// here, 32,767 at depth 14 — from DEPTH + 1 declared schemas, with no diagnostic. The target's
+/// contribution is now expanded once per resolved `file#pointer` and replayed at every later use.
+///
+/// The exact count is one type for the response's own target plus one per `allOf` property site
+/// per *declaration* — `L0`..`L(DEPTH-1)` each declare two — which is `2 * DEPTH + 1`. The shape
+/// of every type is pinned too, so the bound cannot be met by dropping what a member contributes:
+/// flattening still copies the target's fields into each enclosing struct.
+#[test]
+fn a_file_referenced_all_of_member_reused_through_a_deep_graph_is_expanded_once() {
+    const DEPTH: usize = 10;
+    let mut lib = String::from("components:\n  schemas:\n");
+    for level in 0..DEPTH {
+        lib.push_str(&format!(
+            "    L{level}:\n      type: object\n      properties:\n        a: {{ allOf: [{{ $ref: \
+             './lib.yaml#/components/schemas/L{next}' }}] }}\n        b: {{ allOf: [{{ $ref: \
+             './lib.yaml#/components/schemas/L{next}' }}] }}\n",
+            next = level + 1
+        ));
+    }
+    lib.push_str(&format!(
+        "    L{DEPTH}:\n      type: object\n      properties: {{ id: {{ type: string }} }}\n"
+    ));
+
+    let (generated, checked, code) = split("./lib.yaml#/components/schemas/L0", &lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    let types = types_module(&code);
+    // Every lowered type here is named from an `L<digit>` hint; the client scaffolding that
+    // `types_module` also carries is not.
+    let declared = declared_types(&types, "L", |tail| {
+        tail.starts_with(|character: char| character.is_ascii_digit())
+    });
+    assert_eq!(
+        declared.len(),
+        2 * DEPTH + 1,
+        "{} declared schemas generated {} types: {declared:?}",
+        DEPTH + 1,
+        declared.len()
+    );
+    // Every generated struct is either an interior level (`a` and `b`, flattened from the member) or
+    // the leaf level (`id`), so each wrapper carries exactly what its target contributes.
+    let leaves = declared
+        .iter()
+        .filter(|ty| declared_fields(&types, ty) == ["id"])
+        .count();
+    let interior = declared
+        .iter()
+        .filter(|ty| declared_fields(&types, ty) == ["a", "b"])
+        .count();
+    assert_eq!(
+        (interior, leaves),
+        (2 * DEPTH - 1, 2),
+        "every type must carry its target's flattened fields: {declared:?}"
+    );
+}
+
+/// A replayed contribution is the member's, not the enclosing composition's.
+///
+/// Expanding a file-referenced `allOf` member once and replaying it is only sound if nothing the
+/// enclosing `allOf` does to the merged fields — promoting a field to required, intersecting a
+/// repeated property — leaks back into what the member contributes to the next use. `Strict`
+/// requires `id` beside the member and `Loose` does not, so the two uses of one member must differ
+/// exactly there, in whichever order they are lowered.
+#[test]
+fn a_file_referenced_all_of_member_contributes_the_same_fields_to_every_use() {
+    let lib = r##"
+components:
+  schemas:
+    Holder:
+      type: object
+      required: [strict, loose]
+      properties:
+        strict: { $ref: './lib.yaml#/components/schemas/Strict' }
+        loose: { $ref: './lib.yaml#/components/schemas/Loose' }
+    Strict:
+      allOf:
+        - $ref: './lib.yaml#/components/schemas/Base'
+        - required: [id]
+    Loose:
+      allOf:
+        - $ref: './lib.yaml#/components/schemas/Base'
+        - properties: { note: { type: string } }
+    Base:
+      type: object
+      properties: { id: { type: string } }
+"##;
+    let strict_first =
+        "        strict: { $ref: './lib.yaml#/components/schemas/Strict' }\n        \
+                        loose: { $ref: './lib.yaml#/components/schemas/Loose' }\n";
+    let loose_first = "        loose: { $ref: './lib.yaml#/components/schemas/Loose' }\n        \
+                       strict: { $ref: './lib.yaml#/components/schemas/Strict' }\n";
+    assert!(lib.contains(strict_first));
+    for order in [lib.to_owned(), lib.replace(strict_first, loose_first)] {
+        let (generated, checked, code) = split("./lib.yaml#/components/schemas/Holder", &order);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        }
+        let types = types_module(&code);
+        assert_eq!(declared_fields(&types, "Strict"), ["id"], "{types}");
+        assert_eq!(declared_fields(&types, "Loose"), ["id", "note"], "{types}");
+        let strict_id = types
+            .lines()
+            .map(str::trim_start)
+            .skip_while(|line| !line.starts_with("pub struct Strict "))
+            .find(|line| line.starts_with("pub id:"))
+            .map(str::to_owned);
+        let loose_id = types
+            .lines()
+            .map(str::trim_start)
+            .skip_while(|line| !line.starts_with("pub struct Loose "))
+            .find(|line| line.starts_with("pub id:"))
+            .map(str::to_owned);
+        let strict_id = strict_id.expect("`Strict` declares `id`");
+        let loose_id = loose_id.expect("`Loose` declares `id`");
+        let inner = strict_id
+            .strip_prefix("pub id: ")
+            .and_then(|ty| ty.strip_suffix(','))
+            .expect("a field line");
+        assert!(
+            !inner.starts_with("Option<"),
+            "`Strict` requires `id`: {types}"
+        );
+        assert_eq!(
+            loose_id,
+            format!("pub id: Option<{inner}>,"),
+            "`Strict`'s requirement must not leak into `Loose` through the shared member, and \
+             both uses must name the one type the member's property lowered to: {types}"
+        );
+    }
+}
+
+/// One schema that is both a file-referenced `allOf` member and a direct `$ref` is lowered twice —
+/// once to its own type by `ensure_resolved`, once flattened as a member — and the two copies must
+/// not compete for one name.
+///
+/// The member's body is named for the target, so a hint equal to the one `ensure_resolved` gives
+/// the direct type would put two types on one name, and the naming scope hands the bare name to
+/// whichever lowering reaches it first. Reordering two properties would then move `Basemeta` (and,
+/// for a scalar target, `Code` itself) from the direct type to the member's copy. Both orders must
+/// generate the same set of names, with the direct type and its nested types on the bare ones.
+#[test]
+fn a_schema_used_as_file_referenced_all_of_member_and_direct_ref_names_both_copies_stably() {
+    let lib = r##"
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        direct: { $ref: './lib.yaml#/components/schemas/Base' }
+        wrapped: { allOf: [{ $ref: './lib.yaml#/components/schemas/Base' }] }
+        code: { $ref: './lib.yaml#/components/schemas/Code' }
+        wrappedCode: { allOf: [{ $ref: './lib.yaml#/components/schemas/Code' }] }
+    Base:
+      type: object
+      properties:
+        meta: { type: object, properties: { tag: { type: string } } }
+    Code:
+      type: string
+      enum: [a, b]
+"##;
+    let direct_first = "        direct: { $ref: './lib.yaml#/components/schemas/Base' }\n        \
+                        wrapped: { allOf: [{ $ref: './lib.yaml#/components/schemas/Base' }] }\n        \
+                        code: { $ref: './lib.yaml#/components/schemas/Code' }\n        \
+                        wrappedCode: { allOf: [{ $ref: './lib.yaml#/components/schemas/Code' }] }\n";
+    let member_first = "        wrappedCode: { allOf: [{ $ref: './lib.yaml#/components/schemas/Code' }] }\n        \
+                        wrapped: { allOf: [{ $ref: './lib.yaml#/components/schemas/Base' }] }\n        \
+                        code: { $ref: './lib.yaml#/components/schemas/Code' }\n        \
+                        direct: { $ref: './lib.yaml#/components/schemas/Base' }\n";
+    assert!(lib.contains(direct_first));
+    let mut names = Vec::new();
+    for order in [lib.to_owned(), lib.replace(direct_first, member_first)] {
+        let (generated, checked, code) = split("./lib.yaml#/components/schemas/Holder", &order);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        }
+        let types = types_module(&code);
+        let field_type = |owner: &str, field: &str| {
+            types
+                .lines()
+                .map(str::trim_start)
+                .skip_while(|line| !line.starts_with(&format!("pub struct {owner} ")))
+                .take_while(|line| !line.starts_with('}'))
+                .find_map(|line| line.strip_prefix(&format!("pub {field}: ")))
+                .map(|ty| ty.trim_end_matches(',').to_owned())
+        };
+        assert_eq!(
+            field_type("Holder", "direct").as_deref(),
+            Some("Option<Base>"),
+            "{types}"
+        );
+        assert_eq!(
+            field_type("Base", "meta").as_deref(),
+            Some("Option<Basemeta>"),
+            "{types}"
+        );
+        assert_eq!(
+            field_type("Holder", "code").as_deref(),
+            Some("Option<Code>"),
+            "{types}"
+        );
+        let wrapped_meta = field_type("Holderwrapped", "meta").expect("the member's `meta`");
+        assert_ne!(wrapped_meta, "Option<Basemeta>", "{types}");
+        let mut declared: Vec<String> = types
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                line.strip_prefix("pub struct ")
+                    .or_else(|| line.strip_prefix("pub enum "))
+            })
+            .filter_map(|rest| rest.split([' ', '<', '{', '(', ';']).next())
+            .map(str::to_owned)
+            .collect();
+        declared.sort();
+        names.push((declared, wrapped_meta, field_type("Holder", "wrappedCode")));
+    }
+    assert_eq!(names[0], names[1], "lowering order renamed a type");
+}
+
 /// A **root-only** document — no sub-files, no remote refs — whose `allOf` member reaches the
 /// component being lowered through a component **alias**.
 ///
