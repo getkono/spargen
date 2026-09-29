@@ -1480,7 +1480,7 @@ serde_json = "1.0.151"
 
     #[test]
     fn a_requirement_that_admits_a_version_below_the_floor_is_rejected() {
-        let manifest = CORE_MANIFEST.replace("1.12.1", "1.12.0");
+        let manifest = replace_once(CORE_MANIFEST, "1.12.1", "1.12.0");
         let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
         assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
         assert_eq!(diagnostics[0].code, Code::RuntimeDependencyContract);
@@ -1532,11 +1532,37 @@ serde_json = "1.0.151"
             .all(|diagnostic| diagnostic.code == Code::RuntimeDependencyContract));
     }
 
+    /// `haystack` with its one occurrence of `needle` replaced by `with`.
+    ///
+    /// A plain `str::replace` whose needle has gone stale — a floor bumped in `CORE_MANIFEST`, say
+    /// — silently returns the manifest unchanged, and the fixture then fails on an assertion about
+    /// the contract instead of on the needle. Requiring exactly one match makes it fail as what it
+    /// is.
+    fn replace_once(haystack: &str, needle: &str, with: &str) -> String {
+        assert_eq!(
+            haystack.matches(needle).count(),
+            1,
+            "fixture needle {needle:?} must occur exactly once in {haystack}"
+        );
+        haystack.replacen(needle, with, 1)
+    }
+
     #[test]
     fn reqwest_defaults_and_blocking_wiring_are_part_of_the_contract() {
-        let manifest = CORE_MANIFEST.replace(
-            "reqwest = { version = \"0.12.28\", default-features = false }",
-            "reqwest = \"0.12.28\"\n\n[features]\nblocking = []",
+        // The entry and its floor are read back out of `CORE_MANIFEST` rather than restated, so a
+        // bump to the reqwest floor there changes this fixture with it.
+        let core_reqwest = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with("reqwest = "))
+            .expect("CORE_MANIFEST declares reqwest under that key");
+        let floor = core_reqwest
+            .split('"')
+            .nth(1)
+            .expect("the reqwest entry pins a quoted version");
+        let manifest = replace_once(
+            CORE_MANIFEST,
+            core_reqwest,
+            &format!("reqwest = \"{floor}\"\n\n[features]\nblocking = []"),
         );
         let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
         let messages = diagnostics
@@ -1934,7 +1960,8 @@ serde_json = "1.0.151"
     fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
         // Untargeted, the rule has two halves: a `package` key on the canonical name is rejected,
         // and the crate declared under another name is not found at all.
-        let untargeted_package = CORE_MANIFEST.replace(
+        let untargeted_package = replace_once(
+            CORE_MANIFEST,
             "secrecy = \"0.10.3\"",
             "secrecy = { package = \"secrecy\", version = \"0.10.3\" }",
         );
@@ -1946,7 +1973,8 @@ serde_json = "1.0.151"
             "`secrecy` cannot be renamed because generated code references that canonical crate \
              name"
         );
-        let untargeted_alias = CORE_MANIFEST.replace(
+        let untargeted_alias = replace_once(
+            CORE_MANIFEST,
             "secrecy = \"0.10.3\"",
             "secret = { package = \"secrecy\", version = \"0.10.3\" }",
         );
