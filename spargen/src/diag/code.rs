@@ -504,7 +504,8 @@ mod tests {
     /// to say the opposite of what the generator does keeps every assertion green, so the prose is
     /// reviewed by hand, as `docs/support-matrix.md` itself says. Where an `explain()` body is
     /// pinned (see its rustdoc), the matrix row defers to `spargen explain` rather than restating
-    /// the body in words no test compares with it.
+    /// the body in words no test compares with it; the clauses `E023`'s row does quote are held
+    /// verbatim by `the_e023_matrix_row_quotes_its_pinned_explain_text_verbatim`.
     #[test]
     fn the_support_documents_cite_the_codes_that_exist_where_they_belong() {
         // Skipped only from a packaged `.crate`, which carries no docs directory. In the
@@ -556,6 +557,81 @@ mod tests {
                 if home == 3 { "Warned" } else { "Rejected" }
             );
         }
+    }
+
+    /// The words that mark a matrix clause as stating how `E023`'s audit reads workspace
+    /// inheritance: the subject the pinned explain body owns. Matched case-insensitively.
+    const E023_INHERITANCE_VOCABULARY: &[&str] = &["workspace", "inherit", "default-features"];
+
+    /// `E023`'s explain body is pinned byte for byte, so the matrix row citing `E023` defers to it
+    /// rather than restating it — but the row still states a few inheritance rules for a reader
+    /// scanning the table, and a paraphrase of a pinned body is a second copy no test compares
+    /// with the first. That copy drifted twice while every suite stayed green (#218). So every
+    /// clause of that row which touches workspace inheritance must be a **verbatim excerpt** of
+    /// the explain body, and the row must name `spargen explain E023` as where the rest lives.
+    ///
+    /// A clause is a piece of a cell split on `. ` and `; `. The clause naming
+    /// `spargen explain E023` is the deferral itself and is exempt. What this cannot see: a
+    /// paraphrase that avoids every word in [`E023_INHERITANCE_VOCABULARY`].
+    #[test]
+    fn the_e023_matrix_row_quotes_its_pinned_explain_text_verbatim() {
+        let Some(root) = repo_root() else {
+            eprintln!("skipping: not tested from the workspace");
+            return;
+        };
+        let matrix = read_repo_document(&root, "docs/support-matrix.md");
+        let explain = Code::RuntimeDependencyContract.explain();
+        let code = Code::RuntimeDependencyContract.as_str();
+
+        let rows: Vec<&str> = matrix
+            .lines()
+            .filter(|line| {
+                line.starts_with("| ")
+                    && cited_codes(line)
+                        .iter()
+                        .any(|(cited, column)| cited == code && *column == 4)
+            })
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly one docs/support-matrix.md row must reject with {code}, found {rows:#?}"
+        );
+        let row = rows[0];
+
+        let deferral = format!("`spargen explain {code}`");
+        assert!(
+            row.contains(&deferral),
+            "the {code} row must defer to {deferral} for the inheritance rules it does not quote"
+        );
+
+        let mut quoted = 0;
+        for cell in row.split('|') {
+            for clause in cell.split(". ").flat_map(|sentence| sentence.split("; ")) {
+                let clause = clause.trim().trim_end_matches('.');
+                let lower = clause.to_lowercase();
+                if clause.contains(&deferral)
+                    || !E023_INHERITANCE_VOCABULARY
+                        .iter()
+                        .any(|word| lower.contains(word))
+                {
+                    continue;
+                }
+                assert!(
+                    explain.contains(clause),
+                    "docs/support-matrix.md's {code} row states workspace inheritance in words \
+                     `spargen explain {code}` does not use:\n\n  {clause}\n\nQuote the explain \
+                     text verbatim, or leave the clause to it."
+                );
+                quoted += 1;
+            }
+        }
+        // Without this, a vocabulary that stopped matching anything would pass vacuously.
+        assert!(
+            quoted > 0,
+            "no clause of the {code} row matched {E023_INHERITANCE_VOCABULARY:?}; if the row no \
+             longer quotes the explain text at all, retire this test with it"
+        );
     }
 
     #[test]
