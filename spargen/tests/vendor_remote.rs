@@ -6,8 +6,10 @@
 //! [`spargen::vendor`] facade (and, under `cli`, the `spargen lock` binary) fetches them for real:
 //! request, status handling, redirect following, and connection failure are all the real ones.
 //!
-//! What this does **not** reach is the TLS handshake: the fetcher trusts only the bundled web
-//! roots, so a local HTTPS server would need a certificate-trust seam the fetcher does not have.
+//! What this does **not** reach is a completed TLS handshake: the fetcher trusts only the bundled
+//! web roots, so a local HTTPS server would need a certificate-trust seam the fetcher does not
+//! have. `tests/tls_strictness.rs` drives the handshake up to the point it is refused, which
+//! needs no trust.
 
 #![cfg(feature = "remote-fetch")]
 
