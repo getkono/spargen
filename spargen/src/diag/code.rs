@@ -403,13 +403,14 @@ mod tests {
     /// `docs/errors.md` are the same contract — and without this the two drift silently.
     #[test]
     fn the_published_index_lists_exactly_the_declared_codes() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/errors.md");
-        let Ok(index) = std::fs::read_to_string(path) else {
-            // Absent when the crate is tested from a packaged `.crate`, which carries no docs
-            // directory. In the repository — where the invariant matters — it is always there.
-            eprintln!("skipping: {path} is not present");
+        // A packaged `.crate` carries no docs directory, so the check is skipped there — gated on
+        // the workspace marker, not on the file, so that inside the repository a missing or
+        // renamed index fails instead of passing with a line on stderr nobody reads.
+        let Some(root) = repo_root() else {
+            eprintln!("skipping: not tested from the workspace");
             return;
         };
+        let index = read_repo_document(&root, "docs/errors.md");
         let rows: Vec<(String, String)> = index
             .lines()
             .filter(|line| line.starts_with("| `E") || line.starts_with("| `W"))
@@ -487,18 +488,22 @@ mod tests {
     /// checkable in general, but the code tokens in it are: every one must name a real code, every
     /// declared code must be placed somewhere in the matrix, and a code must not be filed under a
     /// column that disagrees with its own severity.
+    ///
+    /// That is all it holds. The prose of a cell is constrained by nothing here: a row rewritten
+    /// to say the opposite of what the generator does keeps every assertion green, so the prose is
+    /// reviewed by hand, as `docs/support-matrix.md` itself says. Where an `explain()` body is
+    /// pinned (see its rustdoc), the matrix row defers to `spargen explain` rather than restating
+    /// the body in words no test compares with it.
     #[test]
     fn the_support_documents_cite_the_codes_that_exist_where_they_belong() {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
-        let matrix_path = format!("{root}/docs/support-matrix.md");
-        let scope_path = format!("{root}/docs/openapi-3.2.md");
-        let (Ok(matrix), Ok(scope)) = (
-            std::fs::read_to_string(&matrix_path),
-            std::fs::read_to_string(&scope_path),
-        ) else {
-            eprintln!("skipping: {matrix_path} is not present");
+        // Skipped only from a packaged `.crate`, which carries no docs directory. In the
+        // repository a missing or renamed support document fails rather than skipping the check.
+        let Some(root) = repo_root() else {
+            eprintln!("skipping: not tested from the workspace");
             return;
         };
+        let matrix = read_repo_document(&root, "docs/support-matrix.md");
+        let scope = read_repo_document(&root, "docs/openapi-3.2.md");
 
         let matrix_cited = cited_codes(&matrix);
         for (cited, _) in matrix_cited.iter().chain(cited_codes(&scope).iter()) {
@@ -614,6 +619,14 @@ mod tests {
         let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).to_path_buf();
         let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
         manifest.contains("[workspace]").then_some(root)
+    }
+
+    /// Read a document the repository must carry, failing — never skipping — when it is absent.
+    /// Only call this under [`repo_root`], which is what decides whether the file must exist.
+    fn read_repo_document(root: &std::path::Path, relative: &str) -> String {
+        std::fs::read_to_string(root.join(relative)).unwrap_or_else(|error| {
+            panic!("{relative} must exist in the repository, and reading it failed: {error}")
+        })
     }
 
     /// `all()` is a hand-written `const ALL`, and every docs/behavior test iterates it — so a
