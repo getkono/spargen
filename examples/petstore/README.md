@@ -27,7 +27,10 @@ What it exercises:
 - **Typed response headers** — the documented `X-Total-Count` is read through a generated
   accessor, as an explicit second step that cannot turn a successful call into a failure.
 - **Auth** — a bearer credential registered with `with_credential`; a missing credential fails
-  before the request is sent.
+  before the request is sent. A `Credential::Provider` is awaited on tokio's executor once per
+  request and its token is what the mock authenticates; a provider that fails surfaces as
+  `RequestError::CredentialProvider`, naming the scheme with the provider's `AuthError` as its
+  `source()`, and nothing reaches the mock.
 - **Error taxonomy** — a documented `404` arrives as the operation's typed error body; an
   undocumented `401` is preserved as `Error::UnexpectedStatus` and classified non-transient.
 

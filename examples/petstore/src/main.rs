@@ -1,5 +1,6 @@
 //! Drives the generated petstore client end to end against a local mock server: typed models,
-//! query/header/path parameters, JSON bodies, bearer auth, typed API errors, undocumented-status
+//! query/header/path parameters, JSON bodies, bearer auth (a static token and an async token
+//! provider, succeeding and failing), typed API errors, undocumented-status
 //! handling, a refused connection, the transient-failure classifier, and the bring-your-own-policy retry adapter.
 //! Everything runs on 127.0.0.1 — no external API, no real credentials.
 
@@ -18,8 +19,8 @@ mod petstore {
 }
 
 use petstore::{
-    exponential_backoff, types, Client, Credential, Error, HttpBackend, RequestError,
-    ReqwestBackend, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    exponential_backoff, types, AuthError, Client, Credential, Error, HttpBackend, RequestError,
+    ReqwestBackend, RetryBackend, RetryOutcome, RetryPolicy, RetryWait, TokenFuture,
 };
 
 const TOKEN: &str = "let-me-in";
@@ -27,6 +28,13 @@ const TOKEN: &str = "let-me-in";
 /// How many times the flaky route has been hit; it fails transiently (503) on the first attempt,
 /// then serves 200 — so a retrying client succeeds where a plain one would surface the 503.
 static FLAKY_HITS: AtomicU32 = AtomicU32::new(0);
+
+/// How many requests the mock has read a request line for, so a scenario can assert that a
+/// pre-send failure put nothing on the wire.
+static MOCK_REQUESTS: AtomicU32 = AtomicU32::new(0);
+
+/// How many times the token provider has been asked for a token.
+static PROVIDER_CALLS: AtomicU32 = AtomicU32::new(0);
 
 /// A bring-your-own retry policy: retry transient outcomes with exponential backoff, up to a cap.
 /// The wait is built from the caller's own async timer (`tokio::time::sleep`) — the spargen runtime
@@ -188,6 +196,70 @@ async fn main() {
         other => panic!("expected a missing-credential error, got {other:?}"),
     }
 
+    // A rotating token from an async provider. The closure is awaited on tokio's real executor, and
+    // it genuinely suspends (a timer, standing in for a round trip to an identity provider) before
+    // yielding, so the request build is held across a pending poll rather than a ready one. The
+    // mock accepts only `Bearer let-me-in`, so a 200 proves the provider's token is what travelled.
+    // It is asked once per request, not once per client: two calls, two refreshes.
+    let rotating = Client::new(&base_url).unwrap().with_credential(
+        "bearerAuth",
+        Credential::Provider(Arc::new(|| -> TokenFuture {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                PROVIDER_CALLS.fetch_add(1, Ordering::SeqCst);
+                Ok(SecretString::from(TOKEN))
+            })
+        })),
+    );
+    for _ in 0..2 {
+        let pet = rotating
+            .get_pet("1")
+            .await
+            .expect("a provider-supplied token authenticates");
+        assert_eq!(pet.status(), 200);
+    }
+    assert_eq!(PROVIDER_CALLS.load(Ordering::SeqCst), 2);
+    println!("token provider awaited on a real executor, once per request");
+
+    // A provider that fails is the client's "unauthenticated" state: typed, naming the scheme, with
+    // the provider's own `AuthError` as the cause — and raised before anything is sent, so the mock
+    // sees no request for it.
+    let failing = Client::new(&base_url).unwrap().with_credential(
+        "bearerAuth",
+        Credential::Provider(Arc::new(|| -> TokenFuture {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                Err(AuthError::new("identity provider unavailable"))
+            })
+        })),
+    );
+    let requests_before = MOCK_REQUESTS.load(Ordering::SeqCst);
+    let error = failing
+        .get_pet("1")
+        .await
+        .expect_err("a failing provider must fail the call");
+    let Error::RequestConstruction(RequestError::CredentialProvider { scheme, source }) = &error
+    else {
+        panic!("expected a credential-provider error, got {error:?}");
+    };
+    assert_eq!(*scheme, "bearerAuth");
+    assert_eq!(source.to_string(), "identity provider unavailable");
+    assert!(!error.is_transient());
+    // The chain a generic error reporter walks: the request error, then the provider's own.
+    let cause = std::error::Error::source(&error).expect("the request error");
+    assert_eq!(
+        cause.to_string(),
+        "the token provider registered for security scheme `bearerAuth` failed"
+    );
+    let provider = std::error::Error::source(cause).expect("the provider's error");
+    assert!(provider.downcast_ref::<AuthError>().is_some());
+    println!("failed token provider surfaced as a typed error for `{scheme}`");
+    assert_eq!(
+        MOCK_REQUESTS.load(Ordering::SeqCst),
+        requests_before,
+        "a failed provider must fail before the request is sent"
+    );
+
     // A wrong token draws the server's (undocumented) 401: preserved raw, and not retry-worthy.
     let wrong = Client::new(&base_url)
         .unwrap()
@@ -265,6 +337,7 @@ fn handle(mut stream: TcpStream) {
     if reader.read_line(&mut request_line).is_err() {
         return;
     }
+    MOCK_REQUESTS.fetch_add(1, Ordering::SeqCst);
     let mut parts = request_line.split_whitespace();
     let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
         return;
