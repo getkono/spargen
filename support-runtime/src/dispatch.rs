@@ -143,7 +143,7 @@ pub async fn attach_auth(
     requirements: &[&[AuthScheme]],
 ) -> Result<RequestBuilder, Error<Infallible>> {
     // No requirement means "attach nothing", not "unauthenticated". Without this, an empty slice
-    // would fall into the `find` below, which returns `None` for it, and the call would fail as
+    // would fall through the loop below without choosing anything, and the call would fail as
     // `MissingCredential` naming no schemes at all. Generated output never produces an empty slice
     // — `emit.rs` omits the call entirely for an operation with no `security` — but this function
     // is public in the runtime crate and reachable from sibling code in whichever module `include!`s
@@ -152,43 +152,62 @@ pub async fn attach_auth(
     if requirements.is_empty() {
         return Ok(request);
     }
-    let Some(alternative) = requirements.iter().find(|alternative| {
-        alternative.iter().all(|scheme| {
-            // `mutualTLS` is satisfied by the transport's client certificate, so it never needs a
-            // registered credential and never blocks an alternative from being chosen.
-            matches!(scheme.kind, AuthKind::MutualTls) || core.credential(scheme.name).is_some()
-        })
-    }) else {
-        // Nothing was satisfied, so every alternative names at least one unregistered scheme.
-        let alternatives: Vec<Vec<&'static str>> = requirements
-            .iter()
-            .map(|alternative| {
-                alternative
-                    .iter()
-                    .filter(|scheme| {
-                        !matches!(scheme.kind, AuthKind::MutualTls)
-                            && core.credential(scheme.name).is_none()
-                    })
-                    .map(|scheme| scheme.name)
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        return Err(Error::RequestConstruction(
-            RequestError::MissingCredential { alternatives },
-        ));
-    };
-    let mut request = request;
-    for scheme in *alternative {
-        if matches!(scheme.kind, AuthKind::MutualTls) {
-            continue;
+    // Selection and reporting are one computation: an alternative is chosen exactly when the list
+    // of its unregistered schemes is empty, and that same list is what `MissingCredential`
+    // reports for it. So every reported inner list is non-empty by construction, and the outer
+    // list is non-empty because `requirements` is.
+    let mut alternatives: Vec<Vec<&'static str>> = Vec::with_capacity(requirements.len());
+    for alternative in requirements {
+        let mut missing = Vec::new();
+        let mut registered = Vec::with_capacity(alternative.len());
+        for scheme in *alternative {
+            match resolve(core, scheme) {
+                Resolution::Transport => {}
+                Resolution::Registered(credential) => registered.push((scheme, credential)),
+                Resolution::Missing => missing.push(scheme.name),
+            }
         }
-        // Present by construction: the alternative was selected because every scheme resolves.
-        let Some(credential) = core.credential(scheme.name) else {
-            continue;
-        };
-        request = apply_credential(request, scheme, credential).await?;
+        if missing.is_empty() {
+            let mut request = request;
+            for (scheme, credential) in registered {
+                request = apply_credential(request, scheme, credential).await?;
+            }
+            return Ok(request);
+        }
+        alternatives.push(missing);
     }
-    Ok(request)
+    Err(Error::RequestConstruction(
+        RequestError::MissingCredential { alternatives },
+    ))
+}
+
+/// How one scheme of a security alternative is satisfied, if at all.
+enum Resolution<'a> {
+    /// Satisfied by the transport itself; nothing is attached to the request.
+    Transport,
+    /// Satisfied by the credential registered under the scheme's name.
+    Registered(&'a Credential),
+    /// Not satisfied: the caller still has to register a credential for it.
+    Missing,
+}
+
+/// The single answer to "does this scheme block its alternative?", read by both the selection
+/// and the `MissingCredential` report in [`attach_auth`]. The match is exhaustive over
+/// [`AuthKind`], so a new kind has to state how it is satisfied before it compiles.
+fn resolve<'a>(core: &'a ClientCore, scheme: &AuthScheme) -> Resolution<'a> {
+    match scheme.kind {
+        // `mutualTLS` is satisfied by the transport's client certificate, so it never needs a
+        // registered credential and never blocks an alternative from being chosen.
+        AuthKind::MutualTls => Resolution::Transport,
+        AuthKind::Bearer
+        | AuthKind::Basic
+        | AuthKind::ApiKeyHeader(_)
+        | AuthKind::ApiKeyQuery(_)
+        | AuthKind::ApiKeyCookie(_) => match core.credential(scheme.name) {
+            Some(credential) => Resolution::Registered(credential),
+            None => Resolution::Missing,
+        },
+    }
 }
 
 async fn apply_credential(
@@ -766,9 +785,9 @@ mod tests {
     }
 
     /// No requirement at all is distinct from a requirement nothing satisfies: it attaches nothing
-    /// and succeeds. Without the early return an empty slice reaches `find`, which answers `None`
-    /// for it, and the call would fail as `MissingCredential` naming no schemes — the degenerate
-    /// rendering `Display` was made total for. Generated output cannot reach this (`emit.rs` omits
+    /// and succeeds. Without the early return an empty slice falls through the selection loop
+    /// without choosing anything, and the call would fail as `MissingCredential` naming no
+    /// schemes — the degenerate rendering `Display` was made total for. Generated output cannot reach this (`emit.rs` omits
     /// the call when an operation declares no `security`), but the function is public.
     #[test]
     fn no_requirement_attaches_nothing() {
@@ -856,6 +875,137 @@ mod tests {
             rendered.ends_with("(missing: token or zeta + alpha or token)"),
             "{rendered}"
         );
+    }
+
+    /// One scheme of every `AuthKind`, each under its own name, and a credential of the kind that
+    /// scheme accepts.
+    fn every_kind() -> [(AuthScheme, Credential); 6] {
+        let key = || Credential::ApiKey(SecretString::from("k3y"));
+        [
+            (
+                AuthScheme {
+                    name: "bearer",
+                    kind: AuthKind::Bearer,
+                },
+                key(),
+            ),
+            (
+                AuthScheme {
+                    name: "basic",
+                    kind: AuthKind::Basic,
+                },
+                Credential::Basic {
+                    username: "u".to_owned(),
+                    password: SecretString::from("p"),
+                },
+            ),
+            (
+                AuthScheme {
+                    name: "header",
+                    kind: AuthKind::ApiKeyHeader("x-key"),
+                },
+                key(),
+            ),
+            (
+                AuthScheme {
+                    name: "query",
+                    kind: AuthKind::ApiKeyQuery("key"),
+                },
+                key(),
+            ),
+            (
+                AuthScheme {
+                    name: "cookie",
+                    kind: AuthKind::ApiKeyCookie("key"),
+                },
+                key(),
+            ),
+            (
+                AuthScheme {
+                    name: "mtls",
+                    kind: AuthKind::MutualTls,
+                },
+                key(),
+            ),
+        ]
+    }
+
+    /// The schemes of `alternative` a caller still has to register under `registered`: every
+    /// scheme but a registered one or `mutualTLS`, in declaration order. Written independently of
+    /// `attach_auth` so the two can disagree.
+    fn expected_missing(alternative: &[AuthScheme], registered: &[&str]) -> Vec<&'static str> {
+        alternative
+            .iter()
+            .filter(|scheme| {
+                !matches!(scheme.kind, AuthKind::MutualTls) && !registered.contains(&scheme.name)
+            })
+            .map(|scheme| scheme.name)
+            .collect()
+    }
+
+    /// Selection and the `MissingCredential` report agree over every `AuthKind`, every
+    /// registration subset, and every non-empty combination of schemes as an alternative: the
+    /// call succeeds exactly when some alternative has nothing missing, and otherwise reports,
+    /// per alternative in order, exactly what is missing — so neither list is ever empty (#205).
+    #[test]
+    fn selection_and_the_missing_credential_report_agree_over_every_kind_and_registration() {
+        let kinds = every_kind();
+        let subsets = |mask: usize| -> Vec<AuthScheme> {
+            kinds
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, (scheme, _))| *scheme)
+                .collect()
+        };
+        let all = (1usize << kinds.len()) - 1;
+        let alternatives: Vec<Vec<AuthScheme>> = (1..=all).map(subsets).collect();
+        let check = |core: &ClientCore, registered: &[&str], requirements: &[&[AuthScheme]]| {
+            let expected: Vec<Vec<&'static str>> = requirements
+                .iter()
+                .map(|alternative| expected_missing(alternative, registered))
+                .collect();
+            let satisfiable = expected.iter().any(Vec::is_empty);
+            match poll_ready(attach_auth(core, get(core), requirements)) {
+                Ok(_) => assert!(satisfiable, "{registered:?} {requirements:?}"),
+                Err(Error::RequestConstruction(RequestError::MissingCredential {
+                    alternatives,
+                })) => {
+                    assert!(!satisfiable, "{registered:?} {requirements:?}");
+                    assert_eq!(alternatives, expected, "{registered:?} {requirements:?}");
+                    assert!(!alternatives.is_empty());
+                    assert!(alternatives.iter().all(|missing| !missing.is_empty()));
+                }
+                Err(error) => panic!("{registered:?} {requirements:?}: {error:?}"),
+            }
+        };
+        for registration in 0..=all {
+            let mut core = core();
+            let mut registered = Vec::new();
+            for (bit, (scheme, credential)) in kinds.iter().enumerate() {
+                if registration & (1 << bit) != 0 {
+                    core.set_credential(scheme.name, credential.clone());
+                    registered.push(scheme.name);
+                }
+            }
+            // Each combination alone, then every combination at once as alternatives of one
+            // requirement, and again without the ones `mutualTLS` alone satisfies.
+            for alternative in &alternatives {
+                check(&core, &registered, &[alternative]);
+            }
+            let every: Vec<&[AuthScheme]> = alternatives.iter().map(Vec::as_slice).collect();
+            check(&core, &registered, &every);
+            let blocking: Vec<&[AuthScheme]> = every
+                .iter()
+                .copied()
+                .filter(|alternative| {
+                    alternative
+                        .iter()
+                        .any(|scheme| !matches!(scheme.kind, AuthKind::MutualTls))
+                })
+                .collect();
+            check(&core, &registered, &blocking);
+        }
     }
 
     /// A client that registers a token provider always has a credential registered, so a failed
