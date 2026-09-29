@@ -26,6 +26,22 @@ pub(crate) use provenance::Provenance;
 pub use severity::Severity;
 pub use span::{FileId, Loc, Span};
 
+/// Whether `source` declares `fn {name}(` immediately preceded by `#[test]`, with only whitespace
+/// between.
+///
+/// Test-only: the one predicate behind every check that a fixture cited for an explain clause is
+/// a `#[test]` in the module named — `EXPLAIN_CLAUSES_OWNED_ELSEWHERE` in `code.rs` and the `E023`
+/// byte-for-byte test in `runtime_contract.rs` — so a fix to it reaches both. It lives in `diag`
+/// because that is the lowest layer both can reach.
+#[cfg(test)]
+pub(crate) fn is_test_fn(source: &str, name: &str) -> bool {
+    source.match_indices(&format!("fn {name}(")).any(|(at, _)| {
+        source[..at]
+            .rsplit_once("#[test]")
+            .is_some_and(|(_, between)| between.trim().is_empty())
+    })
+}
+
 /// A single diagnostic emitted during parsing, validation, or codegen.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Diagnostic {

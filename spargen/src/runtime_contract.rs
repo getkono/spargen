@@ -2591,14 +2591,9 @@ serde_json.workspace = true
         const SOURCE: &str = include_str!("runtime_contract.rs");
 
         // A cited name must be a `#[test]` in this module: the attribute immediately precedes it,
-        // with only whitespace between.
-        let is_test_fn = |name: &str| {
-            SOURCE.match_indices(&format!("fn {name}(")).any(|(at, _)| {
-                SOURCE[..at]
-                    .rsplit_once("#[test]")
-                    .is_some_and(|(_, between)| between.trim().is_empty())
-            })
-        };
+        // with only whitespace between. The predicate is shared with `diag/code.rs`'s
+        // `EXPLAIN_CLAUSES_OWNED_ELSEWHERE` check, so a fix to it reaches both.
+        let is_test_fn = |name: &str| crate::diag::is_test_fn(SOURCE, name);
 
         let promises = |clause: &str, pinned_by: &[&str]| {
             // Exactly once, not merely present: an assertion whose text also occurs earlier or
