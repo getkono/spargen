@@ -19,10 +19,11 @@ Included public APIs:
 | `meilisearch` | `meilisearch/open-api` | `a2bd2133ac9f9b85fca8fb8b1aa69063c8f1002c` | `open-api.json` | `83cbd10cea1ca75590dc31f1d2e40ef2b636297d47b39c9aefd813e41454cfd1` | Reject `E011` (OpenAPI 3.1.0; invalid null `externalDocs.description`) |
 | `mastodon-openapi` | `abraham/mastodon-openapi` | `aea01d055ea82b898ff24f5004d1012bec1de25f` | `dist/schema.json` | `87d163d80860be314a86128a02b60baa5f829643a2a9b92d18b7165c7f3f2435` | Generate |
 
-The last four are pinned real-world APIs added to broaden coverage: Stripe, Twilio and a
-representative Kubernetes API-group document are still OpenAPI 3.0.x/3.0.1, so they pin the version
-gate (`E001`) on major APIs; `meilisearch` is genuine OpenAPI 3.1.0 and exercises strict official
-document validation past the gate, rejecting its null Tag `externalDocs.description` fields (`E011`).
+The four after `openapi-boilerplate` are pinned real-world APIs added to broaden coverage: Stripe,
+Twilio and a representative Kubernetes API-group document are still OpenAPI 3.0.x/3.0.1, so they
+pin the version gate (`E001`) on major APIs; `meilisearch` is genuine OpenAPI 3.1.0 and exercises
+strict official document validation past the gate, rejecting its null Tag
+`externalDocs.description` fields (`E011`).
 
 `mastodon-openapi` (#215) is genuine OpenAPI 3.1.0 that generates. It is the corpus's only
 real-world instance of the recursive-nullable `$ref`, the standard 3.1 spelling of "optionally
