@@ -3,6 +3,119 @@ use std::process::Command;
 use camino::Utf8PathBuf;
 use spargen::{CargoIntegration, Code, Outcome, Spec};
 
+/// A `cargo` invocation for the fixture crate at `crate_dir`, building into that crate's own
+/// `target/`. Every nested `cargo` in this suite goes through here.
+fn fixture_cargo(crate_dir: &std::path::Path) -> Command {
+    isolated(Command::new("cargo"), crate_dir)
+}
+
+/// Run `command` in `crate_dir` with its build and target directories inside `crate_dir`,
+/// overriding whatever this process inherited.
+///
+/// A nested `cargo` otherwise inherits the caller's `CARGO_TARGET_DIR` (or a `build.target-dir` /
+/// `build.build-dir` from Cargo config), and then every fixture crate of every concurrent run shares
+/// one artifact set: Cargo hashes a path package relative to its workspace root, so two fixtures
+/// with the same package name in different temporary directories get the same `-C metadata`, the
+/// same artifact paths, and the same fingerprint. A fixture whose sources were written before
+/// another run's same-named build finished is then judged fresh, and runs *that* build: the
+/// server-override fixture runs a binary with another run's port baked in, and the `W012` fixture
+/// a build script that reads another run's (possibly deleted) spec. Environment variables outrank
+/// Cargo config, so setting both here wins over either source.
+fn isolated(mut command: Command, crate_dir: &std::path::Path) -> Command {
+    let target = crate_dir.join("target");
+    command
+        .current_dir(crate_dir)
+        .env("CARGO_TARGET_DIR", &target)
+        .env("CARGO_BUILD_BUILD_DIR", &target);
+    command
+}
+
+/// The helper is only a guard if nothing goes around it: a bare nested `cargo` inherits the
+/// caller's target directory again.
+#[test]
+fn every_nested_cargo_goes_through_the_isolating_helper() {
+    let bare = concat!("Command::new(", "\"cargo\")");
+    let source = include_str!("e2e.rs");
+    assert_eq!(
+        source.matches(bare).count(),
+        1,
+        "every nested `cargo` must be built by `fixture_cargo`, which alone may spell `{bare}`"
+    );
+}
+
+/// Two same-named fixture crates in different directories, both written before either is built,
+/// under an inherited shared directory: the second one is judged fresh and runs the first one's
+/// binary. The control proves each case reproduces that collision, so the isolated run printing its
+/// own value, from its own `target/`, is evidence that `isolated` prevents it rather than a vacuous
+/// pass. Each variable is inherited on its own, because each alone is enough to share artifacts.
+#[test]
+fn same_named_fixtures_never_share_an_inherited_target_directory() {
+    let run = |mut command: Command| {
+        let output = command.args(["run", "--quiet"]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    };
+
+    for inherited in ["CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR"] {
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("shared");
+        let fixture = |value: &str| {
+            let root = temp.path().join(value);
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(
+                root.join("Cargo.toml"),
+                "[package]\nname = \"same_name\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n\
+                 [workspace]\n",
+            )
+            .unwrap();
+            std::fs::write(
+                root.join("src/main.rs"),
+                format!("fn main() {{ print!(\"{value}\"); }}\n"),
+            )
+            .unwrap();
+            root
+        };
+        let first = fixture("first");
+        let control = fixture("control");
+        let second = fixture("second");
+
+        // What an unisolated nested `cargo` sees when the suite runs with this variable (or its
+        // Cargo config key) pointing at a directory other runs share.
+        let inheriting = |crate_dir: &std::path::Path| {
+            let mut command = fixture_cargo(crate_dir);
+            command
+                .env_remove("CARGO_TARGET_DIR")
+                .env_remove("CARGO_BUILD_BUILD_DIR")
+                .env(inherited, &shared);
+            command
+        };
+
+        assert_eq!(run(inheriting(&first)), "first", "{inherited}");
+        assert_eq!(
+            run(inheriting(&control)),
+            "first",
+            "under a shared {inherited}, the control must reproduce the collision, or this test \
+             proves nothing about `isolated`"
+        );
+        assert_eq!(
+            run(isolated(inheriting(&second), &second)),
+            "second",
+            "under a shared {inherited}, an isolated fixture must build its own sources, not reuse \
+             a same-named crate's artifacts"
+        );
+        let binary = format!("target/debug/same_name{}", std::env::consts::EXE_SUFFIX);
+        assert!(
+            second.join(&binary).is_file(),
+            "under a shared {inherited}, an isolated fixture's artifacts must land in its own \
+             `target/`"
+        );
+    }
+}
+
 fn generate_fixture_crate(
     spec: &std::path::Path,
     out: &std::path::Path,
@@ -100,11 +213,7 @@ fn an_operation_named_after_a_runtime_type_still_compiles() {
         "a colliding error type must be widened, not shadowed:\n{generated}"
     );
 
-    let status = Command::new("cargo")
-        .arg("check")
-        .current_dir(&out)
-        .status()
-        .unwrap();
+    let status = fixture_cargo(&out).arg("check").status().unwrap();
     assert!(
         status.success(),
         "an operationId matching a runtime re-export must still generate compiling code"
@@ -161,11 +270,7 @@ fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
     );
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
-    let status = Command::new("cargo")
-        .arg("check")
-        .current_dir(&out)
-        .status()
-        .unwrap();
+    let status = fixture_cargo(&out).arg("check").status().unwrap();
     assert!(
         status.success(),
         "generated output must compile against the block `spargen deps` prints"
@@ -229,11 +334,7 @@ paths: {}
     )
     .unwrap();
 
-    let output = Command::new("cargo")
-        .arg("check")
-        .current_dir(&crate_dir)
-        .output()
-        .unwrap();
+    let output = fixture_cargo(&crate_dir).arg("check").output().unwrap();
     assert!(
         !output.status.success(),
         "unsupported floor unexpectedly compiled"
@@ -318,11 +419,7 @@ paths: {}
     .unwrap();
 
     // One table per OS family: Cargo applies exactly one of them on any unix or windows host.
-    let output = Command::new("cargo")
-        .arg("check")
-        .current_dir(&crate_dir)
-        .output()
-        .unwrap();
+    let output = fixture_cargo(&crate_dir).arg("check").output().unwrap();
     assert!(
         output.status.success(),
         "a tokio table applying to the build target must pass the audit:\n{}",
@@ -338,11 +435,7 @@ paths: {}
         )),
     )
     .unwrap();
-    let output = Command::new("cargo")
-        .arg("check")
-        .current_dir(&crate_dir)
-        .output()
-        .unwrap();
+    let output = fixture_cargo(&crate_dir).arg("check").output().unwrap();
     assert!(
         !output.status.success(),
         "a tokio table that does not apply to the build target unexpectedly compiled"
@@ -366,14 +459,13 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
     let report = generate_fixture_crate(&spec, &out, "minimum_runtime_client");
     assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
 
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args([
             "+nightly",
             "generate-lockfile",
             "-Z",
             "direct-minimal-versions",
         ])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(
@@ -405,7 +497,7 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
         );
     }
 
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args([
             "clippy",
             "--locked",
@@ -416,7 +508,6 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
             "-W",
             "clippy::expect-used",
         ])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(
@@ -425,7 +516,7 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
     );
 
     if wasm32_target_installed() {
-        let status = Command::new("cargo")
+        let status = fixture_cargo(&out)
             .args([
                 "check",
                 "--locked",
@@ -433,7 +524,6 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
                 "--target",
                 "wasm32-unknown-unknown",
             ])
-            .current_dir(&out)
             .status()
             .unwrap();
         assert!(
@@ -458,14 +548,10 @@ fn generated_module_compiles_in_basic_oas31_crate() {
         .iter()
         .all(|diagnostic| diagnostic.severity != spargen::Severity::Error));
 
-    let status = Command::new("cargo")
-        .arg("check")
-        .current_dir(&out)
-        .status()
-        .unwrap();
+    let status = fixture_cargo(&out).arg("check").status().unwrap();
     assert!(status.success());
 
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args([
             "clippy",
             "--all-features",
@@ -475,7 +561,6 @@ fn generated_module_compiles_in_basic_oas31_crate() {
             "-W",
             "clippy::expect-used",
         ])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(status.success());
@@ -1950,18 +2035,13 @@ fn middleware_backend_wraps_an_inner_backend() {
 "##,
     )
     .unwrap();
-    let status = Command::new("cargo")
-        .arg("test")
-        .current_dir(&out)
-        .status()
-        .unwrap();
+    let status = fixture_cargo(&out).arg("test").status().unwrap();
     assert!(status.success());
 
     // the same generated crate must also build and lint clean WITH the `blocking` feature,
     // proving the `BlockingClient` type and its blocking methods compile under clippy -D warnings.
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["build", "--features", "blocking"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(
@@ -1969,9 +2049,8 @@ fn middleware_backend_wraps_an_inner_backend() {
         "generated crate must build with --features blocking"
     );
 
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["clippy", "--features", "blocking", "--", "-D", "warnings"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(
@@ -2323,9 +2402,8 @@ fn an_alias_equal_error_body_is_one_body_type() {
 "##,
     )
     .unwrap();
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["test", "--test", "errors"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(
@@ -2335,9 +2413,8 @@ fn an_alias_equal_error_body_is_one_body_type() {
 
     // Drive the blocking round-trip test under the feature (it is `#![cfg(feature = "blocking")]`, so
     // it only exists here). This exercises a real HTTP round-trip through a blocking method.
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "blocking"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(
@@ -2399,16 +2476,11 @@ fn assert_reconnect_policy_is_public<P: ReconnectPolicy>() {}
     );
     std::fs::write(&generated_path, &generated).unwrap();
 
-    let status = Command::new("cargo")
-        .arg("check")
-        .current_dir(&out)
-        .status()
-        .unwrap();
+    let status = fixture_cargo(&out).arg("check").status().unwrap();
     assert!(status.success());
 
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["clippy", "--", "-D", "warnings"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(status.success());
@@ -2575,9 +2647,8 @@ fn oas32_custom_method_and_discriminator_fallback_reach_the_wire() {
     )
     .unwrap();
 
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "wire"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(
@@ -2645,9 +2716,8 @@ fn union_and_allof_roundtrip_under_proptest() {
     std::fs::create_dir_all(out.join("tests")).unwrap();
     std::fs::write(out.join("tests/roundtrip.rs"), ROUNDTRIP_TEST).unwrap();
 
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["test", "--test", "roundtrip"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(
@@ -4480,9 +4550,8 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
 
     // Default features: the client, transport seam, middleware/retry helpers, auth token provider,
     // and streaming `EventStream` must all compile against reqwest's `!Send` wasm `fetch` backend.
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["check", "--target", "wasm32-unknown-unknown"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(
@@ -4493,7 +4562,7 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
     // With the opt-in `blocking` feature enabled, a wasm build must STILL compile: the tokio-backed
     // `BlockingClient` and the tokio dependency are both gated off wasm, so the browser build never
     // pulls a runtime it cannot run.
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args([
             "check",
             "--target",
@@ -4501,7 +4570,6 @@ fn generated_crate_compiles_for_wasm32_browser_target() {
             "--features",
             "blocking",
         ])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(
@@ -4854,7 +4922,7 @@ fn audit_materialized_layout(
         std::fs::write(&path, contents).unwrap();
     }
     let manifest = root.join(member);
-    let metadata = Command::new("cargo")
+    let metadata = fixture_cargo(manifest.parent().unwrap())
         .args([
             "metadata",
             "--no-deps",
@@ -5128,9 +5196,8 @@ fn date_and_date_time_reach_the_wire_as_rfc3339() {
     std::fs::create_dir_all(out.join("tests")).unwrap();
     std::fs::write(out.join("tests/dates.rs"), DATE_WIRE_TEST).unwrap();
 
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "dates"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(status.success(), "the date-time wire round-trip must pass");
@@ -5351,9 +5418,8 @@ fn the_unoverridden_operation_still_uses_the_client_base_url() {
     )
     .unwrap();
 
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "servers"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(status.success(), "the server-override round-trip must pass");
@@ -5489,9 +5555,8 @@ fn rfc6570_multipart_parts_are_not_percent_encoded() {
     )
     .unwrap();
 
-    let status = Command::new("cargo")
+    let status = fixture_cargo(&out)
         .args(["test", "--features", "blocking", "--test", "multipart"])
-        .current_dir(&out)
         .status()
         .unwrap();
     assert!(status.success(), "the multipart wire round-trip must pass");
@@ -5642,11 +5707,7 @@ paths:
     )
     .unwrap();
 
-    let output = Command::new("cargo")
-        .arg("check")
-        .current_dir(&crate_dir)
-        .output()
-        .unwrap();
+    let output = fixture_cargo(&crate_dir).arg("check").output().unwrap();
     assert!(
         output.status.success(),
         "build script must warn and still generate:\n{}",
@@ -5700,11 +5761,7 @@ fn a_keyword_header_or_server_variable_generates_compiling_code() {
         );
     }
 
-    let status = Command::new("cargo")
-        .arg("check")
-        .current_dir(&out)
-        .status()
-        .unwrap();
+    let status = fixture_cargo(&out).arg("check").status().unwrap();
     assert!(
         status.success(),
         "a keyword-named header or server variable must generate compiling code"
@@ -5770,11 +5827,7 @@ fn a_gen_named_spec_compiles_under_edition_2024() {
         "escaping must not change the wire name:\n{generated}"
     );
 
-    let output = Command::new("cargo")
-        .arg("check")
-        .current_dir(&out)
-        .output()
-        .unwrap();
+    let output = fixture_cargo(&out).arg("check").output().unwrap();
     assert!(
         output.status.success(),
         "a spec naming things `gen` must compile for an edition-2024 consumer:\n{}",
