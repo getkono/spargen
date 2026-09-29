@@ -17,11 +17,21 @@ Included public APIs:
 | `twilio-api-2010` | `twilio/twilio-oai` | `bb6288e9f540d2d63540bbaadf6b73fd262c2df3` | `spec/json/twilio_api_v2010.json` | `a6753266b8b05a201e8658734e332ee51d07a0913f2d419335d87bdb287643a2` | Reject `E001` (OpenAPI 3.0.1) |
 | `kubernetes-authentication-v1` | `kubernetes/kubernetes` | `fb3cf74c50ec5d117a7d17f1115c9413fd492c3d` | `api/openapi-spec/v3/apis__authentication.k8s.io__v1_openapi.json` | `443427d822f77db77202c96df06d453845abc5cc67390180129a67e6c74d421e` | Reject `E001` (OpenAPI 3.0.0) |
 | `meilisearch` | `meilisearch/open-api` | `a2bd2133ac9f9b85fca8fb8b1aa69063c8f1002c` | `open-api.json` | `83cbd10cea1ca75590dc31f1d2e40ef2b636297d47b39c9aefd813e41454cfd1` | Reject `E011` (OpenAPI 3.1.0; invalid null `externalDocs.description`) |
+| `mastodon-openapi` | `abraham/mastodon-openapi` | `aea01d055ea82b898ff24f5004d1012bec1de25f` | `dist/schema.json` | `87d163d80860be314a86128a02b60baa5f829643a2a9b92d18b7165c7f3f2435` | Generate |
 
 The last four are pinned real-world APIs added to broaden coverage: Stripe, Twilio and a
 representative Kubernetes API-group document are still OpenAPI 3.0.x/3.0.1, so they pin the version
 gate (`E001`) on major APIs; `meilisearch` is genuine OpenAPI 3.1.0 and exercises strict official
 document validation past the gate, rejecting its null Tag `externalDocs.description` fields (`E011`).
+
+`mastodon-openapi` (#215) is genuine OpenAPI 3.1.0 that generates. It is the corpus's only
+real-world instance of the recursive-nullable `$ref`, the standard 3.1 spelling of "optionally
+another one of these": `oneOf: [{$ref: '#/components/schemas/Account'}, {type: 'null'}]` on
+`Account.moved`, and the same through `Status` on `Status.reblog` and `Quote.quoted_status`.
+`spargen/tests/snapshot.rs` asserts each lowers to `Option<Box<…>>`. The document is derived from
+the GFDL-1.3 `mastodon/documentation` and declares that licence in its `info.license`, so the
+licence text is vendored beside it as `mastodon-openapi/COPYING`; the generator repository itself
+is MIT.
 
 Deliberately not included: HoneyHive, IOTA gas-station, and Redocly.
 
@@ -29,28 +39,37 @@ Deliberately not included: HoneyHive, IOTA gas-station, and Redocly.
 
 A passing `corpus-smoke`, `corpus_manifest`, `snapshot`, or `recipes` run is evidence only for the
 constructs these descriptions contain and that reach the code being changed. It is silent about
-the rest. Five of the nine cases (and the `poem-openapi` recipe) are rejected before any schema is
+the rest. Five of the ten cases (and the `poem-openapi` recipe) are rejected before any schema is
 lowered: `E001` for the four OpenAPI 3.0.x documents and the recipe, and `E011` document validation
 for `meilisearch`. Schema lowering is reached only by `github-api-3-1`, `openai-openapi`, `ollama`,
-`openapi-boilerplate`, and the `utoipa`, `utoipa-untagged-overlap`, and `aide` recipes.
+`openapi-boilerplate`, `mastodon-openapi`, and the `utoipa`, `utoipa-untagged-overlap`, and `aide`
+recipes.
 
 **Schema Object `$ref` beside shape-bearing sibling keywords** (the intersection the support matrix
-describes, and its `E013` rejections) has no coverage here at all. Every such behaviour is pinned
-only by inline fixtures: those in `spargen/tests/frontend.rs`, and the two `--compat` carve
-fixtures in `spargen/tests/carve.rs` (`carve_removes_a_ref_whose_siblings_cannot_be_intersected`
-and `carve_removes_a_recursive_ref_whose_siblings_bear_a_shape`), which carve away a `$ref`-sibling
-`E013`. Measured on `master@16eda2e`:
+describes, and its `E013` rejections) is reached by `mastodon-openapi` alone. It carries 35 `$ref`s
+with a `type` sibling, each a string enum component referenced beside `type: string` (33) or
+`type: [string, 'null']` (2); `/components/schemas/Status/properties/visibility` is one. Every other intersection behaviour —
+a non-empty intersection of any other shape, an empty one, a recursive target — is pinned only by
+inline fixtures: those in `spargen/tests/frontend.rs`, and the two `--compat` carve fixtures in
+`spargen/tests/carve.rs` (`carve_removes_a_ref_whose_siblings_cannot_be_intersected` and
+`carve_removes_a_recursive_ref_whose_siblings_bear_a_shape`), which carve away a `$ref`-sibling
+`E013`. In the other pinned documents and recipes, the only `$ref` with a sibling other than an
+annotation (`description`, `title`, `deprecated`, `default`, 3.0's `nullable`) is
+`openai-openapi`'s `/components/schemas/InputItem/oneOf/1`, which sets `type: object` beside
+`$ref: '#/components/schemas/Item'`. It is a `oneOf` member, and a union member's `$ref` siblings
+are currently dropped before lowering ([#279](https://github.com/getkono/spargen/issues/279)), so
+it never reaches the intersection. Re-measure this section once #279 is fixed.
 
-- Mutation: making every shape-bearing `$ref` sibling that reaches the intersection in
-  `spargen/src/oas31/lower.rs` reject with `E013` left `corpus_manifest` (14 tests), `snapshot` (9)
-  and `recipes` (4) green, with no snapshot changed. `frontend.rs` failed 20 of its 366 tests.
-- Scan: in every pinned document and recipe, the only `$ref` with a sibling other than an
-  annotation (`description`, `title`, `deprecated`, `default`, 3.0's `nullable`) is
-  `openai-openapi`'s `/components/schemas/InputItem/oneOf/1`, which sets `type: object` beside
-  `$ref: '#/components/schemas/Item'`. It is a `oneOf` member, and a union member's `$ref` siblings
-  are currently dropped before lowering ([#279](https://github.com/getkono/spargen/issues/279)),
-  so it never reaches the intersection either. Once #279 is fixed it becomes the corpus's only
-  such case. Re-measure this section then.
+Measured on `master@b1961a4` by running `spargen check` over every case and recipe that reaches
+lowering, with one mutation of `spargen/src/oas31/lower.rs` at a time:
+
+- Making every shape-bearing `$ref` sibling that reaches the intersection reject with `E013`
+  rejects `mastodon-openapi` (26 `E013`s); every other case and recipe keeps its outcome. Before
+  `mastodon-openapi` was added this mutation left the whole corpus green (measured on
+  `master@16eda2e`: `corpus_manifest`, `snapshot` and `recipes` passed with no snapshot changed).
+- Rejecting the recursive-nullable collapse (a single real union member that closes a reference
+  cycle, without sibling keywords) with `E013` rejects `mastodon-openapi` (one `E013`); every
+  other case and recipe keeps its outcome.
 
 Before relying on a green corpus run for a change to a construct, check that some pinned
 description contains that construct in a position that reaches the code. If none does, the
