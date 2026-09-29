@@ -1499,8 +1499,9 @@ components:
     /// An error reported at `pointer` in the loaded file named `file`.
     fn error_in(bundle: &InputBundle, file: &str, pointer: &str) -> Diagnostic {
         let id = bundle.file_id_for_path(file).unwrap();
+        // Any error code carves the same way; this one is not held to an emission-site marker.
         Diagnostic::error(
-            Code::UnresolvedRef,
+            Code::NonDisjointUnion,
             Provenance::new(
                 JsonPointer::from(pointer.to_owned()),
                 Some(bundle.value_at(id).span()),
