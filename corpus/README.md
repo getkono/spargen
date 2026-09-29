@@ -36,7 +36,10 @@ for `meilisearch`. Schema lowering is reached only by `github-api-3-1`, `openai-
 
 **Schema Object `$ref` beside shape-bearing sibling keywords** (the intersection the support matrix
 describes, and its `E013` rejections) has no coverage here at all. Every such behaviour is pinned
-only by the inline fixtures in `spargen/tests/frontend.rs`. Measured on `master@16eda2e`:
+only by inline fixtures: those in `spargen/tests/frontend.rs`, and the two `--compat` carve
+fixtures in `spargen/tests/carve.rs` (`carve_removes_a_ref_whose_siblings_cannot_be_intersected`
+and `carve_removes_a_recursive_ref_whose_siblings_bear_a_shape`), which carve away a `$ref`-sibling
+`E013`. Measured on `master@16eda2e`:
 
 - Mutation: making every shape-bearing `$ref` sibling that reaches the intersection in
   `spargen/src/oas31/lower.rs` reject with `E013` left `corpus_manifest` (14 tests), `snapshot` (9)
@@ -51,4 +54,5 @@ only by the inline fixtures in `spargen/tests/frontend.rs`. Measured on `master@
 
 Before relying on a green corpus run for a change to a construct, check that some pinned
 description contains that construct in a position that reaches the code. If none does, the
-evidence has to come from `frontend.rs` and `e2e.rs` fixtures, or from a new corpus case.
+evidence has to come from `frontend.rs`, `carve.rs`, and `e2e.rs` fixtures, or from a new corpus
+case.
