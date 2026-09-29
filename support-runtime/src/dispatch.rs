@@ -877,8 +877,6 @@ mod tests {
         );
     }
 
-    /// A client that registers a token provider always has a credential registered, so a failed
-    /// refresh is its "unauthenticated" state — typed, with the provider's error as the cause.
     /// One scheme of every `AuthKind`, each under its own name, and a credential of the kind that
     /// scheme accepts.
     fn every_kind() -> [(AuthScheme, Credential); 6] {
@@ -1010,6 +1008,8 @@ mod tests {
         }
     }
 
+    /// A client that registers a token provider always has a credential registered, so a failed
+    /// refresh is its "unauthenticated" state — typed, with the provider's error as the cause.
     #[test]
     fn a_failed_token_provider_is_a_typed_credential_provider_error() {
         let mut core = core();
