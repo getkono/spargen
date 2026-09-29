@@ -1815,6 +1815,46 @@ fn a_nullable_uninhabited_field_still_admits_null() {
     assert!(serde_json::from_str::<basic_client::types::NullOnlyProperty>(r#"{"x": 1}"#).is_err());
 }
 
+// serde's `Option<T>` maps a JSON `null` to `None` without calling `T::deserialize`, so an
+// optional non-nullable field would decode `{"name": null}` as absent and re-serialise it as `{}`:
+// a value the schema does not admit, accepted and then silently rewritten. A present value, `null`
+// included, is decoded as the field's own type instead.
+#[test]
+fn an_optional_non_nullable_field_rejects_a_present_null() {
+    use basic_client::types::OptionalFields;
+    for field in ["name", "count", "flag", "tags", "mode", "nested", "choice", "colour"] {
+        let document = format!(r#"{{"{field}": null}}"#);
+        let decoded = serde_json::from_str::<OptionalFields>(&document);
+        assert!(
+            decoded.is_err(),
+            "{document}: `{field}` is not nullable, yet decoded as {decoded:?}"
+        );
+    }
+    // Absence is still `None` (or the schema default), and serialises back to absence.
+    let absent: OptionalFields = serde_json::from_str("{}").unwrap();
+    assert!(absent.name.is_none() && absent.count.is_none() && absent.choice.is_none());
+    assert_eq!(absent.colour.as_deref(), Some("red"));
+    // A present, well-typed value still decodes.
+    let present: OptionalFields = serde_json::from_str(
+        r#"{"name": "n", "count": 2, "flag": false, "tags": [], "mode": "manual", "nested": {},
+            "choice": 3, "colour": "blue"}"#,
+    )
+    .unwrap();
+    assert_eq!(present.name.as_deref(), Some("n"));
+    assert_eq!(present.count, Some(2));
+    assert_eq!(present.colour.as_deref(), Some("blue"));
+    // An untyped property admits `null` as a value of its own, and keeps it present on the wire.
+    let untyped: OptionalFields = serde_json::from_str(r#"{"anything": null}"#).unwrap();
+    assert_eq!(untyped.anything, Some(serde_json::Value::Null));
+    assert_eq!(
+        serde_json::to_value(&untyped).unwrap(),
+        serde_json::json!({"anything": null, "colour": "red"})
+    );
+    // A nullable optional property is where `null` and absence both mean `None`.
+    let nullable: OptionalFields = serde_json::from_str(r#"{"maybe": null}"#).unwrap();
+    assert!(nullable.maybe.is_none());
+}
+
 #[test]
 fn pattern_properties_capture_into_typed_overflow_map() {
     // The declared `host` field is typed; every non-declared property is captured by the flatten
@@ -2110,6 +2150,13 @@ fn xml_body_types_carry_attribute_and_rename() {
         quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
     assert_eq!(receipt.code, "OK");
     assert_eq!(receipt.note, None);
+    // A present optional element is decoded as the field's own type through its present-value
+    // deserializer, not through quick-xml's `Option` handling.
+    let noted: basic_client::types::XmlReceipt = quick_xml::de::from_str(
+        "<XmlReceipt><ReceiptCode>OK</ReceiptCode><note>late</note></XmlReceipt>",
+    )
+    .unwrap();
+    assert_eq!(noted.note.as_deref(), Some("late"));
 }
 
 #[test]
@@ -4450,6 +4497,28 @@ components:
           anyOf:
             - false
             - type: "null"
+    # Optional, non-nullable properties of every kind of type. A present `null` is a value none of
+    # these schemas admits, so it is rejected wherever the property's own type rejects it rather
+    # than decoding as absent; absence still decodes as `None`. The untyped `anything` admits
+    # `null` and keeps it as a present value, and the nullable `maybe` keeps collapsing `null`.
+    OptionalFields:
+      type: object
+      properties:
+        name: { type: string }
+        count: { type: integer }
+        flag: { type: boolean }
+        tags:
+          type: array
+          items: { type: string }
+        mode: { $ref: "#/components/schemas/Mode" }
+        nested: { $ref: "#/components/schemas/ForbiddenProperty" }
+        choice:
+          oneOf:
+            - type: string
+            - type: integer
+        colour: { type: string, default: red }
+        anything: {}
+        maybe: { type: [string, "null"] }
     StringLiteral:
       type: string
       enum: [special]
