@@ -2132,6 +2132,52 @@ fn ci_installs_exactly_the_tool_versions_mise_pins() {
 }
 
 #[test]
+fn the_release_preview_never_smudges_lfs_content() {
+    // The preview clones this checkout, and `release-plz update` then checks out other revisions
+    // and this branch again; each checkout smudges every LFS file that differs, fetching it from
+    // the clone's `origin`, which is this checkout. CI's checkout holds no LFS objects, so a pull
+    // request that added a corpus file failed the preview with "remote missing object" (#357)
+    // while `GIT_LFS_SKIP_SMUDGE=1` covered only the clone. No packaged file is an LFS object, so
+    // every command that checks files out skips it. The pairing test holds CI to the same lines.
+    let tasks = mise_tasks();
+    let task_env = mise_env(&tasks, "release-preview");
+    let mut checked = Vec::new();
+    for line in mise_commands(&tasks, "release-preview") {
+        for segment in line.split("&&") {
+            let words: Vec<&str> = segment.split_whitespace().collect();
+            let program = words
+                .iter()
+                .position(|word| !word.contains('='))
+                .unwrap_or(words.len());
+            let (assignments, command) = words.split_at(program);
+            let checks_out = match command {
+                ["release-plz", ..] => true,
+                ["git", rest @ ..] => rest.contains(&"clone"),
+                _ => false,
+            };
+            if !checks_out {
+                continue;
+            }
+            let skipped = assignments.contains(&"GIT_LFS_SKIP_SMUDGE=1")
+                || task_env.get("GIT_LFS_SKIP_SMUDGE").map(String::as_str) == Some("1");
+            assert!(
+                skipped,
+                "`mise run release-preview` runs `{}` without `GIT_LFS_SKIP_SMUDGE=1`: it would \
+                 fetch LFS content from a checkout that holds none",
+                segment.trim()
+            );
+            checked.push(command[0].to_owned());
+        }
+    }
+    assert!(
+        ["git", "release-plz"]
+            .iter()
+            .all(|program| checked.iter().any(|seen| seen == program)),
+        "the release preview no longer clones and runs release-plz ({checked:?}); revisit this test"
+    );
+}
+
+#[test]
 fn the_quality_list_quotes_its_tasks_verbatim() {
     // CLAUDE.md's Quality block glosses some tasks with the command they run. A gloss that is a
     // command is a claim about the task, so it must be the task's command exactly.

@@ -132,7 +132,11 @@ echo "auditing the Cargo.lock published in spargen $version"
 # release-plz refuses a detached HEAD (`cannot determine current branch`), and a clone of CI's
 # pull-request merge ref, which matches no branch, is detached, so the clone is put on a fresh
 # local branch with no upstream (release-plz then assumes `origin`) whatever the source was on.
-# LFS content is skipped: no packaged file is an LFS object. Like `deny`, the verdict is not
+# LFS content is skipped: no packaged file is an LFS object. It is skipped for `release-plz update`
+# too, not only for the clone: release-plz checks out other revisions in copies under the system
+# temp directory and then this branch again, and that checkout smudges every LFS file that differs
+# between them, fetching it from the clone's `origin` — this checkout, which in CI holds no LFS
+# objects — so a change that adds or edits a corpus file fails without it. Like `deny`, the verdict is not
 # hermetic: release-plz compares against the crates.io release and dates the section today. CI's
 # `release-preview` job runs these commands byte for byte, so a `release-plz.toml` or commit
 # history the release job would choke on fails a pull request rather than `master`.
@@ -141,7 +145,7 @@ run = [
   "rm -rf target/release-preview",
   "GIT_LFS_SKIP_SMUDGE=1 git clone --quiet --no-local . target/release-preview",
   "git -C target/release-preview switch --quiet --create release-preview",
-  "cd target/release-preview && release-plz update --repo-url https://github.com/getkono/spargen",
+  "cd target/release-preview && GIT_LFS_SKIP_SMUDGE=1 release-plz update --repo-url https://github.com/getkono/spargen",
   "git -C target/release-preview --no-pager diff",
 ]
 
@@ -213,6 +217,9 @@ run = [
   # the official 3.1 document schema before lowering.
   "cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json > target/corpus-smoke/meili.json || test $? -eq 1",
   "grep -q E011 target/corpus-smoke/meili.json",
+  # Mastodon is 3.1.0 and generates: its recursive-nullable `$ref`s and `$ref`-with-`type`
+  # siblings must keep clearing lowering, so check must succeed with no rejection.
+  "cargo run -q -p spargen --features cli -- check corpus/mastodon-openapi/schema.json --format json",
 ]
 
 [tasks.github-api]

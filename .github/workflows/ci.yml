@@ -172,6 +172,9 @@ jobs:
       # fail the official 3.1 document schema before lowering.
       - run: cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json > target/corpus-smoke/meili.json || test $? -eq 1
       - run: grep -q E011 target/corpus-smoke/meili.json
+      # Mastodon is 3.1.0 and generates: its recursive-nullable `$ref`s and `$ref`-with-`type`
+      # siblings must keep clearing lowering, so check must succeed with no rejection.
+      - run: cargo run -q -p spargen --features cli -- check corpus/mastodon-openapi/schema.json --format json
 
   github-api:
     name: GitHub API generated client
@@ -270,7 +273,7 @@ jobs:
       - run: rm -rf target/release-preview
       - run: GIT_LFS_SKIP_SMUDGE=1 git clone --quiet --no-local . target/release-preview
       - run: git -C target/release-preview switch --quiet --create release-preview
-      - run: cd target/release-preview && release-plz update --repo-url https://github.com/getkono/spargen
+      - run: cd target/release-preview && GIT_LFS_SKIP_SMUDGE=1 release-plz update --repo-url https://github.com/getkono/spargen
       - run: git -C target/release-preview --no-pager diff
 
   # The `deny` job lives in deny.yml, which runs it on the same triggers plus a daily schedule.
