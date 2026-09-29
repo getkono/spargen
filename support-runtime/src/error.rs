@@ -26,7 +26,9 @@ pub enum Error<E> {
     ///
     /// Pre-send, raised while the request is still being assembled — nothing was transmitted:
     /// no registered credential satisfies the operation's security requirement, a registered token
-    /// provider failed, the base URL is invalid, or a parameter or body did not serialize.
+    /// provider failed, the base URL is invalid, or a parameter or body did not serialize. Also
+    /// pre-send: reqwest refusing the request when asked to send it (a builder-kind error), as it
+    /// does for a URL scheme other than `http`/`https` or plain `http` on an `https_only` client.
     ///
     /// Not pre-send: an error reqwest classifies as a request error. reqwest raises that class
     /// from inside the send itself, so the request may already have been transmitted and the
@@ -45,7 +47,8 @@ pub enum Error<E> {
     /// on.
     ///
     /// [`RequestError`] types the two credential causes; every other cause — reqwest's own
-    /// request-error class and both reconnect-clone failures included — arrives as
+    /// request-error and builder-error classes and both reconnect-clone failures included —
+    /// arrives as
     /// [`RequestError::Other`].
     RequestConstruction(RequestError),
     /// #2 — DNS failure, connection refused/reset, TLS handshake or certificate error.
@@ -127,27 +130,27 @@ impl<E> Error<E> {
     /// timeout) is [`TimeoutKind::Connect`]; every other one,
     /// the total-request budget elapsing during the connect included, is [`TimeoutKind::Total`].
     /// On `wasm32` every timeout is `Total`, for the reason above.
+    ///
+    /// A builder-kind error is reqwest refusing the request before sending anything, and it
+    /// becomes [`Error::RequestConstruction`] wherever reqwest raises it: from
+    /// `RequestBuilder::build`, or from `execute` on a request that built fine — a URL whose
+    /// scheme is not `http`/`https`, plain `http` on an `https_only` client, or a URL that is not
+    /// a valid URI. Re-sending it is refused again, so it is not transient.
     pub fn from_reqwest(error: reqwest::Error) -> Self {
-        #[cfg(not(target_arch = "wasm32"))]
-        let connect = error.is_connect();
-        #[cfg(target_arch = "wasm32")]
-        let connect = false;
-        if error.is_timeout() {
-            Error::Timeout(if connect {
-                TimeoutKind::Connect
-            } else {
-                TimeoutKind::Total
-            })
-        } else if error.is_redirect() {
-            Error::Redirect(RedirectError { source: error })
-        } else if error.is_decode() {
-            Error::Protocol(ProtocolError { source: error })
-        } else if connect {
-            Error::Transport(TransportError { source: error })
-        } else if error.is_request() {
-            Error::RequestConstruction(RequestError::Other(RequestCause(Box::new(error))))
-        } else {
-            Error::Transport(TransportError { source: error })
+        Self::from_class(ReqwestClass::of(&error), error)
+    }
+
+    /// Build the variant `class` names around `error`. Split from [`Self::from_reqwest`] so a test
+    /// can pair every class with the variant it produces.
+    fn from_class(class: ReqwestClass, error: reqwest::Error) -> Self {
+        match class {
+            ReqwestClass::Timeout(kind) => Error::Timeout(kind),
+            ReqwestClass::Redirect => Error::Redirect(RedirectError { source: error }),
+            ReqwestClass::Protocol => Error::Protocol(ProtocolError { source: error }),
+            ReqwestClass::Transport => Error::Transport(TransportError { source: error }),
+            ReqwestClass::Request => {
+                Error::RequestConstruction(RequestError::Other(RequestCause(Box::new(error))))
+            }
         }
     }
 
@@ -418,6 +421,60 @@ impl TransportError {
     pub(crate) fn into_source(self) -> reqwest::Error {
         self.source
     }
+
+    /// Whether [`Error::from_reqwest`] would classify this failure as transient, decided on a
+    /// borrow: [`crate::RetryBackend`] asks before it has to hand the error back unconsumed.
+    pub(crate) fn is_transient(&self) -> bool {
+        ReqwestClass::of(&self.source).is_transient()
+    }
+}
+
+/// The taxonomy class [`Error::from_reqwest`] assigns a `reqwest::Error`, decided without
+/// consuming it, so the retry adapter and the taxonomy read one classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReqwestClass {
+    Timeout(TimeoutKind),
+    Redirect,
+    Protocol,
+    Transport,
+    Request,
+}
+
+impl ReqwestClass {
+    /// The order is the classification: a timeout first, split by the connect discriminator; then
+    /// redirect and decode; then a connection failure, which reqwest also reports as request-kind;
+    /// then reqwest's request and builder kinds; anything else falls back to transport.
+    fn of(error: &reqwest::Error) -> Self {
+        #[cfg(not(target_arch = "wasm32"))]
+        let connect = error.is_connect();
+        #[cfg(target_arch = "wasm32")]
+        let connect = false;
+        if error.is_timeout() {
+            ReqwestClass::Timeout(if connect {
+                TimeoutKind::Connect
+            } else {
+                TimeoutKind::Total
+            })
+        } else if error.is_redirect() {
+            ReqwestClass::Redirect
+        } else if error.is_decode() {
+            ReqwestClass::Protocol
+        } else if connect {
+            ReqwestClass::Transport
+        } else if error.is_request() || error.is_builder() {
+            ReqwestClass::Request
+        } else {
+            ReqwestClass::Transport
+        }
+    }
+
+    /// [`Error::is_transient`] of the variant [`Error::from_reqwest`] builds for this class.
+    fn is_transient(self) -> bool {
+        match self {
+            ReqwestClass::Timeout(_) | ReqwestClass::Transport => true,
+            ReqwestClass::Redirect | ReqwestClass::Protocol | ReqwestClass::Request => false,
+        }
+    }
 }
 
 /// Which timeout elapsed (taxonomy #3).
@@ -517,13 +574,15 @@ impl_reqwest_source_error!(RedirectError, "redirect error");
 
 #[cfg(test)]
 mod tests {
+    use std::future::Future;
+
     use bytes::Bytes;
     use reqwest::header::HeaderMap;
     use reqwest::StatusCode;
 
     use crate::{AuthError, ResponseValue, TransportError};
 
-    use super::{Error, RequestError, TimeoutKind};
+    use super::{Error, RequestError, ReqwestClass, TimeoutKind};
 
     #[test]
     fn retry_classifier_includes_timeouts_and_5xx() {
@@ -947,15 +1006,83 @@ mod tests {
     /// a `reqwest::Client` directly. Its timeout, redirect, decode, and request branches all need a
     /// live connection attempt to reach (reqwest exposes no constructor for its own error; the two
     /// timeout kinds are driven over a real client in `spargen/tests/e2e.rs`), so what is pinned
-    /// here is the *fallback*: an error reqwest does not classify becomes `Transport`,
-    /// and a `Transport` failure is retryable. A backend that reported a permanent failure reqwest
-    /// leaves unclassified would therefore be retried, so the fallback is worth stating explicitly.
+    /// here is the builder branch, the one reqwest raises without any I/O.
+    ///
+    /// A builder-kind error means reqwest refused the request: nothing was sent, and re-sending
+    /// it is refused again. reqwest raises it from `RequestBuilder::build` (an unparseable URL)
+    /// and also from `execute` on a request that built fine — a URL whose scheme is not
+    /// `http`/`https`, or plain `http` on an `https_only` client. The second arrives through the
+    /// backend as a `TransportError`, so without this branch the same refusal would be a
+    /// non-retryable `RequestConstruction` at build time and a retryable `Transport` at execute.
     #[test]
-    fn from_reqwest_falls_back_to_transport_for_an_unclassified_error() {
-        let error = Error::<ApiBody>::from_reqwest(reqwest_error());
-        assert!(matches!(error, Error::Transport(_)), "{error}");
-        assert!(error.is_transient());
-        assert!(std::error::Error::source(&error).is_some());
+    fn from_reqwest_classifies_a_refused_request_as_request_construction() {
+        let https_only = reqwest::Client::builder()
+            .https_only(true)
+            .build()
+            .expect("build an https-only client");
+        let refused_at_execute = |client: reqwest::Client, url: &str| {
+            let request = client
+                .request(reqwest::Method::GET, url)
+                .build()
+                .expect("reqwest builds the request; it refuses it only at execute");
+            // reqwest answers without touching the network, so the first poll is ready.
+            let mut future = std::pin::pin!(client.execute(request));
+            match future
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+            {
+                std::task::Poll::Ready(result) => result.expect_err("reqwest refuses the request"),
+                std::task::Poll::Pending => panic!("reqwest touched the network for {url}"),
+            }
+        };
+        for source in [
+            reqwest_error(),
+            refused_at_execute(reqwest::Client::new(), "ftp://example.com/op"),
+            refused_at_execute(https_only, "http://example.com/op"),
+        ] {
+            assert!(source.is_builder(), "{source}");
+            let error = Error::<ApiBody>::from_reqwest(source);
+            assert!(
+                matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+                "{error}"
+            );
+            assert!(!error.is_transient(), "{error}");
+            assert!(std::error::Error::source(&error).is_some());
+        }
+    }
+
+    /// `TransportError::is_transient` is what `RetryOutcome::is_transient` answers for a transport
+    /// failure, and it is decided on a borrow, apart from the variant `from_reqwest` builds. Pair
+    /// every class with that variant so the two cannot disagree: reqwest exposes no constructor
+    /// for the other kinds, so the variant is built around a stand-in source, which neither the
+    /// class nor `Error::is_transient` reads.
+    #[test]
+    fn every_reqwest_class_is_transient_exactly_when_its_variant_is() {
+        for class in [
+            ReqwestClass::Timeout(TimeoutKind::Connect),
+            ReqwestClass::Timeout(TimeoutKind::Total),
+            ReqwestClass::Redirect,
+            ReqwestClass::Protocol,
+            ReqwestClass::Transport,
+            ReqwestClass::Request,
+        ] {
+            // Exhaustive, so a class added without a row here does not compile.
+            match class {
+                ReqwestClass::Timeout(_)
+                | ReqwestClass::Redirect
+                | ReqwestClass::Protocol
+                | ReqwestClass::Transport
+                | ReqwestClass::Request => {}
+            }
+            let error = Error::<ApiBody>::from_class(class, reqwest_error());
+            assert_eq!(class.is_transient(), error.is_transient(), "{class:?}");
+        }
+        // The borrowed classification is the one `from_reqwest` applies to the same error.
+        let transport = TransportError::new(reqwest_error());
+        assert_eq!(
+            transport.is_transient(),
+            Error::<ApiBody>::from_reqwest(reqwest_error()).is_transient()
+        );
     }
 
     #[test]
