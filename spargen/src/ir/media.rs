@@ -129,8 +129,8 @@ pub(crate) enum StatusSpec {
     /// A status range by leading digit, e.g. `Range(2)` for `2XX`.
     Range(u8),
     /// The `default` response, which covers every status no other selector documents. Lowering
-    /// keeps it in [`Responses::default`], never in [`Responses::by_status`]; it enters a shape's
-    /// entries only through [`Responses::error`], which classifies it last.
+    /// stores that response in [`Responses::default`], and [`Responses::error`] offers it to the
+    /// error shape under this selector, classified last.
     Default,
 }
 
@@ -514,8 +514,7 @@ impl Responses {
     /// The entries are the lowered non-success statuses of `by_status` plus the
     /// [`StatusSpec::Default`] entry a declared `default` contributes, not everything the document
     /// declares: the count and the variants follow what lowering kept. `default` is *offered*
-    /// here whenever it is
-    /// declared — including when it is also the operation's sole success source (see
+    /// here whenever it is declared — including when it is also the operation's sole success source (see
     /// [`Self::success`]), which then types both sides with that one body, as the specification
     /// does: `default` documents every undeclared status, of either class. (A bodied *streaming*
     /// `default` cannot be typed on both sides — the success side would stream and this side
@@ -572,8 +571,8 @@ fn finish_shape<S>(
 /// key is injective over selectors, so the sort is total exactly when the selectors within one
 /// operation's entries are unique — which is a property of lowering, not of the document's map
 /// keys: distinct keys stay distinct selectors only because the frontend admits no `Responses` key
-/// outside the specification's grammar (on which parsing is injective), and `default` is the one
-/// key lowering keeps out of `by_status`, so it contributes at most one entry.
+/// outside the specification's grammar (on which parsing is injective), and lowering stores
+/// `default` in its own field, so it contributes at most one entry.
 fn precedence_key(status: StatusSpec) -> (u8, u16) {
     match status {
         StatusSpec::Exact(code) => (0, code),
@@ -616,8 +615,8 @@ pub(crate) enum SuccessShape {
 pub(crate) enum ErrorShape {
     /// Every lowered error entry is bodyless, or there is none: the entries are the non-success
     /// `by_status` statuses plus the [`StatusSpec::Default`] entry a present `default` contributes,
-    /// which is a fact about the lowered entries, not about what the document declares. Every non-success
-    /// status is then `UnexpectedStatus` with its status and headers, retaining at most
+    /// which is a fact about the lowered entries, not about what the document declares. Every
+    /// non-success status is then `UnexpectedStatus` with its status and headers, retaining at most
     /// `max_error_body` bytes of the body (silently truncated past that cap); a failed body read
     /// returns the read error instead.
     None,
@@ -626,8 +625,7 @@ pub(crate) enum ErrorShape {
     Single(Ty),
     /// Two or more entries of which at least one carries a body, counted over the non-success
     /// `by_status` entries plus the [`StatusSpec::Default`] entry a present `default` contributes:
-    /// several
-    /// bodies, or a single body beside a documented bodyless entry (a bodied `404` beside a
+    /// several bodies, or a single body beside a documented bodyless entry (a bodied `404` beside a
     /// bodyless `403` is `Status404(E)` and `Status403`, since a newtype over the `404` body has
     /// nowhere to put the `403`). Generated as a per-operation error enum, one variant per entry — a
     /// payload-carrying variant for a bodied status, a unit variant for a bodyless one. Entries are
