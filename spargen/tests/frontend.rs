@@ -17852,22 +17852,169 @@ fn a_dangling_pointer_ref_inside_an_extension_is_not_resolved() {
     }
 }
 
-/// The asymmetry the skip leaves behind, pinned so it is visible rather than merely true: a
-/// dangling **file** ref inside an extension still rejects, because the bundle loader resolves and
-/// reads `$ref` targets *before* anything parses a Responses key, so the skip never gets a say.
-/// A dangling **pointer** ref in the same position does not (the fixture above). Two kinds of
-/// dangling reference inside arbitrary user data now reach different verdicts.
-///
-/// This is bundle-loader behavior, outside this change's reach — filed as #239 rather than fixed.
-/// Should the loader stop eagerly reading refs it has no reason to interpret, this fixture is the
-/// one that says so.
+/// A dangling **file** ref in the same position reaches the same verdict as the pointer ref above
+/// (#239). It once rejected with `E011` "failed to read", because the bundle loader read every
+/// `$ref` target before anything parsed a Responses key, so the skip never got a say; the loader
+/// now stops at specification extensions itself.
 #[test]
-fn a_dangling_file_ref_inside_an_extension_still_rejects_unlike_a_pointer_ref() {
+fn a_dangling_file_ref_inside_an_extension_is_not_read_like_a_pointer_ref() {
     let (generated, checked) = generate_and_check_refd_path_item(
         "get:\n  operationId: getPet\n  responses:\n    '200': { description: ok }\n    x-note: { $ref: 'nowhere.yaml' }\n",
     );
-    for report in [&generated, &checked] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let inline = inline_spec_with_response_entries("        x-note: { $ref: 'nowhere.yaml' }\n");
+    for report in [&generated, &checked, &generate(&inline), &check(&inline)] {
+        assert!(report.outcome().is_success(), "{report:#?}");
+        assert!(!has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+/// The loader's stop is not confined to `responses`: an extension on any object whose keys are
+/// fixed fields is author data wherever it sits, so no file it names is read. The Paths Object is
+/// absent because the parser, not the loader, still reads an `x-` key there as a path item, for a
+/// pointer ref as much as a file ref (#370).
+#[test]
+fn a_dangling_file_ref_is_not_read_in_any_extension_position() {
+    let dangling = "{ $ref: 'nowhere.yaml' }";
+    let head =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    let schema = "content:\n            application/json:\n              schema:\n                type: string\n";
+    // (the position, the document)
+    let cases = [
+        ("the document root", format!("{head}x-note: {dangling}\npaths: {{}}\n")),
+        ("the Info Object", format!("openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0, x-note: {dangling} }}\nservers: [{{ url: 'https://e.com' }}]\npaths: {{}}\n")),
+        ("a Path Item", format!("{head}paths:\n  /pet:\n    x-note: {dangling}\n    get:\n      operationId: getPet\n      responses:\n        '200': {{ description: ok }}\n")),
+        ("an Operation", format!("{head}paths:\n  /pet:\n    get:\n      operationId: getPet\n      x-note: {dangling}\n      responses:\n        '200': {{ description: ok }}\n")),
+        ("a Response", format!("{head}paths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200':\n          description: ok\n          x-note: {dangling}\n")),
+        ("a Schema", format!("{head}paths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200':\n          description: ok\n          {schema}                x-note: {dangling}\n")),
+        ("the Components Object", format!("{head}paths: {{}}\ncomponents:\n  x-note: {dangling}\n")),
+    ];
+    for (position, spec) in &cases {
+        for report in [&generate(spec), &check(spec)] {
+            assert!(report.outcome().is_success(), "{position}: {report:#?}");
+            assert!(
+                !has_code(report, Code::InvalidInput),
+                "{position}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// Write `files` (the first is the root, `openapi.yaml`) into a tempdir and run both entry points.
+fn generate_and_check_files(files: &[(&str, &str)]) -> (Report, Report, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    for (name, text) in files {
+        std::fs::write(dir.join(name), text).unwrap();
+    }
+    let root = dir.join(files[0].0);
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(root.clone(), out.clone()));
+    let checked = spargen::check(&Spec::new(root));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    (generated, checked, code)
+}
+
+/// A root document whose `200` body is `$ref: '{target}'`, with `rest` appended at the top level.
+fn root_with_body_ref(target: &str, rest: &str) -> String {
+    format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\npaths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema: {{ $ref: '{target}' }}\n{rest}"
+    )
+}
+
+/// The stop has one exception, and it is what keeps it sound: a reference *into* an extension
+/// (`#/x-defs/Pet`) makes that value part of the description, interpreted as whatever its site
+/// expects, so the files its own references name are read — in the root document and in a
+/// sub-file alike. A pet file that exists generates the client; one that does not rejects with the
+/// loader's `E011`, exactly as it would outside an extension.
+#[test]
+fn a_file_ref_inside_an_extension_a_reference_addresses_is_still_read() {
+    const PET: &str =
+        "type: object\nrequired: [petName]\nproperties:\n  petName: { type: string }\n";
+    let in_root = root_with_body_ref("#/x-defs/Pet", "x-defs:\n  Pet: { $ref: 'pet.yaml' }\n");
+    let in_lib = root_with_body_ref("lib.yaml#/x-defs/Pet", "");
+    let lib = "x-defs:\n  Pet: { $ref: 'pet.yaml' }\n";
+    for (placement, files) in [
+        ("in the root", vec![("openapi.yaml", in_root.as_str())]),
+        (
+            "in a sub-file",
+            vec![("openapi.yaml", in_lib.as_str()), ("lib.yaml", lib)],
+        ),
+    ] {
+        let mut present = files.clone();
+        present.push(("pet.yaml", PET));
+        let (generated, checked, code) = generate_and_check_files(&present);
+        assert_eq!(
+            generated.outcome(),
+            Outcome::Generated,
+            "{placement}: {generated:#?}"
+        );
+        assert_eq!(
+            checked.outcome(),
+            Outcome::Clean,
+            "{placement}: {checked:#?}"
+        );
+        assert!(
+            code.contains("pet_name"),
+            "{placement}: the pet file's schema reaches the client"
+        );
+
+        let (generated, checked, _) = generate_and_check_files(&files);
+        for report in [&generated, &checked] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{placement}: {report:#?}"
+            );
+            assert!(
+                messages_for(report, Code::InvalidInput)
+                    .iter()
+                    .any(|message| message.contains("failed to read")
+                        && message.contains("pet.yaml")),
+                "{placement}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// `x-` is an extension only where keys are fixed fields. Where they are names the author chose —
+/// a response header, a schema property, a component — `x-rate-limit` is an entry like any other,
+/// and the file its `$ref` names is read: the dangling spelling of each rejects with `E011`.
+#[test]
+fn a_file_ref_under_an_x_named_entry_is_still_read() {
+    let header = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\npaths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200':\n          description: ok\n          headers:\n            x-rate-limit: { $ref: 'part.yaml' }\n";
+    let property = root_with_body_ref(
+        "#/components/schemas/Pet",
+        "components:\n  schemas:\n    Pet:\n      type: object\n      properties:\n        x-owner: { $ref: 'part.yaml' }\n",
+    );
+    let component = root_with_body_ref(
+        "#/components/schemas/x-pet",
+        "components:\n  schemas:\n    x-pet: { $ref: 'part.yaml' }\n",
+    );
+    for (entry, spec, part) in [
+        ("a response header", header, "schema: { type: integer }\n"),
+        ("a schema property", property.as_str(), "type: string\n"),
+        ("a component", component.as_str(), "type: string\n"),
+    ] {
+        let (generated, checked, _) =
+            generate_and_check_files(&[("openapi.yaml", spec), ("part.yaml", part)]);
+        assert_eq!(
+            generated.outcome(),
+            Outcome::Generated,
+            "{entry}: {generated:#?}"
+        );
+        assert!(checked.outcome().is_success(), "{entry}: {checked:#?}");
+
+        let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", spec)]);
+        for report in [&generated, &checked] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+            assert!(
+                messages_for(report, Code::InvalidInput)
+                    .iter()
+                    .any(|message| message.contains("failed to read")
+                        && message.contains("part.yaml")),
+                "{entry}: {report:#?}"
+            );
+        }
     }
 }
 

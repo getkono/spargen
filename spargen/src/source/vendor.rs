@@ -6,14 +6,14 @@
 //! through local sub-files and through fetched remote documents), fetches each once, writes the
 //! bytes under `.spargen/vendor/`, and records a hash pin in `spargen.lock`.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 
 use super::lock::{vendor_path_for_url, Lock, RemoteEntry, LOCK_FILE_NAME, VENDOR_DIR};
-use super::remote::{classify_ref, collect_refs, RefTarget};
+use super::remote::{classify_ref, collect_refs, enters_extension, split_fragment, RefTarget};
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
 
@@ -77,6 +77,7 @@ fn serialize_path<S: serde::Serializer>(
     serializer.serialize_str(path.as_str())
 }
 
+#[derive(Clone)]
 enum Base {
     Local(Utf8PathBuf),
     Remote(String),
@@ -92,8 +93,10 @@ struct ScanDoc {
 /// that performs network I/O, and only through the injected `fetcher`.
 ///
 /// The walk recurses through relative-file refs (to catch remote refs nested in local sub-files)
-/// and through fetched remote documents (whose relative refs resolve against their own URL).
-/// Recursion parsing is best-effort: a fetched doc that does not parse is still vendored, and any
+/// and through fetched remote documents (whose relative refs resolve against their own URL). It
+/// follows exactly the references the build's bundle loader does: none inside a specification
+/// extension, unless a followed reference addresses that extension's contents, so `spargen lock`
+/// pins every document a build reads and fetches nothing a build ignores. Recursion parsing is best-effort: a fetched doc that does not parse is still vendored, and any
 /// remote ref it hides surfaces later as an actionable `E003` on the next `generate`.
 pub(crate) fn vendor(
     spec: &Utf8Path,
@@ -121,28 +124,41 @@ pub(crate) fn vendor(
     let mut seen_local: HashSet<Utf8PathBuf> = HashSet::new();
     seen_local.insert(spec.to_path_buf());
 
-    let mut queue: VecDeque<ScanDoc> = VecDeque::new();
-    queue.push_back(ScanDoc {
+    // Every scanned document is kept, because a reference into a specification extension is walked
+    // at its target (`enters_extension`), which may lie in a document scanned earlier. The queue
+    // holds a document index and the pointer to walk from: the root, or such a target.
+    let mut docs: Vec<ScanDoc> = vec![ScanDoc {
         value: root_value,
         base: Base::Local(spec.to_path_buf()),
-    });
+    }];
+    let mut local_docs: HashMap<Utf8PathBuf, usize> = HashMap::from([(spec.to_path_buf(), 0)]);
+    let mut remote_docs: HashMap<String, usize> = HashMap::new();
+    let mut walked_targets: HashSet<(usize, JsonPointer)> = HashSet::new();
+    let mut queue: VecDeque<(usize, JsonPointer)> = VecDeque::from([(0, JsonPointer::root())]);
 
-    while let Some(doc) = queue.pop_front() {
-        let remote_base = match &doc.base {
+    while let Some((index, pointer)) = queue.pop_front() {
+        let base = docs[index].base.clone();
+        let remote_base = match &base {
             Base::Local(_) => None,
             Base::Remote(url) => Some(url.clone()),
         };
-        for reference in collect_refs(&doc.value) {
-            match classify_ref(&reference, remote_base.as_deref()) {
+        let Some(value) = docs[index].value.pointer(&pointer) else {
+            continue;
+        };
+        let doc_refs = collect_refs(value);
+        for reference in &doc_refs {
+            match classify_ref(reference, remote_base.as_deref()) {
                 RefTarget::InDocument => {}
                 RefTarget::LocalRelative(path) => {
-                    if let Base::Local(base_path) = &doc.base {
+                    if let Base::Local(base_path) = &base {
                         let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
                         let target = parent.join(&path);
                         if seen_local.insert(target.clone()) {
                             if let Ok(text) = std::fs::read_to_string(&target) {
                                 if let Some(value) = parse_scratch(target.as_str(), &text) {
-                                    queue.push_back(ScanDoc {
+                                    local_docs.insert(target.clone(), docs.len());
+                                    queue.push_back((docs.len(), JsonPointer::root()));
+                                    docs.push(ScanDoc {
                                         value,
                                         base: Base::Local(target),
                                     });
@@ -214,12 +230,39 @@ pub(crate) fn vendor(
                     });
                     if let Ok(text) = String::from_utf8(bytes) {
                         if let Some(value) = parse_scratch(&url, &text) {
-                            queue.push_back(ScanDoc {
+                            remote_docs.insert(url.clone(), docs.len());
+                            queue.push_back((docs.len(), JsonPointer::root()));
+                            docs.push(ScanDoc {
                                 value,
                                 base: Base::Remote(url),
                             });
                         }
                     }
+                }
+            }
+        }
+        // Every document a reference names has been scanned by now, so its target can be found.
+        for reference in doc_refs
+            .iter()
+            .filter(|reference| enters_extension(reference))
+        {
+            let target = match classify_ref(reference, remote_base.as_deref()) {
+                RefTarget::InDocument => Some(index),
+                RefTarget::LocalRelative(path) => match &base {
+                    Base::Local(base_path) => {
+                        let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
+                        local_docs.get(&parent.join(&path)).copied()
+                    }
+                    Base::Remote(_) => None,
+                },
+                RefTarget::Remote(url) => remote_docs.get(&url).copied(),
+                RefTarget::UnsupportedRemote(_) => None,
+            };
+            let (_, fragment) = split_fragment(reference);
+            if let Some(target) = target {
+                let target = (target, JsonPointer::from(fragment.to_owned()));
+                if walked_targets.insert(target.clone()) {
+                    queue.push_back(target);
                 }
             }
         }
@@ -373,6 +416,65 @@ mod tests {
         assert!(vendor_dir
             .join(vendor_path_for_url("https://api.example.com/tag.yaml"))
             .exists());
+    }
+
+    /// `spargen lock` follows the references a build follows (#239): none inside a specification
+    /// extension, so a remote document one names is never fetched (the stub would fail it with
+    /// `E025`), but every one inside an extension a followed reference addresses — in the root
+    /// document or in a fetched one — and every one under an author-chosen `x-` name.
+    #[test]
+    fn vendors_what_a_build_reads_and_nothing_inside_an_unaddressed_extension() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let spec = dir.join("openapi.yaml");
+        std::fs::write(
+            &spec,
+            "openapi: 3.1.0\n\
+             x-note: { $ref: \"https://api.example.com/unused-root.yaml\" }\n\
+             x-defs:\n\
+             \x20 Pet: { $ref: \"https://api.example.com/pet.yaml\" }\n\
+             components:\n\
+             \x20 x-note: { $ref: \"https://api.example.com/unused-components.yaml\" }\n\
+             \x20 schemas:\n\
+             \x20   Pet: { $ref: \"#/x-defs/Pet\" }\n\
+             \x20   Tag: { $ref: \"https://api.example.com/lib.yaml#/x-defs/Tag\" }\n",
+        )
+        .unwrap();
+        let mut docs = std::collections::HashMap::new();
+        docs.insert(
+            "https://api.example.com/pet.yaml".to_owned(),
+            b"type: object\n\
+              x-meta: { $ref: \"./unused-schema.yaml\" }\n\
+              properties:\n  x-owner: { $ref: \"./owner.yaml\" }\n"
+                .to_vec(),
+        );
+        docs.insert(
+            "https://api.example.com/owner.yaml".to_owned(),
+            b"type: string\n".to_vec(),
+        );
+        docs.insert(
+            "https://api.example.com/lib.yaml".to_owned(),
+            b"x-defs:\n  Tag: { $ref: \"./tag.yaml\" }\n".to_vec(),
+        );
+        docs.insert(
+            "https://api.example.com/tag.yaml".to_owned(),
+            b"type: string\n".to_vec(),
+        );
+        let fetcher = StubFetcher { docs };
+
+        let mut diags = Diagnostics::default();
+        let report = vendor(&spec, &fetcher, &mut diags).expect("vendor succeeds");
+        assert!(diags.items().is_empty(), "{:?}", diags.items());
+        let urls: Vec<&str> = report.refs.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "https://api.example.com/lib.yaml",
+                "https://api.example.com/owner.yaml",
+                "https://api.example.com/pet.yaml",
+                "https://api.example.com/tag.yaml",
+            ]
+        );
     }
 
     #[test]
