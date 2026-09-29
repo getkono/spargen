@@ -4832,6 +4832,493 @@ components:
     );
 }
 
+/// One objection the `E023` audit raises against a required dependency, by crate name.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum Objection {
+    Missing(String),
+    Feature { krate: String, feature: String },
+    Defaults(String),
+    Optional(String),
+    Renamed(String),
+}
+
+/// Classify one `E023` message. A message this does not recognise panics, so an objection the
+/// audit learns later cannot pass the Cargo oracle below unexamined.
+fn objection(message: &str) -> Objection {
+    let ticked = |text: &str, index: usize| text.split('`').nth(index).unwrap().to_owned();
+    if message.starts_with("generated client requires Cargo feature `") {
+        return Objection::Feature {
+            krate: ticked(message, 3),
+            feature: ticked(message, 1),
+        };
+    }
+    if message.starts_with("generated client requires `") {
+        return Objection::Missing(ticked(message, 1));
+    }
+    let krate = ticked(message, 1);
+    let rest = message.splitn(3, '`').nth(2).unwrap_or_default();
+    if rest.starts_with(" must set `default-features = false`") {
+        Objection::Defaults(krate)
+    } else if rest.starts_with(" must not be optional") || rest.starts_with(" must be optional") {
+        Objection::Optional(krate)
+    } else if rest.starts_with(" cannot be renamed") {
+        Objection::Renamed(krate)
+    } else {
+        panic!("an E023 message the Cargo oracle cannot classify: {message}")
+    }
+}
+
+/// What Cargo itself makes of one dependency the member declares.
+#[derive(Debug)]
+struct CargoDeclared {
+    /// The package the declaration names (`package`, or else the key).
+    package: String,
+    /// Whether the crate is in the member's graph with every feature of the member off — the
+    /// build in which an optional dependency is absent however its features are wired.
+    unconditional: bool,
+    /// The features Cargo activates on it, from that build where the crate is in it, otherwise
+    /// with every member feature on.
+    features: std::collections::BTreeSet<String>,
+}
+
+/// Ask Cargo, not spargen, how `member` resolves: every dependency it declares, keyed by the name
+/// the member's code sees it under. `Err` carries Cargo's refusal when it will not load the layout.
+///
+/// Each stub crate is a path dependency outside the workspace root, so it is never a member and
+/// its activated features are exactly what the member's declarations ask for; `default` is one of
+/// them only when Cargo kept default features on.
+fn cargo_view(
+    member: &std::path::Path,
+    package: &str,
+) -> Result<std::collections::BTreeMap<String, CargoDeclared>, String> {
+    let metadata = |features: &str| {
+        let output = fixture_cargo(member.parent().unwrap())
+            .args(["metadata", "--offline", "--format-version", "1", features])
+            .arg("--manifest-path")
+            .arg(member)
+            .output()
+            .unwrap();
+        if !output.status.success() {
+            return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+        }
+        Ok(serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap())
+    };
+    let minimal = metadata("--no-default-features")?;
+    let full = metadata("--all-features")?;
+
+    // package name -> the features activated on it, over the member's direct dependencies.
+    let activated = |metadata: &serde_json::Value| {
+        let name_of = |id: &serde_json::Value| {
+            metadata["packages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|candidate| candidate["id"] == *id)
+                .unwrap()["name"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        let nodes = metadata["resolve"]["nodes"].as_array().unwrap();
+        let features_of = |id: &serde_json::Value| {
+            nodes.iter().find(|node| node["id"] == *id).unwrap()["features"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|feature| feature.as_str().unwrap().to_owned())
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let member = nodes
+            .iter()
+            .find(|node| name_of(&node["id"]) == package)
+            .unwrap();
+        member["deps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|dep| (name_of(&dep["pkg"]), features_of(&dep["pkg"])))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let (minimal_activated, full_activated) = (activated(&minimal), activated(&full));
+
+    let declarations = full["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|candidate| candidate["name"] == package)
+        .unwrap()["dependencies"]
+        .as_array()
+        .unwrap();
+    Ok(declarations
+        .iter()
+        .map(|declared| {
+            let name = declared["name"].as_str().unwrap().to_owned();
+            let key = declared["rename"].as_str().unwrap_or(&name).to_owned();
+            let unconditional = minimal_activated.get(&name);
+            let features = unconditional
+                .or_else(|| full_activated.get(&name))
+                .cloned()
+                .unwrap_or_default();
+            let view = CargoDeclared {
+                unconditional: unconditional.is_some(),
+                package: name,
+                features,
+            };
+            (key, view)
+        })
+        .collect())
+}
+
+/// What the audit must say about a layout Cargo accepts, derived from Cargo's own resolution of it
+/// and the requirement set alone — never from spargen's model of inheritance.
+fn objections_cargo_implies(
+    requirements: &spargen::Requirements,
+    cargo: &std::collections::BTreeMap<String, CargoDeclared>,
+) -> std::collections::BTreeSet<Objection> {
+    let mut objections = std::collections::BTreeSet::new();
+    for required in requirements
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.required_by_feature.is_none())
+    {
+        let name = required.name.to_owned();
+        let Some(declared) = cargo.get(required.name) else {
+            objections.insert(Objection::Missing(name));
+            continue;
+        };
+        if declared.package != required.name {
+            objections.insert(Objection::Renamed(name.clone()));
+        }
+        for feature in &required.features {
+            if !declared.features.contains(*feature) {
+                objections.insert(Objection::Feature {
+                    krate: name.clone(),
+                    feature: (*feature).to_owned(),
+                });
+            }
+        }
+        if required.no_default_features && declared.features.contains("default") {
+            objections.insert(Objection::Defaults(name.clone()));
+        }
+        if declared.unconditional == required.optional {
+            objections.insert(Objection::Optional(name));
+        }
+    }
+    objections
+}
+
+/// #173: `E023`'s explain text says it follows `workspace = true` "as Cargo does" — the feature
+/// union, the `default-features` rule, `optional` read from the member, and what counts as a
+/// rename. Every other inheritance fixture pins spargen's model of that against spargen's own
+/// expectations, so a divergence from Cargo would leave the suite green and surface as a rustc
+/// error inside a consumer's generated code. Here Cargo is the oracle: each layout is resolved by
+/// `cargo metadata` over local stub crates (offline, no registry), the objections Cargo's
+/// resolution implies are derived from that and the requirement set alone, and the audit must
+/// raise exactly those. A layout Cargo refuses never reaches the audit — neither `build.rs` nor
+/// the macro runs for a manifest Cargo will not load — so it pins only the refusal the explain
+/// text's advice rests on.
+#[test]
+fn workspace_inheritance_audit_agrees_with_cargo() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+    std::fs::write(
+        &spec,
+        r##"openapi: 3.1.0
+info: { title: Inherited, version: 1.0.0 }
+paths:
+  /json:
+    post:
+      operationId: postJson
+      requestBody:
+        content:
+          application/json:
+            schema: { type: string }
+      responses:
+        "204": { description: ok }
+"##,
+    )
+    .unwrap();
+    let requirements = spargen::requirements(&Spec::new(spec.clone())).expect("spec lowers");
+    let required = requirements
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.required_by_feature.is_none())
+        .collect::<Vec<_>>();
+    let reqwest = required
+        .iter()
+        .find(|dependency| dependency.name == "reqwest")
+        .unwrap();
+    assert!(
+        reqwest.no_default_features && reqwest.features.contains(&"json"),
+        "the cases below need a required feature and a required `default-features = false`: \
+         {requirements:#?}"
+    );
+
+    // One stub per required crate at its floor version, declaring `default` and every feature the
+    // requirement names, plus a `bytes-fork` to rename to.
+    let stub = |dir: &str, name: &str, version: &str, features: &[&str]| {
+        let root = temp.path().join("stubs").join(dir);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "").unwrap();
+        let features = features
+            .iter()
+            .map(|feature| format!("{feature} = []\n"))
+            .collect::<String>();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"{version}\"\n\n\
+                 [features]\ndefault = []\n{features}"
+            ),
+        )
+        .unwrap();
+    };
+    for dependency in &required {
+        stub(
+            dependency.name,
+            dependency.name,
+            dependency.version,
+            &dependency.features,
+        );
+    }
+    let bytes = required
+        .iter()
+        .find(|dependency| dependency.name == "bytes")
+        .unwrap();
+    stub("bytes-fork", "bytes-fork", bytes.version, &bytes.features);
+
+    // The declaration `spargen deps` asks for, as a `[workspace.dependencies]` line on a stub.
+    let root_line = |dependency: &spargen::RequiredDependency| {
+        let mut parts = vec![
+            format!("version = \"{}\"", dependency.version),
+            format!("path = \"../stubs/{}\"", dependency.name),
+        ];
+        if dependency.no_default_features {
+            parts.push("default-features = false".to_owned());
+        }
+        if !dependency.features.is_empty() {
+            let features = dependency
+                .features
+                .iter()
+                .map(|feature| format!("\"{feature}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            parts.push(format!("features = [{features}]"));
+        }
+        format!("{} = {{ {} }}", dependency.name, parts.join(", "))
+    };
+
+    struct Case {
+        name: &'static str,
+        /// `[workspace.dependencies]` lines replacing the advised one, by crate.
+        root: &'static [(&'static str, &'static str)],
+        /// Member lines replacing `name = { workspace = true }`, by crate; empty drops it.
+        member: &'static [(&'static str, &'static str)],
+        /// Extra `[package]` keys, then extra member tables.
+        package: &'static str,
+        tables: &'static str,
+        /// `Some(reason)` where Cargo must refuse the layout with that reason.
+        refused: Option<&'static str>,
+    }
+    const PLAIN: Case = Case {
+        name: "",
+        root: &[],
+        member: &[],
+        package: "",
+        tables: "",
+        refused: None,
+    };
+    let cases = [
+        Case {
+            name: "every requirement inherited as advised",
+            ..PLAIN
+        },
+        Case {
+            name: "features split between root and member (the union)",
+            root: &[
+                (
+                    "reqwest",
+                    r#"reqwest = { version = "{version}", path = "../stubs/reqwest", default-features = false }"#,
+                ),
+                (
+                    "serde",
+                    r#"serde = { version = "{version}", path = "../stubs/serde" }"#,
+                ),
+            ],
+            member: &[
+                (
+                    "reqwest",
+                    r#"reqwest = { workspace = true, features = ["json"] }"#,
+                ),
+                (
+                    "serde",
+                    r#"serde = { workspace = true, features = ["derive"] }"#,
+                ),
+            ],
+            ..PLAIN
+        },
+        Case {
+            name: "a required feature declared on neither side",
+            root: &[(
+                "reqwest",
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", default-features = false }"#,
+            )],
+            ..PLAIN
+        },
+        Case {
+            name:
+                "the member's default-features = false cannot turn off defaults the root leaves on",
+            root: &[(
+                "reqwest",
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["json"] }"#,
+            )],
+            member: &[(
+                "reqwest",
+                r#"reqwest = { workspace = true, default-features = false }"#,
+            )],
+            ..PLAIN
+        },
+        Case {
+            name: "the same override, refused outright on edition 2024",
+            root: &[(
+                "reqwest",
+                r#"reqwest = { version = "{version}", path = "../stubs/reqwest", features = ["json"] }"#,
+            )],
+            member: &[(
+                "reqwest",
+                r#"reqwest = { workspace = true, default-features = false }"#,
+            )],
+            package: "edition = \"2024\"\n",
+            refused: Some(
+                "`default-features = false` cannot override workspace's `default-features`",
+            ),
+            ..PLAIN
+        },
+        Case {
+            name: "the member's default-features = true turns the root's disabled defaults back on",
+            member: &[(
+                "reqwest",
+                r#"reqwest = { workspace = true, default-features = true }"#,
+            )],
+            ..PLAIN
+        },
+        Case {
+            name: "optional on the member, even wired into default",
+            member: &[(
+                "serde_json",
+                r#"serde_json = { workspace = true, optional = true }"#,
+            )],
+            tables: "[features]\ndefault = [\"dep:serde_json\"]\n",
+            ..PLAIN
+        },
+        Case {
+            name: "optional in the root",
+            root: &[(
+                "serde_json",
+                r#"serde_json = { version = "{version}", path = "../stubs/serde_json", optional = true }"#,
+            )],
+            refused: Some("workspace dependencies cannot be optional"),
+            ..PLAIN
+        },
+        Case {
+            name: "a root `package` naming the key itself renames nothing (#168)",
+            root: &[(
+                "bytes",
+                r#"bytes = { package = "bytes", version = "{version}", path = "../stubs/bytes" }"#,
+            )],
+            ..PLAIN
+        },
+        Case {
+            name: "a root `package` naming another crate renames it",
+            root: &[(
+                "bytes",
+                r#"bytes = { package = "bytes-fork", version = "{version}", path = "../stubs/bytes-fork" }"#,
+            )],
+            ..PLAIN
+        },
+        Case {
+            name: "a required crate the member does not inherit",
+            member: &[("secrecy", "")],
+            ..PLAIN
+        },
+    ];
+
+    let mut raised = std::collections::BTreeSet::new();
+    let mut clean = 0;
+    for (index, case) in cases.iter().enumerate() {
+        let lookup = |overrides: &[(&str, &'static str)], name: &str| {
+            overrides
+                .iter()
+                .find(|(krate, _)| *krate == name)
+                .map(|(_, line)| *line)
+        };
+        let mut root =
+            String::from("[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n");
+        let mut member = format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n{}\n{}\n[dependencies]\n",
+            case.package, case.tables
+        );
+        for dependency in &required {
+            match lookup(case.root, dependency.name) {
+                Some(line) => root.push_str(&line.replace("{version}", dependency.version)),
+                None => root.push_str(&root_line(dependency)),
+            }
+            root.push('\n');
+            match lookup(case.member, dependency.name) {
+                Some(line) => member.push_str(line),
+                None => member.push_str(&format!("{} = {{ workspace = true }}", dependency.name)),
+            }
+            member.push('\n');
+        }
+        let dir = temp.path().join(format!("case-{index}"));
+        std::fs::create_dir_all(dir.join("client/src")).unwrap();
+        std::fs::write(dir.join("client/src/lib.rs"), "").unwrap();
+        std::fs::write(dir.join("Cargo.toml"), &root).unwrap();
+        let manifest = dir.join("client/Cargo.toml");
+        std::fs::write(&manifest, &member).unwrap();
+        let layout = format!("{}:\n{root}\n{member}", case.name);
+
+        let cargo = cargo_view(&manifest, "consumer");
+        if let Some(reason) = case.refused {
+            let refusal = cargo.expect_err(&format!("Cargo must refuse {layout}"));
+            assert!(refusal.contains(reason), "{layout}\n{refusal}");
+            continue;
+        }
+        let cargo = cargo.unwrap_or_else(|refusal| panic!("Cargo must accept {layout}\n{refusal}"));
+        let expected = objections_cargo_implies(&requirements, &cargo);
+
+        let preview = spargen::__private::preview_for_macro(
+            &Spec::new(spec.clone()),
+            manifest.to_str().unwrap(),
+        );
+        let audited = preview
+            .report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| diagnostic.code == Code::RuntimeDependencyContract)
+            .map(|diagnostic| objection(&diagnostic.message))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            audited, expected,
+            "the audit (left) disagrees with what Cargo's resolution implies (right) for {layout}\
+             \nCargo resolved: {cargo:#?}"
+        );
+        if expected.is_empty() {
+            clean += 1;
+        }
+        raised.extend(expected);
+    }
+
+    // The table exercises both verdicts and every objection the oracle can derive, so no rule can
+    // agree with Cargo merely because no case reaches it.
+    assert!(clean >= 3, "{clean} clean layouts");
+    let kinds = raised
+        .iter()
+        .map(std::mem::discriminant)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(kinds.len(), 5, "{raised:#?}");
+}
+
 /// A spec that turns on every capability the requirement table knows: a JSON body (`reqwest/json`),
 /// a multipart body (`reqwest/multipart`), a binary array inside JSON (`bytes/serde`), an XML body
 /// (`quick-xml`), an event stream (`futures-core` + `reqwest/stream`), `format: uuid` (`uuid`) and
