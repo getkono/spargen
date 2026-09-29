@@ -47,30 +47,116 @@ for `meilisearch`. Schema lowering is reached only by `github-api-3-1`, `openai-
 recipes.
 
 **Schema Object `$ref` beside shape-bearing sibling keywords** (the intersection the support matrix
-describes, and its `E013` rejections) is reached by `mastodon-openapi` alone. It carries 35 `$ref`s
-with a `type` sibling, each a string enum component referenced beside `type: string` (33) or
-`type: [string, 'null']` (2); `/components/schemas/Status/properties/visibility` is one. Every other intersection behaviour —
-a non-empty intersection of any other shape, an empty one, a recursive target — is pinned only by
-inline fixtures: those in `spargen/tests/frontend.rs`, and the two `--compat` carve fixtures in
+describes, and its `E013` rejections) is reached by `mastodon-openapi` and by one `oneOf` member of
+`openai-openapi`. Mastodon carries 35 `$ref`s with a `type` sibling, each a string enum component
+referenced beside `type: string` (33) or `type: [string, 'null']` (2);
+`/components/schemas/Status/properties/visibility` is one. In the other pinned documents and
+recipes, the only `$ref` with a sibling other than an annotation (`description`, `title`,
+`deprecated`, `default`, 3.0's `nullable`) is `openai-openapi`'s
+`/components/schemas/InputItem/oneOf/1`, which sets `type: object` beside
+`$ref: '#/components/schemas/Item'`. A union member's `$ref` siblings were dropped before lowering
+until [#279](https://github.com/getkono/spargen/issues/279) was fixed, and since then this member
+reaches the intersection too. Every other intersection behaviour — an empty intersection, a
+recursive target, and a non-empty one of any other shape — is pinned only by inline fixtures:
+those in `spargen/tests/frontend.rs`, and the two `--compat` carve fixtures in
 `spargen/tests/carve.rs` (`carve_removes_a_ref_whose_siblings_cannot_be_intersected` and
 `carve_removes_a_recursive_ref_whose_siblings_bear_a_shape`), which carve away a `$ref`-sibling
-`E013`. In the other pinned documents and recipes, the only `$ref` with a sibling other than an
-annotation (`description`, `title`, `deprecated`, `default`, 3.0's `nullable`) is
-`openai-openapi`'s `/components/schemas/InputItem/oneOf/1`, which sets `type: object` beside
-`$ref: '#/components/schemas/Item'`. It is a `oneOf` member, and a union member's `$ref` siblings
-are currently dropped before lowering ([#279](https://github.com/getkono/spargen/issues/279)), so
-it never reaches the intersection. Re-measure this section once #279 is fixed.
+`E013`.
 
-Measured on `master@b1961a4` by running `spargen check` over every case and recipe that reaches
-lowering, with one mutation of `spargen/src/oas31/lower.rs` at a time:
+Measured by running `spargen check` over every case and recipe that reaches lowering, with one
+mutation of `spargen/src/oas31/lower.rs` at a time:
 
 - Making every shape-bearing `$ref` sibling that reaches the intersection reject with `E013`
-  rejects `mastodon-openapi` (26 `E013`s); every other case and recipe keeps its outcome. Before
-  `mastodon-openapi` was added this mutation left the whole corpus green (measured on
-  `master@16eda2e`: `corpus_manifest`, `snapshot` and `recipes` passed with no snapshot changed).
+  rejects `mastodon-openapi` (26 `E013`s) and adds one `E013` to the already-rejected
+  `openai-openapi`, at `/components/schemas/InputItem/oneOf/1`; every other case and recipe keeps
+  its outcome and histogram (measured on `master@38c1154`, where `corpus_manifest` and `snapshot`
+  fail and `recipes` passes). On `master@b1961a4`, before #279 was fixed, only `mastodon-openapi`
+  changed. Before `mastodon-openapi` was added this mutation left the whole corpus green (measured
+  on `master@16eda2e`: `corpus_manifest`, `snapshot` and `recipes` passed with no snapshot
+  changed).
 - Rejecting the recursive-nullable collapse (a single real union member that closes a reference
   cycle, without sibling keywords) with `E013` rejects `mastodon-openapi` (one `E013`); every
-  other case and recipe keeps its outcome.
+  other case and recipe keeps its outcome (measured on `master@b1961a4`).
+
+### Which diagnostic emission sites the corpus notices
+
+The snapshot histograms show which codes the corpus *emits*, so they catch a site that stops
+firing. Whether the corpus would notice a site that starts *over*-firing depends on a different
+fact: whether some pinned description reaches the site with its condition false. This table records
+that for every emission site in `spargen/src/oas31` and `spargen/src/source` (the frontend; codes
+emitted only by `codegen`, `compat`, `name` or the facade are out of scope).
+
+Measured on `master@38c1154`. An emission site is one `Code::` construction outside a
+`#[cfg(test)]` module: 143 of them, 107 errors and 36 warnings. The mutation for a site makes it
+fire whenever the statement that selects it is evaluated: the innermost `if` or `let … else`
+condition, or the `match` whose arm it is, with any early exit ahead of it in the same block
+skipped. For a helper that only builds a diagnostic (`reject_all_of_cycle`, `reject_unpinned`,
+`duplicate_key_error`, …) that statement is at its call sites, and the helper counts as noticed if
+any of them is. A site is **noticed** when some description evaluates that statement more often than
+the site already fires, on a run that observes the result:
+
+- all ten manifest cases, through `snapshot.rs`'s uncapped histograms (errors and warnings);
+- the recipes, through `recipes.rs`, which observe errors, plus warnings other than `W001` in
+  `aide`'s case; the other recipes' warnings are not asserted.
+
+Which statements each description evaluates was read from source-based coverage
+(`cargo +stable llvm-cov`) of `spargen check --batch-cap 1000000` over each case and recipe on its
+own, and of the `corpus_manifest`, `snapshot` and `recipes` suites; the two agree on every site.
+Real mutations run through the three suites checked the method. Forcing seven sites marked not
+noticed, all at once, left all three green (`frontend.rs` failed 8 of 403 under the same mutations,
+so they were live). Forcing a noticed site failed exactly the tests of the descriptions listed as
+reaching it, for each of four: `W002` for `callbacks` (five snapshots and the `aide` recipe),
+`E004` for a Path Item `$ref` hop (`openapi-boilerplate` in `corpus_manifest` and `snapshot`),
+`W011` for a second per-operation `servers` entry (the `github-api-3-1` snapshot), and the
+`$ref`-sibling `E013` above (`mastodon-openapi` and `openai-openapi`). The `E004` and `W011`
+mutations shared one run; no description reaches both.
+
+98 of the 143 sites are noticed and 45 are not (34 errors, 11 warnings). Per code:
+
+| Code | Sites | Noticed | Fired by the corpus | Sites no pinned description reaches |
+| --- | --- | --- | --- | --- |
+| `E001` | 1 | 1 | the four 3.0 cases, `poem-openapi` recipe | — |
+| `E002` | 2 | 0 | — | root `jsonSchemaDialect` not the OAS dialect; a schema `$schema` naming another dialect |
+| `E003` | 2 | 1 | — | `spargen lock` meeting an unfetchable remote scheme (`vendor.rs`) |
+| `E004` | 14 | 9 | — | remote alias cycle (`ensure_remote`); bundle alias cycle (`ensure_resolved`); both arms of `reject_unfollowable_reference`; a Security Scheme `$ref` that does not resolve |
+| `E005` | 2 | 0 | — | `patternProperties` beside `additionalProperties: false`; heterogeneous `patternProperties` value types |
+| `E006` | 1 | 1 | — | — |
+| `E007` | 3 | 3 | — | — |
+| `E008` | 2 | 2 | — | — |
+| `E009` | 28 | 20 | `openai-openapi` | a `content` parameter under a media other than JSON or text; a non-object form-urlencoded request body; `prefixEncoding`/`itemEncoding` on multipart; an Encoding Object style outside the four, delimited with `explode: true`, `deepObject` in multipart, or an object property in multipart; an XML hint on a type serialized as XML |
+| `E010` | 7 | 3 | — | all four `in: querystring` sites (no content, unsupported media, no schema, non-object form body) |
+| `E011` | 27 | 19 | `meilisearch` | an `additionalOperations` method colliding with a fixed field; a tag `parent` cycle and an unknown `parent`; `xml.nodeType` beside `attribute`/`wrapped`; a duplicate path-item parameter; a vendored remote that is not UTF-8; a malformed `spargen.lock`; `spargen lock` I/O failures |
+| `E012` | 2 | 2 | — | — |
+| `E013` | 9 | 8 | — | an all-scalar `allOf` with no common value (`reject_all_of_scalars`) |
+| `E014` | 1 | 1 | — | — |
+| `E015` | 1 | 0 | — | `prefixItems` beside a typed `items` rest |
+| `E016` | 1 | 1 | — | — |
+| `E021` | 1 | 0 | — | a vendored remote missing or drifted from its pin |
+| `E022` | 2 | 2 | — | — |
+| `E025` | 1 | 0 | — | a failed `spargen lock` fetch |
+| `W001` | 3 | 3 | `github-api-3-1`, `openai-openapi`, `ollama`, `mastodon-openapi`, `aide` recipe | — |
+| `W002` | 3 | 3 | `github-api-3-1`, `openai-openapi`, `mastodon-openapi` | — |
+| `W005` | 4 | 3 | `github-api-3-1`, `openai-openapi` | a `default` beside an annotation-only component `$ref` (`ensure_component`) |
+| `W006` | 2 | 0 | — | both `XmlHintIgnored` sites |
+| `W010` | 3 | 2 | — | `itemSchema` on a response header's `content` |
+| `W011` | 20 | 13 | `github-api-3-1`, `openai-openapi` | cases `positional-encoding-form`, `allow-reserved-multipart`, `encoding-headers-non-multipart`, `encoding-header-no-value`, and three `response-header-untyped` sites under a header's `content` |
+| `W014` | 1 | 1 | `github-api-3-1`, `openai-openapi`, `ollama` | — |
+
+A noticed site can rest on one description. These are noticed by exactly one, so removing or
+re-pinning it would leave them unguarded:
+
+- `openapi-boilerplate`: six `E004` sites (the four in `resolve.rs`, `chain_component_alias`'s
+  cycle, and the Path Item `$ref` hop) and `E016`'s Path Item `$ref` siblings.
+- `openai-openapi`: the `E009` sites for a nested `encoding`, a `contentType` range, a malformed
+  `contentType`, and an unsendable `contentType` parameter, and `W011`'s
+  `encoding-unknown-property`.
+- `mastodon-openapi`: `E009` for a sequential response's `schema` under OpenAPI 3.2, the three
+  `E011` server-variable checks, and `W011`'s `unused-server-variable`.
+- `github-api-3-1`: `W011`'s `extra-servers`.
+
+The sites listed as not reached get no evidence at all from a green corpus run, in either direction;
+only `frontend.rs` and the other inline fixtures pin them. Re-measure this table when a case is
+added or re-pinned, and when a change moves a site or its gate.
 
 Before relying on a green corpus run for a change to a construct, check that some pinned
 description contains that construct in a position that reaches the code. If none does, the
