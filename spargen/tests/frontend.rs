@@ -1654,6 +1654,63 @@ components:
     }
 }
 
+/// A resolved target is named for its final pointer token, and that token is RFC 6901-unescaped
+/// first — the result is a public type name in the generated API. Two targets pin both halves:
+///
+/// - `a~1b` is the key `a/b`, so it is named `AB`; left escaped it would be `A1b`.
+/// - `a~01b` is the key `a~1b` — a literal tilde — so it is named `A1b`. Decoding `~0` before `~1`
+///   turns it into `a/b` instead, and it collides with the first target's name.
+///
+/// So the unescape and its order (`~1` first, then `~0`) each change a public name here.
+#[test]
+fn a_resolved_target_is_named_for_its_unescaped_final_pointer_token() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [slash, tilde]
+                properties:
+                  slash: { $ref: '#/x-weird/a~1b' }
+                  tilde: { $ref: '#/x-weird/a~01b' }
+x-weird:
+  a/b:
+    type: object
+    properties: { x: { type: string } }
+  a~1b:
+    type: object
+    properties: { y: { type: string } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("pub struct AB "),
+        "`a~1b` names the key `a/b`: {code}"
+    );
+    assert!(
+        code.contains("pub slash: AB"),
+        "the `a/b` target is the slash field's type: {code}"
+    );
+    assert!(
+        code.contains("pub struct A1b "),
+        "`a~01b` names the key `a~1b`: {code}"
+    );
+    assert!(
+        code.contains("pub tilde: A1b"),
+        "the `a~1b` target is the tilde field's type: {code}"
+    );
+}
+
 /// The one-member form of the same fault, which has no sibling to disguise it: a sub-file component
 /// whose entire body is `allOf: [$ref to itself]`. The placeholder read made the component itself
 /// `serde_json::Value`, so the operation's whole response body was untyped — `clean`.
