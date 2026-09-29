@@ -2367,6 +2367,37 @@ fn a_contested_type_name_survives_reordering_the_paths_that_reach_it() {
     );
 }
 
+/// A definition with no identity of its own — a boolean-schema `false` property, which lowers to a
+/// `Never` type whose provenance falls back to the root document's own (empty) pointer — must never
+/// take a contested name from a declared schema. The empty pointer is the lowest a plain ordering
+/// could produce, so without the `anonymous` term of the rank the synthesized `Holder x` would take
+/// `Holderx` from the component declared under that name. Both component orders are generated, so
+/// arrival order cannot be what decides it.
+#[test]
+fn a_synthesized_type_with_no_identity_never_takes_a_name_from_a_declared_schema() {
+    const HOLDER: &str = "    Holder:\n      type: object\n      properties:\n        x: false\n";
+    const DECLARED: &str = "    Holderx:\n      type: object\n      required: [declared]\n      \
+                            properties: { declared: { type: string } }\n";
+    for (first, second) in [(HOLDER, DECLARED), (DECLARED, HOLDER)] {
+        let (report, code) = generate_with_code(&format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\npaths: {{}}\n\
+             components:\n  schemas:\n{first}{second}"
+        ));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let types = types_module(&code);
+        assert_eq!(
+            field_owner(&types, "pub declared:").as_deref(),
+            Some("Holderx"),
+            "the declared schema keeps the bare name: {types}"
+        );
+        assert!(
+            types.contains("pub enum Holderx84222325 {}"),
+            "and the synthesized `Never` carries the root pointer's disambiguator: {types}"
+        );
+    }
+}
+
 /// A root document whose two operations reach a `Shape` declared in `a.yaml` and another declared
 /// in `b.yaml`, listed `/a` first unless `b_first`; returns the generated client.
 fn generate_two_file_shapes(b_first: bool) -> String {
