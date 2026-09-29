@@ -1600,6 +1600,60 @@ paths:
     );
 }
 
+/// The fourth spelling of the shape above, and the one the root-document branch of
+/// `reservation_at` exists for: a **root** component whose `allOf` member names itself through an
+/// explicit file reference to the root document. `ensure_resolved` routes that reference back to
+/// `ensure_component`, so the in-progress schema is recorded in the root component map rather than
+/// the resolved-reference one, and only the root-document branch finds it.
+///
+/// Without that branch the member is not recognised as in progress, is lowered again, and recurses
+/// until the depth cap: the document is rejected with `E014`, a chain-length blame for a cycle of
+/// length one — the misdiagnosis
+/// `a_sub_file_component_alias_cycle_is_reported_as_a_cycle_not_as_excessive_depth` forbids.
+#[test]
+fn a_direct_recursive_all_of_member_named_by_explicit_root_file_reference_is_rejected() {
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Tree' } }
+components:
+  schemas:
+    Tree:
+      type: object
+      properties:
+        label: { type: string }
+        child:
+          description: the child node
+          allOf:
+            - { $ref: './openapi.yaml#/components/schemas/Tree' }
+"##;
+    for (entry, report) in [("generate", &generate(root)), ("check", &check(root))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::AllOfIrreconcilable
+                    && d.message.contains("direct recursive")),
+            "{entry}: it is a direct recursive member, and must be named as one: {report:#?}"
+        );
+        assert!(
+            !has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: a member that names its own component is a cycle, not a deep chain: \
+             {report:#?}"
+        );
+    }
+}
+
 /// The one-member form of the same fault, which has no sibling to disguise it: a sub-file component
 /// whose entire body is `allOf: [$ref to itself]`. The placeholder read made the component itself
 /// `serde_json::Value`, so the operation's whole response body was untyped — `clean`.
