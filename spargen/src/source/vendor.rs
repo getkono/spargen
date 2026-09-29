@@ -278,12 +278,33 @@ impl RemoteFetch for ReqwestFetcher {
     fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
         let response = reqwest::blocking::get(url)
             .and_then(reqwest::blocking::Response::error_for_status)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| with_causes(&error))?;
         response
             .bytes()
             .map(|bytes| bytes.to_vec())
-            .map_err(|error| error.to_string())
+            .map_err(|error| with_causes(&error))
     }
+}
+
+/// `error` followed by each error in its `source()` chain, `: `-separated.
+///
+/// A reqwest transport error displays only "error sending request for url (…)"; what actually
+/// failed — the refused connection, the DNS lookup, the TLS alert and its reason — is carried by
+/// its sources, and E025 promises to report it.
+#[cfg(feature = "remote-fetch")]
+fn with_causes(error: &dyn std::error::Error) -> String {
+    let mut rendered = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        let cause_text = cause.to_string();
+        // Some layers repeat their source's text in their own; print each distinct text once.
+        if !rendered.ends_with(&cause_text) {
+            rendered.push_str(": ");
+            rendered.push_str(&cause_text);
+        }
+        source = cause.source();
+    }
+    rendered
 }
 
 #[cfg(test)]

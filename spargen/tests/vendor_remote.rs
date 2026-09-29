@@ -272,6 +272,9 @@ fn a_refused_connection_is_e025_naming_the_url() {
 
     let message = fetch_failure(&report);
     assert!(message.contains(&url), "{message}");
+    // The cause, not only reqwest's "error sending request": the refused connect's own I/O
+    // error, whose std rendering always carries the OS error number.
+    assert!(message.contains("(os error "), "{message}");
 }
 
 /// The same fetch through the installed binary, so `spargen lock`'s own wiring is reached too.
