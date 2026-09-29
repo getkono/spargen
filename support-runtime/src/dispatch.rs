@@ -219,19 +219,19 @@ async fn apply_credential(
             Credential::Basic { username, password } => {
                 Ok(request.basic_auth(username, Some(password.expose_secret())))
             }
-            _ => Err(credential_mismatch(scheme.name, "http basic")),
+            _ => Err(credential_mismatch(scheme.name, "http basic", credential)),
         },
         AuthKind::Bearer => match token {
             Some(token) => Ok(request.bearer_auth(token.expose_secret())),
-            None => Err(credential_mismatch(scheme.name, "bearer")),
+            None => Err(credential_mismatch(scheme.name, "bearer", credential)),
         },
         AuthKind::ApiKeyHeader(name) => match token {
             Some(token) => Ok(request.header(name, sensitive_value(token.expose_secret())?)),
-            None => Err(credential_mismatch(scheme.name, "apiKey")),
+            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
         },
         AuthKind::ApiKeyQuery(name) => match token {
             Some(token) => Ok(request.query(&[(name, token.expose_secret())])),
-            None => Err(credential_mismatch(scheme.name, "apiKey")),
+            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
         },
         // Satisfied by the transport; `attach_auth` never reaches this arm.
         AuthKind::MutualTls => Ok(request),
@@ -240,7 +240,7 @@ async fn apply_credential(
                 let cookie = format!("{name}={}", token.expose_secret());
                 Ok(request.header(reqwest::header::COOKIE, sensitive_value(&cookie)?))
             }
-            None => Err(credential_mismatch(scheme.name, "apiKey")),
+            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
         },
     }
 }
@@ -251,10 +251,22 @@ fn sensitive_value(secret: &str) -> Result<HeaderValue, Error<Infallible>> {
     Ok(value)
 }
 
-fn credential_mismatch(scheme: &str, kind: &str) -> Error<Infallible> {
-    Error::request_message(format!(
-        "the credential registered for security scheme `{scheme}` cannot satisfy its `{kind}` type"
-    ))
+fn credential_mismatch(
+    scheme: &'static str,
+    required: &'static str,
+    credential: &Credential,
+) -> Error<Infallible> {
+    let registered = match credential {
+        Credential::Bearer(_) => "Bearer",
+        Credential::Basic { .. } => "Basic",
+        Credential::ApiKey(_) => "ApiKey",
+        Credential::Provider(_) => "Provider",
+    };
+    Error::RequestConstruction(RequestError::CredentialMismatch {
+        scheme,
+        required,
+        registered,
+    })
 }
 
 /// Send a prepared request through the core's transport [`crate::HttpBackend`], mapping
@@ -890,12 +902,9 @@ mod tests {
     /// what changes for a consumer is that the round trip to the identity provider is gone and the
     /// cause no longer downcasts to `AuthError`.
     ///
-    /// Nothing typed replaces it. `credential_mismatch` goes through `Error::request_message`,
-    /// which boxes its text as a private `MessageError` — declared without `pub` in `error.rs`, and
-    /// named by none of the four lists that re-export the runtime into generated output — so the
-    /// cause has **no public type a consumer can name**, and `to_string()` matching is the only
-    /// recourse left. That is the same observable the typed missing-credential cause exists to
-    /// remove; this path still has it, tracked separately as #192.
+    /// What replaces it is typed: `RequestError::CredentialMismatch`, naming the scheme, the kind
+    /// it carries, and the kind registered, and ending the chain, so a consumer routes it without
+    /// matching on text.
     #[test]
     fn a_token_provider_under_a_basic_scheme_is_a_mismatch_without_calling_it() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -920,18 +929,19 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+            matches!(
+                error,
+                Error::RequestConstruction(RequestError::CredentialMismatch {
+                    scheme: "login",
+                    required: "http basic",
+                    registered: "Provider",
+                })
+            ),
             "{error:?}"
         );
+        // The payload is the whole cause: nothing below it, so nothing downcasts to `AuthError`.
         let source = std::error::Error::source(&error).unwrap();
-        assert!(source.to_string().contains("http basic"), "{source}");
-        // The break 0adccc5's footer declares, asserted at the level master's `AuthError` occupied:
-        // the cause is still reachable, and it is no longer that type.
-        assert!(
-            std::error::Error::source(source)
-                .is_some_and(|cause| cause.downcast_ref::<AuthError>().is_none()),
-            "the mismatch cause must be reachable and must not downcast to `AuthError`"
-        );
+        assert!(std::error::Error::source(source).is_none(), "{source}");
         assert!(!called.load(Ordering::SeqCst), "the provider was called");
     }
 
@@ -995,33 +1005,11 @@ mod tests {
             FIRST_THEN_FALLBACK,
         ))
         .unwrap_err();
-        assert!(
-            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
-            "expected the selected alternative's mismatch, got {error:?}"
-        );
-        let source = std::error::Error::source(&error).unwrap();
-        assert!(source.to_string().contains("`primary`"), "{source}");
-    }
-
-    #[test]
-    fn mismatched_credential_kind_fails() {
-        let mut core = core();
-        core.set_credential(
-            "token",
-            Credential::Basic {
-                username: "u".to_owned(),
-                password: SecretString::from("p"),
-            },
-        );
-        let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
-        // A mismatch is a misconfiguration at `with_credential`, not a state an application routes
-        // on, so it deliberately stays untyped.
-        assert!(
-            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
-            "{error:?}"
-        );
-        let source = std::error::Error::source(&error).unwrap();
-        assert!(source.to_string().contains("bearer"), "{source}");
+        let Error::RequestConstruction(RequestError::CredentialMismatch { scheme, .. }) = &error
+        else {
+            panic!("expected the selected alternative's mismatch, got {error:?}");
+        };
+        assert_eq!(*scheme, "primary");
     }
 
     #[test]
@@ -1086,8 +1074,59 @@ mod tests {
             }]],
         ))
         .unwrap_err();
-        let source = std::error::Error::source(&error).unwrap();
-        assert!(source.to_string().contains("http basic"), "{source}");
+        assert!(
+            matches!(
+                error,
+                Error::RequestConstruction(RequestError::CredentialMismatch {
+                    scheme: "login",
+                    required: "http basic",
+                    registered: "Bearer",
+                })
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// The other direction: a static basic credential under a scheme that carries a token. It
+    /// yields no token, so every token-carrying kind reports the mismatch with its own name.
+    #[test]
+    fn a_basic_credential_does_not_satisfy_a_token_scheme() {
+        let mut core = core();
+        core.set_credential(
+            "login",
+            Credential::Basic {
+                username: "aladdin".to_owned(),
+                password: SecretString::from("open sesame"),
+            },
+        );
+        for (kind, required) in [
+            (AuthKind::Bearer, "bearer"),
+            (AuthKind::ApiKeyHeader("X-Api-Key"), "apiKey"),
+            (AuthKind::ApiKeyQuery("api_key"), "apiKey"),
+            (AuthKind::ApiKeyCookie("SESSION"), "apiKey"),
+        ] {
+            let error = poll_ready(attach_auth(
+                &core,
+                get(&core),
+                &[&[AuthScheme {
+                    name: "login",
+                    kind,
+                }]],
+            ))
+            .unwrap_err();
+            match error {
+                Error::RequestConstruction(RequestError::CredentialMismatch {
+                    scheme,
+                    required: reported,
+                    registered,
+                }) => {
+                    assert_eq!(scheme, "login");
+                    assert_eq!(reported, required, "{kind:?}");
+                    assert_eq!(registered, "Basic");
+                }
+                other => panic!("expected CredentialMismatch for {kind:?}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
