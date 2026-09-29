@@ -528,6 +528,23 @@ mod tests {
                 .to_string_lossy()
         );
         assert_eq!(consumer.resolve_spec_path(manifest), manifest);
+
+        // A bare relative manifest path has an empty parent; the spec directory is then the one
+        // that path is relative to, spelled `.`, never an empty prefix.
+        let bare = Consumer::locate(os("Cargo.toml"), None).unwrap();
+        assert_eq!(
+            bare,
+            Consumer {
+                dir: ".".to_owned(),
+                manifest: "Cargo.toml".to_owned(),
+            }
+        );
+        assert_eq!(
+            bare.resolve_spec_path("openapi.yaml"),
+            std::path::Path::new(".")
+                .join("openapi.yaml")
+                .to_string_lossy()
+        );
     }
 
     #[cfg(unix)]
