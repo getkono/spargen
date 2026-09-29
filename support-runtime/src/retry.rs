@@ -124,7 +124,9 @@ impl<'a> RetryOutcome<'a> {
     /// protocol failure is not. Neither is a request reqwest refused before sending anything — a
     /// URL scheme other than `http`/`https`, plain `http` on an `https_only` client — which is
     /// refused again on every attempt, nor any other request-kind failure, which reqwest may raise
-    /// after the request was transmitted. Policies are free to ignore this and key on
+    /// after the request was transmitted. On `wasm32` that includes a failed connection: reqwest
+    /// offers no connect classification there, so it stays a request-kind failure and is not
+    /// transient. Policies are free to ignore this and key on
     /// [`Self::status`] / [`Self::transport_error`] directly.
     pub fn is_transient(&self) -> bool {
         match self {
