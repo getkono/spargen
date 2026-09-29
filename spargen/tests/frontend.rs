@@ -9249,10 +9249,11 @@ fn shape_bearing_keywords_the_explain_names() -> Vec<String> {
 }
 
 /// `E013`'s explain names the sibling keywords intersected with a `$ref`'s target rather than
-/// discarded. That is a published promise, and nothing but this fixture ties it to the code:
-/// `schema_has_shape_constraint` is the private gate deciding whether the intersection happens, and
-/// a sibling that clears the gate but lowers to `TypeKind::Any` intersects as identity and is
-/// discarded anyway.
+/// discarded. That is a published promise, held to the code at two levels. Which keywords the
+/// private gate `schema_has_shape_constraint` reads is pinned in-crate: its `SHAPE_KEYWORDS` table
+/// and this explain name one set, in both directions (`oas31::lower`'s tests). What this fixture
+/// adds is behaviour, which the table cannot show: a sibling that clears the gate but lowers to
+/// `TypeKind::Any` intersects as identity and is discarded anyway.
 ///
 /// The list under test is DERIVED from `explain()`, not repeated here, so deleting a keyword from
 /// the prose fails this fixture rather than quietly shrinking what it checks. And each row is a
