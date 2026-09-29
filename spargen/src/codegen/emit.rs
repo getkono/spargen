@@ -1605,6 +1605,11 @@ fn emit_multipart_body(
                     Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {
                         let mut part = reqwest::multipart::Part::text(#receiver.to_string());
                     },
+                    // Codegen sees only a checked `Api`; JSON-encoding a reservation would pick a
+                    // part shape for a body nobody lowered.
+                    Some(TypeKind::Reserved) => unreachable!(
+                        "a reservation reached codegen; `check_invariants` should have rejected it"
+                    ),
                     // Any composite property → a JSON-encoded text part.
                     _ => quote! {
                         let mut part = reqwest::multipart::Part::text(
@@ -2964,6 +2969,13 @@ fn emit_type_def(
                     }
                 }
             }
+        }
+        // Named here rather than left to the alias arm: `type_kind_tokens` refuses it too, but a
+        // reservation is not an alias and must not read as one at this site either.
+        TypeKind::Reserved => {
+            unreachable!(
+                "a reservation reached codegen; `check_invariants` should have rejected it"
+            )
         }
         _ => {
             let ty = type_kind_tokens(&def.kind, api, names, options);

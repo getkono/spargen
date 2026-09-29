@@ -2152,6 +2152,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 {
                     Some(structure)
                 }
+                // A reservation's fields are not known yet, so no required key can be proven
+                // unique to it: not a sound discriminator, like any non-closed variant.
+                TypeKind::Reserved => None,
                 _ => None,
             })
             .collect();
@@ -2575,17 +2578,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // The pre-check above sees root components only. A name the root does not declare
                 // is a *sub-file* component, and it reaches its own reservation through
                 // `ensure_resolved`, so a direct recursive member there arrives here as a back-edge
-                // rather than being caught above. Refuse to read it for the same reason: see
-                // `is_in_progress_root`.
-                if self.is_in_progress_root(ty.id) {
-                    return self.reject_all_of_unit(
-                        schema.provenance.clone(),
-                        "an `allOf` member is a direct recursive `$ref` to the component being \
-                         lowered",
-                    );
-                }
-                self.push_ref_member(ty, out);
-                return Some(());
+                // rather than being caught above; `push_ref_member` refuses to read it.
+                return self.push_ref_member(
+                    ty,
+                    &schema.provenance,
+                    "an `allOf` member is a direct recursive `$ref` to the component being lowered",
+                    out,
+                );
             }
             // A remote `$ref` member goes through the cycle-safe remote path, exactly like a
             // component member: a member still being lowered is a direct recursive ref whose fields
@@ -2599,15 +2598,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     );
                 }
                 let ty = self.ensure_remote(reference)?;
-                if self.is_in_progress_root(ty.id) {
-                    return self.reject_all_of_unit(
-                        schema.provenance.clone(),
-                        "an `allOf` member is a direct recursive remote `$ref` to the schema being \
-                         lowered",
-                    );
-                }
-                self.push_ref_member(ty, out);
-                return Some(());
+                return self.push_ref_member(
+                    ty,
+                    &schema.provenance,
+                    "an `allOf` member is a direct recursive remote `$ref` to the schema being \
+                     lowered",
+                    out,
+                );
             }
             // Non-component refs resolve (or error) exactly as `lower_schema` does; treat the target
             // as an inline member.
@@ -2662,9 +2659,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Turn a resolved `$ref` member's already-lowered type into a contribution: an object component
-    /// contributes a *copy* of its fields/`additionalProperties`; any other kind is a scalar member.
-    fn push_ref_member(&mut self, ty: Ty, out: &mut Vec<Contribution>) {
+    /// contributes a *copy* of its fields/`additionalProperties`; any other lowered kind is a
+    /// scalar member.
+    ///
+    /// A member whose body is still being lowered is refused here, with `recursive` as the
+    /// message, rather than by each caller: a reservation's kind says nothing about the schema's
+    /// shape, and reading it as "not a struct" is exactly how a recursive member once became a
+    /// silent scalar. A caller cannot forget the guard because it no longer holds it.
+    fn push_ref_member(
+        &mut self,
+        ty: Ty,
+        provenance: &Provenance,
+        recursive: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
+        // Every id `is_in_progress_root` accepts is still a `Reserved` placeholder — each
+        // in-progress map is entered with a fresh `reserve` and left before its `fill` — so this
+        // arm is the whole guard the callers used to hold.
         match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Reserved) => {
+                return self.reject_all_of_unit(provenance.clone(), recursive)
+            }
             Some(TypeKind::Struct(structure)) => {
                 let fields = structure.fields.clone();
                 let required = fields
@@ -2681,6 +2696,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             _ => out.push(Contribution::Scalar(ty)),
         }
+        Some(())
     }
 
     fn gather_inline(
@@ -2865,11 +2881,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // safe thing to do with one is refuse to read it. The callers above guard their own paths,
         // but a guard that asks about the *spelling* of a reference rather than its resolved
         // identity lets one through, and the rescue below then converted that unanswerable
-        // intersection into a confident wrong answer: `intersect_non_null` has no `Reserved` arm, so
-        // it returned `None`, and `None if accepts_null` typed the position as the exact JSON null
-        // type. The result was `pub type X = ();` — a client that decodes only `null` for a schema
-        // that accepts objects — emitted with no diagnostic, which is the standing invariant's
-        // fourth, silent behaviour.
+        // intersection into a confident wrong answer: `intersect_non_null` returned `None` for it
+        // (it now does so by a `Reserved` arm of its own), and `None if accepts_null` typed the
+        // position as the exact JSON null type. The result was `pub type X = ();` — a client that
+        // decodes only `null` for a schema that accepts objects — emitted with no diagnostic,
+        // which is the standing invariant's fourth, silent behaviour.
         //
         // Returning `None` here hands the refusal to the caller. It is a backstop, not a guarantee
         // of rejection: most callers report `None` as an irreconcilable composition, but two treat
@@ -3051,6 +3067,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         match (a_kind, b_kind) {
+            // Nothing true can be said about intersecting an unlowered body with anything else
+            // (the identical reservation answered above by id). `intersect_types` refuses this
+            // before calling here; stating it again means a new caller inherits the refusal rather
+            // than reaching the `Any` arms below, which would answer with the placeholder itself.
+            (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => None,
             (TypeKind::Any, _) => Some(non_nullable(b)),
             (_, TypeKind::Any) => Some(non_nullable(a)),
             (TypeKind::Primitive(left), TypeKind::Primitive(right)) => {
@@ -3369,6 +3390,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 (TypeKind::Array(x), TypeKind::Array(y)) => {
                     self.same_map_value_type_guarded(**x, **y, visiting)
                 }
+                // An unlowered body cannot be proven the same value type as anything else, so the
+                // pair is heterogeneous and the map is rejected with `E005` rather than merged on
+                // a guess. The same reservation on both sides already answered `true` by id.
+                (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => false,
                 _ => false,
             },
             _ => false,
@@ -4294,6 +4319,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         match self.graph.get(ty.id).map(|def| &def.kind) {
             Some(TypeKind::Bytes) => MediaType::OctetStream,
             Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => MediaType::Text,
+            // Encodings are lowered per operation, after every component the body reaches is
+            // filled, so this is not expected. Were it reached, JSON is the codec that renders any
+            // value faithfully, and it agrees with `default_content_type`'s answer for the same
+            // placeholder, so the part's header and its bytes cannot disagree.
+            Some(TypeKind::Reserved) => MediaType::Json,
             _ => MediaType::Json,
         }
     }
@@ -4310,6 +4340,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // is the 3.2 rule and the only self-consistent reading for a nested array.
             Some(TypeKind::Array(_)) | Some(TypeKind::Tuple(_)) => "application/json".to_owned(),
             Some(TypeKind::Primitive(_)) | Some(TypeKind::Enum(_)) => "text/plain".to_owned(),
+            // Not expected, for the reason `natural_codec` states. Were it reached, JSON is what
+            // `natural_codec` renders a placeholder as, so it is the header that tells the truth
+            // about those bytes; the octet-stream fallback below would not.
+            Some(TypeKind::Reserved) => "application/json".to_owned(),
             _ => "application/octet-stream".to_owned(),
         }
     }
@@ -4705,14 +4739,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // line. The declared schema therefore describes ONE cookie, and the accessor is a list
             // of them — a schema that is already a list is taken to be that list.
             let (ty, shape) = if name.eq_ignore_ascii_case("set-cookie") {
-                let list = match self.graph.get(ty.id).map(|def| &def.kind) {
-                    Some(TypeKind::Array(_)) => ty,
-                    _ => self.insert_type(
+                let already_list = match self.graph.get(ty.id).map(|def| &def.kind) {
+                    Some(TypeKind::Array(_)) => true,
+                    // `header_shape` refused a reservation above, so none reaches here; were one
+                    // to, it is not known to be a list, and the declared schema is one cookie.
+                    Some(TypeKind::Reserved) => false,
+                    _ => false,
+                };
+                let list = if already_list {
+                    ty
+                } else {
+                    self.insert_type(
                         &format!("Header{name}"),
                         TypeKind::Array(Box::new(ty)),
                         Docs::default(),
                         Some(header.provenance.clone()),
-                    ),
+                    )
                 };
                 (list, crate::ir::HeaderShape::SetCookie)
             } else {
@@ -4799,6 +4841,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             Some(TypeKind::Array(_)) => Some(crate::ir::HeaderShape::Array),
             Some(TypeKind::Struct(_)) => Some(crate::ir::HeaderShape::Object),
+            // Headers are lowered per operation, after every component they reach is filled, so
+            // this is not expected. Were it reached, an unknown body has no provable `simple`
+            // shape: `None` sends the header to the callers' `W011` (no accessor, warned) instead
+            // of guessing one.
+            Some(TypeKind::Reserved) => None,
             _ => None,
         }
     }
@@ -5175,10 +5222,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// This matters because [`Self::push_ref_member`] classifies an `allOf` member by reading
     /// `graph.get(id).kind`. That kind is now [`TypeKind::Reserved`] — it was `TypeKind::Any` until
     /// the dedicated variant landed, which is why reading one answered "scalar" for a type that is
-    /// not a scalar and the member silently became `serde_json::Value`. `push_ref_member` is still
-    /// shaped that way: its `_` arm absorbs `Reserved` without a compile error, so the guard lives
-    /// here in its callers. The three in-progress maps are exactly the set of such ids, and the only
-    /// safe thing to do with one is refuse to read it.
+    /// not a scalar and the member silently became `serde_json::Value`. `push_ref_member` now names
+    /// `Reserved` in its own `match` and refuses it, so the refusal lives in the function rather
+    /// than in each caller. Every id in the three in-progress maps is such a placeholder, and the
+    /// only safe thing to do with one is refuse to read it.
     ///
     /// This asks "is `id` **any** open reservation". A caller that needs "is `id` the reservation
     /// belonging to the schema at *this* provenance" wants [`Self::reservation_at`] instead; the two
@@ -6648,6 +6695,9 @@ fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {
                 .variants
                 .iter()
                 .all(|variant| visit(graph, variant.ty, seen)),
+            // An unlowered body cannot be proved string-like, and this answers "is it proved":
+            // no, so the raw text body is refused rather than admitted on the strength of nothing.
+            Some(TypeKind::Reserved) => false,
             _ => false,
         };
         seen.remove(&ty.id);
@@ -6779,6 +6829,12 @@ fn representable_default(raw: &RawDefault, kind: Option<&TypeKind>) -> Option<De
         {
             Some(DefaultValue::Bool(*value))
         }
+        // A property whose type is a cycle-closing `$ref` to a component still being lowered sees
+        // its placeholder here. No literal can be proved to fit an unknown body, so the default is
+        // not representable: it is documented and reported (`W005`) rather than wired. It is also
+        // the answer the filled body would get — a cycle closes only through a schema that holds a
+        // reference (an object, array, tuple, or union), and none of those takes a literal here.
+        (_, TypeKind::Reserved) => None,
         _ => None,
     }
 }

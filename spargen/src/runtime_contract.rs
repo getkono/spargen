@@ -129,6 +129,13 @@ fn bytes_need_serde(api: &Api) -> bool {
                     .variants
                     .iter()
                     .any(|variant| contains_bytes(&api.types, variant.ty.id, &mut BTreeSet::new())),
+                // Requirements are derived only from an `Api` that passed `check_invariants`, which
+                // rejects a surviving reservation. Answering `false` would under-declare a runtime
+                // dependency for a shape nobody computed.
+                TypeKind::Reserved => unreachable!(
+                    "a reservation reached the runtime contract; `check_invariants` should have \
+                     rejected it"
+                ),
                 _ => false,
             });
     model_needs_serde
@@ -203,6 +210,10 @@ fn contains_bytes(types: &TypeGraph, id: TypeId, visiting: &mut BTreeSet<TypeId>
             .variants
             .iter()
             .any(|variant| contains_bytes(types, variant.ty.id, visiting)),
+        // Unreachable for the reason `bytes_need_serde` states: only a checked `Api` gets here.
+        Some(TypeKind::Reserved) => unreachable!(
+            "a reservation reached the runtime contract; `check_invariants` should have rejected it"
+        ),
         _ => false,
     };
     visiting.remove(&id);
