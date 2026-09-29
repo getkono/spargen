@@ -2027,6 +2027,21 @@ serde_json = "1.0.151"
             "`secrecy` cannot be renamed because generated code references that canonical crate \
              name"
         );
+        // A non-string `package` is not a spelling Cargo accepts, so it is not read as the
+        // identity: only `package = "<the key>"` is exempt, and `package = 1` stays a rename.
+        let untargeted_non_string = replace_once(
+            CORE_MANIFEST,
+            core_secrecy,
+            &format!("secrecy = {{ package = 1, version = \"{version}\" }}"),
+        );
+        assert_eq!(
+            messages(&audit_manifest_for(
+                &untargeted_non_string,
+                &TargetContext::Unknown
+            )),
+            "`secrecy` cannot be renamed because generated code references that canonical crate \
+             name"
+        );
         let untargeted_alias = replace_once(
             CORE_MANIFEST,
             core_secrecy,
