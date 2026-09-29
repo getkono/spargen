@@ -150,10 +150,33 @@ request once the fix is on `master`, or yank the affected version where no fix e
 
 A red `deny` for an advisory or yank the diff did not introduce is the **maintainers'** to fix, not
 the author's of whichever pull request showed it first. It is fixed the day it is seen, in a
-`fix(deps):` pull request of its own that bumps the affected crate
-(`cargo update -p <crate> --precise <patched>`, in each lockfile that carries it) or, where no
-patched release exists, adds an `[advisories] ignore` entry to `deny.toml` stating why the
-advisory does not reach this graph and what lifts it. That pull request merges first, and open
+`fix(deps):` pull request of its own. Where a patched release exists, the fix depends on who
+resolves the affected crate:
+
+- **In `spargen`'s published graph** — reached through a normal (not dev-) dependency of
+  `spargen/Cargo.toml` under any feature, including `remote-fetch` and `cli`: a lockfile bump
+  alone is not a fix. It is undone by one `cargo update -p <crate> --precise <old>` with every gate
+  green once the database stops naming the advisory, and it never reaches a consumer, because
+  Cargo ignores a dependency's lockfile. The pull request adds a direct, default-features-off
+  requirement at the patched release to `spargen/Cargo.toml` (optional and enabled by the feature
+  that reaches the crate, never named in code), *and* a `[bans] deny` entry in `deny.toml` in the
+  `name` + `version = "<patched"` form whose `reason` names the advisory, and bumps each lockfile
+  that carries the crate. A later advisory on a crate that already has a floor moves both to the
+  new release. `advisory_floors_are_manifest_requirements` in `spargen/tests/corpus_manifest.rs`
+  holds every ban to a manifest requirement at exactly its release, so neither half lands alone.
+  Where the patched release is outside the range the parent dependency accepts (a new minor on a
+  `0.x` line), a floor cannot select it: bump the parent instead, and floor what it still leaves
+  open. A floor goes when the parent's own requirement reaches it, or when the parent moves off
+  that line (the stranded requirement would otherwise add a second, unused copy); removing the
+  rustls floor also removes that test's assertion that it exists.
+- **Anywhere else** — a dev-dependency, or a crate only `support-runtime` or an example lockfile
+  carries: bump it with `cargo update -p <crate> --precise <patched>` in each lockfile that
+  carries it. That guards only this repository's resolves; a consumer's runtime graph is resolved
+  from its own manifest, and this rule does not reach it.
+
+Where no patched release exists, the pull request adds an `[advisories] ignore` entry to
+`deny.toml` stating why the advisory does not reach this graph and what lifts it, whichever graph
+the crate is in. That pull request merges first, and open
 pull requests then merge `master` in; none of them carries the fix. Otherwise a lockfile changes
 only with the manifest change that needs it, and the workspace one also in release-plz's release
 pull request. That pull request does not touch the example lockfiles, so their `spargen` version
