@@ -209,41 +209,119 @@ fn the_corpus_smoke_gate_writes_only_inside_the_checkout() {
     }
 }
 
-/// Flags that narrow what cargo-deny *resolves or consults*, rather than which checks it runs
-/// over the result. Measured on this tree with cargo-deny 0.19.9 (then the `mise.toml` pin), as
-/// `cargo-deny --log-level warn --manifest-path ./Cargo.toml --all-features <flag> check
-/// advisories`: `--exclude rustls` and `--target wasm32-unknown-unknown` each turn
-/// `advisories FAILED` (RUSTSEC-2026-0285, reached only through reqwest's TLS feature) into
-/// `advisories ok`, exit 1 to exit 0. The other five do *not* flip that verdict here and are
-/// rejected as the same class of flag rather than on a measured flip -- `--offline` was
-/// measured against an already-populated advisory database, and `--no-default-features` is
-/// overridden by the `--all-features` this same value is required to carry. Not exhaustive:
-/// see `the_deny_gate_states_the_feature_scope_it_audits`, and #238. `-t` is clap's short alias
-/// for `--target` (the only one of these flags whose short form cargo-deny's `--help` lists, in
-/// 0.19.9 and in 0.20.2 alike), and is the same flag: `--all-features -t wasm32-unknown-unknown`
-/// drops rustls from `cargo deny list` exactly as the long spelling does.
+/// The only global flags a `cargo deny` audit command may pass, with whether each takes a value.
+/// An allow-list, not a deny-list (#238): a word outside it fails the audit's test whatever it is,
+/// so a flag nobody has measured, or one a later cargo-deny adds, is rejected until it is argued
+/// onto this list. Each entry is here because it cannot shrink the graph cargo-deny resolves:
+/// `--all-features` is the widest feature selection there is; `--locked` only makes `cargo
+/// metadata` fail where it would rewrite `Cargo.lock`; `--manifest-path` and `--config` take
+/// values their callers hold to named files (the root or an example `Cargo.toml`, and
+/// `deny.toml`).
 ///
-/// Applied to `mise run deny`'s commands, which CI's `deny` job runs byte for byte.
-const GRAPH_NARROWING_FLAGS: [&str; 8] = [
-    "--exclude",
-    "--target",
-    "-t",
-    "--exclude-dev",
-    "--exclude-unpublished",
-    "--offline",
-    "--frozen",
-    "--no-default-features",
+/// A deny-list of graph-narrowing flags (`--exclude`, `--target`/`-t`, `--exclude-dev`,
+/// `--exclude-unpublished`, `--offline`, `--frozen`, `--no-default-features`) stood here before,
+/// and `--metadata-path` was not on it: on this tree with cargo-deny 0.20.2, `cargo deny
+/// --all-features --locked --metadata-path <default-feature cargo metadata> list` drops
+/// `rustls@0.23.45` from the audited graph, as `--exclude rustls` does, with every word the old
+/// test asked for still present. `-L`/`--log-level`, `-f`/`--format` and `-c`/`--color` change
+/// only what is printed; they are off the list because no audit passes them, not because they
+/// narrow.
+const DENY_AUDIT_FLAGS: [(&str, bool); 4] = [
+    ("--all-features", false),
+    ("--locked", false),
+    ("--manifest-path", true),
+    ("--config", true),
 ];
 
-/// The flag a single argv word spells. `--flag value` and `--flag=value` are the same flag to
-/// clap, and so are `-t value`, `-t=value`, and the attached `-tvalue`: a short flag is its first
-/// two characters.
-fn flag_of(token: &str) -> &str {
-    match token.strip_prefix('-') {
-        Some(rest) if !rest.starts_with('-') && rest.len() > 1 => token.get(..2).unwrap_or(token),
-        _ => token.split_once('=').map_or(token, |(flag, _)| flag),
+/// The only flags a `cargo audit` lockfile audit command may pass, with whether each takes a
+/// value; like `DENY_AUDIT_FLAGS`, an allow-list (#238). `lockfile_audits` holds each one's value:
+/// `--db` to the printed checkout, `--no-fetch` to that checkout staying the one printed, `--deny`
+/// to `warnings`, `--file` to a committed lockfile, and every `--ignore` to `deny.toml`'s
+/// `[advisories] ignore`. cargo-audit's `--no-yanked`, `--target-arch`, `--target-os` and
+/// `--stale` all narrow what it reports, and are rejected here with every other word.
+const LOCKFILE_AUDIT_FLAGS: [(&str, bool); 5] = [
+    ("--db", true),
+    ("--no-fetch", false),
+    ("--deny", true),
+    ("--file", true),
+    ("--ignore", true),
+];
+
+/// Every word of `words` read as a flag from `allowed`, in order, each paired with its value:
+/// `--flag value` or `--flag=value` where the flag takes one, the bare flag where it does not.
+/// Any other word -- a flag outside `allowed`, a short alias, a value with no flag before it, a
+/// value-taking flag with no value, or a value on a flag that takes none -- is an `Err` naming it.
+fn allowed_flags<'a>(
+    words: &[&'a str],
+    allowed: &[(&'static str, bool)],
+) -> Result<Vec<(&'static str, Option<&'a str>)>, String> {
+    let mut flags = Vec::new();
+    let mut rest = words.iter();
+    while let Some(&word) = rest.next() {
+        let (flag, attached) = match word.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => (flag, Some(value)),
+            _ => (word, None),
+        };
+        let &(flag, takes_value) = allowed
+            .iter()
+            .find(|(name, _)| *name == flag)
+            .ok_or_else(|| format!("`{word}` is not one of the allowed flags"))?;
+        let value = match (takes_value, attached) {
+            (false, None) => None,
+            (false, Some(_)) => return Err(format!("`{word}`: `{flag}` takes no value")),
+            (true, Some(value)) => Some(value),
+            (true, None) => Some(rest.next().copied().unwrap_or_default()),
+        };
+        if value.is_some_and(|value| value.is_empty() || value.starts_with('-')) {
+            return Err(format!("`{flag}` has no value"));
+        }
+        flags.push((flag, value));
     }
+    Ok(flags)
 }
+
+/// What a `cargo deny` audit's global flags select.
+#[derive(Debug, Default, PartialEq)]
+struct DenyAuditFlags<'a> {
+    all_features: bool,
+    locked: bool,
+    manifest: Option<&'a str>,
+    config: Option<&'a str>,
+}
+
+/// The global flags of a `cargo deny` audit (the words between `cargo deny` and `check`), held to
+/// `DENY_AUDIT_FLAGS`, each passed at most once. A leading `./` on a path value is dropped.
+fn deny_audit_flags<'a>(globals: &[&'a str]) -> Result<DenyAuditFlags<'a>, String> {
+    let mut selected = DenyAuditFlags::default();
+    for (flag, value) in allowed_flags(globals, &DENY_AUDIT_FLAGS)? {
+        let value = value.map(|path| path.trim_start_matches("./"));
+        let repeated = match flag {
+            "--all-features" => std::mem::replace(&mut selected.all_features, true),
+            "--locked" => std::mem::replace(&mut selected.locked, true),
+            "--manifest-path" => selected
+                .manifest
+                .replace(value.unwrap_or_default())
+                .is_some(),
+            "--config" => selected.config.replace(value.unwrap_or_default()).is_some(),
+            other => unreachable!("`{other}` is in `DENY_AUDIT_FLAGS` but not read here"),
+        };
+        if repeated {
+            return Err(format!("`{flag}` is passed more than once"));
+        }
+    }
+    Ok(selected)
+}
+
+/// The top-level tables `deny.toml` may carry: the four checks' policies. Like `DENY_AUDIT_FLAGS`,
+/// an allow-list, because the file narrows the graph as surely as a flag, from outside any
+/// command: `[graph]` carries `targets`, `exclude`, `features`, `no-default-features`,
+/// `exclude-dev` and `exclude-unpublished`, the file-side spellings of the graph flags
+/// `DENY_AUDIT_FLAGS` leaves out (`[graph] exclude = ["rustls"]` drops `rustls@0.23.45` from
+/// `cargo deny --all-features --locked list` on this tree, cargo-deny 0.20.2).
+const DENY_TOML_TABLES: [&str; 4] = ["advisories", "bans", "licenses", "sources"];
+
+/// The positional values `cargo deny check` takes, per cargo-deny 0.20.2's `check --help`.
+const CHECK_NAMES: [&str; 5] = ["advisories", "bans", "licenses", "sources", "all"];
 
 /// The keys a `mise.toml` task may carry. Every other key changes what the task executes or where:
 /// `dir` moves the working directory (`dir = "support-runtime"` shrinks `cargo deny`'s graph from
@@ -419,14 +497,31 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
     // Every committed lockfile is audited: the root one -- no `--manifest-path`, or one naming the
     // root `Cargo.toml` -- and each example workspace's, which gating jobs compile (for wasm32
     // too) and whose resolves carry crates the root one never reaches (#184). Each audit must
-    // pass `--all-features`, no graph-narrowing flag, and a bare `check`, since `check licenses`
-    // drops `advisories` and `check advisories` drops the licence, ban and source checks the
-    // examples were outside of. The root audit must also pass `--locked`; an example audit must
-    // not need to (its `spargen` path-package stamp goes stale on every release, so no gate that
-    // compiles an example is locked), and must pass `--config deny.toml`, so it runs under the one
-    // policy rather than whatever cargo-deny would discover beside the example. The deny-list is
-    // a **list, not a proof** (#238): it rejects the graph-narrowing flags measured to hide this
-    // tree's live advisory, and cannot establish that some other flag does not narrow.
+    // pass `--all-features`, only flags `DENY_AUDIT_FLAGS` allows, and a bare `check`, since
+    // `check licenses` drops `advisories` and `check advisories` drops the licence, ban and source
+    // checks the examples were outside of. The root audit must also pass `--locked`; an example
+    // audit must not need to (its `spargen` path-package stamp goes stale on every release, so no
+    // gate that compiles an example is locked), and must pass `--config deny.toml`, so it runs
+    // under the one policy rather than whatever cargo-deny would discover beside the example; the
+    // root audit reads that same file, by default or by name.
+    //
+    // Together these hold every input cargo-deny builds the graph from (#238): its argv, whose
+    // every word is allow-listed (containment of `--all-features` alone admitted `--all-features
+    // --exclude rustls`, and a deny-list of such flags admitted `--metadata-path`);
+    // the policy file's `[graph]`, which `DENY_TOML_TABLES` excludes; the task's environment, held
+    // empty; and its working directory, which neither the task (`MISE_TASK_KEYS`) nor its CI job
+    // (`WORKFLOW_KEYS`, `JOB_KEYS`) can move off the repository root.
+    let deny: toml::Table = toml::from_str(&read("deny.toml")).expect("deny.toml parses");
+    let unexpected: Vec<&String> = deny
+        .keys()
+        .filter(|key| !DENY_TOML_TABLES.contains(&key.as_str()))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "deny.toml carries {unexpected:?}; only the checks' policies {DENY_TOML_TABLES:?} may \
+         appear there, since `[graph]` narrows the graph every audit resolves from outside any \
+         command (`[graph] exclude = [\"rustls\"]` drops rustls from it)"
+    );
     let tasks = mise_tasks();
     assert!(
         mise_env(&tasks, "deny").is_empty(),
@@ -483,21 +578,15 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
         let globals = &words[skip..check];
         let which = &words[check + 1..];
 
-        let mut manifest = None;
-        let mut config = None;
-        let mut rest = globals.iter();
-        while let Some(word) = rest.next() {
-            if *word == "--manifest-path" {
-                manifest = rest.next().copied();
-            } else if let Some(path) = word.strip_prefix("--manifest-path=") {
-                manifest = Some(path);
-            } else if *word == "--config" {
-                config = rest.next().copied();
-            } else if let Some(path) = word.strip_prefix("--config=") {
-                config = Some(path);
-            }
-        }
-        let manifest = manifest.map_or("Cargo.toml", |path| path.trim_start_matches("./"));
+        let flags = deny_audit_flags(globals).unwrap_or_else(|error| {
+            panic!(
+                "`mise run deny` runs `{command}`: {error}. An audit passes only the flags \
+                 `DENY_AUDIT_FLAGS` allows, {DENY_AUDIT_FLAGS:?}, each of which cannot shrink the \
+                 graph cargo-deny resolves; `--all-features --exclude rustls` still contains \
+                 `--all-features` and drops rustls from it (#238)"
+            )
+        });
+        let manifest = flags.manifest.unwrap_or("Cargo.toml");
         if manifest == "Cargo.toml" {
             root_audits += 1;
             // Without `--locked`, cargo-deny's `cargo metadata` rewrites a lockfile that does not
@@ -505,18 +594,23 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
             // with rustls-webpki 0.103.13) reported green and was silently corrected, and a
             // deleted one was regenerated and reported `advisories ok` (#146). With it, both fail
             // -- the deleted lockfile with "cannot create the lock file ... because --locked was
-            // passed". `--frozen` would also hold the lockfile, but it implies `--offline`, a
-            // graph-narrowing flag below.
+            // passed". `--frozen` would also hold the lockfile, but it implies `--offline`, which
+            // is not on `DENY_AUDIT_FLAGS`.
             assert!(
-                globals.contains(&"--locked"),
+                flags.locked,
                 "`mise run deny` runs `{command}`, which does not pass `--locked`, so a lockfile \
                  that does not match the manifests is rewritten and the rewrite is audited \
                  instead of the committed `Cargo.lock`"
             );
+            assert!(
+                matches!(flags.config, None | Some("deny.toml")),
+                "`mise run deny` runs `{command}`, which audits the root workspace under a policy \
+                 other than the repository's `deny.toml`"
+            );
         } else if examples.contains(manifest) {
             example_audits.insert(manifest.to_owned());
             assert_eq!(
-                config.map(|path| path.trim_start_matches("./")),
+                flags.config,
                 Some("deny.toml"),
                 "`mise run deny` runs `{command}`, which does not pass `--config deny.toml`, so \
                  the example is audited under whatever policy cargo-deny finds beside it rather \
@@ -530,19 +624,10 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
         }
 
         assert!(
-            globals.contains(&"--all-features"),
+            flags.all_features,
             "`mise run deny` runs `{command}`, which does not pass `--all-features`, so the \
              audited graph has no TLS stack in it"
         );
-        for word in globals {
-            let flag = flag_of(word);
-            assert!(
-                !GRAPH_NARROWING_FLAGS.contains(&flag),
-                "`mise run deny` runs `{command}`, whose `{flag}` shrinks the graph cargo-deny \
-                 resolves rather than the checks it runs over it; `--all-features {flag} …` \
-                 still contains `--all-features` and still drops RUSTSEC-2026-0285"
-            );
-        }
         assert!(
             which.is_empty(),
             "`mise run deny` runs `{command}`, which narrows `check` to {which:?}; anything \
@@ -560,6 +645,87 @@ fn the_deny_gate_states_the_feature_scope_it_audits() {
         "`mise run deny` must audit every example workspace's committed lockfile: gating jobs \
          compile them, and their resolves carry crates the root one never reaches (#184)"
     );
+}
+
+#[test]
+fn the_audit_flag_allow_lists_admit_only_what_they_name() {
+    // The gate tests above read the audit commands through `deny_audit_flags` and
+    // `allowed_flags`; this holds those readers to rejecting what they do not name (#238). Every
+    // rejected value below still contains `--all-features --locked`, which is all the test asked
+    // for before a deny-list, and all a deny-list could establish after it.
+    let words = |line: &'static str| line.split_whitespace().collect::<Vec<_>>();
+    assert_eq!(
+        deny_audit_flags(&words("--all-features --locked")),
+        Ok(DenyAuditFlags {
+            all_features: true,
+            locked: true,
+            ..DenyAuditFlags::default()
+        })
+    );
+    assert_eq!(
+        deny_audit_flags(&words(
+            "--manifest-path=./examples/petstore/Cargo.toml --config deny.toml --all-features"
+        )),
+        Ok(DenyAuditFlags {
+            all_features: true,
+            manifest: Some("examples/petstore/Cargo.toml"),
+            config: Some("deny.toml"),
+            ..DenyAuditFlags::default()
+        })
+    );
+    for narrowing in [
+        // Measured on this tree with cargo-deny 0.20.2 to drop rustls from `cargo deny list`.
+        "--exclude rustls",
+        "--metadata-path target/default-features-metadata.json",
+        // Measured in #238 with cargo-deny 0.19.9 to turn `advisories FAILED` into `ok`, in each
+        // spelling clap accepts.
+        "--target wasm32-unknown-unknown",
+        "-t wasm32-unknown-unknown",
+        "-twasm32-unknown-unknown",
+        "--target=wasm32-unknown-unknown",
+        // Graph flags of the same kind, and a feature selection beside `--all-features`.
+        "--exclude-dev",
+        "--exclude-unpublished",
+        "--workspace",
+        "--offline",
+        "--frozen",
+        "--no-default-features",
+        "--features cli",
+        // Output-only flags no audit passes: off the list, so rejected with the rest.
+        "--log-level off",
+        "-L off",
+        "--format json",
+        // Malformed spellings of allowed flags.
+        "--locked",
+        "--all-features=true",
+        "--config",
+        "--config --all-features",
+        "--manifest-path=",
+        "Cargo.toml",
+    ] {
+        let line = format!("--all-features --locked {narrowing}");
+        let globals: Vec<&str> = line.split_whitespace().collect();
+        assert!(
+            deny_audit_flags(&globals).is_err(),
+            "`cargo deny {line} check` passes `deny_audit_flags`, so the gate tests admit it"
+        );
+    }
+    for narrowing in [
+        "--no-yanked",
+        "--target-arch x86",
+        "--target-os windows",
+        "--stale",
+        "-n",
+        "--file",
+    ] {
+        let line =
+            format!("--db target/db --no-fetch --deny warnings --file Cargo.lock {narrowing}");
+        let flags: Vec<&str> = line.split_whitespace().collect();
+        assert!(
+            allowed_flags(&flags, &LOCKFILE_AUDIT_FLAGS).is_err(),
+            "`cargo audit {line}` passes `allowed_flags`, so the lockfile audit test admits it"
+        );
+    }
 }
 
 /// The published workspace crates that ship a binary, by package name. `cargo package` puts
@@ -626,10 +792,15 @@ fn the_published_lockfile_audit_covers_every_shipped_binary() {
             .position(|word| *word == "check")
             .unwrap_or_else(|| panic!("`{command}` is not a `cargo deny check`"));
         let (globals, which) = (&words[2..check], &words[check + 1..]);
-        let manifest = globals
-            .iter()
-            .position(|word| *word == "--manifest-path")
-            .and_then(|at| globals.get(at + 1))
+        let flags = deny_audit_flags(globals).unwrap_or_else(|error| {
+            panic!(
+                "`{command}`: {error}. An audit passes only the flags `DENY_AUDIT_FLAGS` allows, \
+                 {DENY_AUDIT_FLAGS:?}, each of which cannot shrink the graph cargo-deny resolves \
+                 (#238)"
+            )
+        });
+        let manifest = flags
+            .manifest
             .unwrap_or_else(|| panic!("`{command}` names no `--manifest-path`"));
         let krate = manifest
             .strip_prefix("target/deny-published/")
@@ -642,25 +813,22 @@ fn the_published_lockfile_audit_covers_every_shipped_binary() {
         // longer matches and audit the re-resolution, which is not what `--locked` installs.
         // `--all-features`: the TLS stack reaches the graph only through features (#147).
         // `--config deny.toml`: the same advisory policy, ignores and `yanked` included, as `deny`.
-        for required in ["--locked", "--all-features"] {
-            assert!(
-                globals.contains(&required),
-                "`{command}` does not pass `{required}`"
-            );
-        }
+        assert!(flags.locked, "`{command}` does not pass `--locked`");
         assert!(
-            globals
-                .windows(2)
-                .any(|pair| pair == ["--config", "deny.toml"]),
+            flags.all_features,
+            "`{command}` does not pass `--all-features`"
+        );
+        assert_eq!(
+            flags.config,
+            Some("deny.toml"),
             "`{command}` does not audit under the repository's `deny.toml`"
         );
-        for word in globals {
-            let flag = flag_of(word);
-            assert!(
-                !GRAPH_NARROWING_FLAGS.contains(&flag),
-                "`{command}`'s `{flag}` shrinks the graph cargo-deny resolves"
-            );
-        }
+        // After `check` come only check names: a word there that is not one is one of `check`'s
+        // own flags, and those are held to none, as `deny`'s bare `check` holds them.
+        assert!(
+            which.iter().all(|word| CHECK_NAMES.contains(word)),
+            "`{command}` passes {which:?} after `check`, which are not all check names {CHECK_NAMES:?}"
+        );
         assert!(
             which.is_empty() || which.contains(&"advisories") || which.contains(&"all"),
             "`{command}` narrows `check` to {which:?}, which drops `advisories`"
@@ -700,13 +868,6 @@ fn lockfile_audit_step<'a>(words: &[&'a str]) -> Option<LockfileAuditStep<'a>> {
         None
     }
 }
-
-/// `cargo audit` flags that narrow what it reports: `--no-yanked` drops the yank check this audit
-/// exists for, `--target-arch`/`--target-os` drop advisories scoped to other platforms, and
-/// `--stale` accepts a database cargo-audit would refuse. `--ignore` is held to `deny.toml`'s
-/// `[advisories] ignore` instead.
-const LOCKFILE_AUDIT_NARROWING_FLAGS: [&str; 4] =
-    ["--no-yanked", "--target-arch", "--target-os", "--stale"];
 
 /// The lockfiles `task`'s `cargo audit` commands read, after holding the task to the audit's
 /// shape: one `cargo deny fetch db`, then one line printing the fetched checkout's commit, then
@@ -795,38 +956,47 @@ fn lockfile_audits(task: &str) -> BTreeSet<String> {
                          it audits against"
                     )
                 });
+                let skip = if words.first() == Some(&"cargo-audit") {
+                    1
+                } else {
+                    2
+                };
+                let flags =
+                    allowed_flags(&words[skip..], &LOCKFILE_AUDIT_FLAGS).unwrap_or_else(|error| {
+                        panic!(
+                            "`{command}`: {error}. A lockfile audit passes only the flags \
+                             `LOCKFILE_AUDIT_FLAGS` allows, {LOCKFILE_AUDIT_FLAGS:?} (#238)"
+                        )
+                    });
+                // The value of a flag passed exactly once; `--no-fetch`'s is `Some("")`.
                 let value = |flag: &str| {
-                    words
-                        .windows(2)
-                        .find(|pair| pair[0] == flag)
-                        .map(|pair| pair[1])
+                    let mut values = flags.iter().filter(|(name, _)| *name == flag);
+                    match (values.next(), values.next()) {
+                        (Some((_, value)), None) => Some(value.unwrap_or_default()),
+                        _ => None,
+                    }
                 };
                 assert_eq!(
                     value("--db"),
                     Some(checkout),
-                    "`{command}` must read the checkout whose revision was printed, `{checkout}`"
+                    "`{command}` must read, once, the checkout whose revision was printed, \
+                     `{checkout}`"
                 );
-                assert!(
-                    words.contains(&"--no-fetch"),
+                assert_eq!(
+                    value("--no-fetch"),
+                    Some(""),
                     "`{command}` fetches its own database, so its revision is not the printed one"
                 );
                 assert_eq!(
                     value("--deny"),
                     Some("warnings"),
                     "`{command}` must deny every warning kind (yanked, unmaintained, unsound), as \
-                     deny.toml's `[advisories]` does"
+                     deny.toml's `[advisories]` does, and pass `--deny` once"
                 );
-                for word in &words {
-                    let flag = flag_of(word);
-                    assert!(
-                        !LOCKFILE_AUDIT_NARROWING_FLAGS.contains(&flag),
-                        "`{command}`'s `{flag}` narrows what the lockfile audit reports"
-                    );
-                }
-                let ignores: BTreeSet<String> = words
-                    .windows(2)
-                    .filter(|pair| pair[0] == "--ignore")
-                    .map(|pair| pair[1].to_owned())
+                let ignores: BTreeSet<String> = flags
+                    .iter()
+                    .filter(|(name, _)| *name == "--ignore")
+                    .filter_map(|(_, id)| id.map(str::to_owned))
                     .collect();
                 assert_eq!(
                     ignores, ignored,
@@ -834,7 +1004,7 @@ fn lockfile_audits(task: &str) -> BTreeSet<String> {
                      ignore` does: one policy, not two"
                 );
                 let file = value("--file")
-                    .unwrap_or_else(|| panic!("`{command}` names no `--file`"))
+                    .unwrap_or_else(|| panic!("`{command}` names no single `--file`"))
                     .trim_start_matches("./");
                 assert!(
                     files.insert(file.to_owned()),
