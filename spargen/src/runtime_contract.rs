@@ -2609,6 +2609,10 @@ serde_json.workspace = true
         // rewrote the mirror and every clause assertion in one stroke — negating "taking the
         // version from there" that way left the suite green. An edit to `code.rs` must now be
         // re-typed in a second file that no edit to this module can reach.
+        // It sits beside this module, under `src/`, so it ships in the published crate and this
+        // test still compiles there. Being test-only, it is not needed to build the packaged
+        // library, so `every_included_file_ships_in_the_published_crate` in `tests/layering.rs`
+        // is what holds it in the package.
         // The file carries a trailing newline, as a text file should; the explain body does not.
         let expected = include_str!("runtime_contract_e023_explain.txt").trim_end_matches('\n');
 
