@@ -980,10 +980,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(alias);
         }
 
-        let nullable = schema_is_nullable(&schema);
+        // Provisional, as in `ensure_component`: a back-edge met mid-body needs an answer before the
+        // body has one, and `schema_is_nullable` cannot see a composed body's null.
+        let provisional_nullable = schema_is_nullable(&schema);
         let root_id = self.graph.reserve();
         self.remote_in_progress
-            .insert(reference.to_owned(), (root_id, nullable));
+            .insert(reference.to_owned(), (root_id, provisional_nullable));
         let lowered = self.lower_schema(&schema, reference);
         self.remote_in_progress.remove(reference);
         let mut ty = lowered?;
@@ -1000,9 +1002,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.graph.fill(root_id, def);
         ty.id = root_id;
-        ty.nullable = nullable;
+        // The body's answer, cached under the same value so a direct return and a later cache hit
+        // yield an identical `Ty` — see `ensure_component`.
         self.remote_components
-            .insert(reference.to_owned(), (root_id, nullable));
+            .insert(reference.to_owned(), (root_id, ty.nullable));
         Some(ty)
     }
 
@@ -1057,7 +1060,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // one is worse. Every schema the parser produces carries a span, so this is defensive.
             return self.lower_schema(&schema, hint);
         };
-        // A resolved target that is a root component already has an identity — its name.
+        // A resolved target that is a root component already has an identity — its name. The
+        // `contains_key` alone decides it: a pointer deeper than a component (`Tree/properties/x`)
+        // cannot equal a key, because structural validation rejects any root component key outside
+        // `^[a-zA-Z0-9._-]+$` before lowering runs.
         if schema
             .provenance
             .span
@@ -1068,7 +1074,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .pointer
                 .as_str()
                 .strip_prefix("/components/schemas/")
-                .filter(|name| !name.is_empty() && !name.contains('/'))
             {
                 if self.document.components.schemas.contains_key(name) {
                     return self.ensure_component(name, Some(reference), at);
@@ -1123,10 +1128,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(alias);
         }
 
-        let nullable = schema_is_nullable(&schema);
+        // Provisional, as in `ensure_component`: a back-edge met mid-body needs an answer before the
+        // body has one, and `schema_is_nullable` cannot see a composed body's null.
+        let provisional_nullable = schema_is_nullable(&schema);
         let root_id = self.graph.reserve();
         self.resolved_in_progress
-            .insert(key.clone(), (root_id, nullable));
+            .insert(key.clone(), (root_id, provisional_nullable));
         let lowered = self.lower_schema(&schema, &hint);
         self.resolved_in_progress.remove(&key);
         let mut ty = lowered?;
@@ -1143,8 +1150,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.graph.fill(root_id, def);
         ty.id = root_id;
-        ty.nullable = nullable;
-        self.resolved_components.insert(key, (root_id, nullable));
+        // The body's answer, cached under the same value so a direct return and a later cache hit
+        // yield an identical `Ty` — see `ensure_component`.
+        self.resolved_components.insert(key, (root_id, ty.nullable));
         Some(ty)
     }
 

@@ -1401,6 +1401,131 @@ components:
     }
 }
 
+/// A sub-file component whose body is a nullable union keeps its nullability at every use, as the
+/// same component in the root document does.
+///
+/// `schema_is_nullable` reads only `type`, `enum` and `const`, so for `oneOf: [null, string]` it
+/// answers `false`, while lowering the union answers `true`. `ensure_component` stopped writing
+/// that provisional answer back over the body's; `ensure_resolved` still did, and cached it, so
+/// both required fields below were emitted as a bare `M` and a `null` the description allows would
+/// fail to decode. Two fields, because the first use returns the lowered `Ty` and the second the
+/// cached one, and each carried the overwrite separately.
+#[test]
+fn a_sub_file_nullable_union_component_stays_nullable_at_every_use() {
+    const COMPONENTS: &str = r##"
+components:
+  schemas:
+    W:
+      type: object
+      required: [a, b]
+      properties:
+        a: { $ref: '#/components/schemas/M' }
+        b: { $ref: '#/components/schemas/M' }
+    M:
+      oneOf:
+        - { type: 'null' }
+        - { type: string }
+"##;
+    let (generated, checked, code) = split("./lib.yaml#/components/schemas/W", COMPONENTS);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    for field in ["pub a:", "pub b:"] {
+        assert_eq!(
+            field_type(&code, field).as_deref(),
+            Some("Option<M>"),
+            "{field}: {code}"
+        );
+    }
+
+    // The root-document control: the same components, the same field types.
+    let (report, root) = generate_with_code(&format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/W' }} }}
+{COMPONENTS}"##
+    ));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    for field in ["pub a:", "pub b:"] {
+        assert_eq!(
+            field_type(&root, field).as_deref(),
+            Some("Option<M>"),
+            "{field}: {root}"
+        );
+    }
+}
+
+/// A sub-file component's `default` reaches its generated type's rustdoc, as a root component's
+/// does. `ensure_resolved` lowers the sub-file root's body and then appends the note to the lifted
+/// definition itself, so dropping that step loses the documented default with nothing else
+/// changing.
+#[test]
+fn a_sub_file_component_default_is_documented_on_its_type() {
+    // The doc line directly above the declaration, so a note that lands on another item, or a
+    // declaration with no note, does not satisfy it.
+    let doc_above = |code: &str, declaration: &str| {
+        let lines: Vec<&str> = code.lines().map(str::trim).collect();
+        lines
+            .iter()
+            .position(|line| *line == declaration)
+            .and_then(|at| at.checked_sub(1))
+            .map(|above| lines[above].to_owned())
+    };
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Counted",
+        r##"
+components:
+  schemas:
+    Counted: { type: integer, default: 7 }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_eq!(
+        doc_above(&code, "pub type Counted = i64;").as_deref(),
+        Some("///Default: `7`."),
+        "the sub-file default must document the type it declares: {code}"
+    );
+
+    // The root-document control: the same component, the same note.
+    let (report, root) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Counted' } }
+components:
+  schemas:
+    Counted: { type: integer, default: 7 }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        doc_above(&root, "pub type Counted = i64;").as_deref(),
+        Some("///Default: `7`."),
+        "{root}"
+    );
+}
+
 /// A sub-file component that is not an object. Deduplicating sub-file components lifts the lowered
 /// root into a reserved id and asserts the root was the last definition its own body inserted — an
 /// invariant a scalar (one insert, no children) and a union (a wrapper over boxed members) exercise
@@ -1597,6 +1722,164 @@ paths:
             .iter()
             .any(|d| d.code == Code::AllOfIrreconcilable && d.message.contains("direct recursive")),
         "{report:#?}"
+    );
+}
+
+/// The precondition `ensure_resolved`'s root-component routing rests on: a pointer deeper than a
+/// component, such as `/components/schemas/Tree/properties/x`, is routed by `contains_key` alone,
+/// which is sound only because no root component key can contain `/`. Structural validation rejects
+/// such a key under both versions before lowering runs, so the nested reference below never reaches
+/// the component literally named `Tree/properties/x`.
+#[test]
+fn a_root_component_key_containing_a_slash_is_rejected_before_lowering() {
+    for version in ["3.1.0", "3.2.0"] {
+        let spec = format!(
+            r##"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Tree/properties/x' }} }}
+components:
+  schemas:
+    Tree:
+      type: object
+      properties:
+        x: {{ type: integer }}
+    Tree/properties/x: {{ type: string }}
+"##
+        );
+        for (entry, report) in [("generate", &generate(&spec)), ("check", &check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{version}/{entry}: {report:#?}"
+            );
+            assert!(
+                messages_for(report, Code::InvalidInput)
+                    .iter()
+                    .any(|message| message.contains("\"Tree/properties/x\" does not match")),
+                "{version}/{entry}: the key itself must be what is rejected: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The fourth spelling of the shape above, and the one the root-document branch of
+/// `reservation_at` exists for: a **root** component whose `allOf` member names itself through an
+/// explicit file reference to the root document. `ensure_resolved` routes that reference back to
+/// `ensure_component`, so the in-progress schema is recorded in the root component map rather than
+/// the resolved-reference one, and only the root-document branch finds it.
+///
+/// Without that branch the member is not recognised as in progress, is lowered again, and recurses
+/// until the depth cap: the document is rejected with `E014`, a chain-length blame for a cycle of
+/// length one — the misdiagnosis
+/// `a_sub_file_component_alias_cycle_is_reported_as_a_cycle_not_as_excessive_depth` forbids.
+#[test]
+fn a_direct_recursive_all_of_member_named_by_explicit_root_file_reference_is_rejected() {
+    let root = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Tree' } }
+components:
+  schemas:
+    Tree:
+      type: object
+      properties:
+        label: { type: string }
+        child:
+          description: the child node
+          allOf:
+            - { $ref: './openapi.yaml#/components/schemas/Tree' }
+"##;
+    for (entry, report) in [("generate", &generate(root)), ("check", &check(root))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::AllOfIrreconcilable
+                    && d.message.contains("direct recursive")),
+            "{entry}: it is a direct recursive member, and must be named as one: {report:#?}"
+        );
+        assert!(
+            !has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: a member that names its own component is a cycle, not a deep chain: \
+             {report:#?}"
+        );
+    }
+}
+
+/// A resolved target is named for its final pointer token, and that token is RFC 6901-unescaped
+/// first — the result is a public type name in the generated API. Two targets pin both halves:
+///
+/// - `a~1b` is the key `a/b`, so it is named `AB`; left escaped it would be `A1b`.
+/// - `a~01b` is the key `a~1b` — a literal tilde — so it is named `A1b`. Decoding `~0` before `~1`
+///   turns it into `a/b` instead, and it collides with the first target's name.
+///
+/// So the unescape and its order (`~1` first, then `~0`) each change a public name here.
+#[test]
+fn a_resolved_target_is_named_for_its_unescaped_final_pointer_token() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [slash, tilde]
+                properties:
+                  slash: { $ref: '#/x-weird/a~1b' }
+                  tilde: { $ref: '#/x-weird/a~01b' }
+x-weird:
+  a/b:
+    type: object
+    properties: { x: { type: string } }
+  a~1b:
+    type: object
+    properties: { y: { type: string } }
+"##;
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        code.contains("pub struct AB "),
+        "`a~1b` names the key `a/b`: {code}"
+    );
+    assert!(
+        code.contains("pub slash: AB"),
+        "the `a/b` target is the slash field's type: {code}"
+    );
+    assert!(
+        code.contains("pub struct A1b "),
+        "`a~01b` names the key `a~1b`: {code}"
+    );
+    assert!(
+        code.contains("pub tilde: A1b"),
+        "the `a~1b` target is the tilde field's type: {code}"
     );
 }
 
@@ -5392,6 +5675,62 @@ mod remote {
             "{code}"
         );
         assert!(!code.contains("serde_json::Value>"), "{code}");
+    }
+
+    /// The remote spelling of
+    /// `a_sub_file_nullable_union_component_stays_nullable_at_every_use`: a vendored schema whose
+    /// body is `oneOf: [null, string]`, used by two required fields. `ensure_remote` wrote
+    /// `schema_is_nullable`'s provisional `false` back over the union's own `true` and cached it,
+    /// so both fields were a bare type a `null` would fail to decode into.
+    #[test]
+    fn a_vendored_nullable_union_stays_nullable_at_every_use() {
+        const MAYBE_URL: &str = "https://api.example.com/schemas/maybe.yaml";
+        const MAYBE_YAML: &str = "oneOf:\n  - type: 'null'\n  - type: string\n";
+        const MAYBE_SHA: &str = "734c50f67b492acbbf4be1e9e09901db3f69ba14154ce2256cdd9bfe2e039fa7";
+
+        let spec = format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths:\n\
+             \x20 /it:\n\
+             \x20   get:\n\
+             \x20     operationId: getIt\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema:\n\
+             \x20               type: object\n\
+             \x20               required: [a, b]\n\
+             \x20               properties:\n\
+             \x20                 a: {{ $ref: \"{MAYBE_URL}\" }}\n\
+             \x20                 b: {{ $ref: \"{MAYBE_URL}\" }}\n"
+        );
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{MAYBE_URL}\"\nsha256 = \"{MAYBE_SHA}\"\npath = \
+             \"api.example.com/schemas/maybe.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/maybe.yaml", MAYBE_YAML)];
+
+        let (generated, _temp, out) = run_layout(&spec, Some(&lock), &vendor, false);
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let (checked, _temp2, _out2) = run_layout(&spec, Some(&lock), &vendor, true);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            // The pin is live, so the document really reaches lowering.
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        }
+        for field in ["pub a:", "pub b:"] {
+            assert_eq!(
+                field_type(&code, field).as_deref(),
+                Some("Option<HttpsApiExampleComSchemasMaybeYaml>"),
+                "{field}: {code}"
+            );
+        }
     }
 
     /// A vendored remote schema that refers to **itself** directly, with no alias in between: the
