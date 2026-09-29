@@ -3422,6 +3422,7 @@ mod tests {
             kind: TypeKind::Primitive(Prim::String),
             docs: Docs::default(),
             provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
         });
         let operation = Operation {
             id: OperationId("getMessage".to_owned()),

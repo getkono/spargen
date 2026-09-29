@@ -200,6 +200,7 @@ mod tests {
             kind: TypeKind::Primitive(Prim::String),
             docs: Default::default(),
             provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
         });
         Api {
             info: Info {
@@ -277,6 +278,7 @@ mod tests {
             kind: TypeKind::Reserved,
             docs: Default::default(),
             provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
         });
         let mut diags = Diagnostics::new(100);
         check_invariants(&api, &mut diags);
@@ -308,6 +310,7 @@ mod tests {
                 kind,
                 docs: Default::default(),
                 provenance: Provenance::new(JsonPointer::root(), None),
+                document: String::new(),
             });
             Ty {
                 id,

@@ -919,7 +919,7 @@ fn multipart_parts_carry_their_resolved_content_types() {
 
     let client = basic_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
     client
-        .upload_file(&basic_client::types::RequestBody {
+        .upload_file(&basic_client::types::RequestBodyE12d70b5 {
             file: bytes::Bytes::from_static(b"\x00\x01binary"),
             caption: "a caption".to_owned(),
             count: None,
@@ -1800,7 +1800,7 @@ fn multipart_body_struct_has_typed_form_part_fields() {
     // optional `count`/`tags` are `Option`. Constructing the value proves the field types; the
     // generated `upload_file` method (compiled here) builds the `reqwest::multipart::Form` from it,
     // which compiles only with reqwest's `multipart` feature enabled.
-    let body = basic_client::types::RequestBody {
+    let body = basic_client::types::RequestBodyE12d70b5 {
         file: bytes::Bytes::from_static(b"hello"),
         caption: "a caption".to_owned(),
         count: Some(3),

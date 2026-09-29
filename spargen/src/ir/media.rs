@@ -1188,6 +1188,7 @@ mod tests {
                 kind,
                 docs: Docs::default(),
                 provenance: Provenance::new(JsonPointer::root(), None),
+                document: String::new(),
             });
         }
         graph

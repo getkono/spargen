@@ -20,7 +20,7 @@ use crate::ir::{AdditionalProps, Api, OperationId, ScalarValue, TypeId, TypeKind
 pub(crate) use casing::{to_pascal_case, to_snake_case};
 pub(crate) use ident::Ident;
 pub(crate) use keyword::{escape, IdentRole};
-pub(crate) use scope::Scope;
+pub(crate) use scope::{RankedRequest, Scope};
 pub(crate) use synth::synth_operation_id;
 
 /// The identifiers allocated for a whole [`Api`]: one per operation, params struct, type, field,
@@ -130,13 +130,30 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
         }
     }
 
+    // Type names are public API, so which of two same-named definitions keeps the bare name must not
+    // depend on the order lowering met them in — that follows `paths` order and `$ref` discovery,
+    // and reordering a mapping changes no schema. The contest is decided on each definition's own
+    // `(document, pointer)` identity instead. A definition carrying none (the root document's own
+    // pointer, which synthesized types fall back to) ranks after every definition that has one, so
+    // it can never take a name from a declared schema.
     let mut type_scope = Scope::default();
-    for (id, def) in api.types.iter() {
-        names.types.insert(
-            id,
-            type_scope.alloc(&def.name_hint, IdentRole::Type, &def.provenance.pointer),
-        );
-    }
+    let definitions: Vec<_> = api.types.iter().collect();
+    let requests: Vec<_> = definitions
+        .iter()
+        .map(|(_, def)| {
+            let pointer = &def.provenance.pointer;
+            let anonymous = def.document.is_empty() && pointer.as_str().is_empty();
+            RankedRequest {
+                hint: &def.name_hint,
+                provenance: pointer,
+                rank: (anonymous, def.document.as_str(), pointer.as_str()),
+            }
+        })
+        .collect();
+    let allocated = type_scope.alloc_ranked(&requests, IdentRole::Type);
+    names
+        .types
+        .extend(definitions.iter().map(|(id, _)| *id).zip(allocated));
 
     // Response-header structs live in the same scope as the other per-operation types, so a
     // documented header can never collide with a generated model.
