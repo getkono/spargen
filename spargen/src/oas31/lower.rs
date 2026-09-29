@@ -1373,7 +1373,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `is_in_progress_root` stays as a backstop and adds no rejection of its own: a target
             // still being lowered is one whose lowering reached this site, which is a cycle the walk
             // finds. Kept so that a walk which ever missed one reports the recursion, rather than
-            // leaving `intersect_types`' fail-closed arm to report it as an empty intersection.
+            // leaving `intersect_types`' fail-closed arm to report it as a failed intersection.
             let back_edge = self.ref_closes_a_cycle(reference, &schema.provenance)
                 || self.is_in_progress_root(referenced.id);
             if back_edge {
@@ -1411,13 +1411,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
-            let Some(intersection) =
+            let Ok(intersection) =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
             else {
                 // `$ref` is an applicator: the value must satisfy the target AND these siblings.
-                // `intersect_types` returns `None` for two distinct conditions — the intersection is
+                // `intersect_types` fails for two distinct conditions — the intersection is
                 // empty, so no value satisfies both, or it is inhabited but has no single Rust type
-                // — and the message must not claim the first when it may be the second. Either way
+                // — and this one message covers both, so it must not claim the first. Either way
                 // it is reported rather than dropped: dropping would silently delete a body,
                 // parameter or property from the generated client.
                 return self.reject_ref_sibling_intersection(schema);
@@ -1792,7 +1792,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // and it already reaches the intersection on the sibling side, where it belongs —
                 // it can narrow what the result accepts, never create something to accept.
                 inner.nullable = inner.nullable || null_from_member;
-                let Some(constrained) =
+                let Ok(constrained) =
                     self.intersect_types(inner, sibling.ty, &format!("{hint}Constrained"))
                 else {
                     // Neither side admits null and the non-null shapes do not meet, so nothing is
@@ -1803,7 +1803,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // output that still exists, and here no enum is generated at all.
                     //
                     // The message says "empty or unrepresentable" for the same reason Site A's
-                    // does: `None` covers both, and the sole non-null member is named because there
+                    // does: it covers both, and the sole non-null member is named because there
                     // is exactly one, so the author needs no index to find it.
                     return self.reject_branchless_union(
                         schema,
@@ -1873,24 +1873,39 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             if let Some(sibling) = sibling {
-                let Some(intersection) = self.intersect_types(
+                ty = match self.intersect_types(
                     ty,
                     sibling.ty,
                     &format!("{hint}Variant{index}Constrained"),
-                ) else {
+                ) {
+                    Ok(intersection) => intersection,
                     // The sibling constraints make this branch impossible; JSON Schema simply
                     // removes it from the union's accepted set. Acknowledge it, because a variant
                     // vanishing from the generated enum is otherwise invisible.
-                    // W011 case: excluded-union-branch
-                    Diagnostic::warning(Code::DeclarationHasNoEffect, schema.provenance.clone())
+                    Err(NoMeet::Empty) => {
+                        // W011 case: excluded-union-branch
+                        Diagnostic::warning(
+                            Code::DeclarationHasNoEffect,
+                            schema.provenance.clone(),
+                        )
                         .message(format!(
                             "union member {index} cannot satisfy the enclosing schema's own \
                              constraints, so it is not a variant of the generated enum"
                         ))
                         .emit(self.diags);
-                    continue;
+                        continue;
+                    }
+                    // The branch does admit values the siblings admit, but no Rust type holds
+                    // them, so it can be neither kept nor dropped without refusing them.
+                    Err(NoMeet::Unrepresentable) => {
+                        let message = format!(
+                            "union member {index} and the enclosing schema's own sibling keywords \
+                             share values that no single Rust type represents, so the member can \
+                             be neither generated nor dropped"
+                        );
+                        return self.reject_unrepresentable_meet(schema, &message);
+                    }
                 };
-                ty = intersection;
             }
             // Hoist a variant's own nullability up to the union: a `null` payload then resolves at the
             // outer `Option<Union>` (→ `None`), and the discriminated/disjoint dispatch below only
@@ -2522,7 +2537,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return Some(self.with_all_of_nullability(schema, ty));
             };
             for (index, member) in scalars.iter().copied().enumerate().skip(1) {
-                let Some(merged) = self.intersect_types(
+                let Ok(merged) = self.intersect_types(
                     intersection,
                     member,
                     &format!("{hint}Intersection{index}"),
@@ -2600,13 +2615,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
                         existing.required = existing.required || field.required;
                         existing.ty = match intersection {
-                            Some(ty) => ty,
-                            // A reservation's body is not known yet, so `None` here says nothing
-                            // about whether the property's types meet; typing the field
-                            // uninhabited would be a guess. Refuse it, as `intersect_types`'
-                            // backstop expects its callers to.
-                            None if self.is_reservation(existing.ty.id)
-                                || self.is_reservation(field.ty.id) =>
+                            Ok(ty) => ty,
+                            // A reservation's body is not known yet, so the failure here says
+                            // nothing about whether the property's types meet; typing the field
+                            // uninhabited would be a guess. Refuse it, naming the cycle rather
+                            // than a conflict nobody wrote.
+                            Err(_)
+                                if self.is_reservation(existing.ty.id)
+                                    || self.is_reservation(field.ty.id) =>
                             {
                                 let message = format!(
                                     "property `{}` repeated across `allOf` members is typed by a \
@@ -2626,7 +2642,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             // type now and the requirement is settled after the loop. A member's
                             // applied `default` goes with the old type: no value of it is a value
                             // of the field any more (it stays documented in rustdoc).
-                            None => {
+                            Err(NoMeet::Empty) => {
                                 uninhabited.insert(field.name.wire.clone());
                                 if let Some(default) = &mut existing.default {
                                     default.applied = None;
@@ -2637,6 +2653,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                     Docs::default(),
                                     None,
                                 )
+                            }
+                            // Only an empty meet is uninhabited: these two types share values, and
+                            // an uninhabited field would refuse every object carrying one.
+                            Err(NoMeet::Unrepresentable) => {
+                                let message = format!(
+                                    "property `{}` repeated across `allOf` members has types that \
+                                     share values no single Rust type represents",
+                                    field.name.wire
+                                );
+                                return self.reject_unrepresentable_meet(schema, &message);
                             }
                         };
                     }
@@ -2916,7 +2942,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(match (acc, next) {
             (AdditionalProps::Deny, _) | (_, AdditionalProps::Deny) => AdditionalProps::Deny,
             (AdditionalProps::Typed(x), AdditionalProps::Typed(y)) => {
-                let intersection = self.intersect_types(**x, **y, hint)?;
+                let intersection = self.intersect_types(**x, **y, hint).ok()?;
                 AdditionalProps::Typed(Box::new(intersection))
             }
             (AdditionalProps::Typed(x), AdditionalProps::Allow)
@@ -3009,14 +3035,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
+    /// Two sides that share values no single Rust type represents ([`NoMeet::Unrepresentable`]),
+    /// met where an empty meet would have been typed uninhabited or dropped: a union branch against
+    /// the enclosing schema's siblings, or a property repeated across `allOf` members. Either
+    /// stand-in would refuse the values the two sides share, so the composition is refused instead.
+    fn reject_unrepresentable_meet<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        // E013 case: unrepresentable-meet
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
     /// Report that a `$ref` target and its own sibling keywords have no single typed intersection.
     /// `$ref` is a 2020-12 applicator, so this is the same class of irreconcilable composition an
     /// `allOf` reports — `E013` covers both spellings — but the remedy names the construct the
-    /// author actually wrote. The underlying `None` covers an empty intersection and an inhabited
-    /// but unrepresentable one, for any of the reasons an `allOf` merge has, so the message must
-    /// distinguish no further than that.
+    /// author actually wrote. Its callers report an empty intersection and an inhabited but
+    /// unrepresentable one alike, for any of the reasons an `allOf` merge has, so the message
+    /// distinguishes no further than that.
     fn reject_ref_sibling_intersection(&mut self, schema: &Schema) -> Option<Ty> {
-        // E013 case: scalar-members, required-property, additional-values, object-scalar-mix
+        // E013 case: scalar-members, required-property, additional-values, object-scalar-mix, unrepresentable-meet
         Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
             .message(
                 "the `$ref` target and this schema's own sibling keywords have an empty or \
@@ -3120,9 +3159,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// independently from the non-null shape; an intersection containing only JSON `null` becomes
     /// [`TypeKind::Null`]. Derived arrays, objects, enums, and narrowed unions are inserted into the
     /// graph so codegen still sees an ordinary, fully typed IR node.
-    fn intersect_types(&mut self, a: Ty, b: Ty, hint: &str) -> Option<Ty> {
-        let a_kind = self.graph.get(a.id)?.kind.clone();
-        let b_kind = self.graph.get(b.id)?.kind.clone();
+    ///
+    /// No typed intersection is one of two answers, and [`NoMeet`] says which: an empty one may be
+    /// typed uninhabited where an empty value remains (an array's items, a property no side
+    /// requires) or collapse to `null` where both sides admit it, while an unrepresentable one is
+    /// never narrowed that way — it reaches a caller that reports it.
+    fn intersect_types(&mut self, a: Ty, b: Ty, hint: &str) -> Result<Ty, NoMeet> {
+        let (Some(a_def), Some(b_def)) = (self.graph.get(a.id), self.graph.get(b.id)) else {
+            return Err(NoMeet::Unrepresentable);
+        };
+        let a_kind = a_def.kind.clone();
+        let b_kind = b_def.kind.clone();
 
         // Fail closed on a reservation, BEFORE nullability is consulted. A `TypeKind::Reserved`
         // operand is a placeholder whose body is still being lowered, so no true statement can be
@@ -3130,48 +3177,46 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // safe thing to do with one is refuse to read it. The callers above guard their own paths,
         // but a guard that asks about the *spelling* of a reference rather than its resolved
         // identity lets one through, and the rescue below then converted that unanswerable
-        // intersection into a confident wrong answer: `intersect_non_null` returned `None` for it
-        // (it now does so by a `Reserved` arm of its own), and `None if accepts_null` typed the
+        // intersection into a confident wrong answer: `intersect_non_null` found no meet for it
+        // (it now refuses by a `Reserved` arm of its own), and the null rescue typed the
         // position as the exact JSON null type. The result was `pub type X = ();` — a client that
         // decodes only `null` for a schema that accepts objects — emitted with no diagnostic,
         // which is the standing invariant's fourth, silent behaviour.
         //
-        // Returning `None` here hands the refusal to the caller. It is a backstop, not a guarantee
-        // of rejection: most callers report `None` as an irreconcilable composition, but two treat
-        // it as "provably empty" — the `Array` arm of `intersect_non_null` types the items as
-        // `Never`, and `intersect_structs` keeps an optional conflicting property as `Never` — so a
-        // reservation that reaches either through a missed caller-side guard is still emitted as an
-        // uninhabited type rather than rejected. The caller-side guards are what reject; this arm
-        // only keeps the null-collapse rescue below from turning the refusal into `()`.
+        // Refusing it as `NoMeet::Unrepresentable` hands the refusal to the caller, and that answer
+        // is never typed uninhabited or collapsed to `null`: the `Never` fallbacks (an array's
+        // items, a property no side requires) take only `NoMeet::Empty`, and so does the null
+        // rescue below. So a reservation that slips past a caller-side guard is still rejected.
         //
         // A reservation intersected with ITSELF is exempt: `X ∩ X = X` needs no knowledge of the
         // body, and it is how every ordinary recursive schema composes when two `allOf` members
         // repeat one construct. Refusing it rejected those documents with a false "conflicting
-        // types" message, and at the two `Never` callers above emitted a `kids` array that decodes
-        // only `[]`. `intersect_non_null` answers it by its identity short-circuit.
+        // types" message. `intersect_non_null` answers it by its identity short-circuit.
         if a.id != b.id
             && (matches!(a_kind, TypeKind::Reserved) || matches!(b_kind, TypeKind::Reserved))
         {
-            return None;
+            return Err(NoMeet::Unrepresentable);
         }
 
         let accepts_null = type_accepts_null(a, &a_kind) && type_accepts_null(b, &b_kind);
 
         let non_null = if matches!(a_kind, TypeKind::Null) || matches!(b_kind, TypeKind::Null) {
-            None
+            Err(NoMeet::Empty)
         } else {
             self.intersect_non_null(a, &a_kind, b, &b_kind, hint)
         };
 
         match non_null {
-            Some(mut ty) => {
+            Ok(mut ty) => {
                 ty.nullable = accepts_null;
-                Some(ty)
+                Ok(ty)
             }
-            None if accepts_null => {
-                Some(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+            // Only an EMPTY non-null meet leaves exactly `null`. An unrepresentable one still holds
+            // the non-null values the two sides share, and `()` would refuse every one of them.
+            Err(NoMeet::Empty) if accepts_null => {
+                Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
             }
-            None => None,
+            Err(no_meet) => Err(no_meet),
         }
     }
 
@@ -3307,12 +3352,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         b: Ty,
         b_kind: &TypeKind,
         hint: &str,
-    ) -> Option<Ty> {
+    ) -> Result<Ty, NoMeet> {
         if a.id == b.id {
             let mut ty = a;
             ty.nullable = false;
             ty.boxed = a.boxed || b.boxed;
-            return Some(ty);
+            return Ok(ty);
         }
 
         match (a_kind, b_kind) {
@@ -3320,17 +3365,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // (the identical reservation answered above by id). `intersect_types` refuses this
             // before calling here; stating it again means a new caller inherits the refusal rather
             // than reaching the `Any` arms below, which would answer with the placeholder itself.
-            (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => None,
-            (TypeKind::Any, _) => Some(non_nullable(b)),
-            (_, TypeKind::Any) => Some(non_nullable(a)),
+            (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => Err(NoMeet::Unrepresentable),
+            (TypeKind::Any, _) => Ok(non_nullable(b)),
+            (_, TypeKind::Any) => Ok(non_nullable(a)),
             (TypeKind::Primitive(left), TypeKind::Primitive(right)) => {
-                let primitive = intersect_primitives(*left, *right)?;
+                let Some(primitive) = intersect_primitives(*left, *right) else {
+                    return Err(no_meet(a_kind, b_kind));
+                };
                 if primitive == *left {
-                    Some(non_nullable(a))
+                    Ok(non_nullable(a))
                 } else if primitive == *right {
-                    Some(non_nullable(b))
+                    Ok(non_nullable(b))
                 } else {
-                    Some(self.insert_type(
+                    Ok(self.insert_type(
                         hint,
                         TypeKind::Primitive(primitive),
                         Docs::default(),
@@ -3346,13 +3393,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .cloned()
                     .collect();
                 if variants.is_empty() {
-                    None
+                    // Both value sets are finite and listed in full, so sharing no value is proof.
+                    Err(NoMeet::Empty)
                 } else if variants == left.variants {
-                    Some(non_nullable(a))
+                    Ok(non_nullable(a))
                 } else if variants == right.variants {
-                    Some(non_nullable(b))
+                    Ok(non_nullable(b))
                 } else {
-                    Some(self.insert_type(
+                    Ok(self.insert_type(
                         hint,
                         TypeKind::Enum(ScalarEnum {
                             repr: left.repr,
@@ -3366,26 +3414,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (TypeKind::Enum(enumeration), TypeKind::Primitive(primitive))
                 if enum_matches_primitive(enumeration.repr, *primitive) =>
             {
-                Some(non_nullable(a))
+                Ok(non_nullable(a))
             }
             (TypeKind::Primitive(primitive), TypeKind::Enum(enumeration))
                 if enum_matches_primitive(enumeration.repr, *primitive) =>
             {
-                Some(non_nullable(b))
+                Ok(non_nullable(b))
             }
             (TypeKind::Array(left), TypeKind::Array(right)) => {
                 let item_hint = format!("{hint}Item");
-                let item = self
-                    .intersect_types(**left, **right, &item_hint)
-                    .unwrap_or_else(|| {
+                let item = match self.intersect_types(**left, **right, &item_hint) {
+                    Ok(item) => item,
+                    // No item satisfies both, so exactly the empty array satisfies both arrays:
+                    // `Vec<Never>` is faithful.
+                    Err(NoMeet::Empty) => {
                         self.insert_type(&item_hint, TypeKind::Never, Docs::default(), None)
-                    });
+                    }
+                    // Items both sides admit exist, and `Vec<Never>` would refuse every array that
+                    // holds one.
+                    Err(NoMeet::Unrepresentable) => return Err(NoMeet::Unrepresentable),
+                };
                 if same_ty(item, **left) {
-                    Some(non_nullable(a))
+                    Ok(non_nullable(a))
                 } else if same_ty(item, **right) {
-                    Some(non_nullable(b))
+                    Ok(non_nullable(b))
                 } else {
-                    Some(self.insert_type(
+                    Ok(self.insert_type(
                         hint,
                         TypeKind::Array(Box::new(item)),
                         Docs::default(),
@@ -3393,6 +3447,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ))
                 }
             }
+            // A position with no intersection is unrepresentable rather than empty, whichever way
+            // it fails: `prefixItems` does not require the array to reach that position, so an
+            // array shorter than it still satisfies both tuples.
             (TypeKind::Tuple(left), TypeKind::Tuple(right)) if left.len() == right.len() => {
                 let items = left
                     .iter()
@@ -3400,15 +3457,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .enumerate()
                     .map(|(index, (left, right))| {
                         self.intersect_types(*left, *right, &format!("{hint}Item{index}"))
+                            .ok()
                     })
-                    .collect::<Option<Vec<_>>>()?;
-                Some(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(NoMeet::Unrepresentable)?;
+                Ok(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
             }
             // A homogeneous array against a tuple: every tuple position must also satisfy the
             // array's item schema, and the length is the tuple's. So the intersection is the tuple
             // with each position narrowed by the item — `{$ref: Coord, type: array}` over a
-            // `prefixItems` `Coord` is `Coord`. A position with no intersection leaves no tuple
-            // (unlike the array-array arm, a fixed-length tuple has no empty value to fall back on).
+            // `prefixItems` `Coord` is `Coord`. A position with no intersection leaves no tuple,
+            // and, as for two tuples, that is unrepresentable rather than empty.
             (TypeKind::Array(item), TypeKind::Tuple(positions)) => {
                 self.intersect_array_tuple(**item, positions, b, hint)
             }
@@ -3420,53 +3479,64 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             (TypeKind::Union(union), _) => self.intersect_union(a, union, b, hint),
             (_, TypeKind::Union(union)) => self.intersect_union(b, union, a, hint),
-            (TypeKind::Bytes, TypeKind::Bytes) => Some(non_nullable(a)),
+            (TypeKind::Bytes, TypeKind::Bytes) => Ok(non_nullable(a)),
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
             // string conjoined with it is the binary content: `{$ref: Data, format: binary}` over a
             // string `Data` lowers exactly as the inline `{type: string, format: binary}` does. Only
             // the unformatted string: `uuid` and the date formats carry a decoded representation of
-            // their own that `Bytes` cannot also be.
-            (TypeKind::Bytes, TypeKind::Primitive(Prim::String)) => Some(non_nullable(a)),
-            (TypeKind::Primitive(Prim::String), TypeKind::Bytes) => Some(non_nullable(b)),
-            _ => None,
+            // their own that `Bytes` cannot also be, so that pair is unrepresentable (`no_meet`).
+            (TypeKind::Bytes, TypeKind::Primitive(Prim::String)) => Ok(non_nullable(a)),
+            (TypeKind::Primitive(Prim::String), TypeKind::Bytes) => Ok(non_nullable(b)),
+            _ => Err(no_meet(a_kind, b_kind)),
         }
     }
 
     /// The intersection of a homogeneous array whose items are `item` with the tuple `tuple`, whose
     /// positions are `positions`: the tuple, each position intersected with `item`. Returns the
-    /// tuple itself when no position narrowed, and `None` when any position has no intersection.
+    /// tuple itself when no position narrowed, and [`NoMeet::Unrepresentable`] when any position
+    /// has no intersection.
     fn intersect_array_tuple(
         &mut self,
         item: Ty,
         positions: &[Ty],
         tuple: Ty,
         hint: &str,
-    ) -> Option<Ty> {
+    ) -> Result<Ty, NoMeet> {
         let items = positions
             .iter()
             .enumerate()
             .map(|(index, position)| {
                 self.intersect_types(*position, item, &format!("{hint}Item{index}"))
+                    .ok()
             })
-            .collect::<Option<Vec<_>>>()?;
+            .collect::<Option<Vec<_>>>()
+            .ok_or(NoMeet::Unrepresentable)?;
         if items
             .iter()
             .zip(positions)
             .all(|(narrowed, position)| same_ty(*narrowed, *position))
         {
-            Some(non_nullable(tuple))
+            Ok(non_nullable(tuple))
         } else {
-            Some(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
+            Ok(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
         }
     }
 
-    fn intersect_structs(&mut self, left: &Struct, right: &Struct, hint: &str) -> Option<Ty> {
+    fn intersect_structs(
+        &mut self,
+        left: &Struct,
+        right: &Struct,
+        hint: &str,
+    ) -> Result<Ty, NoMeet> {
         let mut fields: IndexMap<String, Field> = left
             .fields
             .iter()
             .cloned()
             .map(|field| (field.name.wire.clone(), field))
             .collect();
+        // An unrepresentable property is remembered rather than returned at once: a later
+        // required property whose types are disjoint still proves the whole object empty.
+        let mut unrepresentable = false;
         for field in &right.fields {
             match fields.get_mut(&field.name.wire) {
                 Some(existing) => {
@@ -3474,7 +3544,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
                     let required = existing.required || field.required;
                     existing.ty = match intersection {
-                        Some(ty) => ty,
+                        Ok(ty) => ty,
                         // Mirrors the array arm above, and for the same reason `E013`'s explain
                         // gives for it: a property NEITHER side requires does not empty the
                         // object when its two types cannot meet, because every instance that
@@ -3483,7 +3553,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         // ones. Propagating the failure would reject a document that `{}`
                         // satisfies. An applied `default` goes with the old type, since no value
                         // of it is a value of the field any more (it stays documented in rustdoc).
-                        None if !required => {
+                        Err(NoMeet::Empty) if !required => {
                             if let Some(default) = &mut existing.default {
                                 default.applied = None;
                             }
@@ -3491,7 +3561,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         }
                         // Required on one side or the other: every instance must carry a value no
                         // type admits, so the composition really is empty.
-                        None => return None,
+                        Err(NoMeet::Empty) => return Err(NoMeet::Empty),
+                        // Values both sides admit exist, so an uninhabited field would refuse every
+                        // object carrying one, required or not.
+                        Err(NoMeet::Unrepresentable) => {
+                            unrepresentable = true;
+                            continue;
+                        }
                     };
                     existing.required = required;
                     if existing.required {
@@ -3505,12 +3581,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }
-        let additional = self.merge_additional(
-            &left.additional,
-            &right.additional,
-            &format!("{hint}Additional"),
-        )?;
-        Some(self.insert_type(
+        if unrepresentable {
+            return Err(NoMeet::Unrepresentable);
+        }
+        // Two additional-value types that do not meet leave the object inhabited (one with no
+        // additional key satisfies both), so that failure is never an empty object.
+        let additional = self
+            .merge_additional(
+                &left.additional,
+                &right.additional,
+                &format!("{hint}Additional"),
+            )
+            .ok_or(NoMeet::Unrepresentable)?;
+        Ok(self.insert_type(
             hint,
             TypeKind::Struct(Struct {
                 fields: fields.into_values().collect(),
@@ -3527,25 +3610,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         union: &Union,
         other: Ty,
         hint: &str,
-    ) -> Option<Ty> {
+    ) -> Result<Ty, NoMeet> {
         let mut variants = Vec::new();
         let mut retained = Vec::new();
         for (index, variant) in union.variants.iter().enumerate() {
-            if let Some(ty) =
-                self.intersect_types(variant.ty, other, &format!("{hint}Variant{index}"))
-            {
-                variants.push(UnionVariant {
-                    name_hint: variant.name_hint.clone(),
-                    ty,
-                });
-                retained.push(index);
+            match self.intersect_types(variant.ty, other, &format!("{hint}Variant{index}")) {
+                Ok(ty) => {
+                    variants.push(UnionVariant {
+                        name_hint: variant.name_hint.clone(),
+                        ty,
+                    });
+                    retained.push(index);
+                }
+                // A branch no value of `other` satisfies contributes nothing to the intersection,
+                // so dropping it loses no value.
+                Err(NoMeet::Empty) => {}
+                // A branch that shares values with `other` but has no type for them cannot be
+                // dropped without refusing those values, whatever the other branches do.
+                Err(NoMeet::Unrepresentable) => return Err(NoMeet::Unrepresentable),
             }
         }
         if variants.len() == 1 {
-            return variants.into_iter().next().map(|variant| variant.ty);
+            return Ok(variants.remove(0).ty);
         }
         if variants.is_empty() {
-            return None;
+            return Err(NoMeet::Empty);
         }
         if variants.len() == union.variants.len()
             && variants
@@ -3553,7 +3642,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .zip(&union.variants)
                 .all(|(left, right)| same_ty(left.ty, right.ty))
         {
-            return Some(non_nullable(union_ty));
+            return Ok(non_nullable(union_ty));
         }
         let strategy = match &union.strategy {
             UnionStrategy::Discriminated {
@@ -3581,7 +3670,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 priorities: retained.iter().map(|index| priorities[*index]).collect(),
             },
         };
-        Some(self.insert_type(
+        Ok(self.insert_type(
             hint,
             TypeKind::Union(Union { variants, strategy }),
             Docs::default(),
@@ -5961,6 +6050,65 @@ fn collect_node_refs<'v>(node: &'v SpannedValue, out: &mut Vec<&'v str>) {
 
 fn type_accepts_null(ty: Ty, kind: &TypeKind) -> bool {
     ty.nullable || matches!(kind, TypeKind::Null | TypeKind::Any)
+}
+
+/// Why two lowered types have no typed intersection. The two answers call for different handling,
+/// so an intersection never reports one where it may be the other.
+///
+/// Only [`NoMeet::Empty`] may be typed uninhabited ([`TypeKind::Never`]) or collapsed to the exact
+/// JSON `null`: those stand in for the intersection only when no value satisfies both sides.
+/// [`NoMeet::Unrepresentable`] is a set of values the generated client would silently refuse, so
+/// every caller reports it (`E013`) instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoMeet {
+    /// No JSON value satisfies both sides: their value categories are disjoint (a string and an
+    /// integer), or their scalar `enum` sets share no value.
+    Empty,
+    /// The sides may share values, but no single Rust type represents the ones they share — `uuid`
+    /// and `contentEncoding: base64` are both annotations on a string, so every string satisfies
+    /// both — or nothing can be known yet, because one side is a reservation.
+    Unrepresentable,
+}
+
+/// The JSON category every instance of a non-null lowered kind falls in, for a kind confined to
+/// one. Unlike [`LowerCtx::json_category`], which picks a union's dispatch and so leaves raw bytes
+/// uncategorised, this answers what an instance of a *schema* can be: binary content in a schema is
+/// a (base64) JSON string.
+fn value_category(kind: &TypeKind) -> Option<JsonCategory> {
+    match kind {
+        TypeKind::Primitive(Prim::Bool) => Some(JsonCategory::Boolean),
+        TypeKind::Primitive(Prim::I32 | Prim::I64 | Prim::F64) => Some(JsonCategory::Number),
+        TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date)
+        | TypeKind::Bytes => Some(JsonCategory::String),
+        TypeKind::Enum(enumeration) => Some(match enumeration.repr {
+            ScalarRepr::String => JsonCategory::String,
+            ScalarRepr::Int => JsonCategory::Number,
+            ScalarRepr::Bool => JsonCategory::Boolean,
+        }),
+        TypeKind::Array(_) | TypeKind::Tuple(_) => Some(JsonCategory::Array),
+        TypeKind::Struct(_) => Some(JsonCategory::Object),
+        // `null` is intersected before any non-null kind is compared, `Never` has no instance, a
+        // union and `Any` span several categories, and a reservation's body is not known yet.
+        TypeKind::Null
+        | TypeKind::Never
+        | TypeKind::Union(_)
+        | TypeKind::Any
+        | TypeKind::Reserved => None,
+    }
+}
+
+/// Why two non-null kinds that no intersection rule meets do not meet: empty when one side is
+/// uninhabited or the two sit in disjoint JSON categories, and otherwise unrepresentable — two
+/// strings of different formats, tuples of different lengths — because nothing here proves that
+/// no value satisfies both.
+fn no_meet(left: &TypeKind, right: &TypeKind) -> NoMeet {
+    if matches!(left, TypeKind::Never) || matches!(right, TypeKind::Never) {
+        return NoMeet::Empty;
+    }
+    match (value_category(left), value_category(right)) {
+        (Some(left), Some(right)) if left != right => NoMeet::Empty,
+        _ => NoMeet::Unrepresentable,
+    }
 }
 
 fn non_nullable(mut ty: Ty) -> Ty {
