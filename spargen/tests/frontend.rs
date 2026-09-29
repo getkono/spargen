@@ -15954,7 +15954,7 @@ paths:
         ("text/plain; foo, text/plain", "text/plain; foo"),
     ];
     // Well-formed under RFC 9110, but a quoted value `mime_str` refuses: empty, or holding a `"`
-    // or a tab.
+    // or a tab. Only a multipart part sends its `contentType`, so only multipart rejects these.
     let unsendable = [
         "text/plain; a=\"\"",
         "text/plain; a=\"x\\\"y\"",
@@ -15962,6 +15962,11 @@ paths:
         "text/plain; a=\"x\\\ty\"",
     ];
     for media in ["multipart/form-data", "application/x-www-form-urlencoded"] {
+        let unsendable_here: &[&str] = if media == "multipart/form-data" {
+            &unsendable
+        } else {
+            &[]
+        };
         let cases = malformed
             .iter()
             .map(|(content_type, first)| {
@@ -15973,7 +15978,7 @@ paths:
                     ),
                 )
             })
-            .chain(unsendable.iter().map(|content_type| {
+            .chain(unsendable_here.iter().map(|content_type| {
                 (
                     *content_type,
                     format!(
@@ -16000,6 +16005,33 @@ paths:
                 );
             }
         }
+    }
+    // A form-urlencoded field's `contentType` only picks the codec its value is rendered with; it
+    // is never sent as a header, so an RFC-valid parameter `mime_str` would refuse is no reason to
+    // reject the document.
+    for content_type in unsendable {
+        let spec = body("application/x-www-form-urlencoded", content_type);
+        let report = check(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{content_type:?}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{content_type:?}: {report:#?}"
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{content_type:?}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{content_type:?}: {report:#?}"
+        );
+        assert!(!code.contains("mime_str"), "{content_type:?}: {code}");
     }
     // Well-formed parameter lists generate, and the part carries the canonical spelling: names
     // and values as written, whitespace around `;` and empty parameters dropped (RFC 9110 admits

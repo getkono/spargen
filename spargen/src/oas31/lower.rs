@@ -4452,8 +4452,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // Its parameters are sent too, so they are held to RFC 9110 § 5.6.6: a
                 // parameter without `=` (`text/plain; foo`) would otherwise generate with nothing
                 // reported and fail only when the part's `Content-Type` is parsed at request time.
+                // Only a multipart part sends it (`mime_str`); a form-urlencoded field's
+                // `contentType` only picks the codec, so a value the transport could not carry is
+                // no reason to refuse it there. A malformed list is refused under either, as the
+                // essence rule above is: it is not a media type.
                 match media_type_with_parameters(&first) {
                     Ok(canonical) => canonical,
+                    Err(ParameterFault::Unsendable(canonical)) if media != MediaType::Multipart => {
+                        canonical
+                    }
                     Err(fault) => {
                         let (message, remedy) = match fault {
                             ParameterFault::Malformed => (
@@ -4464,7 +4471,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 "write each parameter as `name=value`, with a token name and a \
                                  token or quoted-string value, such as `text/plain; charset=utf-8`",
                             ),
-                            ParameterFault::Unsendable => (
+                            ParameterFault::Unsendable(_) => (
                                 format!(
                                     "`encoding.{name}.contentType: {first}` has a quoted \
                                      parameter value the generated client cannot send: an empty \
@@ -6870,14 +6877,15 @@ fn first_list_element(list: &str) -> &str {
 }
 
 /// Why a media type's parameter list cannot be sent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum ParameterFault {
     /// Not `parameters = *( OWS ";" OWS [ parameter ] )` with
     /// `parameter = token "=" ( token / quoted-string )` (RFC 9110 §§ 5.6.6, 5.6.4).
     Malformed,
     /// Well-formed, but a quoted value the multipart transport's parser (`mime` 0.3, behind
     /// reqwest's `Part::mime_str`) refuses: empty, or holding a `"` (as a quoted-pair) or a tab.
-    Unsendable,
+    /// Carries the canonical form, for a caller that never sends the value.
+    Unsendable(String),
 }
 
 /// A media type whose essence is already well-formed, with its parameter list checked against
@@ -6994,7 +7002,7 @@ fn media_type_with_parameters(media: &str) -> Result<String, ParameterFault> {
         }
     }
     if unsendable {
-        Err(ParameterFault::Unsendable)
+        Err(ParameterFault::Unsendable(canonical))
     } else {
         Ok(canonical)
     }
