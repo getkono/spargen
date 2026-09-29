@@ -8610,7 +8610,10 @@ components:
     );
 }
 
-/// A property declared with different lowered types in two `allOf` members is irreconcilable → E013.
+/// A property declared with different lowered types in two `allOf` members, and required by one of
+/// them, is irreconcilable → E013. The requirement is what empties the object: without it `{}` is
+/// valid and the property is typed uninhabited instead (see
+/// `an_all_of_conflict_on_an_optional_property_agrees_with_every_other_spelling`).
 const ALL_OF_CONFLICT_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -8623,6 +8626,7 @@ components:
           properties:
             x: { type: string }
         - type: object
+          required: [x]
           properties:
             x: { type: integer }
 "##;
@@ -16559,6 +16563,180 @@ fn a_property_conflict_on_an_optional_property_does_not_empty_the_object() {
                 "`{what}` did not report E013 through {entry}: {report:#?}"
             );
         }
+    }
+}
+
+/// Four spellings of one conjunction — a `$ref` with sibling `properties`, the same pair written
+/// as `allOf` members, a sole-member `oneOf` beside `properties`, and two inline `allOf` members —
+/// have identical valid sets when a property conflicts and is optional on every side: `{}` and
+/// `{"zz": 1}` satisfy all four and no `a`-bearing instance satisfies any. The intersection path
+/// typed the property uninhabited; the `allOf` merge, which does not go through
+/// `intersect_structs`, rejected the same document with `E013`. So whether a document was an error
+/// depended on which equivalent spelling its author chose.
+///
+/// Every spelling below must now agree, and so must every control: requiring the property anywhere
+/// — on the member that declares it, on a later member that only lists it in `required` (read
+/// after the conflict is seen, so the decision cannot be made at the conflict), on the enclosing
+/// schema, or on the `$ref` target — empties the object, and all of those reject.
+#[test]
+fn an_all_of_conflict_on_an_optional_property_agrees_with_every_other_spelling() {
+    const HEAD: &str =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    const PATH: &str = r##"paths:
+  /u:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                BODY
+"##;
+    const OBJ: &str =
+        "components:\n  schemas:\n    Obj: { type: object, properties: { a: { type: string } } }\n";
+    const OBJ_REQUIRED: &str = "components:\n  schemas:\n    Obj: { type: object, required: [a], properties: { a: { type: string } } }\n";
+    const UNUSED: &str = "components:\n  schemas:\n    Unused: { type: string }\n";
+
+    let inhabited: &[(&str, &str, &str)] = &[
+        (
+            "a `$ref` with a conflicting sibling property",
+            "$ref: '#/components/schemas/Obj'\n                type: object\n                properties: { a: { type: integer } }",
+            OBJ,
+        ),
+        (
+            "the same pair as `allOf` members",
+            "allOf:\n                  - $ref: '#/components/schemas/Obj'\n                  - { type: object, properties: { a: { type: integer } } }",
+            OBJ,
+        ),
+        (
+            "a sole-member `oneOf` beside a conflicting property",
+            "type: object\n                properties: { a: { type: integer } }\n                oneOf: [{ type: object, properties: { a: { type: string } } }]",
+            UNUSED,
+        ),
+        (
+            "two inline `allOf` members",
+            "allOf:\n                  - { type: object, properties: { a: { type: string } } }\n                  - { type: object, properties: { a: { type: integer } } }",
+            UNUSED,
+        ),
+        (
+            "an `allOf` member conflicting with the enclosing schema's own property",
+            "type: object\n                properties: { a: { type: integer } }\n                allOf:\n                  - { type: object, properties: { a: { type: string } } }",
+            UNUSED,
+        ),
+        (
+            "a third `allOf` member meeting an already-uninhabited property",
+            "allOf:\n                  - { type: object, properties: { a: { type: string } } }\n                  - { type: object, properties: { a: { type: integer } } }\n                  - { type: object, properties: { a: { type: boolean } } }",
+            UNUSED,
+        ),
+    ];
+    for (what, body, components) in inhabited {
+        let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` still admits `{{}}`, so {entry} must not reject it: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable)
+                    && !has_code(&report, Code::NonDisjointUnion),
+                "`{what}` reported an irreconcilable composition through {entry}: {report:#?}"
+            );
+        }
+        let (_, code) = generate_with_code(&spec);
+        assert!(
+            code.contains("no JSON value can inhabit schema"),
+            "`{what}` must give the conflicting property an uninhabited type: {code}"
+        );
+        assert!(
+            code.contains("pub a: Option<"),
+            "`{what}` must keep the conflicting property optional: {code}"
+        );
+        assert!(!code.contains("serde_json :: Value"), "{code}");
+    }
+
+    let empty: &[(&str, &str, &str)] = &[
+        (
+            "the member that declares the property requires it",
+            "allOf:\n                  - { type: object, properties: { a: { type: string } } }\n                  - { type: object, required: [a], properties: { a: { type: integer } } }",
+            UNUSED,
+        ),
+        (
+            "a later member requires the property without declaring it",
+            "allOf:\n                  - { type: object, properties: { a: { type: string } } }\n                  - { type: object, properties: { a: { type: integer } } }\n                  - { type: object, required: [a] }",
+            UNUSED,
+        ),
+        (
+            "the enclosing schema requires the property",
+            "type: object\n                required: [a]\n                allOf:\n                  - { type: object, properties: { a: { type: string } } }\n                  - { type: object, properties: { a: { type: integer } } }",
+            UNUSED,
+        ),
+        (
+            "the `$ref` member's target requires the property",
+            "allOf:\n                  - $ref: '#/components/schemas/Obj'\n                  - { type: object, properties: { a: { type: integer } } }",
+            OBJ_REQUIRED,
+        ),
+        (
+            "the `$ref` sibling spelling of the same requirement",
+            "$ref: '#/components/schemas/Obj'\n                type: object\n                properties: { a: { type: integer } }",
+            OBJ_REQUIRED,
+        ),
+    ];
+    for (what, body, components) in empty {
+        let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{what}` admits no value at all, so {entry} must still reject it: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::AllOfIrreconcilable),
+                "`{what}` did not report E013 through {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A repeated `allOf` property whose one side is a `$ref` back to the schema being lowered cannot
+/// be intersected: the target's body is not known yet, so the merge cannot tell an empty
+/// intersection from a meeting one, and typing the property uninhabited — what an optional
+/// conflicting property now gets — would be a guess that deletes every value it might hold. It
+/// stays `E013`, and the message names the cycle rather than a conflict nobody wrote.
+#[test]
+fn an_all_of_property_typed_by_an_unlowered_cycle_is_refused_not_made_uninhabited() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /n:
+    get:
+      operationId: getN
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Node' }
+components:
+  schemas:
+    Node:
+      allOf:
+        - { type: object, properties: { a: { $ref: '#/components/schemas/Node' } } }
+        - { type: object, properties: { a: { type: string } } }
+"##;
+    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("closes a reference cycle")),
+            "{entry} must name the cycle, not a conflict: {messages:?}"
+        );
     }
 }
 

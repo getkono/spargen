@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
@@ -2287,8 +2287,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `allOf`. The gathered members are then combined:
     ///
     /// * **all object members** → one flattened [`Struct`]: the union of properties in first-seen
-    ///   order, recursive typed intersections for properties declared by several members, the union
-    ///   of `required`, and a conservatively intersected `additionalProperties` policy;
+    ///   order, recursive typed intersections for properties declared by several members (an empty
+    ///   one types the field uninhabited unless some member requires it, which is `E013` — the rule
+    ///   `intersect_structs` applies), the union of `required`, and a conservatively intersected
+    ///   `additionalProperties` policy;
     /// * **all scalar members** → their typed intersection, including numeric narrowing, enum
     ///   narrowing, arrays/objects/unions, and exact nullability; an empty intersection → `E013`;
     /// * an **object/scalar mix** → `E013`.
@@ -2363,6 +2365,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut fields: IndexMap<String, Field> = IndexMap::new();
         let mut required: Vec<String> = Vec::new();
         let mut additional = AdditionalProps::Allow;
+        // Repeated properties whose types have no common value, in first-seen order.
+        let mut uninhabited: IndexSet<String> = IndexSet::new();
         for contribution in &contributions {
             let Contribution::Object {
                 fields: member_fields,
@@ -2410,28 +2414,62 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 match fields.get_mut(&field.name.wire) {
                     Some(existing) => {
                         // A repeated property is an intersection, not an equality assertion: retain
-                        // the narrower compatible type and reject only an empty/unrepresentable
-                        // intersection.
-                        let Some(intersection) = self.intersect_types(
-                            existing.ty,
-                            field.ty,
-                            &format!("{hint}{}Intersection", field.name.wire),
-                        ) else {
-                            let message = format!(
-                                "property `{}` appears in multiple `allOf` members with \
-                                 conflicting types",
-                                field.name.wire
-                            );
-                            return self.reject_all_of(schema, &message);
-                        };
-                        existing.ty = intersection;
+                        // the narrower compatible type.
+                        let field_hint = format!("{hint}{}Intersection", field.name.wire);
+                        let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
                         existing.required = existing.required || field.required;
+                        existing.ty = match intersection {
+                            Some(ty) => ty,
+                            // A reservation's body is not known yet, so `None` here says nothing
+                            // about whether the property's types meet; typing the field
+                            // uninhabited would be a guess. Refuse it, as `intersect_types`'
+                            // backstop expects its callers to.
+                            None if self.is_reservation(existing.ty.id)
+                                || self.is_reservation(field.ty.id) =>
+                            {
+                                let message = format!(
+                                    "property `{}` repeated across `allOf` members is typed by a \
+                                     `$ref` that closes a reference cycle back to the schema \
+                                     being lowered, so its intersection cannot be computed",
+                                    field.name.wire
+                                );
+                                return self.reject_all_of(schema, &message);
+                            }
+                            // The same rule `intersect_structs` applies to a `$ref` and its
+                            // siblings, so the four equivalent spellings of one conjunction agree:
+                            // the types cannot meet, but that empties the object only if some
+                            // instance must carry the property. Whether one must is not known
+                            // until every member's `required` has been read — a later member may
+                            // require it without declaring it — so the field takes an uninhabited
+                            // type now and the requirement is settled after the loop.
+                            None => {
+                                uninhabited.insert(field.name.wire.clone());
+                                self.insert_type(
+                                    &field_hint,
+                                    TypeKind::Never,
+                                    Docs::default(),
+                                    None,
+                                )
+                            }
+                        };
                     }
                     None => {
                         fields.insert(field.name.wire.clone(), field.clone());
                     }
                 }
             }
+        }
+
+        // An uninhabited property that any member requires obliges every instance to carry a value
+        // no type admits: the composition is empty, and that is the document error.
+        if let Some(name) = uninhabited.iter().find(|name| {
+            required.contains(name) || fields.get(*name).is_some_and(|field| field.required)
+        }) {
+            let message = format!(
+                "property `{name}` appears in multiple `allOf` members with conflicting types, \
+                 and a member requires it"
+            );
+            return self.reject_all_of(schema, &message);
         }
 
         // Apply the required union, then keep required fields consistent: a serde default only fires
