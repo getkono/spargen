@@ -18881,6 +18881,63 @@ fn an_inhabited_intersection_with_no_rust_type_is_rejected_not_typed_uninhabited
             );
         }
     }
+
+    // An unrepresentable property does not settle a struct meet on its own: `intersect_structs`
+    // defers it, because a LATER property that some side requires and whose types share no value
+    // proves every object empty, and then the array of them is exactly `[]` — `Vec<Never>`, not a
+    // rejection. The uuid/base64 property `a` comes first so the deferral is what is exercised;
+    // with the required property's types compatible instead, nothing empties the object and the
+    // deferred unrepresentable answer stands.
+    let components = "components:\n  schemas:\n    Objs: { type: array, items: { type: object, \
+                      properties: { a: { type: string, format: uuid }, b: { type: string } } } }\n";
+    for (required_type, empty) in [("integer", true), ("string", false)] {
+        let body = format!(
+            "{{ $ref: '#/components/schemas/Objs', type: array, items: {{ type: object, \
+             properties: {{ a: {{ type: string, contentEncoding: base64 }}, \
+             b: {{ type: {required_type} }} }}, required: [b] }} }}"
+        );
+        let spec = format!("{HEAD}{}{components}", PATH.replace("BODY", &body));
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            if empty {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "a required string/integer property empties every item, so {entry} must keep \
+                     generating the empty array despite the earlier uuid/base64 one: {report:#?}"
+                );
+            } else {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "with no empty property the uuid/base64 one is unrepresentable, so {entry} \
+                     must reject: {report:#?}"
+                );
+                assert!(
+                    has_code(&report, Code::AllOfIrreconcilable),
+                    "{entry} must report E013: {report:#?}"
+                );
+            }
+        }
+        if empty {
+            let (_, code) = generate_with_code(&spec);
+            assert!(
+                code.contains("no JSON value can inhabit schema"),
+                "the emptied item must be typed uninhabited: {code}"
+            );
+            let never = code
+                .lines()
+                .find_map(|line| {
+                    line.trim()
+                        .strip_prefix("pub enum ")
+                        .and_then(|rest| rest.strip_suffix(" {}"))
+                })
+                .unwrap_or_else(|| panic!("no uninhabited enum was emitted: {code}"));
+            assert!(
+                code.contains(&format!("Vec<{never}>")),
+                "the body must be an array of the uninhabited item `{never}`: {code}"
+            );
+        }
+    }
 }
 
 /// A null-only union MEMBER and a `"null"` in the enclosing `type` array are not the same fact, and
