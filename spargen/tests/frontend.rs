@@ -1725,6 +1725,53 @@ paths:
     );
 }
 
+/// The precondition `ensure_resolved`'s root-component routing rests on: a pointer deeper than a
+/// component, such as `/components/schemas/Tree/properties/x`, is routed by `contains_key` alone,
+/// which is sound only because no root component key can contain `/`. Structural validation rejects
+/// such a key under both versions before lowering runs, so the nested reference below never reaches
+/// the component literally named `Tree/properties/x`.
+#[test]
+fn a_root_component_key_containing_a_slash_is_rejected_before_lowering() {
+    for version in ["3.1.0", "3.2.0"] {
+        let spec = format!(
+            r##"
+openapi: {version}
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Tree/properties/x' }} }}
+components:
+  schemas:
+    Tree:
+      type: object
+      properties:
+        x: {{ type: integer }}
+    Tree/properties/x: {{ type: string }}
+"##
+        );
+        for (entry, report) in [("generate", &generate(&spec)), ("check", &check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{version}/{entry}: {report:#?}"
+            );
+            assert!(
+                messages_for(report, Code::InvalidInput)
+                    .iter()
+                    .any(|message| message.contains("\"Tree/properties/x\" does not match")),
+                "{version}/{entry}: the key itself must be what is rejected: {report:#?}"
+            );
+        }
+    }
+}
+
 /// The fourth spelling of the shape above, and the one the root-document branch of
 /// `reservation_at` exists for: a **root** component whose `allOf` member names itself through an
 /// explicit file reference to the root document. `ensure_resolved` routes that reference back to

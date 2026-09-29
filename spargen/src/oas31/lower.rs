@@ -1046,7 +1046,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // one is worse. Every schema the parser produces carries a span, so this is defensive.
             return self.lower_schema(&schema, hint);
         };
-        // A resolved target that is a root component already has an identity — its name.
+        // A resolved target that is a root component already has an identity — its name. The
+        // `contains_key` alone decides it: a pointer deeper than a component (`Tree/properties/x`)
+        // cannot equal a key, because structural validation rejects any root component key outside
+        // `^[a-zA-Z0-9._-]+$` before lowering runs.
         if schema
             .provenance
             .span
@@ -1057,7 +1060,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .pointer
                 .as_str()
                 .strip_prefix("/components/schemas/")
-                .filter(|name| !name.is_empty() && !name.contains('/'))
             {
                 if self.document.components.schemas.contains_key(name) {
                     return self.ensure_component(name, Some(reference), at);
