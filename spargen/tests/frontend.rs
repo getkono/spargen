@@ -8243,6 +8243,130 @@ components:
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
+/// A `oneOf`/`anyOf` member written `{$ref: '#/components/schemas/Name', type: integer}` is the
+/// conjunction `Name ∩ integer` — in 2020-12 `$ref` is an applicator — exactly as the same schema is
+/// at a body or property position. With `Name` a string, nothing satisfies it.
+///
+/// The multi-member union used to lower a root-component member through its `$ref` string alone,
+/// so the member's own `type` was discarded and the run came back clean with the branch typed as
+/// the plain target (#279). The sole-member collapse and every other `$ref` spelling already
+/// intersected it; the verdict is now the one they give, `E013` at the member.
+#[test]
+fn a_component_ref_union_member_whose_siblings_contradict_its_target_is_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /p:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - { $ref: '#/components/schemas/Name', type: integer }
+                  - { type: boolean }
+components:
+  schemas:
+    Name: { type: string }
+"##;
+    let pointer = "/paths/~1p/get/responses/200/content/application~1json/schema/oneOf/0";
+    for (entry, report) in [("generate", generate(spec)), ("check", check(spec))] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{entry}: the member's `type: integer` must not be dropped in silence: {report:#?}"
+        );
+        let e013: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::AllOfIrreconcilable)
+            .collect();
+        assert!(
+            e013.iter().any(|d| d.pointer.as_str() == pointer),
+            "{entry}: E013 must point at the member `{pointer}`, not at {:?}\n{report:#?}",
+            e013.iter().map(|d| d.pointer.as_str()).collect::<Vec<_>>()
+        );
+    }
+}
+
+/// The satisfiable counterpart: `{$ref: Pet, properties: {owner: …}, required: [owner]}` narrows
+/// `Pet` to the pets that carry an `owner`. The branch must be that narrowed type — `Pet`'s fields
+/// plus a required `owner` — while still taking its variant name and its implicit discriminator tag
+/// from the component it references, since the member is still written as that component.
+#[test]
+fn a_component_ref_union_member_with_siblings_is_narrowed_and_keeps_its_component_name() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Pet:
+      type: object
+      properties:
+        kind: { type: string }
+        name: { type: string }
+    Dog:
+      type: object
+      required: [kind, bark]
+      properties:
+        kind: { type: string }
+        bark: { type: boolean }
+    Animal:
+      oneOf:
+        - $ref: '#/components/schemas/Pet'
+          properties: { owner: { type: string } }
+          required: [owner]
+        - $ref: '#/components/schemas/Dog'
+      discriminator:
+        propertyName: kind
+"##;
+    let checked = check(spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "check: {checked:#?}");
+    let (report, code) = generate_with_code(spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    let variants = enum_variants(&types, "Animal");
+    let pet = variants
+        .iter()
+        .find_map(|variant| variant.strip_prefix("Pet(")?.strip_suffix(')'))
+        .map(|payload| {
+            payload
+                .strip_prefix("Box<")
+                .and_then(|inner| inner.strip_suffix('>'))
+                .unwrap_or(payload)
+        })
+        .unwrap_or_else(|| panic!("the member lost its component name, got {variants:?}: {types}"));
+    assert_ne!(
+        pet, "Pet",
+        "the branch is the plain target, so its siblings were discarded: {types}"
+    );
+    let mut fields = declared_fields(&types, pet);
+    fields.sort();
+    assert_eq!(
+        fields,
+        ["kind", "name", "owner"],
+        "the narrowed branch must carry Pet's properties and the member's own: {types}"
+    );
+    let owner = types
+        .split(&format!("pub struct {pet} "))
+        .nth(1)
+        .and_then(|body| field_type(body, "pub owner"));
+    assert!(
+        owner
+            .as_deref()
+            .is_some_and(|ty| !ty.starts_with("Option<")),
+        "the member's `required: [owner]` must make `owner` required, got {owner:?}: {types}"
+    );
+    assert!(
+        types.contains("\"Pet\""),
+        "the implicit discriminator tag must stay the component name: {types}"
+    );
+}
+
 #[test]
 fn discriminated_union_with_mapping_generates() {
     // A `discriminator` with an explicit mapping over object `$ref` variants → an internally-tagged
