@@ -3249,7 +3249,30 @@ serde_json.workspace = true
             .diagnostics;
         let message = messages(&diagnostics);
         assert!(!diagnostics.is_empty(), "the named root does not exist");
-        assert!(message.contains("elsewhere"), "{message}");
+        // Which file the audit consulted is a path identity, so it is compared whole: a
+        // `contains("elsewhere")` check was satisfied by the root *directory* and by a nested
+        // manifest nobody named. `package.workspace` is joined lexically, so the expected spelling
+        // keeps the `..`. Both the read failure and the inheritance message that defers to it
+        // have to name exactly that file.
+        let named = member
+            .parent()
+            .unwrap()
+            .join("../elsewhere")
+            .join("Cargo.toml");
+        let blamed = diagnostics
+            .iter()
+            .find_map(|diagnostic| {
+                manifest_named_after(&diagnostic.message, "failed to read workspace manifest `")
+            })
+            .unwrap_or_else(|| panic!("{message}"));
+        assert_eq!(blamed, named, "{message}");
+        let deferred = diagnostics
+            .iter()
+            .find_map(|diagnostic| {
+                manifest_named_after(&diagnostic.message, "its workspace manifest `")
+            })
+            .unwrap_or_else(|| panic!("{message}"));
+        assert_eq!(deferred, named, "{message}");
     }
 
     #[test]
@@ -4200,6 +4223,21 @@ serde_json.workspace = true
             .map(|(path, _)| path)
     }
 
+    /// The reason `read_toml` appends to ``<prefix>`<path>` ``, after the closing backtick and
+    /// its `: ` separator, or `None` where the message does not continue that way.
+    ///
+    /// The `package.workspace` limb of `E023` defers its whole account of the failure to this
+    /// line, so a renderer that dropped the reason would leave the failure unexplained anywhere
+    /// while every prefix and path assertion stayed green. Callers compare what this returns to
+    /// the error the same operation yields when the fixture repeats it, so the reason is pinned
+    /// exactly rather than merely required to be non-empty.
+    fn reason_after<'m>(message: &'m str, prefix: &str, path: &str) -> Option<&'m str> {
+        message
+            .strip_prefix(prefix)?
+            .strip_prefix(path)?
+            .strip_prefix("`: ")
+    }
+
     #[test]
     fn a_workspace_root_that_cannot_be_read_is_not_reported_as_missing() {
         // Found-but-broken is a third state. Reporting it as "no workspace manifest was found"
@@ -4316,11 +4354,35 @@ serde_json.workspace = true
             "the read failure has to name the same file the inheritance message defers to: {:#?}",
             result.diagnostics
         );
+        let read = member.parent().unwrap().join("../root").join("Cargo.toml");
         assert_eq!(
-            named,
-            member.parent().unwrap().join("../root").join("Cargo.toml"),
+            named, read,
             "both messages have to name the manifest the audit actually read: {:#?}",
             result.diagnostics
+        );
+        // The line the inheritance message defers to has to actually carry the reason: it is the
+        // only account of the failure this limb prints. The expected reason is the parse error
+        // the same file yields when parsed again here, so the whole `: {error}` suffix is pinned.
+        let unparsed = toml::from_str::<toml::Value>(&std::fs::read_to_string(&root).unwrap())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            reason_after(
+                &result.diagnostics[failure].message,
+                "failed to parse workspace manifest `",
+                read.as_str(),
+            ),
+            Some(unparsed.as_str()),
+            "the read failure has to say why the root could not be parsed: {:#?}",
+            result.diagnostics
+        );
+        // A root that failed to parse is still the file a consumer edits next, so it has to stay
+        // a rebuild input: recording it only once it parsed would make repairing it a no-op.
+        assert_eq!(
+            result.manifests,
+            vec![read, member],
+            "{:#?}",
+            result.manifests
         );
         // And the reason must not ride inline in *any* shape, not merely without a colon. The
         // explain text says this limb's inheritance message carries no reason of its own, so a
@@ -4352,6 +4414,21 @@ serde_json.workspace = true
             "{message}"
         );
         assert!(!message.contains("workspace manifest"), "{message}");
+        // The consumer's own failure is reported on this one line and nowhere else, so the line
+        // has to carry its reason: exactly the error parsing the same file again yields.
+        let unparsed =
+            toml::from_str::<toml::Value>(&std::fs::read_to_string(&unparseable).unwrap())
+                .unwrap_err()
+                .to_string();
+        assert_eq!(
+            reason_after(
+                message,
+                "failed to parse consumer manifest `",
+                unparseable.as_str()
+            ),
+            Some(unparsed.as_str()),
+            "{message}"
+        );
         // Nothing past the consumer manifest was looked up, so nothing else is a rebuild input.
         assert_eq!(result.manifests, vec![unparseable]);
 
@@ -4365,6 +4442,16 @@ serde_json.workspace = true
             "{message}"
         );
         assert!(!message.contains("workspace manifest"), "{message}");
+        let unread = std::fs::read_to_string(&absent).unwrap_err().to_string();
+        assert_eq!(
+            reason_after(
+                message,
+                "failed to read consumer manifest `",
+                absent.as_str()
+            ),
+            Some(unread.as_str()),
+            "{message}"
+        );
     }
 
     #[test]
@@ -4468,11 +4555,31 @@ serde_json.workspace = true
             "the read failure has to name the same file the inheritance message defers to: {:#?}",
             result.diagnostics
         );
+        let read = member.parent().unwrap().join("../root").join("Cargo.toml");
         assert_eq!(
-            named,
-            member.parent().unwrap().join("../root").join("Cargo.toml"),
+            named, read,
             "both messages have to name the manifest the audit actually read: {:#?}",
             result.diagnostics
+        );
+        // The same two obligations as the parse limb: the line the inheritance message defers to
+        // carries the reason (exactly the error reading that path again yields), and the root
+        // that could not be read is still a rebuild input, since creating it is the repair.
+        let unread = std::fs::read_to_string(&read).unwrap_err().to_string();
+        assert_eq!(
+            reason_after(
+                &result.diagnostics[failure].message,
+                "failed to read workspace manifest `",
+                read.as_str(),
+            ),
+            Some(unread.as_str()),
+            "the read failure has to say why the root could not be read: {:#?}",
+            result.diagnostics
+        );
+        assert_eq!(
+            result.manifests,
+            vec![read, member],
+            "{:#?}",
+            result.manifests
         );
     }
 
