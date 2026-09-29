@@ -178,9 +178,12 @@ Key points of the surface:
   security alternative the schemes with no registered credential; a credential of a kind its
   scheme cannot carry as `RequestError::CredentialMismatch`; and a failed token provider as
   `RequestError::CredentialProvider` — never a silent 401.
-- A closed [error taxonomy](./errors.md), identical across all spargen output:
-  request-construction, transport, timeout, protocol, redirect, documented API error (typed `E`),
-  undocumented status (raw body preserved), decode failure, interrupted body.
+- A closed error taxonomy, identical across all spargen output: request-construction
+  (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
+  above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
+  (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
+  error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
+  preserved), decode failure (`Error::Decode`), interrupted body (`Error::InterruptedBody`).
   Every generated error type implements `Display` and `std::error::Error`, so `Error<E>` works
   with `?` into `Box<dyn Error>`, `anyhow`, and `thiserror`. `Error::is_transient()` classifies
   retry-worthy failures — spargen ships no retry policy, but the runtime offers a bring-your-own
