@@ -2492,7 +2492,7 @@ fn emit_type_def(
             let fields = object
                 .fields
                 .iter()
-                .map(|field| emit_field(id, field, names, options));
+                .map(|field| emit_field(id, field, api, names, options));
             let providers = object
                 .fields
                 .iter()
@@ -2570,11 +2570,23 @@ fn emit_type_def(
         }
         TypeKind::Never => {
             let error = format!("no JSON value can inhabit schema {}", ident.as_str());
+            let reject_present = format_ident!("{NEVER_REJECT_PRESENT}");
             quote! {
                 #docs
                 #deprecated
                 #[derive(Debug, Clone)]
                 pub enum #ident {}
+
+                impl #ident {
+                    /// The `deserialize_with` of an optional field of this type: it is reached only
+                    /// when the field is present, and no present value — `null` included — is one.
+                    fn #reject_present<'de, D, T>(_deserializer: D) -> Result<Option<T>, D::Error>
+                    where
+                        D: serde::Deserializer<'de>,
+                    {
+                        Err(serde::de::Error::custom(#error))
+                    }
+                }
 
                 impl<'de> serde::Deserialize<'de> for #ident {
                     fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
@@ -2963,6 +2975,7 @@ fn emit_type_def(
 fn emit_field(
     id: crate::ir::TypeId,
     field: &Field,
+    api: &Api,
     names: &Names,
     options: &CodegenOptions,
 ) -> TokenStream {
@@ -3001,6 +3014,23 @@ fn emit_field(
     } else {
         quote! { default, skip_serializing_if = "Option::is_none", }
     };
+    // The `Option` wrapping an optional non-nullable uninhabited field stands for absence only, yet
+    // serde's `Option<T>` maps a JSON `null` to `None` without ever calling `T::deserialize`, so the
+    // uninhabited type would never be consulted and `{"x": null}` would decode. Route every
+    // *present* value, `null` included, to the uninhabited type's rejecting deserializer instead;
+    // an absent field still takes `default`. A nullable one keeps plain `Option`, since there
+    // `null` is exactly the one admitted value.
+    let reject_present = (!field.required
+        && !field.ty.nullable
+        && matches!(
+            api.types.get(field.ty.id).map(|def| &def.kind),
+            Some(TypeKind::Never)
+        ))
+    .then(|| {
+        let never = names.types.get(&field.ty.id).expect("type name allocated");
+        let path = format!("{}::{NEVER_REJECT_PRESENT}", never.as_str());
+        quote! { deserialize_with = #path, }
+    });
     let mut notes: Vec<String> = Vec::new();
     if field.deprecated {
         notes.push("Deprecated per the spec.".to_owned());
@@ -3020,10 +3050,14 @@ fn emit_field(
         .map(|note| quote! { #[doc = #note] });
     quote! {
         #(#notes)*
-        #[serde(rename = #wire, #serde_default)]
+        #[serde(rename = #wire, #serde_default #reject_present)]
         pub #ident: #ty,
     }
 }
+
+/// The name of the private associated function every uninhabited type carries for an optional field
+/// of it: a `deserialize_with` target that rejects any present value, `null` included.
+const NEVER_REJECT_PRESENT: &str = "reject_present";
 
 /// The deterministic identifier of a field's generated serde default-provider function. Derived
 /// from the owning type's dense id plus the field's Rust identifier, so it is stable across runs
