@@ -1727,11 +1727,16 @@ fn delimiter_tokens(delimiter: crate::ir::Delimiter) -> TokenStream {
 /// Render a path/header parameter value from a borrowed expression. Schema-typed parameters use
 /// their declared OpenAPI style; `content`-typed parameters retain their media codec.
 ///
-/// Path values are percent-encoded here, at serialization time. Splicing a raw value into the
-/// path template would let a value containing `/`, `?`, or `#` silently re-target the request.
+/// Path values are percent-encoded here, at serialization time, whether schema- or
+/// `content`-typed. Splicing a raw value into the path template would let a value containing `/`,
+/// `?`, or `#` silently re-target the request.
+///
+/// Every other location's `content` value is returned as the codec rendered it: a header or
+/// cookie is sent verbatim, and the query call site encodes the rendered value itself, so encoding
+/// it here too would encode it twice.
 fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStream) -> TokenStream {
     if let crate::ir::ParamStyle::Content(media) = &param.style {
-        return match media {
+        let rendered = match media {
             MediaType::Json => quote! {
                 serde_json::to_string(#value).map_err(support::Error::request_construction)?
             },
@@ -1742,6 +1747,13 @@ fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStream) -> Token
                     .map_err(support::Error::request_construction)?
             },
         };
+        if param.location != ParamLoc::Path {
+            return rendered;
+        }
+        // The rendered representation is one opaque path segment value: every byte the path's
+        // encoding set does not admit is escaped, which for every path set includes `/`, `?`, `#`.
+        let encoding = percent_encoding_tokens(param);
+        return quote! { support::encode(&#rendered, #encoding) };
     }
     let explode = param.explode;
     let encoding = percent_encoding_tokens(param);
