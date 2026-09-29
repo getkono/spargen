@@ -4126,6 +4126,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Apply the Encoding Object's mode switch for one property.
+    ///
+    /// In media mode a part's bytes come from the property's lowered type and its declared
+    /// `contentType` rides on it as the header. A multipart declaration is refused (`E009`) where
+    /// the two cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose
+    /// declared type is not JSON.
     fn encoding_mode(
         &mut self,
         declared: Option<&EncodingObject>,
@@ -4283,6 +4288,39 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(codec @ (MediaType::Json | MediaType::Text | MediaType::OctetStream)) => codec,
             _ => self.natural_codec(field_ty),
         };
+        // That header-rides rule holds only where the header and the bytes agree. A scalar part
+        // is the text the document described and a bytes part is whatever the caller supplies, so
+        // either carries any well-formed declaration. Every other property is rendered as JSON
+        // whatever it declares, so a declaration that is not JSON (`application/xml` over an
+        // object, `text/csv` over an array, or a type with no codec at all) would put JSON under
+        // a header naming another syntax — bytes no reader of the document predicts. Refused.
+        // Media types are case-insensitive (RFC 9110 § 8.3.1), and the classifier's JSON arms are
+        // spelled in lowercase, so `Application/JSON` is judged as the JSON it is.
+        if media == MediaType::Multipart
+            && explicit.is_some()
+            && self.natural_codec(field_ty) == MediaType::Json
+            && classify_media(&media_essence(&content_type).to_ascii_lowercase())
+                .map(|(codec, _)| codec)
+                != Some(MediaType::Json)
+        {
+            Diagnostic::error(
+                Code::UnsupportedMediaType,
+                declared
+                    .map(|encoding| encoding.provenance.clone())
+                    .unwrap_or_else(|| at.clone()),
+            )
+            .message(format!(
+                "property `{name}` declares `contentType: {content_type}`, but it is not a scalar \
+                 or binary value, so spargen can send it only as JSON; the part's bytes would \
+                 contradict its header"
+            ))
+            .remedy(
+                "declare `application/json` (or a `+json` type), make the property a string or \
+                 binary value, or omit this API segment with spargen::omit!",
+            )
+            .emit(self.diags);
+            return None;
+        }
         // A form field is a single URL-encoded string; raw bytes have no representation there.
         if media == MediaType::FormUrlEncoded && codec == MediaType::OctetStream {
             Diagnostic::error(
