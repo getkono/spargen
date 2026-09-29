@@ -1401,6 +1401,67 @@ components:
     }
 }
 
+/// A sub-file component's `default` reaches its generated type's rustdoc, as a root component's
+/// does. `ensure_resolved` lowers the sub-file root's body and then appends the note to the lifted
+/// definition itself, so dropping that step loses the documented default with nothing else
+/// changing.
+#[test]
+fn a_sub_file_component_default_is_documented_on_its_type() {
+    // The doc line directly above the declaration, so a note that lands on another item, or a
+    // declaration with no note, does not satisfy it.
+    let doc_above = |code: &str, declaration: &str| {
+        let lines: Vec<&str> = code.lines().map(str::trim).collect();
+        lines
+            .iter()
+            .position(|line| *line == declaration)
+            .and_then(|at| at.checked_sub(1))
+            .map(|above| lines[above].to_owned())
+    };
+    let (generated, checked, code) = split(
+        "./lib.yaml#/components/schemas/Counted",
+        r##"
+components:
+  schemas:
+    Counted: { type: integer, default: 7 }
+"##,
+    );
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_eq!(
+        doc_above(&code, "pub type Counted = i64;").as_deref(),
+        Some("///Default: `7`."),
+        "the sub-file default must document the type it declares: {code}"
+    );
+
+    // The root-document control: the same component, the same note.
+    let (report, root) = generate_with_code(
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Counted' } }
+components:
+  schemas:
+    Counted: { type: integer, default: 7 }
+"##,
+    );
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        doc_above(&root, "pub type Counted = i64;").as_deref(),
+        Some("///Default: `7`."),
+        "{root}"
+    );
+}
+
 /// A sub-file component that is not an object. Deduplicating sub-file components lifts the lowered
 /// root into a reserved id and asserts the root was the last definition its own body inserted — an
 /// invariant a scalar (one insert, no children) and a union (a wrapper over boxed members) exercise
