@@ -30,6 +30,14 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Advisory floors. Each mirrors a direct requirement at the same release in `spargen/Cargo.toml`,
+# which is what the resolver enforces here and in every consumer's resolve; this entry names the
+# advisory and still fails once the database stops carrying it. Use the `name` + `version` form:
+# cargo-deny reads `crate = "name@<X"` as the exact release `X`. `advisory_floors_are_manifest_requirements`
+# in `spargen/tests/corpus_manifest.rs` holds both.
+deny = [
+    { name = "rustls", version = "<0.23.45", reason = "RUSTSEC-2026-0285" },
+]
 
 [sources]
 unknown-registry = "deny"

@@ -1798,6 +1798,7 @@ dependencies = [
  "proptest",
  "quote",
  "reqwest",
+ "rustls",
  "semver",
  "serde",
  "serde_json",

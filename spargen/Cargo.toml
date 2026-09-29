@@ -20,7 +20,7 @@ cli = ["dep:clap", "remote-fetch"]
 # generator touches the network; `generate`/`check` never do. It is pulled in by `cli` so the
 # installed binary can vendor remote `$ref`s, and kept as a separate feature so a library-only
 # build (e.g. from `build.rs`) can opt in without the whole CLI.
-remote-fetch = ["dep:reqwest"]
+remote-fetch = ["dep:reqwest", "dep:rustls"]
 
 [dependencies]
 # diag
@@ -51,6 +51,14 @@ reqwest = { workspace = true, features = [
     "blocking",
     "rustls-tls",
 ], optional = true }
+# Never named in code: a version floor on the rustls reqwest's `rustls-tls` links. reqwest
+# requires only `0.23.4`, and Cargo ignores a dependency's lockfile, so without this a consumer
+# enabling `remote-fetch` from `build.rs` resolves rustls itself and may pick a release an
+# advisory names. Default features stay off so this adds no feature (and no second crypto
+# provider) to what reqwest selects. Each floor is mirrored by a `[bans] deny` entry in
+# `deny.toml` naming its advisory; `advisory_floors_are_manifest_requirements` in
+# `tests/corpus_manifest.rs` holds the two equal.
+rustls = { version = "0.23.45", default-features = false, optional = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
