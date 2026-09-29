@@ -488,6 +488,36 @@ fn removing_the_last_declared_success_makes_default_the_success_type_and_is_majo
     assert!(detail.contains("String"), "{detail}");
 }
 
+#[test]
+fn renumbering_a_status_in_a_response_enum_is_major_on_either_side() {
+    // Issue #211: every body type below is unchanged, so only a status label tells the two
+    // signatures apart — a `Status201` variant renamed to `Status202`, or `Status409` to
+    // `Status410`, breaks every consumer matching on it. Each pair is an enum on both sides of the
+    // edit, so it is the enum arm's labels this pins, not a change of shape.
+    let r202_string = R201_STRING.replace("'201'", "'202'");
+    let r409_string = R201_STRING.replace("'201'", "'409'");
+    let r410_string = R201_STRING.replace("'201'", "'410'");
+    for (old, new, kind) in [
+        (
+            format!("{R200_PET}{R201_STRING}"),
+            format!("{R200_PET}{r202_string}"),
+            ChangeKind::SuccessTypeChanged,
+        ),
+        (
+            format!("{R200_PET}{R404}{r409_string}"),
+            format!("{R200_PET}{R404}{r410_string}"),
+            ChangeKind::ErrorTypeChanged,
+        ),
+    ] {
+        let report = diff(
+            &full(&pets_responses(&old), PET_SCHEMA),
+            &full(&pets_responses(&new), PET_SCHEMA),
+        );
+        assert_eq!(kinds(&report), vec![kind], "{new}: {:?}", report.changes);
+        assert_eq!(report.bump, Impact::Major);
+    }
+}
+
 /// `get /pets` with a documented `404` whose body is `error_schema`.
 fn with_error(error_schema: &str) -> String {
     format!(
