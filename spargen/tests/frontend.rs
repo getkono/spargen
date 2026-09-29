@@ -17870,8 +17870,8 @@ fn a_dangling_file_ref_inside_an_extension_is_not_read_like_a_pointer_ref() {
 
 /// The loader's stop is not confined to `responses`: an extension on any object whose keys are
 /// fixed fields is author data wherever it sits, so no file it names is read. The Paths Object is
-/// absent because the parser, not the loader, still reads an `x-` key there as a path item, for a
-/// pointer ref as much as a file ref (#370).
+/// absent because the parser still reads an `x-` key there as a path item (#370), so the loader
+/// reads it too; `a_file_ref_under_a_paths_extension_is_read_while_the_parser_reads_it` pins that.
 #[test]
 fn a_dangling_file_ref_is_not_read_in_any_extension_position() {
     let dangling = "{ $ref: 'nowhere.yaml' }";
@@ -17896,6 +17896,48 @@ fn a_dangling_file_ref_is_not_read_in_any_extension_position() {
                 "{position}: {report:#?}"
             );
         }
+    }
+}
+
+/// Until #370 lands, `parse_paths` reads an `x-` key of the Paths Object as a path item, so the
+/// loader must read the file it references: otherwise a present file is never loaded and the
+/// parser's `$ref` to it fails with `E004`. A file ref there reaches the same verdict as its
+/// pointer twin — both succeed when the target exists, and both reject when it does not (the
+/// file ref with the loader's `E011`, the pointer ref with `E004`), as on `master`.
+#[test]
+fn a_file_ref_under_a_paths_extension_is_read_while_the_parser_reads_it() {
+    const ITEM: &str = "get:\n  operationId: ghost\n  responses:\n    '200': { description: ok }\n";
+    let head =
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    let file = format!("{head}paths:\n  x-note: {{ $ref: 'item.yaml' }}\n");
+    let pointer = format!(
+        "{head}paths:\n  x-note: {{ $ref: '#/components/pathItems/Ghost' }}\ncomponents:\n  pathItems:\n    Ghost:\n      get:\n        operationId: ghost\n        responses:\n          '200': {{ description: ok }}\n"
+    );
+    let dangling_pointer =
+        format!("{head}paths:\n  x-note: {{ $ref: '#/components/pathItems/Ghost' }}\n");
+
+    let (generated, checked, _) =
+        generate_and_check_files(&[("openapi.yaml", &file), ("item.yaml", ITEM)]);
+    let (pointer_generated, pointer_checked) = (generate(&pointer), check(&pointer));
+    for report in [&generated, &checked, &pointer_generated, &pointer_checked] {
+        assert!(report.outcome().is_success(), "{report:#?}");
+        assert!(!has_code(report, Code::UnresolvedRef), "{report:#?}");
+    }
+    assert_eq!(checked.outcome(), pointer_checked.outcome());
+
+    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &file)]);
+    for report in [&generated, &checked] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            messages_for(report, Code::InvalidInput)
+                .iter()
+                .any(|message| message.contains("failed to read") && message.contains("item.yaml")),
+            "{report:#?}"
+        );
+    }
+    for report in [&generate(&dangling_pointer), &check(&dangling_pointer)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(report, Code::UnresolvedRef), "{report:#?}");
     }
 }
 

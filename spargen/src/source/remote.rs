@@ -208,8 +208,10 @@ fn is_extension_key(key: &str) -> bool {
 #[derive(Clone, Copy)]
 enum Keys {
     /// The fixed fields of an OpenAPI or JSON Schema object, beside which `^x-` keys are
-    /// specification extensions. A Paths, Responses, or Callback Object is one too: its other keys
-    /// are paths, status codes, or runtime expressions, none of which can start with `x-`.
+    /// specification extensions. A Responses or Callback Object is one too: its other keys are
+    /// status codes or runtime expressions, neither of which can start with `x-`. The Paths Object
+    /// would be as well, but it is walked as [`Keys::Names`] while the parser still reads its `x-`
+    /// keys as path items (#370).
     Fields,
     /// Names the author chooses (a map), where `x-rate-limit` is a header like any other and every
     /// value is an object with fixed fields.
@@ -274,13 +276,11 @@ fn collect_security_requirement_refs(value: &SpannedValue, refs: &mut Vec<String
         visit(security);
     }
     if let Some(Node::Object(paths)) = root.get("paths").map(|paths| &paths.node) {
-        for (path, item) in paths.iter() {
+        // Every key, `x-` ones included: `parse_paths` reads them all as path items (#370).
+        for (_, item) in paths.iter() {
             let Node::Object(item) = &item.node else {
                 continue;
             };
-            if is_extension_key(&path.name) {
-                continue;
-            }
             for (method, operation) in item.iter() {
                 if is_extension_key(&method.name) {
                     continue;
@@ -309,6 +309,10 @@ fn collect_refs_inner(value: &SpannedValue, keys: Keys, refs: &mut Vec<String>) 
                     Keys::Fields | Keys::Components if is_extension_key(key) => continue,
                     Keys::Components => Keys::Names,
                     Keys::Fields if key == "components" => Keys::Components,
+                    // `parse_paths` still reads an `x-` key of the Paths Object as a path item
+                    // (#370), so the loader reads what it references too; skipping it here would
+                    // turn a file ref the parser follows into a spurious `E004`.
+                    Keys::Fields if key == "paths" => Keys::Names,
                     Keys::Fields if NAME_KEYED_FIELDS.contains(&key) => Keys::Names,
                     Keys::Fields => Keys::Fields,
                 };
@@ -360,15 +364,16 @@ mod tests {
     }
 
     /// The walk skips a specification extension wherever keys are fixed fields — the document
-    /// root, an Operation, a Responses Object, a Schema, the Components Object, a Paths Object —
-    /// and nowhere keys are names: an `x-` header, property, component, media type or webhook is
-    /// an entry like any other (#239). A `$ref` key in a map names an entry.
+    /// root, an Operation, a Responses Object, a Schema, the Components Object — and nowhere keys
+    /// are names: an `x-` header, property, component, media type or webhook is an entry like any
+    /// other (#239). A `$ref` key in a map names an entry. The Paths Object's `x-` keys are still
+    /// walked, because the parser still reads them as path items (#370).
     #[test]
     fn collects_refs_outside_extensions_and_under_every_x_named_entry() {
         let refs = refs_in(
             "x-root: { $ref: skip-root.yaml }\n\
              paths:\n\
-             \x20 x-paths: { $ref: skip-paths.yaml }\n\
+             \x20 x-paths: { $ref: paths.yaml }\n\
              \x20 /p:\n\
              \x20   get:\n\
              \x20     x-op: { $ref: skip-op.yaml }\n\
@@ -393,6 +398,7 @@ mod tests {
         assert_eq!(
             refs,
             [
+                "paths.yaml",
                 "header.yaml",
                 "property.yaml",
                 "def.yaml",
@@ -404,17 +410,18 @@ mod tests {
     }
 
     /// A Security Requirement key naming a scheme by URI is still collected, but not one inside
-    /// an extension of the Paths Object or of a Path Item.
+    /// an extension of a Path Item. Under an `x-` key of the Paths Object it is collected, since
+    /// the parser still reads that key as a path item (#370).
     #[test]
     fn security_requirement_refs_skip_extensions() {
         let refs = refs_in(
             "paths:\n\
-             \x20 x-paths: { get: { security: [{ skip-paths.yaml: [] }] } }\n\
+             \x20 x-paths: { get: { security: [{ ./paths-scheme.yaml: [] }] } }\n\
              \x20 /p:\n\
              \x20   x-item: { security: [{ skip-item.yaml: [] }] }\n\
              \x20   get: { security: [{ ./scheme.yaml: [] }] }\n",
         );
-        assert_eq!(refs, ["scheme.yaml"]);
+        assert_eq!(refs, ["paths-scheme.yaml", "scheme.yaml"]);
     }
 
     /// Only a pointer through an `x-` token enters an extension, decoded the way the resolver
