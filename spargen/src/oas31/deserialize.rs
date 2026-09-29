@@ -1438,7 +1438,7 @@ fn parse_ref_array<T>(
         .collect()
 }
 
-fn parse_ref_or<T>(
+pub(super) fn parse_ref_or<T>(
     value: &SpannedValue,
     pointer: &JsonPointer,
     diags: &mut Diagnostics,

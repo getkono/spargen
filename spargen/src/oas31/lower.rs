@@ -5118,7 +5118,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match current {
                 RefOr::Item(header) => return Some(header),
                 RefOr::Ref(reference) => {
-                    if !seen.insert(reference.reference.clone()) {
+                    if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "header");
                     }
                     let alias = reference
@@ -5136,27 +5136,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         }
                         // Not a component alias: a multi-file description may reference a whole
                         // file, which resolves through the input bundle exactly as a Parameter or
-                        // Response Object reference already does.
+                        // Response Object reference already does — and may itself be a Reference,
+                        // followed from the file it is written in.
                         None => {
-                            let from = reference
-                                .provenance
-                                .span
-                                .map(|span| span.file)
-                                .unwrap_or(crate::diag::FileId(0));
-                            return match self.resolver.resolve_component(
-                                &reference.reference,
-                                from,
+                            current = self.follow_bundle_reference(
+                                &reference,
+                                "header",
                                 super::deserialize::parse_header_object,
-                                self.diags,
-                            ) {
-                                Ok(resolved) => Some(resolved),
-                                Err(miss) => self.reject_unfollowable_reference(
-                                    &reference.provenance,
-                                    "header",
-                                    &reference.reference,
-                                    miss,
-                                ),
-                            };
+                            )?;
                         }
                     }
                 }
@@ -5182,39 +5169,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn resolve_parameter(&mut self, parameter: &RefOr<ParameterObject>) -> Option<ParameterObject> {
-        let mut current = parameter;
+        let mut current = parameter.clone();
         let mut seen = HashSet::new();
         loop {
             match current {
-                RefOr::Item(parameter) => return Some(parameter.clone()),
+                RefOr::Item(parameter) => return Some(parameter),
                 RefOr::Ref(reference) => {
-                    self.note_reference_docs(reference);
-                    if !seen.insert(reference.reference.clone()) {
+                    self.note_reference_docs(&reference);
+                    if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "parameter");
                     }
                     let Some(name) = reference.reference.strip_prefix("#/components/parameters/")
                     else {
                         // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref`.
-                        let from = reference
-                            .provenance
-                            .span
-                            .map(|span| span.file)
-                            .unwrap_or(crate::diag::FileId(0));
-                        return match self.resolver.resolve_component(
-                            &reference.reference,
-                            from,
+                        // file, which resolves through the input bundle like a schema `$ref` —
+                        // and may itself be a Reference, followed from the file it is written in.
+                        current = self.follow_bundle_reference(
+                            &reference,
+                            "parameter",
                             super::deserialize::parse_parameter,
-                            self.diags,
-                        ) {
-                            Ok(resolved) => Some(resolved),
-                            Err(miss) => self.reject_unfollowable_reference(
-                                &reference.provenance,
-                                "parameter",
-                                &reference.reference,
-                                miss,
-                            ),
-                        };
+                        )?;
+                        continue;
                     };
                     let Some(target) = self.document.components.parameters.get(name) else {
                         return self.reject_component_alias(
@@ -5223,7 +5198,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             &reference.reference,
                         );
                     };
-                    current = target;
+                    current = target.clone();
                 }
             }
         }
@@ -5233,14 +5208,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         &mut self,
         body: &RefOr<RequestBodyObject>,
     ) -> Option<RequestBodyObject> {
-        let mut current = body;
+        let mut current = body.clone();
         let mut seen = HashSet::new();
         loop {
             match current {
-                RefOr::Item(body) => return Some(body.clone()),
+                RefOr::Item(body) => return Some(body),
                 RefOr::Ref(reference) => {
-                    self.note_reference_docs(reference);
-                    if !seen.insert(reference.reference.clone()) {
+                    self.note_reference_docs(&reference);
+                    if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "request body");
                     }
                     let Some(name) = reference
@@ -5248,26 +5223,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .strip_prefix("#/components/requestBodies/")
                     else {
                         // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref`.
-                        let from = reference
-                            .provenance
-                            .span
-                            .map(|span| span.file)
-                            .unwrap_or(crate::diag::FileId(0));
-                        return match self.resolver.resolve_component(
-                            &reference.reference,
-                            from,
+                        // file, which resolves through the input bundle like a schema `$ref` —
+                        // and may itself be a Reference, followed from the file it is written in.
+                        current = self.follow_bundle_reference(
+                            &reference,
+                            "request body",
                             super::deserialize::parse_request_body,
-                            self.diags,
-                        ) {
-                            Ok(resolved) => Some(resolved),
-                            Err(miss) => self.reject_unfollowable_reference(
-                                &reference.provenance,
-                                "request body",
-                                &reference.reference,
-                                miss,
-                            ),
-                        };
+                        )?;
+                        continue;
                     };
                     let Some(target) = self.document.components.request_bodies.get(name) else {
                         return self.reject_component_alias(
@@ -5276,46 +5239,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             &reference.reference,
                         );
                     };
-                    current = target;
+                    current = target.clone();
                 }
             }
         }
     }
 
     fn resolve_response(&mut self, response: &RefOr<ResponseObject>) -> Option<ResponseObject> {
-        let mut current = response;
+        let mut current = response.clone();
         let mut seen = HashSet::new();
         loop {
             match current {
-                RefOr::Item(response) => return Some(response.clone()),
+                RefOr::Item(response) => return Some(response),
                 RefOr::Ref(reference) => {
-                    self.note_reference_docs(reference);
-                    if !seen.insert(reference.reference.clone()) {
+                    self.note_reference_docs(&reference);
+                    if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "response");
                     }
                     let Some(name) = reference.reference.strip_prefix("#/components/responses/")
                     else {
                         // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref`.
-                        let from = reference
-                            .provenance
-                            .span
-                            .map(|span| span.file)
-                            .unwrap_or(crate::diag::FileId(0));
-                        return match self.resolver.resolve_component(
-                            &reference.reference,
-                            from,
+                        // file, which resolves through the input bundle like a schema `$ref` —
+                        // and may itself be a Reference, followed from the file it is written in.
+                        current = self.follow_bundle_reference(
+                            &reference,
+                            "response",
                             super::deserialize::parse_response,
-                            self.diags,
-                        ) {
-                            Ok(resolved) => Some(resolved),
-                            Err(miss) => self.reject_unfollowable_reference(
-                                &reference.provenance,
-                                "response",
-                                &reference.reference,
-                                miss,
-                            ),
-                        };
+                        )?;
+                        continue;
                     };
                     let Some(target) = self.document.components.responses.get(name) else {
                         return self.reject_component_alias(
@@ -5324,10 +5275,49 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             &reference.reference,
                         );
                     };
-                    current = target;
+                    current = target.clone();
                 }
             }
         }
+    }
+
+    /// One hop of a Parameter, Request Body, Response or Header chain through the input bundle:
+    /// the target as written, which is either the object or the next Reference to follow. A miss
+    /// is reported here, in the words of the way it failed.
+    fn follow_bundle_reference<T>(
+        &mut self,
+        reference: &super::Reference,
+        kind: &str,
+        parse: fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
+    ) -> Option<RefOr<T>> {
+        let from = reference
+            .provenance
+            .span
+            .map_or_else(|| self.resolver.root_id(), |span| span.file);
+        match self
+            .resolver
+            .resolve_component_or_ref(&reference.reference, from, parse, self.diags)
+        {
+            Ok(target) => Some(target),
+            Err(miss) => self.reject_unfollowable_reference(
+                &reference.provenance,
+                kind,
+                &reference.reference,
+                miss,
+            ),
+        }
+    }
+
+    /// What a reference hop names, for a chain's cycle check: the `(file, pointer)` it resolves to
+    /// wherever the bundle can place it, so one relative spelling written in two files is two
+    /// targets and two spellings of one target are one; the reference as written otherwise.
+    fn hop_identity(
+        &self,
+        reference: &super::Reference,
+    ) -> Result<(crate::diag::FileId, crate::diag::JsonPointer), String> {
+        self.resolver
+            .reference_identity(&reference.reference, &reference.provenance)
+            .ok_or_else(|| reference.reference.clone())
     }
 
     /// Acknowledge a Reference Object `summary`/`description`.

@@ -231,6 +231,36 @@ impl<'doc> Resolver<'doc> {
         parse: impl Fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
         diags: &mut Diagnostics,
     ) -> Result<T, ComponentMiss> {
+        let (node, pointer) = self.component_target(reference, from)?;
+        parse(&node.clone(), &pointer, diags).ok_or(ComponentMiss::Unparsable)
+    }
+
+    /// [`Self::resolve_component`] for a position whose target may itself be a Reference Object —
+    /// the Parameter, Request Body, Response and Header positions, where the specification allows
+    /// `Reference | Object` at every hop.
+    ///
+    /// A target holding a `$ref` is returned as that [`super::RefOr::Ref`], carrying its own
+    /// provenance, so the caller follows the chain from the file the next hop is written in rather
+    /// than parsing the intermediate Reference Object as though it were the object it points to
+    /// (#274): a Parameter with no `in`, or a Response with no content.
+    pub(crate) fn resolve_component_or_ref<T>(
+        &self,
+        reference: &str,
+        from: crate::diag::FileId,
+        parse: fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
+        diags: &mut Diagnostics,
+    ) -> Result<super::RefOr<T>, ComponentMiss> {
+        let (node, pointer) = self.component_target(reference, from)?;
+        super::deserialize::parse_ref_or(&node.clone(), &pointer, diags, parse)
+            .ok_or(ComponentMiss::Unparsable)
+    }
+
+    /// The node a non-component `$ref` written in `from` targets, and its pointer in its file.
+    fn component_target(
+        &self,
+        reference: &str,
+        from: crate::diag::FileId,
+    ) -> Result<(&'doc SpannedValue, crate::diag::JsonPointer), ComponentMiss> {
         let (file, pointer) = self
             .bundle
             .reference_target(reference, from)
@@ -240,7 +270,7 @@ impl<'doc> Resolver<'doc> {
             .value_at(file)
             .pointer(&pointer)
             .ok_or(ComponentMiss::AbsentTarget)?;
-        parse(&node.clone(), &pointer, diags).ok_or(ComponentMiss::Unparsable)
+        Ok((node, pointer))
     }
 
     fn resolve_bundle(

@@ -20123,9 +20123,33 @@ fn placement_fixtures() -> Vec<Placement> {
                 json!({ "operationId": "getPet",
                 "parameters": [{ "name": "q", "in": "query", "schema": { "type": "string" } }],
                 "responses": { "200": { "description": "ok" } } }),
-                none,
+                none.clone(),
             ),
             split_at: "/paths/~1pet/get/parameters/0",
+            rejects: false,
+        },
+        Placement {
+            name: "a valid Request Body, split without changing the verdict",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "requestBody": { "required": true,
+                "content": { "application/json": { "schema": { "type": "string" } } } },
+                "responses": { "200": { "description": "ok" } } }),
+                none.clone(),
+            ),
+            split_at: "/paths/~1pet/get/requestBody",
+            rejects: false,
+        },
+        Placement {
+            name: "a valid Header, split without changing the verdict",
+            document: placement_document(
+                "3.1.0",
+                json!({ "operationId": "getPet", "responses": { "200": { "description": "ok",
+                "headers": { "X-Rate": { "required": true, "schema": { "type": "integer" } } },
+                "content": { "application/json": { "schema": { "type": "string" } } } } } }),
+                none,
+            ),
+            split_at: "/paths/~1pet/get/responses/200/headers/X-Rate",
             rejects: false,
         },
     ]
@@ -20185,14 +20209,27 @@ fn placement_twins(value: &serde_json::Value) -> Vec<Twin> {
 
 /// Write `files` into a fresh directory and run both entry points over its `openapi.json`.
 fn run_placement(files: &[(&str, serde_json::Value)]) -> (Report, Report) {
+    let (generated, checked, _) = run_placement_with_client(files);
+    (generated, checked)
+}
+
+/// [`run_placement`], also returning the generated client (empty when nothing was written).
+fn run_placement_with_client(files: &[(&str, serde_json::Value)]) -> (Report, Report, String) {
     let temp = tempfile::tempdir().unwrap();
     let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
     for (name, value) in files {
         std::fs::write(dir.join(name), serde_json::to_vec_pretty(value).unwrap()).unwrap();
     }
     let generated = spargen::generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
+    let client = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
     let checked = spargen::check(&Spec::new(dir.join("openapi.json")));
-    (generated, checked)
+    (generated, checked, client)
+}
+
+/// The generated client with its provenance header dropped: the header stamps the input's
+/// fingerprint, which differs between an inline document and its split twins by construction.
+fn client_body(client: &str) -> &str {
+    client.find("\n\n").map_or(client, |end| &client[end..])
 }
 
 fn distinct_codes(report: &Report) -> Vec<&'static str> {
@@ -20202,13 +20239,16 @@ fn distinct_codes(report: &Report) -> Vec<&'static str> {
 }
 
 /// An inline document and each of its `$ref`-split twins reach the same verdict under the same
-/// diagnostic codes, through both `generate` and `check`.
+/// diagnostic codes, through both `generate` and `check` — and, where the document is valid, the
+/// same generated client. The verdict alone let a two-hop chain lower its intermediate Reference
+/// Object as the target (#274): a Parameter lost its `in` and was rejected, while a Response,
+/// Request Body or Header lost its content and schema and generated a client without them.
 #[test]
 fn a_construct_reaches_the_same_verdict_inline_and_behind_a_ref() {
     let mut divergent = Vec::new();
     for fixture in placement_fixtures() {
-        let (inline_generated, inline_checked) =
-            run_placement(&[("openapi.json", fixture.document.clone())]);
+        let (inline_generated, inline_checked, inline_client) =
+            run_placement_with_client(&[("openapi.json", fixture.document.clone())]);
         assert_eq!(
             inline_generated.outcome() == Outcome::Rejected,
             fixture.rejects,
@@ -20228,11 +20268,10 @@ fn a_construct_reaches_the_same_verdict_inline_and_behind_a_ref() {
             .unwrap_or_else(|| panic!("{}: nothing at {}", fixture.name, fixture.split_at))
             .clone();
         for (label, reference, mut files) in placement_twins(&moved) {
-            // A chain is held to the property only where the inline document rejects: there the
-            // metaschema decides the verdict before lowering runs. On a valid document the verdict
-            // is lowering's, which does not follow every chain — Path Items deliberately (`E004`,
-            // #135), Parameters by defect (#274).
-            if label == CHAINED && !fixture.rejects {
+            // A valid Path Item is the one position whose chain lowering does not follow: chained
+            // Path Item references are rejected with `E004` by design (#135), and
+            // `e004_a_chained_path_item_ref_is_rejected_at_the_path` pins that verdict.
+            if label == CHAINED && !fixture.rejects && fixture.split_at == "/paths/~1pet" {
                 continue;
             }
             let mut root = fixture.document.clone();
@@ -20244,7 +20283,14 @@ fn a_construct_reaches_the_same_verdict_inline_and_behind_a_ref() {
                 );
             }
             files.push(("openapi.json", root));
-            let (generated, checked) = run_placement(&files);
+            let (generated, checked, client) = run_placement_with_client(&files);
+            if !fixture.rejects && client_body(&client) != client_body(&inline_client) {
+                divergent.push(format!(
+                    "{} through {label}: `generate` emitted a different client than inline\n\
+                     split:\n{client}\ninline:\n{inline_client}",
+                    fixture.name,
+                ));
+            }
             for (entry, inline, split) in [
                 ("generate", &inline_generated, &generated),
                 ("check", &inline_checked, &checked),
@@ -20326,6 +20372,91 @@ fn a_cross_file_reference_cycle_terminates() {
         .expect("a cross-file Reference cycle did not terminate within 60 s");
     for report in [&generated, &checked] {
         assert!(!has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+/// A Parameter, Request Body, Response or Header chain through the bundle is followed hop by hop
+/// from the file each hop is written in (#274), and its cycle check keys on the target each hop
+/// resolves to, not on how the hop is spelled. A cross-file cycle is `E004`'s cycle case in that
+/// kind's words; one relative spelling written in two directories names two targets, so a chain
+/// through both is followed to the object rather than reported as a cycle.
+#[test]
+fn e004_a_chained_object_reference_is_followed_by_target_not_by_spelling() {
+    let placed = |split_at: &str| {
+        placement_fixtures()
+            .into_iter()
+            .find(|fixture| !fixture.rejects && fixture.split_at == split_at)
+            .unwrap_or_else(|| panic!("no valid placement fixture at {split_at}"))
+    };
+    for (kind, split_at) in [
+        ("parameter", "/paths/~1pet/get/parameters/0"),
+        ("request body", "/paths/~1pet/get/requestBody"),
+        ("response", "/paths/~1pet/get/responses/200"),
+        ("header", "/paths/~1pet/get/responses/200/headers/X-Rate"),
+    ] {
+        let fixture = placed(split_at);
+        let moved = fixture.document.pointer(split_at).unwrap().clone();
+        let split = |reference: &str| {
+            let mut root = fixture.document.clone();
+            *root.pointer_mut(split_at).unwrap() = serde_json::json!({ "$ref": reference });
+            root
+        };
+
+        let (generated, checked) = run_placement(&[
+            ("openapi.json", split("./c.json#/A")),
+            (
+                "c.json",
+                serde_json::json!({ "A": { "$ref": "#/B" }, "B": { "$ref": "#/A" } }),
+            ),
+        ]);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{kind}/{entry}: {report:#?}"
+            );
+            assert!(
+                messages_for(report, Code::UnresolvedRef)
+                    .iter()
+                    .any(|m| *m == format!("{kind} reference cycle cannot be resolved")),
+                "{kind}/{entry}: a cross-file cycle must say it is a cycle: {report:#?}"
+            );
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        for sub in ["a", "b"] {
+            std::fs::create_dir(dir.join(sub)).unwrap();
+        }
+        for (name, value) in [
+            ("openapi.json", split("./a/hop.json")),
+            ("a/hop.json", serde_json::json!({ "$ref": "./p.json" })),
+            ("a/p.json", serde_json::json!({ "$ref": "../b/hop.json" })),
+            ("b/hop.json", serde_json::json!({ "$ref": "./p.json" })),
+            ("b/p.json", moved.clone()),
+        ] {
+            std::fs::write(dir.join(name), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+        }
+        let generated = spargen::generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
+        let client = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
+        let checked = spargen::check(&Spec::new(dir.join("openapi.json")));
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{kind}/{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::UnresolvedRef),
+                "{kind}/{entry}: two `./p.json`s in two directories are not a cycle: {report:#?}"
+            );
+        }
+        let (_, _, inline) = run_placement_with_client(&[("openapi.json", fixture.document)]);
+        assert_eq!(
+            client_body(&client),
+            client_body(&inline),
+            "{kind}: the chain must reach the object inline declares"
+        );
     }
 }
 
