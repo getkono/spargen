@@ -2228,19 +2228,30 @@ serde_json = "1.0.151"
         )
         .unwrap();
         let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
-        std::fs::write(
-            &member,
-            format!(
-                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[features]\n\
-                 blocking = [\"dep:tokio\"]\n\n{CORE_INHERITED}\n\
-                 [target.'cfg(not(target_arch=\"wasm32\"))'.dependencies]\n\
-                 tokio = {{ workspace = true, optional = true }}\n"
-            ),
-        )
-        .unwrap();
+        let inherited_optional = format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[features]\n\
+             blocking = [\"dep:tokio\"]\n\n{CORE_INHERITED}\n\
+             [target.'cfg(not(target_arch=\"wasm32\"))'.dependencies]\n\
+             tokio = {{ workspace = true, optional = true }}\n"
+        );
+        let inherited_required = replace_once(&inherited_optional, ", optional = true", "");
         for target in [TargetContext::Unknown, linux()] {
+            // Cargo does not inherit `optional`: the root declares version and features, and the
+            // member adds `optional = true` beside `workspace = true`.
+            std::fs::write(&member, &inherited_optional).unwrap();
             let result = audit_in(&member, &RuntimeRequirements::default(), &target);
             assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+
+            // So a member that leaves it out is held to the optional rule although the entry it
+            // inherits resolves: exactly that rule fires, and nothing about the inheritance. Only
+            // this half notices the rule being skipped for inherited declarations.
+            std::fs::write(&member, &inherited_required).unwrap();
+            let result = audit_in(&member, &RuntimeRequirements::default(), &target);
+            assert_eq!(
+                messages(&result.diagnostics),
+                "`tokio` must be optional because it is enabled only by the generated `blocking` \
+                 feature"
+            );
         }
     }
 
@@ -2721,7 +2732,6 @@ serde_json.workspace = true
         promises(
             "while `optional` is read from the member",
             &[
-                "an_inherited_optional_dependency_in_a_target_table_resolves",
                 "workspace_inherited_tokio_under_an_alternative_spelling_resolves",
                 "an_inherited_member_cannot_make_an_unconditional_crate_optional",
             ],
@@ -2760,7 +2770,7 @@ serde_json.workspace = true
 
     #[test]
     fn an_inherited_member_cannot_make_an_unconditional_crate_optional() {
-        // The mirror of `an_inherited_optional_dependency_in_a_target_table_resolves`: `optional`
+        // The mirror of `workspace_inherited_tokio_under_an_alternative_spelling_resolves`: `optional`
         // is read from the member, so a member that adds `optional = true` to a crate generated
         // code names unconditionally must be rejected — the inheritance resolving is not the same
         // thing as the declaration being acceptable. Every other test that reaches this rule
@@ -3918,51 +3928,6 @@ serde_json.workspace = true
         let result = audit(&member, &requirements);
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         assert_eq!(result.manifests, vec![root, member]);
-    }
-
-    #[test]
-    fn an_inherited_optional_dependency_in_a_target_table_resolves() {
-        // The one optional requirement lives in a `[target.'cfg(…)'.dependencies]` table, and
-        // Cargo does not inherit `optional`: the root declares version and features, the member
-        // adds `optional = true` beside `workspace = true`. Every other inheritance fixture sits
-        // in `[dependencies]`, so the target table's lookup was unpinned.
-        let directory = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
-        let member_dir = directory.path().join("client");
-        std::fs::create_dir(&member_dir).unwrap();
-        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
-        std::fs::write(
-            &root,
-            format!(
-                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
-                 tokio = {{ version = \"1.53.1\", features = [\"rt\"] }}\n",
-                core_workspace_dependencies()
-            ),
-        )
-        .unwrap();
-        let inherited_optional = format!(
-            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[features]\n\
-             blocking = [\"dep:tokio\"]\n\n{CORE_INHERITED}\n\
-             [target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]\n\
-             tokio = {{ workspace = true, optional = true }}\n"
-        );
-        std::fs::write(&member, &inherited_optional).unwrap();
-
-        let result = audit(&member, &RuntimeRequirements::default());
-        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
-
-        // `optional` is the member's to declare, exactly as Cargo reads it: the inherited entry
-        // still resolves, and only the optional rule fires.
-        std::fs::write(&member, inherited_optional.replace(", optional = true", "")).unwrap();
-        let result = audit(&member, &RuntimeRequirements::default());
-        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
-        assert!(
-            result.diagnostics[0]
-                .message
-                .contains("`tokio` must be optional"),
-            "{}",
-            result.diagnostics[0].message
-        );
     }
 
     /// The anti-drift property: the block `spargen deps` prints must be exactly a block the audit
