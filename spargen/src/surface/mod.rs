@@ -441,6 +441,11 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                 }
                 TypeSurface::Union(variants)
             }
+            // Unreachable for the reason `canon_ty` states: only a checked `Api` is surfaced.
+            // Skipping it like an alias would drop a type from the diff without anything noticing.
+            TypeKind::Reserved => unreachable!(
+                "a reservation reached the surface; `check_invariants` should have rejected it"
+            ),
             _ => continue,
         };
         types.insert(name, surface);

@@ -302,6 +302,12 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                     );
                 }
             }
+            // Names are allocated only for an `Api` that passed `check_invariants`, which rejects
+            // a surviving reservation; allocating nothing for one would leave codegen to find a
+            // missing name far from the cause.
+            TypeKind::Reserved => unreachable!(
+                "a reservation reached name allocation; `check_invariants` should have rejected it"
+            ),
             _ => {}
         }
     }
