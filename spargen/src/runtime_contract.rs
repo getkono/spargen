@@ -2449,17 +2449,6 @@ serde_json.workspace = true
     }
 
     #[test]
-    fn a_silent_member_keeps_the_defaults_the_root_turned_off() {
-        // No diagnostic at all, not merely no default-features one: a root that failed to resolve
-        // reports the inheritance instead, and must not pass this test.
-        let messages = inherited_reqwest_default_feature_diagnostics(
-            RootDefaults::Off,
-            "reqwest = { workspace = true }",
-        );
-        assert!(messages.is_empty(), "{messages:#?}");
-    }
-
-    #[test]
     fn a_member_default_features_false_keeps_the_defaults_the_root_turned_off() {
         // The layout the E023 explain text advises: defaults disabled in the root, and the member
         // repeating `false`. Only a member `true` re-enables them, so any explicit member flag must
@@ -2604,13 +2593,15 @@ serde_json.workspace = true
             "a member's `default-features = false` cannot turn off defaults the root leaves on",
             both_directions,
         );
-        // The layout that rule leaves a consumer.
+        // The layout that rule leaves a consumer. The `unset` half is the core workspace layout
+        // itself: its root disables `reqwest`'s defaults and its member declares only
+        // `reqwest.workspace = true`, and it must audit clean.
         promises(
             "disable them in `[workspace.dependencies]` and leave the member's `default-features` \
              unset or `false`",
             &[
                 "a_member_default_features_false_keeps_the_defaults_the_root_turned_off",
-                "a_silent_member_keeps_the_defaults_the_root_turned_off",
+                "workspace_inheritance_uses_the_workspace_version_and_features",
             ],
         );
 
