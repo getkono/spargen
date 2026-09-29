@@ -1478,14 +1478,54 @@ serde_json = "1.0.151"
         }
     }
 
+    /// The release just below `version` at its lowest non-zero component, with the components
+    /// after it zeroed: `1.12.1` gives `1.12.0`, `1.12.0` gives `1.11.0`, and `1.0.0` gives
+    /// `0.0.0`, so a floor that is an `x.y.0` or `x.0.0` release still has one.
+    fn version_below(version: &Version) -> Version {
+        match (version.major, version.minor, version.patch) {
+            (major, minor, patch @ 1..) => Version::new(major, minor, patch - 1),
+            (major, minor @ 1.., 0) => Version::new(major, minor - 1, 0),
+            (major @ 1.., 0, 0) => Version::new(major - 1, 0, 0),
+            (0, 0, 0) => panic!("no release is below 0.0.0"),
+        }
+    }
+
+    #[test]
+    fn version_below_steps_down_at_the_lowest_non_zero_component() {
+        for (version, below) in [
+            ("1.12.1", "1.12.0"),
+            ("1.12.0", "1.11.0"),
+            ("1.0.0", "0.0.0"),
+            ("0.3.0", "0.2.0"),
+        ] {
+            assert_eq!(
+                version_below(&Version::parse(version).unwrap()),
+                Version::parse(below).unwrap(),
+                "{version}"
+            );
+        }
+    }
+
     #[test]
     fn a_requirement_that_admits_a_version_below_the_floor_is_rejected() {
-        let manifest = replace_once(CORE_MANIFEST, "1.12.1", "1.12.0");
+        // A version just below the contract's floor, in place of `CORE_MANIFEST`'s entry: both
+        // are read rather than restated, so a floor bump in either place moves this fixture with
+        // it, whether the new floor is a patch, minor, or major release.
+        let (core_bytes, _) = core_entry("bytes");
+        let floor = BYTES.floor_version();
+        let below = version_below(&floor);
+        assert!(below < floor, "{below} is not below {floor}");
+        let manifest = replace_once(CORE_MANIFEST, core_bytes, &format!("bytes = \"{below}\""));
         let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
         assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
         assert_eq!(diagnostics[0].code, Code::RuntimeDependencyContract);
         assert!(diagnostics[0].message.contains("bytes"));
-        assert!(diagnostics[0].message.contains(">=1.12.1, <2.0.0"));
+        assert!(diagnostics[0].message.contains(&format!("`{below}`")));
+        assert!(diagnostics[0].message.contains(&format!(
+            ">={}, <{}",
+            BYTES.floor,
+            BYTES.ceiling()
+        )));
     }
 
     #[test]
@@ -1551,14 +1591,7 @@ serde_json = "1.0.151"
     fn reqwest_defaults_and_blocking_wiring_are_part_of_the_contract() {
         // The entry and its floor are read back out of `CORE_MANIFEST` rather than restated, so a
         // bump to the reqwest floor there changes this fixture with it.
-        let core_reqwest = core_workspace_dependencies()
-            .lines()
-            .find(|line| line.starts_with("reqwest = "))
-            .expect("CORE_MANIFEST declares reqwest under that key");
-        let floor = core_reqwest
-            .split('"')
-            .nth(1)
-            .expect("the reqwest entry pins a quoted version");
+        let (core_reqwest, floor) = core_entry("reqwest");
         let manifest = replace_once(
             CORE_MANIFEST,
             core_reqwest,
@@ -1959,11 +1992,14 @@ serde_json = "1.0.151"
     #[test]
     fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
         // Untargeted, the rule has two halves: a `package` key on the canonical name is rejected,
-        // and the crate declared under another name is not found at all.
+        // and the crate declared under another name is not found at all. The entry and its version
+        // are read out of `CORE_MANIFEST`, and the missing-crate message names the contract's own
+        // floor, so neither is restated here.
+        let (core_secrecy, version) = core_entry("secrecy");
         let untargeted_package = replace_once(
             CORE_MANIFEST,
-            "secrecy = \"0.10.3\"",
-            "secrecy = { package = \"secrecy\", version = \"0.10.3\" }",
+            core_secrecy,
+            &format!("secrecy = {{ package = \"secrecy\", version = \"{version}\" }}"),
         );
         assert_eq!(
             messages(&audit_manifest_for(
@@ -1975,15 +2011,18 @@ serde_json = "1.0.151"
         );
         let untargeted_alias = replace_once(
             CORE_MANIFEST,
-            "secrecy = \"0.10.3\"",
-            "secret = { package = \"secrecy\", version = \"0.10.3\" }",
+            core_secrecy,
+            &format!("secret = {{ package = \"secrecy\", version = \"{version}\" }}"),
         );
         assert_eq!(
             messages(&audit_manifest_for(
                 &untargeted_alias,
                 &TargetContext::Unknown
             )),
-            "generated client requires `secrecy`; add `secrecy` with version `0.10.3`"
+            format!(
+                "generated client requires `secrecy`; add `secrecy` with version `{}`",
+                SECRECY.floor
+            )
         );
 
         // A target table applies the same two halves to `tokio`, on both paths.
@@ -2212,19 +2251,30 @@ serde_json = "1.0.151"
         )
         .unwrap();
         let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
-        std::fs::write(
-            &member,
-            format!(
-                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[features]\n\
-                 blocking = [\"dep:tokio\"]\n\n{CORE_INHERITED}\n\
-                 [target.'cfg(not(target_arch=\"wasm32\"))'.dependencies]\n\
-                 tokio = {{ workspace = true, optional = true }}\n"
-            ),
-        )
-        .unwrap();
+        let inherited_optional = format!(
+            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[features]\n\
+             blocking = [\"dep:tokio\"]\n\n{CORE_INHERITED}\n\
+             [target.'cfg(not(target_arch=\"wasm32\"))'.dependencies]\n\
+             tokio = {{ workspace = true, optional = true }}\n"
+        );
+        let inherited_required = replace_once(&inherited_optional, ", optional = true", "");
         for target in [TargetContext::Unknown, linux()] {
+            // Cargo does not inherit `optional`: the root declares version and features, and the
+            // member adds `optional = true` beside `workspace = true`.
+            std::fs::write(&member, &inherited_optional).unwrap();
             let result = audit_in(&member, &RuntimeRequirements::default(), &target);
             assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+
+            // So a member that leaves it out is held to the optional rule although the entry it
+            // inherits resolves: exactly that rule fires, and nothing about the inheritance. Only
+            // this half notices the rule being skipped for inherited declarations.
+            std::fs::write(&member, &inherited_required).unwrap();
+            let result = audit_in(&member, &RuntimeRequirements::default(), &target);
+            assert_eq!(
+                messages(&result.diagnostics),
+                "`tokio` must be optional because it is enabled only by the generated `blocking` \
+                 feature"
+            );
         }
     }
 
@@ -2351,21 +2401,12 @@ serde_json.workspace = true
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
         let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
-        let core_reqwest = core_workspace_dependencies()
-            .lines()
-            .find(|line| line.starts_with("reqwest = "))
-            .expect("CORE_MANIFEST declares reqwest under that key");
+        let (core_reqwest, floor) = core_entry("reqwest");
         let root_dependencies = match root_defaults {
             // `CORE_MANIFEST` already disables them, so this is the core body unchanged.
             RootDefaults::Off => core_workspace_dependencies().to_owned(),
-            RootDefaults::On => {
-                let floor = core_reqwest
-                    .split('"')
-                    .nth(1)
-                    .expect("the reqwest entry pins a quoted version");
-                core_workspace_dependencies()
-                    .replace(core_reqwest, &format!("reqwest = \"{floor}\""))
-            }
+            RootDefaults::On => core_workspace_dependencies()
+                .replace(core_reqwest, &format!("reqwest = \"{floor}\"")),
         };
         std::fs::write(
             &root,
@@ -2428,17 +2469,6 @@ serde_json.workspace = true
             messages[0].contains("`reqwest` must set `default-features = false`"),
             "{messages:#?}"
         );
-    }
-
-    #[test]
-    fn a_silent_member_keeps_the_defaults_the_root_turned_off() {
-        // No diagnostic at all, not merely no default-features one: a root that failed to resolve
-        // reports the inheritance instead, and must not pass this test.
-        let messages = inherited_reqwest_default_feature_diagnostics(
-            RootDefaults::Off,
-            "reqwest = { workspace = true }",
-        );
-        assert!(messages.is_empty(), "{messages:#?}");
     }
 
     #[test]
@@ -2586,13 +2616,15 @@ serde_json.workspace = true
             "a member's `default-features = false` cannot turn off defaults the root leaves on",
             both_directions,
         );
-        // The layout that rule leaves a consumer.
+        // The layout that rule leaves a consumer. The `unset` half is the core workspace layout
+        // itself: its root disables `reqwest`'s defaults and its member declares only
+        // `reqwest.workspace = true`, and it must audit clean.
         promises(
             "disable them in `[workspace.dependencies]` and leave the member's `default-features` \
              unset or `false`",
             &[
                 "a_member_default_features_false_keeps_the_defaults_the_root_turned_off",
-                "a_silent_member_keeps_the_defaults_the_root_turned_off",
+                "workspace_inheritance_uses_the_workspace_version_and_features",
             ],
         );
 
@@ -2714,7 +2746,6 @@ serde_json.workspace = true
         promises(
             "while `optional` is read from the member",
             &[
-                "an_inherited_optional_dependency_in_a_target_table_resolves",
                 "workspace_inherited_tokio_under_an_alternative_spelling_resolves",
                 "an_inherited_member_cannot_make_an_unconditional_crate_optional",
             ],
@@ -2753,12 +2784,12 @@ serde_json.workspace = true
 
     #[test]
     fn an_inherited_member_cannot_make_an_unconditional_crate_optional() {
-        // The mirror of `an_inherited_optional_dependency_in_a_target_table_resolves`: `optional`
-        // is read from the member, so a member that adds `optional = true` to a crate generated
-        // code names unconditionally must be rejected — the inheritance resolving is not the same
-        // thing as the declaration being acceptable. Every other test that reaches this rule
-        // declares its crate directly, so nothing held it on the inheritance path, which is the
-        // path this branch is about.
+        // The mirror of `workspace_inherited_tokio_under_an_alternative_spelling_resolves`:
+        // `optional` is read from the member, so a member that adds `optional = true` to a crate
+        // generated code names unconditionally must be rejected — the inheritance resolving is not
+        // the same thing as the declaration being acceptable. Every other test that reaches this
+        // rule declares its crate directly, so nothing held it on the inheritance path, which is
+        // the path this branch is about.
         let messages = inherited_reqwest_default_feature_diagnostics(
             RootDefaults::Off,
             "reqwest = { workspace = true, optional = true }",
@@ -2774,6 +2805,25 @@ serde_json.workspace = true
     /// the floors in these fixtures cannot drift from the ones every other test audits against.
     fn core_workspace_dependencies() -> &'static str {
         CORE_MANIFEST.split_once("[dependencies]\n").unwrap().1
+    }
+
+    /// `CORE_MANIFEST`'s whole line for the dependency `key`, and the version it pins.
+    ///
+    /// Every fixture that rewrites a core entry locates it here, so the floors in `CORE_MANIFEST`
+    /// are stated once in this module: restating one at a call site made a bump there red the
+    /// fixture on its needle instead of on anything the fixture is about. The key is matched as
+    /// `key = ` at the start of a line, and a missing entry or unquoted version fails loudly.
+    fn core_entry(key: &str) -> (&'static str, &'static str) {
+        let prefix = format!("{key} = ");
+        let line = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("CORE_MANIFEST declares `{key}` under that key"));
+        let version = line
+            .split('"')
+            .nth(1)
+            .unwrap_or_else(|| panic!("CORE_MANIFEST's `{key}` entry pins a quoted version"));
+        (line, version)
     }
 
     const CORE_INHERITED: &str = "\
@@ -3892,51 +3942,6 @@ serde_json.workspace = true
         let result = audit(&member, &requirements);
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         assert_eq!(result.manifests, vec![root, member]);
-    }
-
-    #[test]
-    fn an_inherited_optional_dependency_in_a_target_table_resolves() {
-        // The one optional requirement lives in a `[target.'cfg(…)'.dependencies]` table, and
-        // Cargo does not inherit `optional`: the root declares version and features, the member
-        // adds `optional = true` beside `workspace = true`. Every other inheritance fixture sits
-        // in `[dependencies]`, so the target table's lookup was unpinned.
-        let directory = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
-        let member_dir = directory.path().join("client");
-        std::fs::create_dir(&member_dir).unwrap();
-        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
-        std::fs::write(
-            &root,
-            format!(
-                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
-                 tokio = {{ version = \"1.53.1\", features = [\"rt\"] }}\n",
-                core_workspace_dependencies()
-            ),
-        )
-        .unwrap();
-        let inherited_optional = format!(
-            "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[features]\n\
-             blocking = [\"dep:tokio\"]\n\n{CORE_INHERITED}\n\
-             [target.'cfg(not(target_arch = \"wasm32\"))'.dependencies]\n\
-             tokio = {{ workspace = true, optional = true }}\n"
-        );
-        std::fs::write(&member, &inherited_optional).unwrap();
-
-        let result = audit(&member, &RuntimeRequirements::default());
-        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
-
-        // `optional` is the member's to declare, exactly as Cargo reads it: the inherited entry
-        // still resolves, and only the optional rule fires.
-        std::fs::write(&member, inherited_optional.replace(", optional = true", "")).unwrap();
-        let result = audit(&member, &RuntimeRequirements::default());
-        assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
-        assert!(
-            result.diagnostics[0]
-                .message
-                .contains("`tokio` must be optional"),
-            "{}",
-            result.diagnostics[0].message
-        );
     }
 
     /// The anti-drift property: the block `spargen deps` prints must be exactly a block the audit
