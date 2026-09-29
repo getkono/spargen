@@ -6,7 +6,7 @@ operations (3):
   create_pets
   list_pets
   show_pet_by_id
-types (25):
+types (18):
   BlockingClient
   Client
   CreatePetsError
@@ -25,10 +25,3 @@ types (25):
   types::Petid
   types::Petname
   types::Pettag
-  types::ResponseBody
-  types::ResponseBody84222325
-  types::ResponseBodycode
-  types::ResponseBodyid
-  types::ResponseBodymessage
-  types::ResponseBodyname
-  types::ResponseBodytag
