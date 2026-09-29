@@ -20460,6 +20460,73 @@ fn e004_a_chained_object_reference_is_followed_by_target_not_by_spelling() {
     }
 }
 
+/// A `summary`/`description` on a Reference Object written in a sub-file, at the second hop of a
+/// Parameter, Request Body or Response chain, is `W011`'s reference-docs case, located in that
+/// sub-file. Before bundle chains were followed (#274) the second hop was parsed as the object and
+/// its `summary` never read; following it makes the hop a reference site like the first, so its
+/// override is reported rather than dropped, and generation still succeeds.
+#[test]
+fn w011_a_documented_second_hop_reference_in_a_sub_file_is_reported_there() {
+    for split_at in [
+        "/paths/~1pet/get/parameters/0",
+        "/paths/~1pet/get/requestBody",
+        "/paths/~1pet/get/responses/200",
+    ] {
+        let fixture = placement_fixtures()
+            .into_iter()
+            .find(|fixture| !fixture.rejects && fixture.split_at == split_at)
+            .unwrap_or_else(|| panic!("no valid placement fixture at {split_at}"));
+        let moved = fixture.document.pointer(split_at).unwrap().clone();
+        let mut root = fixture.document.clone();
+        *root.pointer_mut(split_at).unwrap() =
+            serde_json::json!({ "$ref": "./hop.json", "summary": "first hop" });
+        let (generated, checked) = run_placement(&[
+            ("openapi.json", root),
+            (
+                "hop.json",
+                serde_json::json!({ "$ref": "./p.json", "description": "second hop" }),
+            ),
+            ("p.json", moved),
+        ]);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{split_at}/{entry}: {report:#?}"
+            );
+            let site = |target: &str| {
+                let wanted = format!("the `summary`/`description` on the reference to `{target}`");
+                let found: Vec<_> = report
+                    .diagnostics()
+                    .iter()
+                    .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                    .filter(|d| d.message.starts_with(&wanted))
+                    .collect();
+                assert_eq!(
+                    found.len(),
+                    1,
+                    "{split_at}/{entry}: exactly one W011 for the hop to `{target}`: {report:#?}"
+                );
+                found[0].span.unwrap_or_else(|| {
+                    panic!("{split_at}/{entry}: the hop to `{target}` has no span: {report:#?}")
+                })
+            };
+            let first = site("./hop.json");
+            let second = site("./p.json");
+            assert_ne!(
+                first.file, second.file,
+                "{split_at}/{entry}: the second hop is written in `hop.json`, not the root: \
+                 {report:#?}"
+            );
+            // `hop.json` is pretty-printed: its Reference Object opens on line 1.
+            assert_eq!(
+                second.start.line, 1,
+                "{split_at}/{entry}: the second hop's W011 points into `hop.json`: {report:#?}"
+            );
+        }
+    }
+}
+
 /// A `$ref` that names the root document through its own file is the root, however the path is
 /// spelled (#220). The bundle once compared paths as written, so `sub/../openapi.yaml` loaded the
 /// root a second time under a second file id: every component was emitted twice, and `W011`
