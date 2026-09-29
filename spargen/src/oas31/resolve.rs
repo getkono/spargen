@@ -60,26 +60,15 @@ impl<'doc> Resolver<'doc> {
     /// document's references are reordered; this spelling does not, which is what lets a type's
     /// `(document, pointer)` identity rank a contested name.
     pub(super) fn document_key(&self, file: crate::diag::FileId) -> String {
-        let root = self.bundle.root_id();
-        if file == root {
+        if file == self.bundle.root_id() {
             return String::new();
         }
         if let Some(url) = self.bundle.remote_origin(file) {
             return url.to_owned();
         }
-        let Some(loaded) = self.bundle.file(file) else {
-            return String::new();
-        };
-        let root_dir = self
-            .bundle
-            .file(root)
-            .and_then(|root| root.path.parent())
-            .unwrap_or_else(|| camino::Utf8Path::new(""));
-        loaded
-            .path
-            .strip_prefix(root_dir)
-            .unwrap_or(&loaded.path)
-            .as_str()
+        self.bundle
+            .root_relative_path(file)
+            .unwrap_or_default()
             .to_owned()
     }
 
