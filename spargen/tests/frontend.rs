@@ -9904,6 +9904,217 @@ fn the_ref_sibling_rejection_does_not_creep_into_the_shapes_that_still_generate(
     );
 }
 
+/// A component whose root is a `$ref` carrying only siblings that bear no shape — an annotation such
+/// as `description`/`title`, or a validation keyword such as `maxLength` — is an alias for its
+/// target, exactly as the bare `{$ref: T}` component is. It used to panic in release builds
+/// (`component root was not the last inserted def`) when the target was declared first, and when
+/// the target was declared second it passed the assertion by lifting the TARGET's def out from
+/// under the target's own component entry, and the IR invariant check then rejected a valid
+/// document (`response body references missing type`).
+///
+/// Every existing no-shape fixture put the `$ref` in a response body, which never reserves a
+/// component root, so none of them could reach this. Both declaration orders are driven because
+/// they fail in different ways, and the output is compared with the bare-`$ref` spelling of the
+/// same alias: the siblings must change nothing the generated types say.
+#[test]
+fn a_component_root_ref_with_only_shapeless_siblings_is_an_alias_for_its_target() {
+    const HEAD: &str = r##"openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /alias:
+    get:
+      operationId: getAlias
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Alias' }
+  /target:
+    get:
+      operationId: getTarget
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Target' }
+components:
+  schemas:
+"##;
+    let targets = [
+        "{ type: string }",
+        "{ type: object, required: [id], properties: { id: { type: integer } } }",
+    ];
+    // `default` rides beside `description` because alone it is the bare spelling: the parser folds a
+    // lone `$ref`+`default` into the alias and reports it as `W005` there.
+    let siblings = [
+        "description: hello",
+        "title: Hello",
+        "maxLength: 5",
+        "description: hello, default: x",
+    ];
+
+    for target in targets {
+        for sibling in siblings {
+            for target_first in [true, false] {
+                let target_line = format!("    Target: {target}\n");
+                let spec = |alias: &str| {
+                    let alias_line = format!("    Alias: {alias}\n");
+                    if target_first {
+                        format!("{HEAD}{target_line}{alias_line}")
+                    } else {
+                        format!("{HEAD}{alias_line}{target_line}")
+                    }
+                };
+                let with_sibling = spec(&format!(
+                    "{{ $ref: '#/components/schemas/Target', {sibling} }}"
+                ));
+                let bare = spec("{ $ref: '#/components/schemas/Target' }");
+                let what = format!(
+                    "`{sibling}` beside a `$ref` to `{target}`, target first: {target_first}"
+                );
+
+                let checked = check(&with_sibling);
+                assert_ne!(
+                    checked.outcome(),
+                    Outcome::Rejected,
+                    "{what} was rejected by check: {checked:#?}"
+                );
+                let (report, code) = generate_with_code(&with_sibling);
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{what} was rejected by generate: {report:#?}"
+                );
+                let (bare_report, bare_code) = generate_with_code(&bare);
+                assert_ne!(bare_report.outcome(), Outcome::Rejected, "{bare_report:#?}");
+                assert_eq!(
+                    types_module(&code),
+                    types_module(&bare_code),
+                    "{what} must lower exactly as the bare `$ref` alias does"
+                );
+                if sibling.starts_with("maxLength") {
+                    assert!(
+                        has_code(&report, Code::ValidationKeywordIgnored),
+                        "{what}: a validation-only sibling must still be acknowledged: {report:#?}"
+                    );
+                }
+                // The alias has no type of its own to document a default on, so it is dropped —
+                // and must say so, as the bare `$ref`+`default` spelling does.
+                assert_eq!(
+                    has_code(&report, Code::SchemaDefaultNotApplied),
+                    sibling.contains("default"),
+                    "{what}: `W005` must fire exactly when a default is dropped: {report:#?}"
+                );
+                assert_eq!(
+                    has_code(&checked, Code::SchemaDefaultNotApplied),
+                    sibling.contains("default"),
+                    "{what}: check must agree with generate on `W005`: {checked:#?}"
+                );
+            }
+        }
+    }
+
+    // A self-referential alias names no type at all. The bare spelling reports the cycle as `E004`;
+    // a sibling beside it must not change that into a generated placeholder or a panic.
+    for alias in [
+        "{ $ref: '#/components/schemas/Loop' }",
+        "{ $ref: '#/components/schemas/Loop', description: hello }",
+    ] {
+        let spec = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          \
+             description: ok\n          content:\n            application/json:\n              \
+             schema: {{ $ref: '#/components/schemas/Loop' }}\ncomponents:\n  schemas:\n    Loop: {alias}\n"
+        );
+        for report in [check(&spec), generate(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "`{alias}`: {report:#?}"
+            );
+            assert!(
+                has_code(&report, Code::UnresolvedRef),
+                "`{alias}` must report the alias cycle as E004: {report:#?}"
+            );
+        }
+    }
+
+    // The guard hands the alias to `chain_component_alias`, which routes a relative-file target
+    // through `ensure_resolved` rather than `ensure_component`: a file target must lower exactly as
+    // its bare spelling does too, in both declaration orders of the root document's two uses.
+    let lib = "components:\n  schemas:\n    \
+               Target: { type: object, required: [id], properties: { id: { type: integer } } }\n";
+    let file_target = "./lib.yaml#/components/schemas/Target";
+    for sibling in ["description: hello", "description: hello, default: x"] {
+        for target_first in [true, false] {
+            let run = |alias: &str| {
+                let temp = tempfile::tempdir().unwrap();
+                let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+                let alias_path = "  /alias:\n    get:\n      operationId: getAlias\n      \
+                    responses:\n        '200':\n          description: ok\n          content:\n            \
+                    application/json:\n              schema: { $ref: '#/components/schemas/Alias' }\n";
+                let target_path = format!(
+                    "  /target:\n    get:\n      operationId: getTarget\n      \
+                     responses:\n        '200':\n          description: ok\n          content:\n            \
+                     application/json:\n              schema: {{ $ref: '{file_target}' }}\n"
+                );
+                let paths = if target_first {
+                    format!("{target_path}{alias_path}")
+                } else {
+                    format!("{alias_path}{target_path}")
+                };
+                std::fs::write(
+                    dir.join("openapi.yaml"),
+                    format!(
+                        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\n\
+                         servers: [{{ url: 'https://e.com' }}]\npaths:\n{paths}\
+                         components:\n  schemas:\n    Alias: {alias}\n"
+                    ),
+                )
+                .unwrap();
+                std::fs::write(dir.join("lib.yaml"), lib).unwrap();
+                let out = dir.join("client.rs");
+                let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+                let code = std::fs::read_to_string(&out).unwrap_or_default();
+                let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+                (generated, checked, code)
+            };
+            let what = format!(
+                "`{sibling}` beside a `$ref` to a relative-file target, target first: {target_first}"
+            );
+            let (generated, checked, code) =
+                run(&format!("{{ $ref: '{file_target}', {sibling} }}"));
+            let (bare_generated, _, bare_code) = run(&format!("{{ $ref: '{file_target}' }}"));
+            for (entry, report) in [
+                ("generate", &generated),
+                ("check", &checked),
+                ("bare generate", &bare_generated),
+            ] {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{what}: {entry}: {report:#?}"
+                );
+            }
+            assert_eq!(
+                types_module(&code),
+                types_module(&bare_code),
+                "{what} must lower exactly as the bare `$ref` alias does"
+            );
+            for (entry, report) in [("generate", &generated), ("check", &checked)] {
+                assert_eq!(
+                    has_code(report, Code::SchemaDefaultNotApplied),
+                    sibling.contains("default"),
+                    "{what}: {entry}: `W005` must fire exactly when a default is dropped: {report:#?}"
+                );
+            }
+        }
+    }
+}
+
 /// When a `$ref` is BOTH unresolvable and carries a contradictory sibling, exactly one code must
 /// win and it must be `E004`: `ensure_component` returns `None` before the intersection is reached,
 /// so the missing component is reported and the sibling never gets a second, confusing diagnostic
