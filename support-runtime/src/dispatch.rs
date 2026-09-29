@@ -2087,4 +2087,121 @@ mod tests {
             200,
         );
     }
+
+    /// The part of a runtime source that is embedded into generated output: everything above the
+    /// test-module marker, which is where the embed splits. The marker is assembled here rather
+    /// than written out, because a runtime source may carry it literally only once.
+    fn embedded(source: &'static str) -> &'static str {
+        source
+            .split_once(concat!("#[cfg", "(test)]"))
+            .map_or(source, |(embedded, _)| embedded)
+    }
+
+    /// Code lines only: a line whose first token is a comment is prose, not an operation.
+    fn code_lines(source: &str) -> impl Iterator<Item = &str> {
+        source
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with("//"))
+    }
+
+    /// `attach_auth`'s rustdoc — shipped verbatim into every generated client — says registration is
+    /// insert-only: `ClientCore::set_credential` is the only writer, nothing removes, clears, or
+    /// replaces a credential with nothing, and `Credential` has no variant meaning "none". That is a
+    /// claim about the *absence* of a capability, which nothing else observes, so this test holds
+    /// the three facts it rests on and fails the moment any of them stops being true (#193). When
+    /// it fails because an unregister or replace operation was added (#142), the fix is to rewrite
+    /// that paragraph — the advice to build a new client is then no longer the only remedy — and
+    /// to delete this test with it, not to widen the allow-lists below. The first assertion ties
+    /// the test to the sentence, so neither can outlive the other unnoticed.
+    #[test]
+    fn the_shipped_insert_only_credential_claim_still_holds() {
+        let dispatch = embedded(include_str!("dispatch.rs"));
+        let prose: String = dispatch
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("///"))
+            .map(str::trim)
+            .collect::<Vec<_>>()
+            .join(" ");
+        for sentence in [
+            "Registration is insert-only: [`ClientCore::set_credential`] is the only writer, there \
+             is no remove, clear, or replace-with-nothing operation at any layer, and \
+             [`Credential`] has no variant meaning \"none\"",
+            "The way to reach a later alternative is to build a client that is not registered for \
+             the earlier one.",
+        ] {
+            assert!(
+                prose.contains(sentence),
+                "`attach_auth`'s rustdoc no longer states {sentence:?}; if the claim was withdrawn, \
+                 delete this test with it",
+            );
+        }
+
+        // 1. The map is a private field of `ClientCore`, so only `client.rs` can reach it, and
+        //    there it is created empty, inserted into by `set_credential`, and read by
+        //    `credential` — nothing else. Any removal, clear, `mem::take`, destructuring, second
+        //    constructor, or `&mut` hand-out names the field and lands here.
+        let client = embedded(include_str!("client.rs"));
+        let mut touches: Vec<&str> = code_lines(client)
+            .filter(|line| {
+                line.match_indices("credentials").any(|(at, word)| {
+                    let before = line[..at].chars().next_back();
+                    let after = line[at + word.len()..].chars().next();
+                    let ident =
+                        |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
+                    !ident(before) && !ident(after)
+                })
+            })
+            .collect();
+        touches.sort_unstable();
+        assert_eq!(
+            touches,
+            [
+                "credentials: HashMap::new(),",
+                "credentials: HashMap<String, Credential>,",
+                "self.credentials.get(scheme)",
+                "self.credentials.insert(scheme.to_owned(), credential);",
+            ],
+            "the credential map gained an access path; if it removes or replaces a registration, \
+             `attach_auth`'s insert-only paragraph is now false",
+        );
+
+        // 2. No method rebuilds the core out from under its credentials without naming the field
+        //    (`*self = Self::new(..)`, or a by-value `self` returning a fresh core): every receiver
+        //    other than `&self` belongs to one of the two known writers, and neither touches the
+        //    map except through the insert above.
+        let code: String = code_lines(client).collect::<Vec<_>>().join(" ");
+        let mut writers: Vec<&str> = code
+            .match_indices("fn ")
+            .filter_map(|(at, _)| {
+                let rest = &code[at + 3..];
+                let name_end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
+                let params = rest[name_end..].split_once('(')?.1;
+                let receiver = params.split([',', ')']).next()?.trim();
+                let mutating = receiver.ends_with("self") && receiver != "&self";
+                mutating.then(|| &rest[..name_end])
+            })
+            .collect();
+        writers.sort_unstable();
+        assert_eq!(
+            writers,
+            ["config_mut", "set_credential"],
+            "`ClientCore` gained a method that mutates or consumes it; if it can drop a \
+             registration, `attach_auth`'s insert-only paragraph is now false",
+        );
+
+        // 3. No variant means "none": every `Credential` carries something to attach, so an
+        //    overwrite through `set_credential` always leaves the scheme registered. A new variant
+        //    stops this match compiling; decide whether it can stand for "no credential" before
+        //    adding its arm.
+        let carries_something = |credential: &Credential| match credential {
+            Credential::Bearer(_)
+            | Credential::Basic { .. }
+            | Credential::ApiKey(_)
+            | Credential::Provider(_) => true,
+        };
+        assert!(carries_something(&Credential::Bearer(SecretString::from(
+            "t0k"
+        ))));
+    }
 }
