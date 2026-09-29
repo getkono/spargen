@@ -1032,6 +1032,64 @@ mod tests {
         assert!(value.is_sensitive());
     }
 
+    /// `Credential`'s shipped documentation states which variant each kind of scheme accepts: both
+    /// static token variants under every token-carrying kind, and neither under `http basic`. The
+    /// provider's half of that table is pinned by the provider tests; this pins the static half,
+    /// so the documented rule and the attach code cannot drift apart unseen.
+    #[test]
+    fn both_static_token_variants_attach_under_every_token_kind_and_neither_under_basic() {
+        for (credential, registered) in [
+            (Credential::Bearer(SecretString::from("t0k")), "Bearer"),
+            (Credential::ApiKey(SecretString::from("t0k")), "ApiKey"),
+        ] {
+            let mut core = core();
+            core.set_credential("s", credential);
+            let attach = |kind| {
+                poll_ready(attach_auth(
+                    &core,
+                    get(&core),
+                    &[&[AuthScheme { name: "s", kind }]],
+                ))
+            };
+
+            let bearer = attach(AuthKind::Bearer).unwrap().build().unwrap();
+            assert_eq!(
+                bearer.headers()[reqwest::header::AUTHORIZATION],
+                "Bearer t0k",
+                "{registered}"
+            );
+            let header = attach(AuthKind::ApiKeyHeader("X-Api-Key"))
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(header.headers()["X-Api-Key"], "t0k", "{registered}");
+            let query = attach(AuthKind::ApiKeyQuery("api_key"))
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(query.url().query(), Some("api_key=t0k"), "{registered}");
+            let cookie = attach(AuthKind::ApiKeyCookie("SESSION"))
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(
+                cookie.headers()[reqwest::header::COOKIE],
+                "SESSION=t0k",
+                "{registered}"
+            );
+
+            let error = attach(AuthKind::Basic).unwrap_err();
+            match error {
+                Error::RequestConstruction(RequestError::CredentialMismatch {
+                    scheme: "s",
+                    required: "http basic",
+                    registered: reported,
+                }) => assert_eq!(reported, registered),
+                other => panic!("expected CredentialMismatch for {registered}, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn attaches_http_basic_credential() {
         // `Basic` was previously present only as the *wrong* credential for a bearer scheme, so
