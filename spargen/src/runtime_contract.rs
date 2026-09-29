@@ -1328,10 +1328,15 @@ fn check_declaration<'v>(
             dependency.name
         )));
     }
+    // A rename is a `package` that differs from the key. Cargo's `package` defaults to the key, so
+    // `bytes = { package = "bytes", … }` is the fully-qualified spelling of an ordinary dependency
+    // and renames nothing (#168). A non-string `package` is not a spelling Cargo accepts, so it is
+    // not given the benefit of the doubt.
     if [Some(declaration), workspace_declaration]
         .into_iter()
         .flatten()
-        .any(|value| value.get("package").is_some())
+        .filter_map(|value| value.get("package"))
+        .any(|package| package.as_str() != Some(dependency.name))
     {
         diagnostics.push(diagnostic(format!(
             "`{}` cannot be renamed because generated code references that canonical crate name{location}",
@@ -1991,19 +1996,47 @@ serde_json = "1.0.151"
 
     #[test]
     fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
-        // Untargeted, the rule has two halves: a `package` key on the canonical name is rejected,
-        // and the crate declared under another name is not found at all. The entry and its version
-        // are read out of `CORE_MANIFEST`, and the missing-crate message names the contract's own
-        // floor, so neither is restated here.
+        // Untargeted, the rule has two halves: the canonical name bound to another package is
+        // rejected, and the crate declared under another name is not found at all. The identity
+        // spelling `package = "<the key>"` renames nothing — Cargo's `package` defaults to the key —
+        // so it is accepted (#168). The entry and its version are read out of `CORE_MANIFEST`, and
+        // the missing-crate message names the contract's own floor, so neither is restated here.
         let (core_secrecy, version) = core_entry("secrecy");
-        let untargeted_package = replace_once(
+        let untargeted_identity = replace_once(
             CORE_MANIFEST,
             core_secrecy,
             &format!("secrecy = {{ package = \"secrecy\", version = \"{version}\" }}"),
         );
         assert_eq!(
             messages(&audit_manifest_for(
+                &untargeted_identity,
+                &TargetContext::Unknown
+            )),
+            ""
+        );
+        let untargeted_package = replace_once(
+            CORE_MANIFEST,
+            core_secrecy,
+            &format!("secrecy = {{ package = \"secrecy-fork\", version = \"{version}\" }}"),
+        );
+        assert_eq!(
+            messages(&audit_manifest_for(
                 &untargeted_package,
+                &TargetContext::Unknown
+            )),
+            "`secrecy` cannot be renamed because generated code references that canonical crate \
+             name"
+        );
+        // A non-string `package` is not a spelling Cargo accepts, so it is not read as the
+        // identity: only `package = "<the key>"` is exempt, and `package = 1` stays a rename.
+        let untargeted_non_string = replace_once(
+            CORE_MANIFEST,
+            core_secrecy,
+            &format!("secrecy = {{ package = 1, version = \"{version}\" }}"),
+        );
+        assert_eq!(
+            messages(&audit_manifest_for(
+                &untargeted_non_string,
                 &TargetContext::Unknown
             )),
             "`secrecy` cannot be renamed because generated code references that canonical crate \
@@ -2025,12 +2058,18 @@ serde_json = "1.0.151"
             )
         );
 
-        // A target table applies the same two halves to `tokio`, on both paths.
+        // A target table applies the same two halves, and the same identity exemption, to `tokio`,
+        // on both paths.
         let key = r#"cfg(not(target_family = "wasm"))"#;
-        let targeted_package = blocking_manifest(&tokio_table(
+        let targeted_identity = blocking_manifest(&tokio_table(
             key,
             "tokio = { package = \"tokio\", version = \"1.53.1\", features = [\"rt\"], optional = \
              true }",
+        ));
+        let targeted_package = blocking_manifest(&tokio_table(
+            key,
+            "tokio = { package = \"tokio-fork\", version = \"1.53.1\", features = [\"rt\"], \
+             optional = true }",
         ));
         let targeted_alias = blocking_manifest(&tokio_table(
             key,
@@ -2038,6 +2077,10 @@ serde_json = "1.0.151"
              optional = true }",
         ));
         for target in [TargetContext::Unknown, linux()] {
+            assert_eq!(
+                messages(&audit_manifest_for(&targeted_identity, &target)),
+                ""
+            );
             assert_eq!(
                 messages(&audit_manifest_for(&targeted_package, &target)),
                 "`tokio` cannot be renamed because generated code references that canonical crate \
@@ -3065,9 +3108,8 @@ serde_json.workspace = true
         // climbing — collapsing the three-way distinction back to "nothing found" for exactly the
         // case where a file the reader can open is the problem.
         //
-        // **This fixture pins behaviour that is known to be wrong, deliberately**, in the same way
-        // as `an_identity_package_key_in_the_workspace_root_is_rejected_although_cargo_accepts_it`
-        // twelve fixtures below. When no workspace root exists anywhere on the walk and any
+        // **This fixture pins behaviour that is known to be wrong, deliberately.** When no
+        // workspace root exists anywhere on the walk and any
         // ancestor failed to parse, that ancestor is reported as "its workspace manifest", though
         // nothing established it was one and it may be an unrelated crate outside the project.
         // The `E023` explain text no longer promises otherwise — it says only that the nearest
@@ -3267,18 +3309,11 @@ serde_json.workspace = true
     }
 
     /// Audits a member that inherits the core crates from a workspace root whose `bytes` entry
-    /// has been rewritten to carry a `package` key, and asserts the single rename rejection that
-    /// produces. `package` is the name that key declares; `note` prefixes both failure messages,
-    /// so a fixture pinning behaviour an issue is going to change can say so where it fails.
+    /// has been rewritten to carry `package = "<package>"`, and returns the diagnostics.
     ///
-    /// The two fixtures below differed in exactly those two things — one string literal and one
-    /// message prefix — with the `bytes` entry lookup, the floor read back out of it and the
-    /// root/member layout written out twice, verbatim.
-    /// `inherited_reqwest_default_feature_diagnostics` three call sites above collapses the same
-    /// pattern, so this is the module's own idiom. Both entry points are kept rather than merged
-    /// into one table-driven test: only the identity-spelling one reds when #168 lands, and a
-    /// single test could not show that.
-    fn workspace_root_package_key_is_rejected(package: &str, note: &str) {
+    /// Shared by the rename and identity fixtures below, which differ only in that one string;
+    /// `inherited_reqwest_default_feature_diagnostics` above collapses the same pattern.
+    fn workspace_root_bytes_package_diagnostics(package: &str) -> Vec<Diagnostic> {
         let core_bytes = core_workspace_dependencies()
             .lines()
             .find(|line| line.starts_with("bytes = "))
@@ -3310,43 +3345,31 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
-        assert_eq!(diagnostics.len(), 1, "{note}{diagnostics:#?}");
+        audit(&member, &RuntimeRequirements::default()).diagnostics
+    }
+
+    #[test]
+    fn a_runtime_crate_renamed_in_the_workspace_root_is_rejected() {
+        // "A renamed runtime crate" is an advertised `E023` trigger, and the check reads `package`
+        // from the member *and* the root — generated code names the canonical crate either way.
+        // Every other rename fixture renames in the member's own table, so this is the root half.
+        // `bytes-fork` is an actual rename: the key `bytes` would bind a different package.
+        let diagnostics = workspace_root_bytes_package_diagnostics("bytes-fork");
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
         assert!(
             diagnostics[0].message.contains("`bytes` cannot be renamed"),
-            "{note}{diagnostics:#?}"
+            "{diagnostics:#?}"
         );
     }
 
     #[test]
-    fn a_package_key_in_the_workspace_root_is_rejected_whatever_it_names() {
-        // "A renamed runtime crate" is an advertised `E023` trigger, and the check reads `package`
-        // from the member *and* the root — generated code names the canonical crate either way.
-        // Every other rename fixture renames in the member's own table, so the root half of that
-        // pair was reached by nothing; this covers it.
-        //
-        // What it pins is the rule as written, which is **wider than a rename**: the check tests
-        // that a `package` key is *present* and never compares it with the dependency name, so the
-        // identity spelling `bytes = { package = "bytes", … }` — a no-op Cargo accepts — is
-        // rejected too. That is tracked as a production defect (#168); the second half of this
-        // fixture pins it as current behaviour so the fix has something to change, and the name of
-        // this test says "whatever it names" rather than asserting a rename occurred.
-        workspace_root_package_key_is_rejected("bytes-fork", "");
-    }
-
-    #[test]
-    fn an_identity_package_key_in_the_workspace_root_is_rejected_although_cargo_accepts_it() {
+    fn an_identity_package_key_in_the_workspace_root_is_accepted() {
         // `bytes = { package = "bytes", … }` renames nothing: Cargo's `package` field defaults to
-        // the key, so this is the fully-qualified spelling of an ordinary dependency and `cargo
-        // check` is happy with it. Spargen refuses it with a hard `E023` because the rule tests the
-        // key's presence rather than its value, so a workspace written in that style cannot use
-        // spargen at all.
-        //
-        // This asserts the **current, wrong** behaviour, deliberately, so that #168's fix has a
-        // fixture to flip. When it lands, this becomes `assert!(diagnostics.is_empty())` and the
-        // name loses its second clause. The same false positive is already pinned at the member
-        // level by a fixture on master; this is the workspace-root half of it.
-        workspace_root_package_key_is_rejected("bytes", "#168: ");
+        // the key, so this is the fully-qualified spelling of an ordinary dependency, and `cargo
+        // check` compiles `bytes::Bytes` against it. The rule once tested the key's *presence*
+        // rather than its value and refused this with a hard `E023` (#168).
+        let diagnostics = workspace_root_bytes_package_diagnostics("bytes");
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
     }
 
     #[test]
