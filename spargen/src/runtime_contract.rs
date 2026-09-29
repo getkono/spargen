@@ -881,7 +881,8 @@ struct WorkspaceRoot {
 /// - otherwise the nearest *lexical* ancestor manifest that parses and declares `[workspace]` wins.
 ///
 /// The ancestor walk runs over an absolutized path. `manifest_path` can legitimately be relative —
-/// the `generate_api!` shim falls back to a bare `./Cargo.toml` — and a relative path has no
+/// a build driver other than Cargo may set `CARGO_MANIFEST_DIR` to a relative directory, which
+/// `generate_api!` passes on as given — and a relative path has no
 /// ancestors to walk, which would report every inherited dependency as unresolvable. Absolutizing
 /// is lexical and keeps any `..`, since folding those away changes which file a path names when a
 /// component is a symlink; the walk therefore climbs the path as written, not as the filesystem
@@ -3038,9 +3039,10 @@ serde_json.workspace = true
 
     #[test]
     fn a_relative_manifest_path_still_resolves_the_workspace_root() {
-        // `generate_api!` falls back to a bare `./Cargo.toml` when Cargo names no manifest in the
-        // environment. A one-component path has no ancestors to walk, so the workspace root was
-        // never found and every inherited dependency reported as unresolvable.
+        // A build driver may name the manifest relatively (`CARGO_MANIFEST_DIR=.`), and
+        // `generate_api!` passes it on as given. A one-component path has no ancestors to walk, so
+        // the workspace root was never found and every inherited dependency reported as
+        // unresolvable.
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("Cargo.toml");
         let member_dir = directory.path().join("client");
@@ -3076,8 +3078,8 @@ serde_json.workspace = true
     #[test]
     fn a_self_rooted_manifest_names_an_absolute_path_when_an_entry_is_missing() {
         // The layout the relative-path fix exists for: a single-crate repository whose `[package]`
-        // and `[workspace]` share one file, reached through the `generate_api!` `./Cargo.toml`
-        // fallback. The diagnostic names the manifest it resolved against, and naming it
+        // and `[workspace]` share one file, reached through a relative manifest path. The
+        // diagnostic names the manifest it resolved against, and naming it
         // `./Cargo.toml` would tell the reader nothing about which file to open.
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -3251,10 +3253,11 @@ serde_json.workspace = true
     /// unresolvable, the mutant adopts it and reports nothing. So the mutant is equivalent **under
     /// that precondition** and distinguishable without it.
     ///
-    /// The precondition is not enforced anywhere: `manifest_from_env` returns `CARGO_MANIFEST_PATH`
-    /// verbatim with no filename check. It holds because Cargo sets that variable to a `Cargo.toml`
-    /// and because the `generate_api!` fallback is a literal `./Cargo.toml`, which is why this is a
-    /// comment rather than a fixture — there is no reachable input that distinguishes the two.
+    /// The precondition is not enforced anywhere: `manifest_from_env` and `generate_api!` both pass
+    /// `CARGO_MANIFEST_PATH` on verbatim with no filename check, and otherwise join `Cargo.toml`
+    /// onto `CARGO_MANIFEST_DIR`. It holds because Cargo sets that variable to a `Cargo.toml`,
+    /// which is why this is a comment rather than a fixture — there is no reachable input that
+    /// distinguishes the two.
     #[test]
     fn the_walk_climbs_past_an_ancestor_that_parses_and_declares_no_workspace() {
         // "A manifest that parses but declares no `[workspace]` is an ordinary member or an
@@ -3530,9 +3533,9 @@ serde_json.workspace = true
         // A self-rooted manifest is the consumer manifest, already read and already recorded, so
         // resolution must not read it a second time or record it again. Reached by an absolute
         // path the duplicate is invisible — `manifests` is sorted and deduplicated — so the guard
-        // has to come in through the `generate_api!` `./Cargo.toml` fallback, where the second
-        // spelling is a different string and Cargo would receive two `rerun-if-changed` directives
-        // for one file.
+        // has to come in through a relative manifest path (`CARGO_MANIFEST_DIR=.`), where the
+        // second spelling is a different string and Cargo would receive two `rerun-if-changed`
+        // directives for one file.
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(
             directory.path().join("Cargo.toml"),
