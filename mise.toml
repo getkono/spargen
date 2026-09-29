@@ -39,10 +39,18 @@ description = "Build every feature combination, not just --all-features"
 # Every other gate runs `--all-features`, so a combination such as `xml` on and `time` off was
 # never compiled — and those are exactly the subsets the generator embeds per spec. `--each-feature`
 # adds the none/all ends; the powerset covers the middle for the runtime, where the conditional
-# modules live.
+# modules live. The first two lines build without dev-dependencies, so a feature they unify in
+# (serde's `derive`) cannot mask a missing one: each package at the ends, then the runtime's lib at
+# every combination. Neither compiles `#[cfg(test)]` code, and plain `cargo check` sets `cfg(test)`
+# for no target but a test one, so the last two lines pass `--all-targets`: test modules,
+# integration tests, and benches at each feature set they visit, which `test` (only
+# `--all-features`) cannot reach (#237). `--all-targets` unifies dev-dependency features into the
+# lib too, so it cannot replace the `--no-dev-deps` powerset. Doctests are not compiled here.
 run = [
   "cargo hack check --workspace --each-feature --no-dev-deps",
-  "cargo hack check -p support-runtime --feature-powerset",
+  "cargo hack check -p support-runtime --no-dev-deps --feature-powerset",
+  "cargo hack check --workspace --exclude support-runtime --each-feature --all-targets",
+  "cargo hack check -p support-runtime --all-targets --feature-powerset",
 ]
 
 [tasks.deny]
