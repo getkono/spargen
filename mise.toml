@@ -5,6 +5,7 @@
 hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
 "cargo:convco" = "0.7.1"                    # Conventional Commit checker
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"  # supply-chain audit
+"aqua:rustsec/rustsec/cargo-audit" = "0.22.2"  # advisory + yank audit of every lockfile entry
 "cargo:cargo-hack" = "0.6.39"               # feature-combination builds
 "cargo:mdbook" = "0.5.4"                    # documentation site builder
 
@@ -60,8 +61,25 @@ run = [
 # each release red. What they audit is therefore exactly what those gates compile. The same test
 # holds every example workspace to an audit here, with `--config deny.toml`, `--all-features`, and
 # a bare `check`.
+# cargo-deny audits the graph it activates, not the lockfile: an entry no feature activates (Cargo
+# locks the target of a weak `dep?/feature` without enabling it, which is how reqwest puts quinn,
+# and through it `rand 0.10` and `chacha20`, into the root `Cargo.lock`) is filtered out and never
+# checked, at any feature scope, so a yanked `chacha20 0.10.1` sat in the lockfile under `yanked =
+# "deny"` with this audit green (#187). `cargo audit` reads every entry of the file it is given,
+# so it runs over each committed lockfile, denying every warning kind (yanked, unmaintained,
+# unsound), as `deny.toml`'s `[advisories]` does. It runs over the RustSec checkout cargo-deny
+# just fetched into `deny.toml`'s `db-path`, without fetching, after the command that prints that
+# checkout's commit: the log of every run names the database revision its advisory verdict was
+# reached against. (The `cargo deny check`s after it fetch again, so theirs is that revision or a
+# later one.) `the_lockfile_audit_reads_every_committed_lockfile` pins this shape.
 description = "Supply-chain audit (licenses, advisories, bans, sources) of every committed lockfile"
 run = [
+  "cargo deny fetch db",
+  "git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file Cargo.lock",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/github-api/Cargo.lock",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore/Cargo.lock",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore-macro/Cargo.lock",
   "cargo deny --all-features --locked check",
   "cargo deny --manifest-path examples/github-api/Cargo.toml --config deny.toml --all-features check",
   "cargo deny --manifest-path examples/petstore/Cargo.toml --config deny.toml --all-features check",
@@ -79,7 +97,9 @@ run = [
 # (or is missing). CI's `deny-published` job in `deny.yml` runs these commands byte for byte, only
 # on the schedule and on `workflow_dispatch`: a pull request cannot change a published artefact, so
 # failing one on it would only block the release that carries the fix.
-# `the_published_lockfile_audit_covers_every_shipped_binary` pins its shape.
+# `the_published_lockfile_audit_covers_every_shipped_binary` pins its shape. As in `deny`, cargo-deny
+# checks only the activated graph, so `cargo audit` also reads every entry of the shipped lockfile
+# (`cargo install --locked` warns on a yanked one), against the printed database revision (#187).
 description = "Advisory audit of the Cargo.lock the latest spargen release ships on crates.io"
 run = [
   '''
@@ -92,6 +112,9 @@ tar -xzf target/deny-published/spargen.crate -C target/deny-published/spargen --
 printf '\n[workspace]\n' >> target/deny-published/spargen/Cargo.toml
 echo "auditing the Cargo.lock published in spargen $version"
 ''',
+  "cargo deny fetch db",
+  "git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file target/deny-published/spargen/Cargo.lock",
   "cargo deny --manifest-path target/deny-published/spargen/Cargo.toml --config deny.toml --all-features --locked check advisories",
 ]
 

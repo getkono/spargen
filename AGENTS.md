@@ -99,7 +99,7 @@ pinned literally on both sides: `commits` checks the pull request's `base.sha..h
 `commit-range` checks `origin/master..HEAD` (only the range is rewritten; the rest must match), the
 `package` job's release-PR-gated `cargo publish --dry-run -p spargen-macro` step is CI-only,
 `benchmarks.yml` adds `set -o pipefail` and `| tee bench-results.txt` to capture the artifact, and
-CI installs `cargo-deny`, `cargo-hack`, `mdbook` and `convco` itself where mise's `[tools]` does, at
+CI installs `cargo-deny`, `cargo-audit`, `cargo-hack`, `mdbook` and `convco` itself where mise's `[tools]` does, at
 the same versions. The Rust toolchain is pinned the same way: `rust-toolchain.toml`'s `channel`
 is a concrete release (not `stable`), it selects the toolchain for every local `cargo` call and so
 for every `mise run` gate, and every `dtolnay/rust-toolchain@` step in every workflow installs that
@@ -125,7 +125,7 @@ CI additionally gates what no local task can: `commits` checks exactly the pull 
 Four lockfiles are committed: the workspace `Cargo.lock` and one per example workspace. The
 supply-chain audit is **not hermetic** — cargo-deny fetches the RustSec database on every run and
 `yanked = "deny"` reads the registry as it is now — so an advisory can turn every open pull request
-red with nothing committed. Three things hold the audit to the committed artefact:
+red with nothing committed. Four things hold the audit to the committed artefact:
 
 - `deny` audits the root workspace with `--locked`, so a lockfile that does not match the
   manifests fails the audit instead of being silently rewritten and the rewrite audited. It also
@@ -133,6 +133,19 @@ red with nothing committed. Three things hold the audit to the committed artefac
   compiles them (their `spargen` stamp goes stale on each release, below): an example audit covers
   exactly the graph those gates compile, and like `mise run example` it rewrites that stamp
   locally.
+- cargo-deny audits the graph it activates, not the lockfile: an entry no feature activates is
+  filtered out at every feature scope. Cargo locks the target of a weak `dep?/feature` without
+  enabling it — reqwest's `quinn?/ring` put quinn, `rand 0.10` and a yanked `chacha20` into
+  `Cargo.lock`, 17 of its 278 entries that cargo-deny never checked (#187). So `deny` also runs
+  `cargo audit --deny warnings` over **every entry** of each committed lockfile (and
+  `deny-published` over the shipped one), with `--ignore` exactly `deny.toml`'s `[advisories]
+  ignore`; `the_lockfile_audit_reads_every_committed_lockfile` holds that shape. A yank or advisory
+  on such an entry is fixed as "anywhere else" below: nothing compiles it.
+- Each run records the advisory-database revision it judged against: `cargo deny fetch db` clones
+  RustSec into `deny.toml`'s `db-path` (`target/advisory-dbs/`), the next command logs that
+  checkout's commit, and every `cargo audit` reads it with `--no-fetch`. A past green is read
+  against that logged revision, not against today's database. (The `cargo deny check`s after it
+  fetch again, so theirs is that revision or a later one.)
 - `deny.yml` runs it daily on `master` (and on `workflow_dispatch`), so the repository finds a new
   advisory before a contributor's unrelated pull request does. GitHub sends a failed scheduled run
   to whoever last changed the workflow's `cron`, and disables a schedule after 60 days without
@@ -146,7 +159,7 @@ The committed lockfile is not the only one users install from. `spargen` has a `
 lockfile's pins; a fix on `master` reaches it only when a release carries it. `mise run
 deny-published` downloads the latest stable `spargen` release from crates.io and runs `cargo deny
 check advisories` over the `Cargo.lock` inside it (`--locked`, `--all-features`, under this
-`deny.toml`). `deny.yml`'s `deny-published` job runs it on the daily schedule and on
+`deny.toml`), and `cargo audit` over every entry of it. `deny.yml`'s `deny-published` job runs it on the daily schedule and on
 `workflow_dispatch`, never on a pull request or push: no diff changes a published artefact.
 `the_published_lockfile_audit_covers_every_shipped_binary` holds it to every published crate that
 ships a binary (a library's shipped lockfile is never resolved against). A red `deny-published`

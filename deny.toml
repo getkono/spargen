@@ -9,6 +9,11 @@
 [advisories]
 version = 2
 yanked = "deny"
+# The RustSec checkout, inside the workspace's gitignored `target/` (relative to the working
+# directory, which is the root for every gate). `mise run deny` prints its commit, and runs
+# `cargo audit` over that same checkout without fetching, so a verdict names the database revision
+# it was reached against (#187). cargo-deny clones into `advisory-db-<hash of the URL>` below it.
+db-path = "target/advisory-dbs"
 
 [licenses]
 version = 2
