@@ -372,7 +372,14 @@ impl Responses {
     /// success status — it is empty, or holds only non-2xx statuses such as `404`. The
     /// specification defines `default` as the documentation of every status not declared
     /// explicitly, so with no success status declared it is what documents a 2xx response. While
-    /// any success status is declared, `default` stays on the error side alone.
+    /// any success status is declared, `default` stays on the error side alone, and satisfies no
+    /// undeclared 2xx in any [`SuccessShape`] (issue #151). That is deliberate: the specification's
+    /// own example pairs a `200` with a `default` "for others (implying an error)", so its body is
+    /// in practice an error model — often one whose optional fields match any object, which would
+    /// type a success silently as an error body — and one response object would then generate a
+    /// success variant and an error variant at once. `Unit` and `Plain` name no status, so they take
+    /// an undeclared 2xx as their one success; only `Enum` can tell it apart, and surfaces it as
+    /// `UnexpectedStatus` with the body preserved, rather than guess.
     fn default_is_success_source(&self) -> bool {
         !self
             .by_status
