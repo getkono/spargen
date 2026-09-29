@@ -1294,8 +1294,9 @@ fn an_undeclared_2xx_is_never_decoded_through_default_beside_a_declared_success(
     let (base, server) = serve_once("application/json", "201 Created", problem);
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_plain_default().unwrap_err() {
-        basic_client::Error::Decode { status, body, .. } => {
+        basic_client::Error::Decode { status, headers, body, .. } => {
             assert_eq!(status, 201);
+            assert_eq!(headers.get("content-type").unwrap(), "application/json");
             assert_eq!(&body[..], problem);
         }
         other => panic!("a 2xx must decode as the declared success, got {other:?}"),
@@ -1580,12 +1581,14 @@ fn success_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
     }
     server.join().unwrap();
 
-    // A body the matched arm cannot parse is `Error::Decode` at that status, with the body kept.
-    let (base, server) = serve_once("application/json", "202 Accepted", b"not json");
+    // A body the matched arm cannot parse is `Error::Decode` at that status, with the headers
+    // (#268) and the body kept.
+    let (base, server) = serve_once("text/plain", "202 Accepted", b"not json");
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_ranged().unwrap_err() {
-        basic_client::Error::Decode { status, body, .. } => {
+        basic_client::Error::Decode { status, headers, body, .. } => {
             assert_eq!(status, 202);
+            assert_eq!(headers.get("content-type").unwrap(), "text/plain");
             assert_eq!(&body[..], b"not json");
         }
         other => panic!("expected a decode error, got {other:?}"),
@@ -1644,11 +1647,14 @@ fn error_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
     }
     server.join().unwrap();
 
-    let (base, server) = serve_once("application/json", "409 Conflict", b"not json");
+    // Issue #268: a documented status whose body does not decode (here an HTML page, as a proxy
+    // in front of the server would send) keeps its status and headers on `Decode`.
+    let (base, server) = serve_once("text/html", "409 Conflict", b"not json");
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_error_ranged().unwrap_err() {
-        basic_client::Error::Decode { status, body, truncated, .. } => {
+        basic_client::Error::Decode { status, headers, body, truncated, .. } => {
             assert_eq!(status, 409);
+            assert_eq!(headers.get("content-type").unwrap(), "text/html");
             assert_eq!(&body[..], b"not json");
             assert!(!truncated);
         }

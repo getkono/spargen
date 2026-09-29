@@ -72,14 +72,21 @@ pub enum Error<E> {
         /// The raw response body.
         body: Bytes,
     },
-    /// #8 — the response body failed to deserialize; retains the status the response carried, the
-    /// serde error path, and the raw body, capped on every path but the two named on `body` below.
+    /// #8 — the response body failed to deserialize; retains the status and headers the response
+    /// carried, the serde error path, and the raw body, capped on every path but the two named on
+    /// `body` below. A documented error status whose body does not match its schema (a problem
+    /// `type` the description does not list, or an HTML page from a proxy in front of the server)
+    /// arrives here with its status and headers intact, so the caller can still act on them —
+    /// honour a `Retry-After` on a `429`, say.
     Decode {
         /// The status of the response whose body failed to decode: a success status when a
         /// success body did not match its schema, the documented error status when a documented
         /// error body did not. For `EventStream`'s per-frame decode, it is the status of the
         /// response the frame was read from — after a reconnect, the reconnected response's.
         status: StatusCode,
+        /// The headers of the response whose body failed to decode — for `EventStream`'s
+        /// per-frame decode, of the response the frame was read from, as for `status`.
+        headers: HeaderMap,
         /// The serde deserialization error path.
         path: String,
         /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
@@ -218,11 +225,13 @@ impl Error<std::convert::Infallible> {
             },
             Error::Decode {
                 status,
+                headers,
                 path,
                 body,
                 truncated,
             } => Error::Decode {
                 status,
+                headers,
                 path,
                 body,
                 truncated,
@@ -1039,6 +1048,7 @@ mod tests {
             },
             Error::Decode {
                 status: StatusCode::OK,
+                headers: HeaderMap::new(),
                 path: "items[0].id".to_owned(),
                 body: Bytes::from_static(b"{}"),
                 truncated: false,
@@ -1358,6 +1368,7 @@ mod tests {
     fn a_decode_error_is_transient_exactly_when_its_status_is() {
         let decode = |code: u16| Error::<ApiBody>::Decode {
             status: StatusCode::from_u16(code).unwrap(),
+            headers: HeaderMap::new(),
             path: "x".to_owned(),
             body: Bytes::new(),
             truncated: false,
@@ -1426,6 +1437,7 @@ mod tests {
             },
             Error::Decode {
                 status: StatusCode::PARTIAL_CONTENT,
+                headers: HeaderMap::new(),
                 path: "items[0].id".to_owned(),
                 body: Bytes::from_static(b"{}"),
                 truncated: true,
@@ -1510,6 +1522,7 @@ mod tests {
     fn a_decode_error_displays_its_status_and_path() {
         let error = Error::<ApiBody>::Decode {
             status: StatusCode::BAD_GATEWAY,
+            headers: HeaderMap::new(),
             path: "items[0].id".to_owned(),
             body: Bytes::new(),
             truncated: false,
@@ -1571,6 +1584,7 @@ mod tests {
             },
             Error::Decode {
                 status: StatusCode::SERVICE_UNAVAILABLE,
+                headers: HeaderMap::new(),
                 path: "items[0].id".to_owned(),
                 body: Bytes::from_static(b"{}"),
                 truncated: true,
@@ -1591,8 +1605,14 @@ mod tests {
         }
 
         // The payload fields survive, not just the discriminant.
+        let mut sent = HeaderMap::new();
+        sent.insert(
+            "retry-after",
+            reqwest::header::HeaderValue::from_static("30"),
+        );
         let widened: Error<ApiBody> = Error::<std::convert::Infallible>::Decode {
             status: StatusCode::UNPROCESSABLE_ENTITY,
+            headers: sent.clone(),
             path: "a.b".to_owned(),
             body: Bytes::from_static(b"raw"),
             truncated: true,
@@ -1600,6 +1620,7 @@ mod tests {
         .widen();
         let Error::Decode {
             status,
+            headers,
             path,
             body,
             truncated,
@@ -1608,6 +1629,7 @@ mod tests {
             panic!("widen changed the variant");
         };
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(headers, sent);
         assert_eq!(path, "a.b");
         assert_eq!(body, Bytes::from_static(b"raw"));
         assert!(truncated);
