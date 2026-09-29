@@ -729,14 +729,23 @@ impl std::fmt::Display for Requirements {
 }
 
 pub(crate) fn audit(manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
-    audit_in(manifest_path, requirements, &TargetContext::from_env())
+    // A real build climbs as Cargo does, to the filesystem root.
+    audit_in(
+        manifest_path,
+        requirements,
+        &TargetContext::from_env(),
+        None,
+    )
 }
 
-/// [`audit`] for an explicit target context, so no test has to mutate the process environment.
+/// [`audit`] for an explicit target context, so no test has to mutate the process environment,
+/// and an explicit `ceiling` on the workspace-root walk (see [`workspace_root`]), so no test's
+/// outcome depends on the manifests that happen to sit above its temporary directory.
 fn audit_in(
     manifest_path: &Utf8Path,
     requirements: &RuntimeRequirements,
     target: &TargetContext,
+    ceiling: Option<&Utf8Path>,
 ) -> Audit {
     let mut diagnostics = Vec::new();
     let mut manifests = vec![manifest_path.to_path_buf()];
@@ -750,7 +759,7 @@ fn audit_in(
             };
         }
     };
-    let root = workspace_root(manifest_path, &manifest);
+    let root = workspace_root(manifest_path, &manifest, ceiling);
     // Only a *separate* workspace manifest is read and reported: a self-rooted one is this very
     // file, already parsed above and already in `manifests`.
     let separate = match &root {
@@ -910,7 +919,19 @@ enum WorkspaceRoot {
 /// would resolve it. For the same reason it is never canonicalized: Cargo climbs the manifest path
 /// it hands the build, symlinks unresolved, so a canonical walk from a member reached through a
 /// symlinked directory would find a different root than Cargo did.
-fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> WorkspaceRoot {
+///
+/// `ceiling` bounds the walk: with `Some(directory)` it reads only ancestors that lie lexically
+/// within `directory` (that directory included) and stops at the first one that does not, so a
+/// manifest above it is neither adopted as the root nor reported as an unreadable candidate. It is
+/// compared component by component against the absolutized path, so it has to be spelled the way
+/// that path is. [`audit`] passes `None` and climbs to the filesystem root as Cargo does; the
+/// fixtures pass their own temporary directory, so no file outside it can change their outcome
+/// (#214). `package.workspace` is not a walk and names its root explicitly, so it is not bounded.
+fn workspace_root(
+    manifest_path: &Utf8Path,
+    manifest: &toml::Value,
+    ceiling: Option<&Utf8Path>,
+) -> WorkspaceRoot {
     let absolute = std::path::absolute(manifest_path)
         .ok()
         .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
@@ -941,6 +962,9 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
     // was the root at all — the walk skipped it precisely because it could not read it.
     let mut unreadable = None;
     while let Some(candidate_dir) = directory {
+        if ceiling.is_some_and(|ceiling| !candidate_dir.starts_with(ceiling)) {
+            break;
+        }
         let candidate = candidate_dir.join("Cargo.toml");
         if candidate.is_file() {
             // One read, keeping the failure rather than discarding it: it is the only account of
@@ -1481,11 +1505,65 @@ serde_json = "1.0.151"
         assert!(time.features.contains(&"parsing"), "{:?}", time.features);
     }
 
+    /// A temporary directory that is also the ceiling of every workspace-root walk audited through
+    /// it, and the only way a fixture here makes one.
+    ///
+    /// The walk otherwise climbs out of the directory to the filesystem root, so a `Cargo.toml`
+    /// that some unrelated process left in `/tmp` or `/` decided the outcome: one declaring
+    /// `[workspace]` turned every no-root fixture into a root-found one, and one that does not parse
+    /// became the candidate their messages name (#214). Auditing through [`Sandbox::audit`] bounds
+    /// the walk to this directory, so a fixture reads only the files it wrote.
+    ///
+    /// The path is canonicalized once, here. The ceiling is compared lexically against the
+    /// absolutized manifest path, and a relative manifest path is absolutized against the working
+    /// directory, which the platform reports canonically: where the temporary directory is reached
+    /// through a symlink, an uncanonicalized ceiling would never be met and the walk would climb
+    /// past it.
+    ///
+    /// `every_fixture_bounds_its_walk_by_its_own_sandbox` holds every fixture in this module to it.
+    struct Sandbox {
+        root: Utf8PathBuf,
+        _directory: tempfile::TempDir,
+    }
+
+    impl Sandbox {
+        fn new() -> Self {
+            let temporary = tempfile::tempdir().unwrap();
+            let root =
+                Utf8PathBuf::from_path_buf(temporary.path().canonicalize().unwrap()).unwrap();
+            Self {
+                root,
+                _directory: temporary,
+            }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            self.root.as_std_path()
+        }
+
+        /// [`audit`], bounded by this sandbox.
+        fn audit(&self, manifest_path: &Utf8Path, requirements: &RuntimeRequirements) -> Audit {
+            self.audit_in(manifest_path, requirements, &TargetContext::from_env())
+        }
+
+        /// [`audit_in`], bounded by this sandbox.
+        fn audit_in(
+            &self,
+            manifest_path: &Utf8Path,
+            requirements: &RuntimeRequirements,
+            target: &TargetContext,
+        ) -> Audit {
+            audit_in(manifest_path, requirements, target, Some(&self.root))
+        }
+    }
+
     fn audit_manifest(contents: &str, requirements: RuntimeRequirements) -> Vec<Diagnostic> {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let manifest = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         std::fs::write(&manifest, contents).unwrap();
-        audit_in(&manifest, &requirements, &TargetContext::Unknown).diagnostics
+        directory
+            .audit_in(&manifest, &requirements, &TargetContext::Unknown)
+            .diagnostics
     }
 
     #[test]
@@ -1664,10 +1742,12 @@ serde_json = "1.0.151"
     }
 
     fn audit_manifest_for(contents: &str, target: &TargetContext) -> Vec<Diagnostic> {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let manifest = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         std::fs::write(&manifest, contents).unwrap();
-        audit_in(&manifest, &RuntimeRequirements::default(), target).diagnostics
+        directory
+            .audit_in(&manifest, &RuntimeRequirements::default(), target)
+            .diagnostics
     }
 
     fn messages(diagnostics: &[Diagnostic]) -> String {
@@ -2315,7 +2395,7 @@ serde_json = "1.0.151"
 
     #[test]
     fn workspace_inherited_tokio_under_an_alternative_spelling_resolves() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
         std::fs::write(
@@ -2339,14 +2419,14 @@ serde_json = "1.0.151"
             // Cargo does not inherit `optional`: the root declares version and features, and the
             // member adds `optional = true` beside `workspace = true`.
             std::fs::write(&member, &inherited_optional).unwrap();
-            let result = audit_in(&member, &RuntimeRequirements::default(), &target);
+            let result = directory.audit_in(&member, &RuntimeRequirements::default(), &target);
             assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
 
             // So a member that leaves it out is held to the optional rule although the entry it
             // inherits resolves: exactly that rule fires, and nothing about the inheritance. Only
             // this half notices the rule being skipped for inherited declarations.
             std::fs::write(&member, &inherited_required).unwrap();
-            let result = audit_in(&member, &RuntimeRequirements::default(), &target);
+            let result = directory.audit_in(&member, &RuntimeRequirements::default(), &target);
             assert_eq!(
                 messages(&result.diagnostics),
                 "`tokio` must be optional because it is enabled only by the generated `blocking` \
@@ -2418,7 +2498,7 @@ serde_json = "1.0.151"
 
     #[test]
     fn workspace_inheritance_uses_the_workspace_version_and_features() {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -2447,7 +2527,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         assert_eq!(result.manifests, vec![root, member]);
     }
@@ -2473,7 +2553,7 @@ serde_json.workspace = true
         root_defaults: RootDefaults,
         member_reqwest: &str,
     ) -> Vec<String> {
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -2502,7 +2582,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         assert!(
             result
                 .diagnostics
@@ -3058,7 +3138,7 @@ serde_json.workspace = true
         // = true` there resolves against the table directly below it. Resolution used to give up
         // the moment the consumer manifest declared `[workspace]` at all, so this layout reported
         // every inherited dependency as unresolvable — about a table spargen had already parsed.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let manifest = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         std::fs::write(
             &manifest,
@@ -3070,7 +3150,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&manifest, &RuntimeRequirements::default());
+        let result = directory.audit(&manifest, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         // Self-rooted: one manifest, not the same file reported twice.
         assert_eq!(result.manifests, vec![manifest]);
@@ -3081,7 +3161,7 @@ serde_json.workspace = true
         // Cargo's `package.workspace` is a path to the root *directory*, not to its manifest. The
         // root here is deliberately not an ancestor of the member, so only that field can resolve
         // it and the assertion cannot pass through the ancestor walk by accident.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root_dir = directory.path().join("root");
         let member_dir = directory.path().join("outside");
         std::fs::create_dir(&root_dir).unwrap();
@@ -3105,7 +3185,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         // The root is reported as the field spells it — `…/outside/../root/Cargo.toml`. `..` is
         // deliberately not folded away: doing that lexically changes which file a path names when
@@ -3142,7 +3222,7 @@ serde_json.workspace = true
         // that is a perfectly good workspace root. Cargo takes the field; so must the audit. If the
         // walk were consulted first the ancestor would resolve every inherited dependency and the
         // audit would fall silent about a root the member explicitly named and that does not exist.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let ancestor = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -3164,7 +3244,9 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        let diagnostics = directory
+            .audit(&member, &RuntimeRequirements::default())
+            .diagnostics;
         let message = messages(&diagnostics);
         assert!(!diagnostics.is_empty(), "the named root does not exist");
         assert!(message.contains("elsewhere"), "{message}");
@@ -3176,7 +3258,7 @@ serde_json.workspace = true
         // `package.workspace`, so a manifest carrying both resolves against its own table. Reversed,
         // the audit would chase a directory that is not there and report every inherited dependency
         // as unresolvable, about a table it had already parsed.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
         let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
@@ -3190,7 +3272,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         assert_eq!(result.manifests, vec![member]);
     }
@@ -3201,7 +3283,7 @@ serde_json.workspace = true
         // `generate_api!` passes it on as given. A one-component path has no ancestors to walk, so
         // the workspace root was never found and every inherited dependency reported as
         // unresolvable.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root = directory.path().join("Cargo.toml");
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -3225,7 +3307,7 @@ serde_json.workspace = true
         let _restore = RestoreWorkingDirectory(std::env::current_dir().unwrap());
         std::env::set_current_dir(&member_dir).unwrap();
 
-        let result = audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
+        let result = directory.audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         // The member as given plus the workspace root the walk reached. The root's textual form
         // depends on how the platform resolves the temporary directory, so only the count is
@@ -3238,7 +3320,7 @@ serde_json.workspace = true
         // "No workspace manifest was found above `Cargo.toml`" names no directory at all. The
         // search runs from the absolutized path, and the message must name that one; reporting
         // the caller's spelling instead left every test green (#202).
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
         std::fs::write(
@@ -3258,7 +3340,7 @@ serde_json.workspace = true
             Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap().join("Cargo.toml"))
                 .unwrap();
 
-        let result = audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
+        let result = directory.audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
         assert!(!result.diagnostics.is_empty());
         for diagnostic in &result.diagnostics {
             assert_eq!(
@@ -3281,7 +3363,7 @@ serde_json.workspace = true
         // through a symlinked directory. Cargo climbs the path it was given, which is the path it
         // hands the build as `CARGO_MANIFEST_DIR`, so the root is the one above the link, not the
         // one above where the link points.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let lexical = directory.path().join("lexical");
         let physical = directory.path().join("physical");
         std::fs::create_dir_all(physical.join("client")).unwrap();
@@ -3311,7 +3393,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         assert_eq!(
             result.manifests,
@@ -3326,7 +3408,7 @@ serde_json.workspace = true
         // and `[workspace]` share one file, reached through a relative manifest path. The
         // diagnostic names the manifest it resolved against, and naming it
         // `./Cargo.toml` would tell the reader nothing about which file to open.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         std::fs::write(
             directory.path().join("Cargo.toml"),
             format!(
@@ -3347,7 +3429,7 @@ serde_json.workspace = true
         let _restore = RestoreWorkingDirectory(std::env::current_dir().unwrap());
         std::env::set_current_dir(directory.path()).unwrap();
 
-        let result = audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
+        let result = directory.audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
         assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
         let message = &result.diagnostics[0].message;
         assert!(
@@ -3372,7 +3454,7 @@ serde_json.workspace = true
         // workspace manifest", sending the reader to repair something unrelated to their build,
         // after which the same `E023` recurred because the repaired file declares no `[workspace]`
         // either (#171).
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
         let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
@@ -3384,7 +3466,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         // Every inherited crate is reported, each as not found and each carrying the hint — the
         // whole message pinned as one string from the verdict through the reason, so the verdict
         // cannot be dropped, the hint cannot be promoted back to the root, and the reason cannot
@@ -3435,7 +3517,7 @@ serde_json.workspace = true
         // `Cargo.toml`, one it lacks permission to read — must stay invisible to a consumer that
         // inherits nothing: it is not this crate's workspace root, and nothing here can tell
         // whether it is anyone's. Treating it as one turned an ordinary build into a hard `E023`.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
         std::fs::write(
@@ -3447,7 +3529,7 @@ serde_json.workspace = true
         // Declares every runtime dependency directly — nothing inherits, so nothing needs a root.
         std::fs::write(&member, CORE_MANIFEST).unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         // And it is not recorded as a build input either: a `rerun-if-changed` on an unrelated
         // file would rebuild the consumer whenever it changed.
@@ -3460,7 +3542,7 @@ serde_json.workspace = true
         // unrelated manifest that happens not to parse can sit between a member and its real
         // workspace root — Cargo reaches the root regardless, and a spargen that stopped short
         // would report `E023` for a layout that builds perfectly well.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let broken_dir = directory.path().join("group");
         let member_dir = broken_dir.join("client");
         std::fs::create_dir(&broken_dir).unwrap();
@@ -3481,7 +3563,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
     }
 
@@ -3510,7 +3592,7 @@ serde_json.workspace = true
         // ordinary, and treating the first *parseable* ancestor as the root silently resolves every
         // inherited dependency against a table that is not there. The existing walk fixtures all
         // put an ancestor that fails to *parse* in the way, which is a different arm.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let middle_dir = directory.path().join("middle");
         let member_dir = middle_dir.join("client");
@@ -3537,13 +3619,176 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         assert!(result.manifests.contains(&root), "{:#?}", result.manifests);
         assert!(
             !result.manifests.contains(&middle),
             "{:#?}",
             result.manifests
+        );
+    }
+
+    /// What `workspace_root` returned, spelled so an assertion can compare it.
+    fn walked(root: WorkspaceRoot) -> String {
+        match root {
+            WorkspaceRoot::SelfRooted(path) => format!("self-rooted {path}"),
+            WorkspaceRoot::Separate(path) => format!("separate {path}"),
+            WorkspaceRoot::NotFound {
+                unreadable: Some((path, _)),
+                ..
+            } => format!("not found, unreadable {path}"),
+            WorkspaceRoot::NotFound {
+                unreadable: None, ..
+            } => "not found".to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_walk_reads_nothing_above_its_ceiling() {
+        // #214: the ceiling is what keeps a fixture's outcome to the files it wrote. Above it sit
+        // a workspace root that would resolve and, further up, a manifest that does not parse —
+        // the two host files that used to turn these fixtures red — and a walk bounded below both
+        // must neither adopt the first nor name the second.
+        let directory = Sandbox::new();
+        let sandbox = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).unwrap();
+        let outer = sandbox.join("outer");
+        let inner = outer.join("inner");
+        let member_dir = inner.join("client");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        std::fs::write(sandbox.join("Cargo.toml"), "[workspace\nthis is not toml\n").unwrap();
+        std::fs::write(outer.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let member = member_dir.join("Cargo.toml");
+        let contents =
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}");
+        std::fs::write(&member, &contents).unwrap();
+        let manifest: toml::Value = toml::from_str(&contents).unwrap();
+        let walk = |ceiling: Option<&Utf8PathBuf>| {
+            walked(workspace_root(
+                &member,
+                &manifest,
+                ceiling.map(Utf8PathBuf::as_path),
+            ))
+        };
+
+        // The ceiling directory itself is read, so a root exactly at it still resolves.
+        assert_eq!(
+            walk(Some(&outer)),
+            format!("separate {}", outer.join("Cargo.toml"))
+        );
+        // Below the root, the walk ends at the ceiling: nothing found, and nothing unreadable met.
+        assert_eq!(walk(Some(&inner)), "not found");
+        assert_eq!(walk(Some(&member_dir)), "not found");
+        // A ceiling the manifest does not lie within bounds the walk before its first read.
+        assert_eq!(walk(Some(&sandbox.join("elsewhere"))), "not found");
+
+        // With the root removed, the unparseable manifest is met only where the ceiling admits it.
+        std::fs::remove_file(outer.join("Cargo.toml")).unwrap();
+        assert_eq!(walk(Some(&outer)), "not found");
+        assert_eq!(
+            walk(Some(&sandbox)),
+            format!("not found, unreadable {}", sandbox.join("Cargo.toml"))
+        );
+    }
+
+    #[test]
+    fn the_production_walk_has_no_ceiling() {
+        // The other half of the ceiling: `audit`, which every real build reaches, passes none, so
+        // it still climbs as Cargo does. A root above any directory a fixture could name as a
+        // ceiling is found only by an unbounded walk, and this is the one fixture that runs one.
+        let directory = Sandbox::new();
+        let sandbox = Utf8Path::from_path(directory.path()).unwrap();
+        let member_dir = sandbox.join("a").join("b").join("client");
+        std::fs::create_dir_all(&member_dir).unwrap();
+        std::fs::write(sandbox.join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
+        let member = member_dir.join("Cargo.toml");
+        let contents = "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n";
+        std::fs::write(&member, contents).unwrap();
+        let manifest: toml::Value = toml::from_str(contents).unwrap();
+
+        assert_eq!(
+            walked(workspace_root(&member, &manifest, None)),
+            format!("separate {}", sandbox.join("Cargo.toml"))
+        );
+        // And the entry point real builds call is the unbounded one: its source forwards `None` as
+        // the last argument. Whitespace is dropped so the check survives rustfmt's wrapping.
+        const SOURCE: &str = include_str!("runtime_contract.rs");
+        let entry: String = SOURCE
+            .split_once("pub(crate) fn audit(")
+            .and_then(|(_, rest)| rest.split_once("\n}\n"))
+            .map(|(body, _)| body)
+            .expect("`audit` is defined in this module")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            entry.ends_with("&TargetContext::from_env(),None,)")
+                || entry.ends_with("&TargetContext::from_env(),None)"),
+            "`audit` must not bound a real build's walk: {entry}"
+        );
+    }
+
+    #[test]
+    fn every_fixture_bounds_its_walk_by_its_own_sandbox() {
+        // #214 was thirteen fixtures, each making its own temporary directory and auditing through
+        // the unbounded entry point, so each climbed out through `/tmp` to `/`. A fourteenth written
+        // the same way would reintroduce it with every test green on a clean host, so the shape is
+        // held here: `Sandbox::new` is the one place this module makes a temporary directory, and
+        // `Sandbox::audit_in` the one place it calls the audit directly. Every other audit goes
+        // through a sandbox, and so is bounded by it. The needles are assembled so this test does
+        // not count itself.
+        const SOURCE: &str = include_str!("runtime_contract.rs");
+        let (_, tests) = SOURCE
+            .split_once(concat!("#[cfg(test)]\n", "mod tests {"))
+            .expect("this module ends in its test module");
+        let tempdir = concat!("tempfile::", "tempdir(");
+        assert_eq!(
+            tests.matches(tempdir).count(),
+            1,
+            "make a fixture's directory with `Sandbox::new()`, not `{tempdir})`"
+        );
+        // The arguments of each call not reached through a receiver — `name(` preceded by neither
+        // `.` nor an identifier character, and not a definition — up to the first `)`.
+        let bare_calls = |name: &str| -> Vec<&str> {
+            let call = format!("{name}(");
+            tests
+                .match_indices(&call)
+                .filter(|(at, _)| {
+                    let before = &tests[..*at];
+                    !before.ends_with('.')
+                        && !before.ends_with("fn ")
+                        && !before
+                            .chars()
+                            .next_back()
+                            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+                })
+                .map(|(at, _)| {
+                    let arguments = &tests[at + call.len()..];
+                    arguments
+                        .split_once(')')
+                        .map_or(arguments, |(head, _)| head)
+                })
+                .collect()
+        };
+        assert_eq!(
+            bare_calls(concat!("aud", "it")),
+            Vec::<&str>::new(),
+            "audit through `Sandbox::audit`, which bounds the walk"
+        );
+        assert_eq!(
+            bare_calls(concat!("aud", "it_in")).len(),
+            1,
+            "audit through `Sandbox::audit_in`, which bounds the walk"
+        );
+        // `workspace_root` is called directly only by the fixtures that pin the ceiling itself, and
+        // only `the_production_walk_has_no_ceiling` runs it unbounded, from a sandbox of its own.
+        let unbounded = bare_calls(concat!("workspace", "_root"))
+            .into_iter()
+            .filter(|arguments| arguments.trim_end().ends_with("None"))
+            .count();
+        assert_eq!(
+            unbounded, 1,
+            "bound a direct walk by its sandbox, as `the_walk_reads_nothing_above_its_ceiling` does"
         );
     }
 
@@ -3562,7 +3807,7 @@ serde_json.workspace = true
             .nth(1)
             .expect("the bytes entry pins a quoted version");
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -3584,7 +3829,9 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        audit(&member, &RuntimeRequirements::default()).diagnostics
+        directory
+            .audit(&member, &RuntimeRequirements::default())
+            .diagnostics
     }
 
     #[test]
@@ -3617,7 +3864,7 @@ serde_json.workspace = true
         // and its doc argues why: that root *is* audited, so `read_toml` already reported the parse
         // failure on its own line and "repeating it here would print it twice". Threading the real
         // reason through would do exactly that, and nothing noticed.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root_dir = directory.path().join("root");
         let member_dir = directory.path().join("outside");
         std::fs::create_dir(&root_dir).unwrap();
@@ -3633,7 +3880,9 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        let diagnostics = directory
+            .audit(&member, &RuntimeRequirements::default())
+            .diagnostics;
         let message = messages(&diagnostics);
         // Reported once, by the audit of the root itself.
         assert_eq!(
@@ -3664,7 +3913,7 @@ serde_json.workspace = true
         // wording of the hint: this one says only that the hint names the *near* broken manifest
         // and not the far one. No other fixture in this module puts two broken manifests on one
         // walk, so deleting it would leave the nearest-wins rule in `workspace_root` unguarded.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let far = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let near_dir = directory.path().join("near");
         let member_dir = near_dir.join("client");
@@ -3679,7 +3928,9 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let diagnostics = audit(&member, &RuntimeRequirements::default()).diagnostics;
+        let diagnostics = directory
+            .audit(&member, &RuntimeRequirements::default())
+            .diagnostics;
         let message = messages(&diagnostics);
         assert!(message.contains(near.as_str()), "{message}");
         assert!(!message.contains(far.as_str()), "{message}");
@@ -3694,7 +3945,7 @@ serde_json.workspace = true
         // workspaces are ordinary — a vendored tree, or a crate inside someone else's checkout —
         // and returning the farthest root instead resolves inherited dependencies against a table
         // belonging to an unrelated project.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let far = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let near_dir = directory.path().join("near");
         let member_dir = near_dir.join("client");
@@ -3718,7 +3969,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         let message = messages(&result.diagnostics);
         assert!(
             message.contains(near.as_str()) && message.contains("declares no `bytes` there"),
@@ -3750,7 +4001,7 @@ serde_json.workspace = true
             "the entry is an inline table"
         );
 
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -3769,7 +4020,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
     }
 
@@ -3780,7 +4031,7 @@ serde_json.workspace = true
         // the required side — so a root `optional = true` excuses a member that leaves it out —
         // left every test green (#202). Cargo rejects `optional` in `[workspace.dependencies]`,
         // so this, too, pins a rule rather than a layout Cargo loads.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
         std::fs::write(
@@ -3804,7 +4055,7 @@ serde_json.workspace = true
         )
         .unwrap();
         for target in [TargetContext::Unknown, linux()] {
-            let result = audit_in(&member, &RuntimeRequirements::default(), &target);
+            let result = directory.audit_in(&member, &RuntimeRequirements::default(), &target);
             assert_eq!(
                 messages(&result.diagnostics),
                 "`tokio` must be optional because it is enabled only by the generated `blocking` \
@@ -3821,7 +4072,7 @@ serde_json.workspace = true
         // has to come in through a relative manifest path (`CARGO_MANIFEST_DIR=.`), where the
         // second spelling is a different string and Cargo would receive two `rerun-if-changed`
         // directives for one file.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         std::fs::write(
             directory.path().join("Cargo.toml"),
             format!(
@@ -3838,7 +4089,7 @@ serde_json.workspace = true
         let _restore = RestoreWorkingDirectory(std::env::current_dir().unwrap());
         std::env::set_current_dir(directory.path()).unwrap();
 
-        let result = audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
+        let result = directory.audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         assert_eq!(
             result.manifests,
@@ -3872,7 +4123,7 @@ serde_json.workspace = true
         // One message used to cover two opposite situations: the workspace has no such entry (fix
         // the root), and no workspace was found at all (fix the layout, or spell the version out).
         // The report behind #71 landed in exactly that ambiguity.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -3884,7 +4135,7 @@ serde_json.workspace = true
         .unwrap();
 
         // No workspace manifest anywhere above the member.
-        let orphaned = audit(&member, &RuntimeRequirements::default());
+        let orphaned = directory.audit(&member, &RuntimeRequirements::default());
         for dependency in ["bytes", "reqwest", "secrecy", "serde", "serde_json"] {
             assert!(
                 orphaned.diagnostics.iter().any(|diagnostic| {
@@ -3924,7 +4175,7 @@ serde_json.workspace = true
             ),
         )
         .unwrap();
-        let partial = audit(&member, &RuntimeRequirements::default());
+        let partial = directory.audit(&member, &RuntimeRequirements::default());
         assert_eq!(partial.diagnostics.len(), 1, "{:#?}", partial.diagnostics);
         let message = &partial.diagnostics[0].message;
         assert!(
@@ -3953,7 +4204,7 @@ serde_json.workspace = true
     fn a_workspace_root_that_cannot_be_read_is_not_reported_as_missing() {
         // Found-but-broken is a third state. Reporting it as "no workspace manifest was found"
         // contradicts the read failure reported beside it and points at the opposite remedy.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root_dir = directory.path().join("root");
         let member_dir = directory.path().join("outside");
         std::fs::create_dir(&root_dir).unwrap();
@@ -3972,7 +4223,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         // The read failure names the file for what it is. Calling the workspace root "the consumer
         // manifest" contradicted the inheritance diagnostic asserted just below, which calls the
         // same path a workspace manifest.
@@ -4089,11 +4340,11 @@ serde_json.workspace = true
     fn a_consumer_manifest_that_cannot_be_read_or_parsed_is_named_as_the_consumer_manifest() {
         // The other half of the role noun: the consumer's own manifest is never called the
         // workspace manifest, on either failure. Swapping the two call-site nouns fails this test.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
 
         let unparseable = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         std::fs::write(&unparseable, "[package\nnot toml at all\n").unwrap();
-        let result = audit(&unparseable, &RuntimeRequirements::default());
+        let result = directory.audit(&unparseable, &RuntimeRequirements::default());
         assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
         let message = &result.diagnostics[0].message;
         assert!(
@@ -4106,7 +4357,7 @@ serde_json.workspace = true
 
         let absent =
             Utf8PathBuf::from_path_buf(directory.path().join("absent").join("Cargo.toml")).unwrap();
-        let result = audit(&absent, &RuntimeRequirements::default());
+        let result = directory.audit(&absent, &RuntimeRequirements::default());
         assert_eq!(result.diagnostics.len(), 1, "{:#?}", result.diagnostics);
         let message = &result.diagnostics[0].message;
         assert!(
@@ -4121,7 +4372,7 @@ serde_json.workspace = true
         // `package.workspace` is taken at its word, so a root directory holding no `Cargo.toml` is
         // a workspace manifest that could not be *read* — not a parse failure, and not a missing
         // root.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root_dir = directory.path().join("root");
         let member_dir = directory.path().join("outside");
         std::fs::create_dir(&root_dir).unwrap();
@@ -4136,7 +4387,7 @@ serde_json.workspace = true
         )
         .unwrap();
 
-        let result = audit(&member, &RuntimeRequirements::default());
+        let result = directory.audit(&member, &RuntimeRequirements::default());
         let any = |needle: &str| {
             result
                 .diagnostics
@@ -4232,7 +4483,7 @@ serde_json.workspace = true
         // core crates. The report said both came back as "generated client requires …". The
         // member adds `stream` to the inherited `reqwest`, which is the feature union a stream
         // needs and the half of it no other fixture exercises.
-        let directory = tempfile::tempdir().unwrap();
+        let directory = Sandbox::new();
         let root = Utf8PathBuf::from_path_buf(directory.path().join("Cargo.toml")).unwrap();
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
@@ -4265,7 +4516,7 @@ serde_json.workspace = true
             uuid: true,
             ..RuntimeRequirements::default()
         };
-        let result = audit(&member, &requirements);
+        let result = directory.audit(&member, &requirements);
         assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
         assert_eq!(result.manifests, vec![root, member]);
     }
