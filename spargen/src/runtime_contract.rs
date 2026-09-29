@@ -749,10 +749,15 @@ fn audit_in(
 ) -> Audit {
     let mut diagnostics = Vec::new();
     let mut manifests = vec![manifest_path.to_path_buf()];
+    // The file every diagnostic below names, absolutized so the reader can open it. A report whose
+    // text never said which manifest was read could not be told apart from one about the right
+    // file (#71, #339): a discovery mismatch then reads as a specific, wrong complaint.
+    let audited = absolutized(manifest_path);
+    let audited = audited.as_path();
     let manifest = match read_toml(manifest_path, "consumer manifest") {
         Ok(value) => value,
         Err(message) => {
-            diagnostics.push(diagnostic(message));
+            diagnostics.push(diagnostic(audited, message));
             return Audit {
                 diagnostics,
                 manifests,
@@ -768,7 +773,7 @@ fn audit_in(
             match read_toml(path, "workspace manifest") {
                 Ok(value) => Some(value),
                 Err(message) => {
-                    diagnostics.push(diagnostic(message));
+                    diagnostics.push(diagnostic(audited, message));
                     None
                 }
             }
@@ -818,6 +823,7 @@ fn audit_in(
                 require_no_defaults: required.no_default_features,
                 require_optional: required.optional,
                 origin,
+                audited,
             },
             target,
             &mut diagnostics,
@@ -837,6 +843,7 @@ fn audit_in(
             });
         if !wired {
             diagnostics.push(diagnostic(
+                audited,
                 "Cargo feature `blocking` must enable the native optional dependency with `blocking = [\"dep:tokio\"]`"
                     .to_owned(),
             ));
@@ -932,10 +939,7 @@ fn workspace_root(
     manifest: &toml::Value,
     ceiling: Option<&Utf8Path>,
 ) -> WorkspaceRoot {
-    let absolute = std::path::absolute(manifest_path)
-        .ok()
-        .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
-        .unwrap_or_else(|| manifest_path.to_path_buf());
+    let absolute = absolutized(manifest_path);
     if manifest.get("workspace").is_some() {
         // Absolutized for the same reason `searched_from` is: this path is what an unresolvable
         // inheritance names, and `./Cargo.toml` tells the reader nothing. It is not added to
@@ -996,6 +1000,16 @@ fn workspace_root(
     }
 }
 
+/// `path` made absolute lexically, as [`workspace_root`] describes: any `..` is kept and nothing is
+/// canonicalized. A path that cannot be absolutized, or whose absolute form is not UTF-8, is
+/// returned as given.
+fn absolutized(path: &Utf8Path) -> Utf8PathBuf {
+    std::path::absolute(path)
+        .ok()
+        .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
 struct DependencyCheck<'a> {
     placement: Placement,
     dependency: Dependency,
@@ -1005,6 +1019,8 @@ struct DependencyCheck<'a> {
     /// Where a `workspace = true` dependency resolves from, so an unresolvable inheritance can say
     /// what actually happened rather than only that it failed.
     origin: WorkspaceOrigin<'a>,
+    /// The absolutized consumer manifest the audit read, which every diagnostic names.
+    audited: &'a Utf8Path,
 }
 
 /// What the workspace lookup found, for the one diagnostic that has to explain itself.
@@ -1040,7 +1056,7 @@ fn check_dependency(
         Placement::Dependencies => {
             let Some(declaration) = dotted_get(manifest, "dependencies", check.dependency.name)
             else {
-                diagnostics.push(diagnostic(missing_message(check.dependency)));
+                diagnostics.push(diagnostic(check.audited, missing_message(check.dependency)));
                 return;
             };
             check_declaration(workspace, declaration, &check, true, "", diagnostics);
@@ -1219,7 +1235,7 @@ fn check_native_target(
             message.push_str("; ");
             message.push_str(&clause);
         }
-        diagnostics.push(diagnostic(message));
+        diagnostics.push(diagnostic(check.audited, message));
         return;
     }
 
@@ -1261,9 +1277,10 @@ fn check_native_target(
             } else {
                 String::new()
             };
-            diagnostics.push(diagnostic(format!(
-                "generated client requires Cargo feature `{feature}` on `{name}`{context}"
-            )));
+            diagnostics.push(diagnostic(
+                check.audited,
+                format!("generated client requires Cargo feature `{feature}` on `{name}`{context}"),
+            ));
         }
     }
 }
@@ -1320,24 +1337,27 @@ fn check_declaration<'v>(
                  is `{path}`, it could not be read: {reason}"
             ),
         };
-        diagnostics.push(diagnostic(format!(
-            "`{}` inherits from `[workspace.dependencies]`, but {origin}{location}",
-            dependency.name
-        )));
+        diagnostics.push(diagnostic(
+            check.audited,
+            format!(
+                "`{}` inherits from `[workspace.dependencies]`, but {origin}{location}",
+                dependency.name
+            ),
+        ));
         return None;
     }
 
     let version = declaration_version(workspace_declaration.unwrap_or(declaration));
     match version {
         Some(requirement) if supported_requirement(requirement, dependency) => {}
-        Some(requirement) => diagnostics.push(diagnostic(format!(
+        Some(requirement) => diagnostics.push(diagnostic(check.audited, format!(
             "`{}` version requirement `{requirement}` is outside the supported range >={}, <{}; use `{}` or a higher compatible caret requirement{location}",
             dependency.name,
             dependency.floor,
             dependency.ceiling(),
             dependency.floor
         ))),
-        None => diagnostics.push(diagnostic(format!(
+        None => diagnostics.push(diagnostic(check.audited, format!(
             "`{}` must declare a Cargo version requirement of `{}` or a higher compatible floor{location}",
             dependency.name, dependency.floor
         ))),
@@ -1348,10 +1368,13 @@ fn check_declaration<'v>(
     if check_features {
         for feature in check.features {
             if !features.contains(*feature) {
-                diagnostics.push(diagnostic(format!(
-                    "generated client requires Cargo feature `{feature}` on `{}`{location}",
-                    dependency.name
-                )));
+                diagnostics.push(diagnostic(
+                    check.audited,
+                    format!(
+                        "generated client requires Cargo feature `{feature}` on `{}`{location}",
+                        dependency.name
+                    ),
+                ));
             }
         }
     }
@@ -1362,13 +1385,13 @@ fn check_declaration<'v>(
         declaration_bool(declaration, "default-features").unwrap_or(true)
     };
     if check.require_no_defaults && defaults {
-        diagnostics.push(diagnostic(format!(
+        diagnostics.push(diagnostic(check.audited, format!(
             "`{}` must set `default-features = false` for the supported freestanding runtime graph{location}",
             dependency.name
         )));
     }
     if check.require_optional && declaration_bool(declaration, "optional") != Some(true) {
-        diagnostics.push(diagnostic(format!(
+        diagnostics.push(diagnostic(check.audited, format!(
             "`{}` must be optional because it is enabled only by the generated `blocking` feature{location}",
             dependency.name
         )));
@@ -1379,12 +1402,15 @@ fn check_declaration<'v>(
     // that turns defaults off) in which the generated module references a crate that is not in the
     // graph, and the failure surfaces as a rustc error inside generated code rather than here.
     if !check.require_optional && declaration_bool(declaration, "optional") == Some(true) {
-        diagnostics.push(diagnostic(format!(
+        diagnostics.push(diagnostic(
+            check.audited,
+            format!(
             "`{}` must not be optional: generated code references it unconditionally, so a build \
              with that feature disabled would not compile. Drop `optional = true`, or turn the \
              mapping off at generation time{location}",
             dependency.name
-        )));
+        ),
+        ));
     }
     // A rename is a `package` that differs from the key. Cargo's `package` defaults to the key, so
     // `bytes = { package = "bytes", … }` is the fully-qualified spelling of an ordinary dependency
@@ -1396,7 +1422,7 @@ fn check_declaration<'v>(
         .filter_map(|value| value.get("package"))
         .any(|package| package.as_str() != Some(dependency.name))
     {
-        diagnostics.push(diagnostic(format!(
+        diagnostics.push(diagnostic(check.audited, format!(
             "`{}` cannot be renamed because generated code references that canonical crate name{location}",
             dependency.name
         )));
@@ -1451,7 +1477,23 @@ fn supported_requirement(raw: &str, dependency: Dependency) -> bool {
     lower >= dependency.floor_version() && lower < dependency.ceiling()
 }
 
-fn diagnostic(message: String) -> Diagnostic {
+/// The suffix every `E023` message ends with, naming the manifest the audit read.
+const AUDITED_MANIFEST: &str = "; audited manifest: ";
+
+/// An `E023` diagnostic whose message ends by naming `audited`, the absolutized consumer manifest
+/// the audit read.
+///
+/// It is the only constructor, so no message can leave out which file it is about. It rides on the
+/// message rather than the `help:` remedy because `generate_api!` reports only code, message, and
+/// pointer: the macro path is where a manifest-discovery mismatch hid (#71), and a remedy would
+/// never have reached that report. A message that already names this file in its own clause (a
+/// read failure of the consumer manifest, or a self-rooted workspace declaring no entry) still
+/// carries the suffix: the clause names the file in its role there, and the suffix names it in the
+/// same shape on every message.
+fn diagnostic(audited: &Utf8Path, mut message: String) -> Diagnostic {
+    // A TOML parse error ends in a newline, which would strand the suffix on a line of its own.
+    message.truncate(message.trim_end().len());
+    message.push_str(&format!("{AUDITED_MANIFEST}`{audited}`"));
     Diagnostic {
         code: Code::RuntimeDependencyContract,
         severity: Code::RuntimeDependencyContract.severity(),
@@ -1546,8 +1588,41 @@ serde_json = "1.0.151"
             self.audit_in(manifest_path, requirements, &TargetContext::from_env())
         }
 
-        /// [`audit_in`], bounded by this sandbox.
+        /// [`audit_in`], bounded by this sandbox, with each message's audited-manifest suffix
+        /// checked and removed.
+        ///
+        /// Every fixture that audits through here therefore also asserts that each diagnostic it
+        /// sees names the absolutized `manifest_path` exactly as [`diagnostic`] renders it, and the
+        /// wording each fixture pins stays the message proper. A relative `manifest_path` is
+        /// absolutized against the working directory the audit itself ran under.
         fn audit_in(
+            &self,
+            manifest_path: &Utf8Path,
+            requirements: &RuntimeRequirements,
+            target: &TargetContext,
+        ) -> Audit {
+            let mut result = self.audit_unstripped(manifest_path, requirements, target);
+            let suffix = format!("{AUDITED_MANIFEST}`{}`", absolutized(manifest_path));
+            for diagnostic in &mut result.diagnostics {
+                let Some(message) = diagnostic.message.strip_suffix(&suffix) else {
+                    panic!(
+                        "an E023 message does not end by naming the audited manifest \
+                         `{manifest_path}` as `{suffix}`: {}",
+                        diagnostic.message
+                    );
+                };
+                assert!(
+                    !message.contains(AUDITED_MANIFEST),
+                    "an E023 message names the audited manifest more than once: {}",
+                    diagnostic.message
+                );
+                diagnostic.message = message.to_owned();
+            }
+            result
+        }
+
+        /// [`audit_in`], bounded by this sandbox, messages exactly as they are rendered.
+        fn audit_unstripped(
             &self,
             manifest_path: &Utf8Path,
             requirements: &RuntimeRequirements,
@@ -3426,6 +3501,65 @@ serde_json.workspace = true
     }
 
     #[test]
+    fn a_missing_entry_names_the_absolutized_manifest_the_audit_read() {
+        // #339: the report behind #71 said a required crate was missing and never said from which
+        // `Cargo.toml`, so a macro that audited the workspace root instead of the member could not
+        // be told apart from a member that really lacked the entry. Here the member lacks `bytes`
+        // and its workspace root sits one directory up; the member is reached by a relative path,
+        // the spelling a build driver may hand over, and the message names it as a path the reader
+        // can open. The messages are read as rendered, not through `Sandbox::audit_in`'s strip.
+        let directory = Sandbox::new();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"member\"]\n",
+        )
+        .unwrap();
+        std::fs::create_dir(directory.path().join("member")).unwrap();
+        let without_bytes = CORE_MANIFEST
+            .lines()
+            .filter(|line| !line.starts_with("bytes"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(directory.path().join("member/Cargo.toml"), without_bytes).unwrap();
+
+        let _lock = WORKING_DIRECTORY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreWorkingDirectory(std::env::current_dir().unwrap());
+        std::env::set_current_dir(directory.path()).unwrap();
+
+        let result = directory.audit_unstripped(
+            Utf8Path::new("member/Cargo.toml"),
+            &RuntimeRequirements::default(),
+            &TargetContext::Unknown,
+        );
+        let member = directory.root.join("member/Cargo.toml");
+        let messages = result
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            [format!(
+                "{}; audited manifest: `{member}`",
+                missing_message(BYTES)
+            )],
+            "the missing entry has to name the member it was looked for in"
+        );
+        // Named once, and never as the workspace root above it, which the audit did not read.
+        assert_eq!(
+            messages[0].matches(member.as_str()).count(),
+            1,
+            "{messages:#?}"
+        );
+        assert!(
+            !messages[0].contains(&format!("`{}`", directory.root.join("Cargo.toml"))),
+            "{messages:#?}"
+        );
+    }
+
+    #[test]
     fn a_self_rooted_manifest_names_an_absolute_path_when_an_entry_is_missing() {
         // The layout the relative-path fix exists for: a single-crate repository whose `[package]`
         // and `[workspace]` share one file, reached through a relative manifest path. The
@@ -4362,10 +4496,13 @@ serde_json.workspace = true
         );
         // The line the inheritance message defers to has to actually carry the reason: it is the
         // only account of the failure this limb prints. The expected reason is the parse error
-        // the same file yields when parsed again here, so the whole `: {error}` suffix is pinned.
+        // the same file yields when parsed again here, so the whole `: {error}` suffix is pinned,
+        // less the trailing newline `diagnostic` trims before naming the audited manifest.
         let unparsed = toml::from_str::<toml::Value>(&std::fs::read_to_string(&root).unwrap())
             .unwrap_err()
-            .to_string();
+            .to_string()
+            .trim_end()
+            .to_owned();
         assert_eq!(
             reason_after(
                 &result.diagnostics[failure].message,
@@ -4415,11 +4552,14 @@ serde_json.workspace = true
         );
         assert!(!message.contains("workspace manifest"), "{message}");
         // The consumer's own failure is reported on this one line and nowhere else, so the line
-        // has to carry its reason: exactly the error parsing the same file again yields.
+        // has to carry its reason: exactly the error parsing the same file again yields, less the
+        // trailing newline `diagnostic` trims before naming the audited manifest.
         let unparsed =
             toml::from_str::<toml::Value>(&std::fs::read_to_string(&unparseable).unwrap())
                 .unwrap_err()
-                .to_string();
+                .to_string()
+                .trim_end()
+                .to_owned();
         assert_eq!(
             reason_after(
                 message,
