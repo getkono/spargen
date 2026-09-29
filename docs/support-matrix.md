@@ -10,7 +10,9 @@ untyped; degradation is never silent.
 
 What a test holds here is narrower than the table may suggest: every diagnostic code a cell cites
 must be a declared code, and every declared code must appear in the column its severity names
-(Warned or Rejected), whatever other cells also mention it. The prose of a cell is reviewed by hand and checked by nothing, so an edit to it
+(Warned or Rejected), whatever other cells also mention it. Apart from the one exception below (the clauses of
+`E023`'s row that name workspace inheritance), the prose of a cell is reviewed by hand and checked
+by nothing, so an edit to it
 needs the same scrutiny as the behavior it describes. Where a test pins the text `spargen explain`
 prints for a code byte for byte (as for `E023`), the row defers to that text rather than restating
 it; `E023`'s row quotes a few of its clauses, and a test holds each clause there that names
