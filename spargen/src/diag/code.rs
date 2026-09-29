@@ -1065,7 +1065,7 @@ mod tests {
         }
         let (module, source) = owner.module;
         for fixture in owner.fixtures {
-            if !is_test_fn(source, fixture) {
+            if !crate::diag::is_test_fn(source, fixture) {
                 failures.push(format!(
                     "{code}'s {:?} names `{fixture}` as a fixture that enforces it, and no \
                      `#[test]` of that name exists in {module}",
@@ -1114,15 +1114,5 @@ mod tests {
                 stale.fixtures
             );
         }
-    }
-
-    /// Whether `source` declares `fn {name}(` immediately preceded by `#[test]`, with only
-    /// whitespace between.
-    fn is_test_fn(source: &str, name: &str) -> bool {
-        source.match_indices(&format!("fn {name}(")).any(|(at, _)| {
-            source[..at]
-                .rsplit_once("#[test]")
-                .is_some_and(|(_, between)| between.trim().is_empty())
-        })
     }
 }
