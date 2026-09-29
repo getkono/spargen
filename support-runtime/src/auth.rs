@@ -49,7 +49,28 @@ pub type TokenProvider = Arc<dyn Fn() -> TokenFuture + Send + Sync>;
 pub type TokenProvider = Arc<dyn Fn() -> TokenFuture>;
 
 /// A per-scheme credential supplied at client construction: a static secret or a token provider
-/// for rotation. Missing required credentials are a construction-time error, not a 401.
+/// for rotation.
+///
+/// Registration checks nothing: a credential is stored under whatever `securitySchemes` key it is
+/// given, and is matched against that scheme's [`AuthKind`] only when an operation that requires
+/// the scheme is called. Every failure below is therefore an error of that call, raised as a
+/// request-construction error before anything is sent — never a 401 from the server:
+///
+/// - no alternative of the operation's requirement has every scheme registered:
+///   [`super::RequestError::MissingCredential`];
+/// - the selected alternative has a credential of a variant its scheme cannot carry:
+///   [`super::RequestError::CredentialMismatch`];
+/// - the selected alternative's [`Credential::Provider`] fails:
+///   [`super::RequestError::CredentialProvider`].
+///
+/// Which variant a scheme accepts:
+///
+/// - `http basic` ([`AuthKind::Basic`]) accepts only [`Credential::Basic`];
+/// - every scheme that carries a token — `http bearer`, `oauth2` and `openIdConnect` (all three
+///   [`AuthKind::Bearer`]) and `apiKey` in a header, query or cookie — accepts [`Credential::Bearer`],
+///   [`Credential::ApiKey`] and [`Credential::Provider`], and rejects [`Credential::Basic`];
+/// - `mutualTLS` ([`AuthKind::MutualTls`]) is satisfied by the transport and never reads a
+///   registered credential, so one registered under it is ignored.
 #[derive(Clone)]
 pub enum Credential {
     /// `Authorization: Bearer <token>`.
@@ -64,6 +85,18 @@ pub enum Credential {
     /// An `apiKey` value.
     ApiKey(SecretString),
     /// A rotating token supplied on demand.
+    ///
+    /// The provider yields one secret, so it stands in for [`Credential::Bearer`] or
+    /// [`Credential::ApiKey`]: it is accepted under every scheme that carries a token (`http
+    /// bearer`, `oauth2`, `openIdConnect`, and `apiKey` in a header, query or cookie) and is asked
+    /// for a fresh token each time a call attaches it. A provider that fails fails that call as
+    /// [`super::RequestError::CredentialProvider`], with its [`AuthError`] as the source.
+    ///
+    /// It is **not** accepted under an `http basic` scheme, which needs a username and password
+    /// ([`Credential::Basic`]). There the call fails as
+    /// [`super::RequestError::CredentialMismatch`] with `required: "http basic"` and
+    /// `registered: "Provider"`, and the provider is never called. Under a `mutualTLS` scheme it is
+    /// ignored and never called, since the transport's client certificate satisfies the scheme.
     Provider(TokenProvider),
 }
 
