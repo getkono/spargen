@@ -394,6 +394,100 @@ fn documenting_a_bodyless_success_beside_the_body_is_major() {
     assert_eq!(report.bump, Impact::Major);
 }
 
+/// `get /pets` whose `responses:` body is `statuses` (8-space indent), for the `default`-beside-
+/// success shapes below.
+fn pets_responses(statuses: &str) -> String {
+    format!(
+        "  /pets:
+    get:
+      operationId: listPets
+      responses:
+{statuses}"
+    )
+}
+
+const R200_PET: &str = "        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Pet' }
+";
+
+const R201_STRING: &str = "        '201':
+          description: created
+          content:
+            application/json:
+              schema: { type: string }
+";
+
+const R204: &str = "        '204':
+          description: nothing
+";
+
+const R404: &str = "        '404':
+          description: missing
+";
+
+const RDEFAULT_STRING: &str = "        default:
+          description: anything else
+          content:
+            application/json:
+              schema: { type: string }
+";
+
+#[test]
+fn documenting_default_beside_a_declared_success_changes_only_the_error_type() {
+    // Issue #151: while any success status is declared, `default` satisfies no undeclared 2xx, so
+    // adding it touches the error side alone, in each success shape — plain, unit, and enum.
+    for success in [
+        R200_PET.to_owned(),
+        R204.to_owned(),
+        format!("{R200_PET}{R201_STRING}"),
+    ] {
+        let old = full(&pets_responses(&success), PET_SCHEMA);
+        let new = full(
+            &pets_responses(&format!("{success}{RDEFAULT_STRING}")),
+            PET_SCHEMA,
+        );
+        let report = diff(&old, &new);
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::ErrorTypeChanged],
+            "{success}: {:?}",
+            report.changes
+        );
+    }
+}
+
+#[test]
+fn removing_the_last_declared_success_makes_default_the_success_type_and_is_major() {
+    // With no success status left, `default` is what documents a 2xx (issue #115), so the success
+    // type moves from `Pet` to `default`'s body: the one edit that brings `default` onto the
+    // success side.
+    let old = full(
+        &pets_responses(&format!("{R200_PET}{R404}{RDEFAULT_STRING}")),
+        PET_SCHEMA,
+    );
+    let new = full(
+        &pets_responses(&format!("{R404}{RDEFAULT_STRING}")),
+        PET_SCHEMA,
+    );
+    let report = diff(&old, &new);
+    assert!(
+        kinds(&report).contains(&ChangeKind::SuccessTypeChanged),
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+    let detail = report
+        .changes
+        .iter()
+        .find(|change| change.kind == ChangeKind::SuccessTypeChanged)
+        .map(|change| change.detail.clone())
+        .unwrap();
+    assert!(detail.contains("String"), "{detail}");
+}
+
 /// `get /pets` with a documented `404` whose body is `error_schema`.
 fn with_error(error_schema: &str) -> String {
     format!(
