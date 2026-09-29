@@ -162,13 +162,13 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             .responses
             .by_status
             .iter()
-            .map(|(spec, response)| (status_label(Some(*spec)), response))
+            .map(|(spec, response)| (status_label(*spec), response))
             .chain(
                 operation
                     .responses
                     .default
                     .as_ref()
-                    .map(|response| (status_label(None), response)),
+                    .map(|response| (status_label(crate::ir::StatusSpec::Default), response)),
             );
         for (label, response) in responses {
             if response.headers.is_empty() {
@@ -317,10 +317,10 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
 
 /// The stable label for one documented status, shared by naming and codegen so a header struct and
 /// its response variant always agree.
-pub(crate) fn status_label(spec: Option<crate::ir::StatusSpec>) -> String {
+pub(crate) fn status_label(spec: crate::ir::StatusSpec) -> String {
     match spec {
-        Some(crate::ir::StatusSpec::Exact(code)) => format!("Status{code}"),
-        Some(crate::ir::StatusSpec::Range(0)) | None => "Default".to_owned(),
-        Some(crate::ir::StatusSpec::Range(prefix)) => format!("Status{prefix}xx"),
+        crate::ir::StatusSpec::Exact(code) => format!("Status{code}"),
+        crate::ir::StatusSpec::Range(prefix) => format!("Status{prefix}xx"),
+        crate::ir::StatusSpec::Default => "Default".to_owned(),
     }
 }

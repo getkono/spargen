@@ -543,14 +543,7 @@ pub(crate) fn emit_operation(
                 .by_status
                 .iter()
                 .filter(|(status, response)| !status.is_success() && response.body.is_some())
-                .map(|(status, _)| match status {
-                    crate::ir::StatusSpec::Exact(code) => {
-                        quote! { support::StatusSpec::Exact(#code) }
-                    }
-                    crate::ir::StatusSpec::Range(prefix) => {
-                        quote! { support::StatusSpec::Range(#prefix) }
-                    }
-                })
+                .map(|(status, _)| runtime_status_spec(*status))
                 .collect::<Vec<_>>();
             if operation
                 .responses
@@ -1234,14 +1227,13 @@ fn emit_response_headers(
         .responses
         .by_status
         .iter()
-        .map(|(spec, response)| (crate::name::status_label(Some(*spec)), response))
-        .chain(
-            operation
-                .responses
-                .default
-                .as_ref()
-                .map(|response| (crate::name::status_label(None), response)),
-        );
+        .map(|(spec, response)| (crate::name::status_label(*spec), response))
+        .chain(operation.responses.default.as_ref().map(|response| {
+            (
+                crate::name::status_label(crate::ir::StatusSpec::Default),
+                response,
+            )
+        }));
     let structs = responses.filter_map(|(label, response)| {
         if response.headers.is_empty() {
             return None;
@@ -2177,8 +2169,8 @@ fn response_variant_def(
 fn status_label(spec: crate::ir::StatusSpec) -> String {
     match spec {
         crate::ir::StatusSpec::Exact(code) => code.to_string(),
-        crate::ir::StatusSpec::Range(0) => "default".to_owned(),
         crate::ir::StatusSpec::Range(prefix) => format!("{prefix}XX"),
+        crate::ir::StatusSpec::Default => "default".to_owned(),
     }
 }
 
@@ -3256,47 +3248,44 @@ fn success_enum_ident(method_ident: &crate::name::Ident) -> proc_macro2::Ident {
 }
 
 /// The `PascalCase` variant identifier for a documented status selector: `Status200` for an exact
-/// code, `Status2xx` for a range, and `Default` for the `default` response (carried as the
-/// `Range(0)` sentinel by [`Responses::error`](crate::ir::Responses::error)). Deterministic and,
-/// within one enum, unique by
-/// construction (each selector appears once). Routed through the `name` escaper for validity.
+/// code, `Status2xx` for a range, and `Default` for [`StatusSpec::Default`](crate::ir::StatusSpec)
+/// — the label [`crate::name::status_label`] gives the same selector's header struct.
+/// Deterministic and, within one enum, unique by construction (each selector appears once).
+/// Routed through the `name` escaper for validity.
 fn status_variant_ident(spec: crate::ir::StatusSpec) -> proc_macro2::Ident {
-    let raw = match spec {
-        crate::ir::StatusSpec::Exact(code) => format!("Status{code}"),
-        crate::ir::StatusSpec::Range(0) => "Default".to_owned(),
-        crate::ir::StatusSpec::Range(prefix) => format!("Status{prefix}xx"),
-    };
+    let raw = crate::name::status_label(spec);
     format_ident!(
         "{}",
         crate::name::escape(&raw, crate::name::IdentRole::Variant).as_str()
     )
 }
 
-/// The runtime `support::StatusSpec` tokens for a documented status selector. The `default`
-/// sentinel (`Range(0)`) maps to `Any`, matching how the single-error-body path builds its table.
+/// The runtime `support::StatusSpec` tokens for a documented status selector. `default` maps to
+/// `Any`: it is classified last, so it matches exactly the statuses no other entry claimed.
 fn runtime_status_spec(spec: crate::ir::StatusSpec) -> TokenStream {
     match spec {
         crate::ir::StatusSpec::Exact(code) => quote! { support::StatusSpec::Exact(#code) },
-        crate::ir::StatusSpec::Range(0) => quote! { support::StatusSpec::Any },
         crate::ir::StatusSpec::Range(prefix) => quote! { support::StatusSpec::Range(#prefix) },
+        crate::ir::StatusSpec::Default => quote! { support::StatusSpec::Any },
     }
 }
 
+/// The chosen media type of the response a shape entry was built from: the `default` response for
+/// [`StatusSpec::Default`](crate::ir::StatusSpec), otherwise the `by_status` entry with exactly
+/// that selector.
 fn response_media_for_spec(
     responses: &crate::ir::Responses,
     spec: crate::ir::StatusSpec,
 ) -> Option<MediaType> {
-    if spec == crate::ir::StatusSpec::Range(0) {
-        return responses
-            .default
-            .as_ref()
-            .and_then(|response| response.media);
-    }
-    responses
-        .by_status
-        .iter()
-        .find(|(candidate, _)| *candidate == spec)
-        .and_then(|(_, response)| response.media)
+    let response = match spec {
+        crate::ir::StatusSpec::Default => responses.default.as_ref(),
+        crate::ir::StatusSpec::Exact(_) | crate::ir::StatusSpec::Range(_) => responses
+            .by_status
+            .iter()
+            .find(|(candidate, _)| *candidate == spec)
+            .map(|(_, response)| response),
+    };
+    response.and_then(|response| response.media)
 }
 
 /// Whether a body is decoded by the raw byte codec, which yields `bytes::Bytes` itself. It reads
@@ -3515,5 +3504,70 @@ mod tests {
             assert_eq!(boxed, unboxed, "boxing changed the emitted error type");
             assert!(!boxed.contains("Box"), "{boxed}");
         }
+    }
+
+    /// Issue #233: `default` was once the selector `Range(0)`, so a `0XX` entry decoded under the
+    /// `default` response's codec (or the fallback, with no `default`), and its variant and
+    /// runtime selector collided with `default`'s. Each selector now reads only its own response.
+    #[test]
+    fn each_status_selector_reads_its_own_response_media_and_label() {
+        let response = |media| Response {
+            body: Some(Ty {
+                id: TypeId(0),
+                nullable: false,
+                boxed: false,
+            }),
+            media: Some(media),
+            stream: None,
+            headers: Vec::new(),
+        };
+        let with_default = Responses {
+            by_status: vec![
+                (StatusSpec::Range(0), response(MediaType::Xml)),
+                (StatusSpec::Exact(404), response(MediaType::Json)),
+            ],
+            default: Some(response(MediaType::Text)),
+        };
+        let media = |responses: &Responses, spec| super::response_media_for_spec(responses, spec);
+        assert_eq!(
+            media(&with_default, StatusSpec::Default),
+            Some(MediaType::Text)
+        );
+        assert_eq!(
+            media(&with_default, StatusSpec::Range(0)),
+            Some(MediaType::Xml)
+        );
+        assert_eq!(
+            media(&with_default, StatusSpec::Exact(404)),
+            Some(MediaType::Json)
+        );
+        let without_default = Responses {
+            default: None,
+            ..with_default
+        };
+        assert_eq!(media(&without_default, StatusSpec::Default), None);
+        assert_eq!(
+            media(&without_default, StatusSpec::Range(0)),
+            Some(MediaType::Xml)
+        );
+
+        assert_eq!(
+            super::status_variant_ident(StatusSpec::Default).to_string(),
+            "Default"
+        );
+        assert_eq!(
+            super::status_variant_ident(StatusSpec::Range(0)).to_string(),
+            "Status0xx"
+        );
+        assert_eq!(super::status_label(StatusSpec::Default), "default");
+        assert_eq!(super::status_label(StatusSpec::Range(0)), "0XX");
+        assert_eq!(
+            super::runtime_status_spec(StatusSpec::Default).to_string(),
+            quote::quote! { support::StatusSpec::Any }.to_string()
+        );
+        assert_ne!(
+            super::runtime_status_spec(StatusSpec::Range(0)).to_string(),
+            super::runtime_status_spec(StatusSpec::Default).to_string()
+        );
     }
 }
