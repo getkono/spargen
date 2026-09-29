@@ -3529,6 +3529,46 @@ serde_json.workspace = true
     }
 
     #[test]
+    fn a_root_declaring_optional_does_not_satisfy_the_rule_that_tokio_be_optional() {
+        // The other half of the fixture above. `optional` is read from the member in both
+        // directions, and that fixture holds only the forbidden one: reading the root as well on
+        // the required side — so a root `optional = true` excuses a member that leaves it out —
+        // left every test green (#202). Cargo rejects `optional` in `[workspace.dependencies]`,
+        // so this, too, pins a rule rather than a layout Cargo loads.
+        let directory = tempfile::tempdir().unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}\
+                 tokio = {{ version = \"1.53.1\", features = [\"rt\"], optional = true }}\n",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n[features]\n\
+                 blocking = [\"dep:tokio\"]\n\n{CORE_INHERITED}\n\
+                 [target.'cfg(not(target_arch=\"wasm32\"))'.dependencies]\n\
+                 tokio = {{ workspace = true }}\n"
+            ),
+        )
+        .unwrap();
+        for target in [TargetContext::Unknown, linux()] {
+            let result = audit_in(&member, &RuntimeRequirements::default(), &target);
+            assert_eq!(
+                messages(&result.diagnostics),
+                "`tokio` must be optional because it is enabled only by the generated `blocking` \
+                 feature"
+            );
+        }
+    }
+
+    #[test]
     fn a_self_rooted_manifest_reached_by_a_relative_path_is_recorded_once() {
         // A self-rooted manifest is the consumer manifest, already read and already recorded, so
         // resolution must not read it a second time or record it again. Reached by an absolute
