@@ -92,10 +92,14 @@ the version it emits, and the idioms spargen handles.
   registered credential; a credential of a kind its scheme cannot carry as
   `RequestError::CredentialMismatch`; and a failed token provider as
   `RequestError::CredentialProvider` — never a silent 401.
-- A closed error taxonomy, identical across all spargen output: request-construction, transport,
-  timeout, protocol, redirect, documented API error (typed `E`), undocumented status (raw body
-  preserved), decode failure (serde path + body, capped except on the two paths the emitted
-  `ClientConfig::max_error_body` doc names), interrupted body. Every generated error
+- A closed error taxonomy, identical across all spargen output: request-construction
+  (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
+  above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
+  (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
+  error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
+  preserved), decode failure (`Error::Decode`: serde path + body, capped except on the two paths
+  the emitted `ClientConfig::max_error_body` doc names), interrupted body
+  (`Error::InterruptedBody`). Every generated error
   type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
   `thiserror`. `Error::is_transient()` classifies retry-worthy failures. An error enum whose
   bodied statuses carry the same body type (one schema, or schemas that generate the same Rust
