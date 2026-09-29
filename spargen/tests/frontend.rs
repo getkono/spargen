@@ -10181,9 +10181,9 @@ fn an_all_of_member_ref_intersects_its_shape_bearing_siblings() {
     }
 }
 
-/// `intersect_types` returns `None` for TWO conditions: the intersection is empty, so no value
-/// satisfies both sides, and the intersection is inhabited but has no single Rust type (the catch-all
-/// in `intersect_non_null` — `Bytes` against a `uuid` or date string, say). The emitted message must
+/// `intersect_types` fails for TWO conditions: the intersection is empty (`NoMeet::Empty`), so no
+/// value satisfies both sides, and the intersection is inhabited but has no single Rust type
+/// (`NoMeet::Unrepresentable` — `Bytes` against a `uuid` or date string, say). The emitted message must
 /// not claim the first when it may be the second: `{$ref: Id, contentEncoding: base64}` over a
 /// `uuid` string `Id` is satisfied by a base64 UUID, and the `E013` explain and the `allOf` scalar
 /// site both already say "empty or unrepresentable". This pins the site to the same honest wording. It asserts
@@ -10501,8 +10501,10 @@ fn a_tuple_conjoined_with_an_array_lowers_to_the_tuple_however_it_is_spelled() {
 
 /// The array's item schema is a real constraint on every tuple position, not a formality the
 /// tuple absorbs: an `integer` item narrows `number` positions to `i64`, and a position the item
-/// contradicts leaves no tuple at all — a fixed-length tuple has no empty value to fall back on the
-/// way an array's `Never` item does — so that composition is still `E013`.
+/// contradicts leaves an intersection no Rust type holds — `prefixItems` does not require an array
+/// to reach that position, so the arrays that stop short of it (`[]` among them) satisfy both
+/// sides, and neither a narrowed tuple nor an uninhabited one admits exactly those — so that
+/// composition is still `E013`, as unrepresentable rather than empty.
 #[test]
 fn an_array_item_schema_narrows_each_tuple_position_or_empties_the_tuple() {
     let narrowed = lower_each_spelling(
@@ -10543,7 +10545,9 @@ components:
 }
 
 /// The union path intersects the enclosing schema's sibling constraints with every branch, and a
-/// branch whose intersection is `None` is dropped with `W011`. So before the two pairs above had
+/// branch whose intersection is empty (`NoMeet::Empty`) is dropped with `W011`; one whose
+/// intersection is inhabited but unrepresentable (`NoMeet::Unrepresentable`) is `E013` instead.
+/// Before the two pairs above had
 /// arms, a tuple branch under a sibling `type: array`, and a binary branch under a sibling
 /// `type: string`, were dropped as excluded although the sibling admits them — and the union
 /// silently lost a member (`U` became `Vec<String>`, or `uuid::Uuid`). Both branches now survive,
@@ -11038,7 +11042,7 @@ fn the_composition_explain_covers_every_cause_that_reports_it() {
     );
 
     // The hedge the round-1 repair put on every message that reports this code: `intersect_types`
-    // returns `None` for an empty intersection AND for an inhabited one with no single Rust type,
+    // fails for an empty intersection AND for an inhabited one with no single Rust type,
     // and the text must not claim the first when it may be the second.
     assert!(explain.contains("empty or unrepresentable"), "{explain}");
 

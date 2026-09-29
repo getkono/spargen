@@ -256,8 +256,8 @@ pub(crate) enum TypeKind {
     /// to the refusal or warning that answer already had. And `push_ref_member`, the historical
     /// origin of the defect class, refuses an in-progress member itself (`E013`'s `allOf` unit
     /// rejection) rather than trusting each caller to have guarded it, so a new caller inherits
-    /// the refusal. `intersect_non_null` likewise answers `None` for a reservation in its own
-    /// first arm instead of relying on `intersect_types`' guard alone.
+    /// the refusal. `intersect_non_null` likewise answers `Err(NoMeet::Unrepresentable)` for a
+    /// reservation in its own first arm instead of relying on `intersect_types`' guard alone.
     ///
     /// **Semver.** The breaks are a list, not a pair, and an earlier revision of this paragraph
     /// said "two" where it should have said what follows. Making the placeholder unreadable did not
