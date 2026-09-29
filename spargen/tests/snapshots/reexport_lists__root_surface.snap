@@ -32,6 +32,6 @@ pub use support::{
     EventStream, ReconnectPolicy, ReconnectReason, ReconnectWait, StreamError,
 };
 #[allow(unused_imports)]
-pub use support::{Date, DateTime};
+pub use support::{Date, DateParseError, DateTime};
 #[allow(unused_imports)]
 pub use __spargen_blocking::*;

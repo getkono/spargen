@@ -179,3 +179,10 @@ let at = DateTime(time::OffsetDateTime::now_utc());
 let year = at.year();                  // through `Deref`
 let inner: time::OffsetDateTime = at.into();
 ```
+
+Both also parse their RFC 3339 text with `FromStr`, failing with `DateParseError`, which the
+generated root re-exports beside them:
+
+```rust
+let day: Result<Date, DateParseError> = "2024-01-01".parse();
+```

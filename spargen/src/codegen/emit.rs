@@ -2437,7 +2437,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
     // `time` mapping enabled; only then does the audit require `time` of the consumer.
     let datetime_module = uses_time.then(|| embed(&crate::support::datetime_runtime_file()));
     let datetime_reexport = uses_time.then(|| {
-        quote! { pub use datetime::{Date, DateTime, ParseError}; }
+        quote! { pub use datetime::{Date, DateParseError, DateTime}; }
     });
     // The blocking facade (`BlockingRuntime`) is embedded unconditionally but gated on the
     // `blocking` feature AND `not(target_arch = "wasm32")` at the module level: the tokio-dependent
@@ -3384,8 +3384,9 @@ pub(super) const STREAM_ROOT_REEXPORTS: &[&str] = &[
 ];
 
 /// The root re-exports emitted only when a date-typed primitive survives lowering with the `time`
-/// mapping on.
-pub(super) const DATETIME_ROOT_REEXPORTS: &[&str] = &["Date", "DateTime"];
+/// mapping on. `DateParseError` is the `FromStr` error of the other two, so `"…".parse::<Date>()`
+/// yields a `Result` whose error type a caller can write down.
+pub(super) const DATETIME_ROOT_REEXPORTS: &[&str] = &["Date", "DateParseError", "DateTime"];
 
 /// The name of an operation's error type: `{Operation}Error`, widened to
 /// `{Operation}OperationError` when the first form would shadow a runtime re-export.
