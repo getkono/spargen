@@ -18358,24 +18358,101 @@ fn the_cycle_predicate_counts_only_edges_lowering_follows() {
 /// same inputs `lower_schema`/`lower_enum` use". That is true for a plain type/enum/const body and
 /// false for every composed one.
 ///
-/// Both oracles agree on each row, and each row is asserted in BOTH spellings, so neither can drift
-/// from the other again.
+/// Both oracles agree on each row, and each row is asserted in EVERY spelling, so none can drift
+/// from the others again. There are four, because three functions reserve a type before lowering
+/// its body and each once wrote the provisional answer back over the body's: `ensure_component`
+/// (a root component), `ensure_resolved` (a sub-file component) and `ensure_remote` (a vendored
+/// remote schema). A per-site fixture pins one row in one direction; this table pins every row
+/// through every site, so reverting any one of the three to the provisional answer fails a row.
+/// Each spelling is used by two operations, because the first use returns the freshly lowered `Ty`
+/// and the second the cached one, and each path carried the overwrite separately.
 #[test]
 fn a_component_and_an_inline_schema_agree_about_null() {
-    const HEAD: &str =
-        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
+    use sha2::{Digest, Sha256};
 
-    fn inline_spec(body: &str) -> String {
+    const REMOTE_URL: &str = "https://api.example.com/schemas/body.yaml";
+    const REMOTE_PATH: &str = "api.example.com/schemas/body.yaml";
+
+    /// The root document: two operations whose `200` bodies are each `schema`, over `components`.
+    fn root(schema: &str, components: &str) -> String {
+        let schema = schema.replace('\n', "\n                ");
+        let operation = |path: &str, id: &str| {
+            format!(
+                "  {path}:\n    get:\n      operationId: {id}\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                {schema}\n"
+            )
+        };
         format!(
-            "{HEAD}paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema:\n                {body}\ncomponents:\n  schemas:\n    Ignore: {{ type: string }}\n",
-            body = body.replace('\n', "\n                ")
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\npaths:\n{}{}components:\n  schemas:\n{components}",
+            operation("/u", "fetch"),
+            operation("/v", "again"),
         )
     }
-    fn named_spec(body: &str) -> String {
-        format!(
-            "{HEAD}paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          description: ok\n          content:\n            application/json:\n              schema: {{ $ref: '#/components/schemas/Body' }}\ncomponents:\n  schemas:\n    Body:\n      {body}\n",
-            body = body.replace('\n', "\n      ")
-        )
+    fn component(body: &str) -> String {
+        format!("    Body:\n      {}\n", body.replace('\n', "\n      "))
+    }
+    /// Write `files` (paths relative to the root document's directory) and generate.
+    fn run(files: &[(&str, String)]) -> (Report, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        for (path, content) in files {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, content).unwrap();
+        }
+        let out = dir.join("client.rs");
+        let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        (report, code)
+    }
+    /// `body` generated in each spelling: `(spelling, report, emitted source)`.
+    fn every_spelling(body: &str) -> Vec<(&'static str, Report, String)> {
+        let ignore = "    Ignore: { type: string }\n";
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{REMOTE_URL}\"\nsha256 = \"{:x}\"\npath = \"{REMOTE_PATH}\"\n",
+            Sha256::digest(body.as_bytes())
+        );
+        let vendored = format!(".spargen/vendor/{REMOTE_PATH}");
+        let spellings = [
+            ("inline", vec![("openapi.yaml", root(body, ignore))]),
+            (
+                "root component",
+                vec![(
+                    "openapi.yaml",
+                    root("$ref: '#/components/schemas/Body'", &component(body)),
+                )],
+            ),
+            (
+                "sub-file component",
+                vec![
+                    (
+                        "openapi.yaml",
+                        root("$ref: './lib.yaml#/components/schemas/Body'", ignore),
+                    ),
+                    (
+                        "lib.yaml",
+                        format!("components:\n  schemas:\n{}", component(body)),
+                    ),
+                ],
+            ),
+            (
+                "vendored remote",
+                vec![
+                    (
+                        "openapi.yaml",
+                        root(&format!("$ref: '{REMOTE_URL}'"), ignore),
+                    ),
+                    ("spargen.lock", lock),
+                    (&vendored, body.to_owned()),
+                ],
+            ),
+        ];
+        spellings
+            .into_iter()
+            .map(|(spelling, files)| {
+                let (report, code) = run(&files);
+                (spelling, report, code)
+            })
+            .collect()
     }
 
     // (what it exercises, the schema body, whether `null` satisfies it)
@@ -18425,46 +18502,56 @@ fn a_component_and_an_inline_schema_agree_about_null() {
         ),
     ];
 
+    // Every emitted operation return (both operations, on every client surface emitted), so a wrong
+    // answer on either the lowered or the cached path shows.
+    let returns = |code: &str| code.matches("support::ResponseValue<").count();
+    let optional_returns = |code: &str| {
+        code.matches("support::ResponseValue<Option<types::")
+            .count()
+    };
+
     for (what, body, null_satisfies) in cases {
         let mut seen = Vec::new();
-        for (spelling, spec) in [
-            ("inline", inline_spec(body)),
-            ("named component", named_spec(body)),
-        ] {
-            let (report, code) = generate_with_code(&spec);
+        for (spelling, report, code) in every_spelling(body) {
             assert_ne!(
                 report.outcome(),
                 Outcome::Rejected,
                 "`{what}` ({spelling}): {report:#?}"
             );
-            let optional = code.contains("ResponseValue<Option<types::");
+            assert!(
+                returns(&code) >= 2,
+                "`{what}` ({spelling}): both operations must be emitted: {code}"
+            );
+            let optional = optional_returns(&code);
             assert_eq!(
                 optional,
-                *null_satisfies,
-                "`{what}` as {spelling} must {} an optional response body — `null` is {} under \
-                 this schema: {code}",
+                if *null_satisfies { returns(&code) } else { 0 },
+                "`{what}` as {spelling} must {} an optional response body on both operations — \
+                 `null` is {} under this schema: {code}",
                 if *null_satisfies { "have" } else { "not have" },
                 if *null_satisfies { "valid" } else { "invalid" }
             );
             seen.push((spelling, optional));
         }
-        assert_eq!(
-            seen[0].1, seen[1].1,
-            "`{what}` lowers to different nullability inline and as a component: {seen:?}"
+        assert_eq!(seen.len(), 4, "`{what}`: every spelling must run: {seen:?}");
+        assert!(
+            seen.iter().all(|(_, optional)| *optional == seen[0].1),
+            "`{what}` lowers to different nullability across spellings: {seen:?}"
         );
     }
 
-    // A component whose union admits ONLY `null` must be the exact null type in both spellings too
+    // A component whose union admits ONLY `null` must be the exact null type in every spelling too
     // — the component boundary previously wrapped it back into an `Option`.
     let only_null = "type: [integer, 'null']\noneOf: [{ type: string }, { type: 'null' }]";
-    for (spelling, spec) in [
-        ("inline", inline_spec(only_null)),
-        ("named component", named_spec(only_null)),
-    ] {
-        let (report, code) = generate_with_code(&spec);
-        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            !code.contains("ResponseValue<Option<types::"),
+    for (spelling, report, code) in every_spelling(only_null) {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{spelling}: {report:#?}"
+        );
+        assert_eq!(
+            optional_returns(&code),
+            0,
             "`{spelling}`: the intersection is `{{null}}`, so the type already has exactly one \
              inhabitant and must not be wrapped in `Option`: {code}"
         );
