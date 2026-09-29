@@ -1038,13 +1038,12 @@ mod tests {
     /// so the documented rule and the attach code cannot drift apart unseen.
     #[test]
     fn both_static_token_variants_attach_under_every_token_kind_and_neither_under_basic() {
-        let variants: [(fn() -> Credential, &str); 2] = [
-            (|| Credential::Bearer(SecretString::from("t0k")), "Bearer"),
-            (|| Credential::ApiKey(SecretString::from("t0k")), "ApiKey"),
-        ];
-        for (credential, registered) in variants {
+        for (credential, registered) in [
+            (Credential::Bearer(SecretString::from("t0k")), "Bearer"),
+            (Credential::ApiKey(SecretString::from("t0k")), "ApiKey"),
+        ] {
             let mut core = core();
-            core.set_credential("s", credential());
+            core.set_credential("s", credential);
             let attach = |kind| {
                 poll_ready(attach_auth(
                     &core,
