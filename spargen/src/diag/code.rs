@@ -200,6 +200,8 @@ impl Code {
     ///   the code may. Adding an enumerating body means adding it to that table.
     /// - `E023`'s body is pinned byte-for-byte, clause by clause, by
     ///   `runtime_contract::tests::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`.
+    ///   Its consumer-obligation clauses, which that test does not cite fixtures for, are tied to
+    ///   the fixtures that enforce them by this module's `EXPLAIN_CLAUSES_OWNED_ELSEWHERE` table.
     /// - Every other body is prose held only to being non-empty. A body that grows a list of the
     ///   cases reaching its code has become the first kind, and belongs in the table.
     pub fn explain(self) -> &'static str {
@@ -962,5 +964,165 @@ mod tests {
                 "OWNED_ELSEWHERE names `{variant}`, which is not a declared Code variant"
             );
         }
+    }
+
+    /// A clause of an `explain()` body whose **behaviour** is enforced by fixtures in another
+    /// module, recorded so that the connection between the prose and those fixtures is written
+    /// down and checkable, rather than re-derived by whoever notices the clause is unasserted.
+    struct ExplainClauseOwner {
+        code: Code,
+        /// Verbatim text of the body; it must occur there exactly once.
+        clause: &'static str,
+        /// The module whose `#[test]`s enforce the clause, and its source.
+        module: (&'static str, &'static str),
+        /// Names of `#[test]` functions in `module` that fail when the behaviour breaks. Where they
+        /// establish less than the clause says, a comment on the row states the gap.
+        fixtures: &'static [&'static str],
+    }
+
+    const RUNTIME_CONTRACT: (&str, &str) = (
+        "runtime_contract.rs",
+        include_str!("../runtime_contract.rs"),
+    );
+
+    /// The sibling of `OWNED_ELSEWHERE` for explain **prose**. `OWNED_ELSEWHERE` records which
+    /// suite asserts that a code is *emitted*; this records which fixtures enforce what a body
+    /// *says*, for clauses no test asserts as text.
+    ///
+    /// `E023`'s body is pinned byte for byte by
+    /// `runtime_contract::tests::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`,
+    /// which additionally cites a fixture for each sentence stating what the resolver does, and by
+    /// its own rule does not cite fixtures for sentences that give advice. The consumer-obligations
+    /// clauses below fall outside that rule — most read as advice — yet each is enforced by an
+    /// existing fixture, and one (reqwest's default features) is a named `E023` trigger in the
+    /// support matrix's rejected column, not advice at all. This table is where that ownership is
+    /// recorded, so the byte-for-byte test's rule need not change.
+    ///
+    /// What the check is worth, precisely: it catches a clause edited or deleted from the body and
+    /// a fixture renamed or removed. It does not verify that a cited fixture has anything to do
+    /// with the clause citing it; that is a reviewer's reading, and holding prose to behaviour in
+    /// general is #137.
+    const EXPLAIN_CLAUSES_OWNED_ELSEWHERE: &[ExplainClauseOwner] = &[
+        ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause: "its consuming Cargo package must declare the crates and dependency features \
+                     referenced by that specific API",
+            module: RUNTIME_CONTRACT,
+            fixtures: &[
+                // Each missing crate or feature is reported, and only when the API uses it.
+                "conditional_dependencies_and_features_are_required_only_when_used",
+                "reqwest_defaults_and_blocking_wiring_are_part_of_the_contract",
+            ],
+        },
+        ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause: "Use the documented tested lower bounds",
+            module: RUNTIME_CONTRACT,
+            fixtures: &["a_requirement_that_admits_a_version_below_the_floor_is_rejected"],
+        },
+        ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause: "(or a higher semver-compatible caret floor)",
+            module: RUNTIME_CONTRACT,
+            fixtures: &["exact_floors_and_higher_compatible_caret_requirements_are_supported"],
+        },
+        ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause: "keep reqwest default features disabled",
+            module: RUNTIME_CONTRACT,
+            fixtures: &["reqwest_defaults_and_blocking_wiring_are_part_of_the_contract"],
+        },
+        ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause: "enable only the reqwest/bytes/XML/UUID/time capabilities named by the \
+                     diagnostic",
+            module: RUNTIME_CONTRACT,
+            // Not covered: these pin that the diagnostic names exactly the capabilities the API
+            // uses (and never `serde` on `time`). The audit does not reject a capability enabled
+            // beyond that set, so "only" is advice, and no fixture enforces it.
+            fixtures: &[
+                "conditional_dependencies_and_features_are_required_only_when_used",
+                "the_time_requirement_never_asks_for_serde",
+            ],
+        },
+    ];
+
+    /// Every way `owner` has gone stale: its clause no longer occurs exactly once in the body, it
+    /// cites no fixture, or a fixture it cites is not a `#[test]` in its module.
+    fn explain_clause_owner_failures(owner: &ExplainClauseOwner) -> Vec<String> {
+        let mut failures = Vec::new();
+        let code = owner.code;
+        let occurrences = code.explain().matches(owner.clause).count();
+        if occurrences != 1 {
+            failures.push(format!(
+                "`spargen explain {code}` says {:?} {occurrences} times, expected exactly once; \
+                 bring EXPLAIN_CLAUSES_OWNED_ELSEWHERE in line with the body",
+                owner.clause
+            ));
+        }
+        if owner.fixtures.is_empty() {
+            failures.push(format!("no fixture cited for {code}'s {:?}", owner.clause));
+        }
+        let (module, source) = owner.module;
+        for fixture in owner.fixtures {
+            if !is_test_fn(source, fixture) {
+                failures.push(format!(
+                    "{code}'s {:?} names `{fixture}` as a fixture that enforces it, and no \
+                     `#[test]` of that name exists in {module}",
+                    owner.clause
+                ));
+            }
+        }
+        failures
+    }
+
+    #[test]
+    fn explain_clauses_owned_elsewhere_resolve_to_fixtures_that_exist() {
+        let failures: Vec<String> = EXPLAIN_CLAUSES_OWNED_ELSEWHERE
+            .iter()
+            .flat_map(explain_clause_owner_failures)
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The check's own falsifiers: a row whose clause is not in the body, whose fixture is a
+    /// helper rather than a `#[test]`, whose fixture does not exist, or that cites nothing, must
+    /// each be refused.
+    #[test]
+    fn the_explain_ownership_check_refuses_a_stale_clause_or_fixture() {
+        let row = |clause, fixtures| ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause,
+            module: RUNTIME_CONTRACT,
+            fixtures,
+        };
+        const LIVE: &[&str] = &["reqwest_defaults_and_blocking_wiring_are_part_of_the_contract"];
+        let clause = "keep reqwest default features disabled";
+
+        assert!(explain_clause_owner_failures(&row(clause, LIVE)).is_empty());
+        for stale in [
+            row("keep reqwest default features enabled", LIVE),
+            row(clause, &["replace_once"]),
+            row(clause, &["no_such_fixture_exists"]),
+            row(clause, &[]),
+        ] {
+            assert_eq!(
+                explain_clause_owner_failures(&stale).len(),
+                1,
+                "{:?} citing {:?}",
+                stale.clause,
+                stale.fixtures
+            );
+        }
+    }
+
+    /// Whether `source` declares `fn {name}(` immediately preceded by `#[test]`, with only
+    /// whitespace between.
+    fn is_test_fn(source: &str, name: &str) -> bool {
+        source.match_indices(&format!("fn {name}(")).any(|(at, _)| {
+            source[..at]
+                .rsplit_once("#[test]")
+                .is_some_and(|(_, between)| between.trim().is_empty())
+        })
     }
 }
