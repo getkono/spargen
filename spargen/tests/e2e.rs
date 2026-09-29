@@ -825,6 +825,60 @@ fn every_parameter_style_serializes_onto_the_wire() {
     server.join().unwrap();
 }
 
+/// `content:`-typed path and header parameters on the wire.
+///
+/// A path value is rendered through its media codec and then percent-encoded as one opaque segment,
+/// exactly as a schema-typed one is: neither the text value's `/` nor the JSON string member's
+/// `/`, `?`, or `#` may leave the segment it is spliced into, so the request stays under the
+/// client's base path. Header values are sent verbatim, as every header value is.
+#[test]
+fn content_typed_path_and_header_parameters_reach_the_wire() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+        let request_line = request.lines().next().unwrap();
+
+        assert_eq!(
+            request_line,
+            "GET /v1/content-params/x%2F..%2F..%2Fadmin/\
+             %7B%22kind%22%3A%22a%2F..%2Fb%3Fc%23d%22%2C%22limit%22%3A3%7D HTTP/1.1",
+            "{request}"
+        );
+        assert!(request.contains("x-text: x/../../admin\r\n"), "{request}");
+        assert!(
+            request.contains("x-json: {\"kind\":\"a/../b?c#d\",\"limit\":3}\r\n"),
+            "{request}"
+        );
+
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let filter = || basic_client::types::DeepFilter {
+        kind: "a/../b?c#d".to_owned(),
+        limit: Some(3),
+    };
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}/v1")).unwrap();
+    client
+        .serialize_content_params(
+            "x/../../admin".to_owned(),
+            filter(),
+            "x/../../admin".to_owned(),
+            filter(),
+        )
+        .unwrap();
+
+    server.join().unwrap();
+}
+
 /// The exact bytes of an `application/x-www-form-urlencoded` body built from an Encoding Object.
 ///
 /// A property that declares `style` switches to RFC 6570 mode (its `contentType` becomes inert);
@@ -2585,6 +2639,49 @@ fn oas32_constructs_reach_the_wire() {
     server.join().unwrap();
 }
 
+/// `in: querystring` with a JSON `content:` entry owns the whole query string: the serialized
+/// value, percent-encoded as one token, so none of its `&`, `=`, or `#` splits or ends the query.
+/// An absent optional value sends no query at all.
+#[test]
+fn a_json_querystring_parameter_is_one_encoded_query() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for expected in [
+            "GET /lookup?%7B%22term%22%3A%22a%26b%3Dc%23d%22%7D HTTP/1.1",
+            "POST /lookup?%7B%22term%22%3A%22x%20y%22%7D HTTP/1.1",
+            "POST /lookup HTTP/1.1",
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let read = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..read]);
+            let request_line = request.lines().next().unwrap();
+
+            assert_eq!(request_line, expected, "{request}");
+
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let query = |term: &str| oas32_client::types::Query { term: Some(term.to_owned()) };
+    let client = oas32_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client.lookup_records(query("a&b=c#d")).unwrap();
+    client
+        .lookup_records_maybe(Some(
+            oas32_client::LookupRecordsMaybeParams::default().filter(query("x y")),
+        ))
+        .unwrap();
+    client.lookup_records_maybe(None).unwrap();
+
+    server.join().unwrap();
+}
+
 /// `additionalOperations` on the wire, plus the two constructs its operation is built from: a
 /// `components.mediaTypes` reference supplying the request body, and a discriminated union whose
 /// `defaultMapping` catches an unrecognized tag.
@@ -3695,6 +3792,38 @@ paths:
           schema: { type: string }
       responses:
         "204": { description: No Content }
+  # `content:`-typed path and header parameters, one per codec. A path value is rendered through its
+  # media codec and then percent-encoded as one opaque segment, so a `/`, `?`, or `#` inside it (a
+  # JSON string member included) can never re-target the request; a header value is sent verbatim,
+  # as every header value is.
+  /content-params/{text}/{json}:
+    get:
+      operationId: serializeContentParams
+      parameters:
+        - name: text
+          in: path
+          required: true
+          content:
+            text/plain: { schema: { type: string } }
+        - name: json
+          in: path
+          required: true
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeepFilter" }
+        - name: X-Text
+          in: header
+          required: true
+          content:
+            text/plain: { schema: { type: string } }
+        - name: X-Json
+          in: header
+          required: true
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeepFilter" }
+      responses:
+        "204": { description: No Content }
   # An `application/x-www-form-urlencoded` body with an Encoding Object per property. `tags` opts
   # into RFC 6570 mode (`style` present ⇒ `contentType` is inert); `blob` stays in media-type mode
   # and is JSON-encoded because its declared content type says so.
@@ -4377,6 +4506,33 @@ servers:
       version:
         default: v1
 paths:
+  # `in: querystring` with a JSON `content:` entry: the whole query string is the serialized value,
+  # percent-encoded as one opaque token. Required and optional set the raw query differently (an
+  # initializer against a conditional assignment), so both are compile-verified.
+  /lookup:
+    get:
+      operationId: lookupRecords
+      parameters:
+        - name: filter
+          in: querystring
+          required: true
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Query"
+      responses:
+        "204": { description: No Content }
+    post:
+      operationId: lookupRecordsMaybe
+      parameters:
+        - name: filter
+          in: querystring
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Query"
+      responses:
+        "204": { description: No Content }
   /records:
     get:
       operationId: listRecords
