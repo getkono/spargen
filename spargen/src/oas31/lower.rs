@@ -4410,10 +4410,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let explicit = declared.and_then(|encoding| encoding.content_type.as_deref());
         let content_type = match explicit {
             // `contentType` is a comma-separated list of acceptable types, but a client sends
-            // exactly one, so the first element wins.
+            // exactly one, so the first element wins. A comma inside a quoted parameter value is
+            // part of that element, not a list separator.
             Some(list) => {
-                let first = list.split(',').next().unwrap_or(list).trim().to_owned();
-                if first.contains('*') {
+                let first = first_list_element(list).to_owned();
+                // Only the essence can be a range; a `*` in a parameter value is an ordinary
+                // `tchar`.
+                if media_essence(&first).contains('*') {
                     Diagnostic::error(
                         Code::UnsupportedMediaType,
                         declared
@@ -4446,7 +4449,43 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
                     return None;
                 }
-                first
+                // Its parameters are sent too, so they are held to RFC 9110 § 5.6.6: a
+                // parameter without `=` (`text/plain; foo`) would otherwise generate with nothing
+                // reported and fail only when the part's `Content-Type` is parsed at request time.
+                match media_type_with_parameters(&first) {
+                    Ok(canonical) => canonical,
+                    Err(fault) => {
+                        let (message, remedy) = match fault {
+                            ParameterFault::Malformed => (
+                                format!(
+                                    "`encoding.{name}.contentType: {first}` has a parameter \
+                                     that is not `name=value` under RFC 9110 § 5.6.6"
+                                ),
+                                "write each parameter as `name=value`, with a token name and a \
+                                 token or quoted-string value, such as `text/plain; charset=utf-8`",
+                            ),
+                            ParameterFault::Unsendable => (
+                                format!(
+                                    "`encoding.{name}.contentType: {first}` has a quoted \
+                                     parameter value the generated client cannot send: an empty \
+                                     value, or one holding a `\"` or a tab"
+                                ),
+                                "quote a non-empty value without `\"` or a tab, or drop the \
+                                 parameter",
+                            ),
+                        };
+                        Diagnostic::error(
+                            Code::UnsupportedMediaType,
+                            declared
+                                .map(|encoding| encoding.provenance.clone())
+                                .unwrap_or_else(|| at.clone()),
+                        )
+                        .message(message)
+                        .remedy(remedy)
+                        .emit(self.diags);
+                        return None;
+                    }
+                }
             }
             None => self.default_content_type(field_ty),
         };
@@ -6729,7 +6768,8 @@ fn media_object_is_opaque(object: &MediaTypeObject) -> bool {
 /// fails is not a media type, so it classifies as nothing and takes the existing unsupported path:
 /// `E009` when it is the only candidate, or an ignored alternative under `W014` otherwise. An
 /// Encoding Object's `contentType` is asked this directly and is `E009` when it fails, since it is
-/// sent verbatim even when it names no codec spargen has.
+/// sent verbatim even when it names no codec spargen has; its parameters are then held to
+/// [`media_type_with_parameters`].
 fn media_type_is_well_formed(essence: &str) -> bool {
     /// `restricted-name = restricted-name-first *126restricted-name-chars` (RFC 6838 § 4.2). ASCII
     /// letters of either case are accepted; case sensitivity is left to the arms that match names.
@@ -6805,6 +6845,159 @@ fn request_media_candidates<T>(content: &IndexMap<String, T>) -> (IndexMap<Strin
 
 fn media_essence(media: &str) -> &str {
     media.split(';').next().unwrap_or(media).trim()
+}
+
+/// The element of a comma-separated media type list a client sends: the first, ended by the first
+/// comma outside an RFC 9110 § 5.6.4 quoted-string, so `text/plain; name="a, b"` is one element.
+/// An unterminated quoted-string runs to the end of the list, where [`media_type_with_parameters`]
+/// rejects it.
+fn first_list_element(list: &str) -> &str {
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in list.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b',' if !quoted => return list[..index].trim(),
+            _ => {}
+        }
+    }
+    list.trim()
+}
+
+/// Why a media type's parameter list cannot be sent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParameterFault {
+    /// Not `parameters = *( OWS ";" OWS [ parameter ] )` with
+    /// `parameter = token "=" ( token / quoted-string )` (RFC 9110 §§ 5.6.6, 5.6.4).
+    Malformed,
+    /// Well-formed, but a quoted value the multipart transport's parser (`mime` 0.3, behind
+    /// reqwest's `Part::mime_str`) refuses: empty, or holding a `"` (as a quoted-pair) or a tab.
+    Unsendable,
+}
+
+/// A media type whose essence is already well-formed, with its parameter list checked against
+/// RFC 9110 § 5.6.6 and re-serialized as `type/subtype; name=value; …`.
+///
+/// Names and values keep their spelling, quoted-strings included. What changes is only what the
+/// grammar leaves free: whitespace around `;` and empty parameters (`text/plain;;a=b`) are
+/// dropped, since the multipart transport's parser refuses whitespace before a `;` and an empty
+/// parameter, both of which RFC 9110 admits.
+fn media_type_with_parameters(media: &str) -> Result<String, ParameterFault> {
+    fn tchar(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+    }
+    fn ows(bytes: &[u8], mut at: usize) -> usize {
+        while matches!(bytes.get(at), Some(b' ' | b'\t')) {
+            at += 1;
+        }
+        at
+    }
+    fn token(bytes: &[u8], from: usize) -> Result<usize, ParameterFault> {
+        let end = from
+            + bytes[from..]
+                .iter()
+                .take_while(|byte| tchar(**byte))
+                .count();
+        if end == from {
+            Err(ParameterFault::Malformed)
+        } else {
+            Ok(end)
+        }
+    }
+    /// The end of the quoted-string opening at `from`, and whether the transport can send it.
+    fn quoted_string(bytes: &[u8], from: usize) -> Result<(usize, bool), ParameterFault> {
+        let mut sendable = true;
+        let mut at = from + 1;
+        loop {
+            match bytes.get(at).copied() {
+                None => return Err(ParameterFault::Malformed),
+                Some(b'"') => return Ok((at + 1, sendable && at > from + 1)),
+                Some(b'\\') => {
+                    // quoted-pair = "\" ( HTAB / SP / VCHAR / obs-text )
+                    match bytes.get(at + 1).copied() {
+                        Some(b'\t' | b'"') => sendable = false,
+                        Some(b' ' | 0x21..=0x7e | 0x80..=0xff) => {}
+                        _ => return Err(ParameterFault::Malformed),
+                    }
+                    at += 2;
+                }
+                // qdtext = HTAB / SP / %x21 / %x23-5B / %x5D-7E / obs-text
+                Some(b'\t') => {
+                    sendable = false;
+                    at += 1;
+                }
+                Some(b' ' | 0x21 | 0x23..=0x5b | 0x5d..=0x7e | 0x80..=0xff) => at += 1,
+                Some(_) => return Err(ParameterFault::Malformed),
+            }
+        }
+    }
+
+    let essence = media_essence(media);
+    let Some((_, parameters)) = media.split_once(';') else {
+        return Ok(essence.to_owned());
+    };
+    let bytes = parameters.as_bytes();
+    let mut canonical = essence.to_owned();
+    let mut unsendable = false;
+    let mut at = 0;
+    loop {
+        at = ows(bytes, at);
+        match bytes.get(at) {
+            None => break,
+            Some(b';') => {
+                at += 1;
+                continue;
+            }
+            Some(_) => {}
+        }
+        let name_end = token(bytes, at)?;
+        if bytes.get(name_end) != Some(&b'=') {
+            return Err(ParameterFault::Malformed);
+        }
+        let value_start = name_end + 1;
+        let value_end = if bytes.get(value_start) == Some(&b'"') {
+            let (end, sendable) = quoted_string(bytes, value_start)?;
+            unsendable |= !sendable;
+            end
+        } else {
+            token(bytes, value_start)?
+        };
+        canonical.push_str("; ");
+        canonical.push_str(&parameters[at..value_end]);
+        at = ows(bytes, value_end);
+        match bytes.get(at) {
+            None => break,
+            Some(b';') => at += 1,
+            Some(_) => return Err(ParameterFault::Malformed),
+        }
+    }
+    if unsendable {
+        Err(ParameterFault::Unsendable)
+    } else {
+        Ok(canonical)
+    }
 }
 
 /// Classify a content type into its wire codec and deterministic preference rank. Structured JSON

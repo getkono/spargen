@@ -15853,8 +15853,14 @@ fn e009_a_malformed_encoding_content_type_is_unsupported() {
     // `content` key. A value that is no media type at all used to fall through to the property's
     // natural codec with nothing reported, and was then sent verbatim: a multipart part attached
     // it through `mime_str`, which fails only when a request is built. Only the element a client
-    // sends (the first of the list) is checked, and parameters are not part of the rule.
+    // sends (the first of the list, split outside quoted-strings) is checked, and its parameters
+    // are held to RFC 9110 § 5.6.6 (#248).
     let body = |media: &str, content_type: &str| {
+        // The value sits in a double-quoted YAML scalar.
+        let content_type = content_type
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\t', "\\t");
         format!(
             r##"
 openapi: 3.2.0
@@ -15930,6 +15936,116 @@ paths:
                 "{content_type:?}: {report:#?}"
             );
         }
+    }
+    // A parameter that is not `token "=" ( token / quoted-string )` used to generate silently and
+    // fail in `mime_str` (`text/plain; foo` is mime's `MissingEqual`). Each case names the element
+    // the diagnostic quotes: the list is split only at a comma outside a quoted-string.
+    let malformed = [
+        ("text/plain; foo", "text/plain; foo"),
+        ("text/plain; =utf-8", "text/plain; =utf-8"),
+        ("text/plain; charset=", "text/plain; charset="),
+        ("text/plain; charset=utf 8", "text/plain; charset=utf 8"),
+        ("text/plain; charset = utf-8", "text/plain; charset = utf-8"),
+        ("text/plain; a=b c=d", "text/plain; a=b c=d"),
+        ("text/plain; a=b; c", "text/plain; a=b; c"),
+        ("text/plain; charset=\"utf-8", "text/plain; charset=\"utf-8"),
+        ("text/plain; a=\"x\"y", "text/plain; a=\"x\"y"),
+        ("text/plain; a=\"x, y", "text/plain; a=\"x, y"),
+        ("text/plain; foo, text/plain", "text/plain; foo"),
+    ];
+    // Well-formed under RFC 9110, but a quoted value `mime_str` refuses: empty, or holding a `"`
+    // or a tab.
+    let unsendable = [
+        "text/plain; a=\"\"",
+        "text/plain; a=\"x\\\"y\"",
+        "text/plain; a=\"x\ty\"",
+        "text/plain; a=\"x\\\ty\"",
+    ];
+    for media in ["multipart/form-data", "application/x-www-form-urlencoded"] {
+        let cases = malformed
+            .iter()
+            .map(|(content_type, first)| {
+                (
+                    *content_type,
+                    format!(
+                        "`encoding.note.contentType: {first}` has a parameter that is not \
+                         `name=value` under RFC 9110 § 5.6.6"
+                    ),
+                )
+            })
+            .chain(unsendable.iter().map(|content_type| {
+                (
+                    *content_type,
+                    format!(
+                        "`encoding.note.contentType: {content_type}` has a quoted parameter value \
+                         the generated client cannot send: an empty value, or one holding a `\"` \
+                         or a tab"
+                    ),
+                )
+            }));
+        for (content_type, message) in cases {
+            let spec = body(media, content_type);
+            for report in [generate(&spec), check(&spec)] {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{media} / {content_type:?}: {report:#?}"
+                );
+                assert!(
+                    report.diagnostics().iter().any(|diagnostic| {
+                        diagnostic.code == Code::UnsupportedMediaType
+                            && diagnostic.message == message
+                    }),
+                    "{media} / {content_type:?}: {report:#?}"
+                );
+            }
+        }
+    }
+    // Well-formed parameter lists generate, and the part carries the canonical spelling: names
+    // and values as written, whitespace around `;` and empty parameters dropped (RFC 9110 admits
+    // both, `mime_str` refuses both). A comma inside a quoted value does not end the element, and
+    // a `*` in a parameter value is not a wildcard.
+    for (content_type, sent) in [
+        ("text/plain; charset=utf-8", "text/plain; charset=utf-8"),
+        ("text/plain;charset=utf-8", "text/plain; charset=utf-8"),
+        ("text/plain ; charset=utf-8", "text/plain; charset=utf-8"),
+        ("text/plain;\tcharset=utf-8 ", "text/plain; charset=utf-8"),
+        ("text/plain;", "text/plain"),
+        ("text/plain;; charset=utf-8;", "text/plain; charset=utf-8"),
+        (
+            "text/plain; charset=\"utf-8\"",
+            "text/plain; charset=\"utf-8\"",
+        ),
+        ("text/plain; name=\"a, b\"", "text/plain; name=\"a, b\""),
+        (
+            "text/plain; name=\"a,b\", text/plain/extra",
+            "text/plain; name=\"a,b\"",
+        ),
+        ("text/plain; name=\"a\\\\b\"", "text/plain; name=\"a\\\\b\""),
+        ("text/plain; a=b; c=\"d e\"", "text/plain; a=b; c=\"d e\""),
+        ("text/plain; a=*", "text/plain; a=*"),
+        ("text/plain; a=b, text/plain; foo", "text/plain; a=b"),
+        ("text/plain; a=\"caf\u{e9}\"", "text/plain; a=\"caf\u{e9}\""),
+        ("text/plain; a=\"x;y\"", "text/plain; a=\"x;y\""),
+    ] {
+        let spec = body("multipart/form-data", content_type);
+        let report = check(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{content_type:?}: {report:#?}"
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{content_type:?}: {report:#?}"
+        );
+        let literal = format!("mime_str({sent:?})");
+        assert!(
+            code.contains(&literal),
+            "{content_type:?} sends {literal}: {code}"
+        );
     }
 }
 
