@@ -213,7 +213,13 @@ Standing invariants:
   spec construct is supported, warned, or rejected — no fourth, silent behavior. New warnings
   and rejections get a stable code in `diag`, an entry in `docs/errors.md`, a cell in
   `docs/support-matrix.md`, and a fixture in `spargen/tests/frontend.rs`, in the same commit.
-  The last three are enforced by tests, not convention.
+  The last three are enforced by tests keyed on the **code**, not on the construct, so they
+  fire only for a change that mints one: a rejection or warning added under a code that already
+  exists moves none of those three gates, and its matrix cell and its `frontend.rs` fixture are
+  on the author and the reviewer. (A new emission site of a code in `code.rs`'s
+  `ENUMERATED_CASES`, such as `E004`, still fails
+  `every_emission_site_falls_into_a_case_its_explain_text_lists` until it carries a case
+  marker; that decides which explain case the site is, not its matrix cell or fixture.)
 - Generated output must stay consumable via `include!` — no crate-level inner attributes;
   attributes ride on emitted items.
 - Prefer `pub(crate)` over `pub` for anything not part of the `build.rs` facade or an emitted
