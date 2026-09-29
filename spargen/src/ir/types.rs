@@ -46,6 +46,7 @@ impl TypeGraph {
             kind: TypeKind::Reserved,
             docs: Docs::default(),
             provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
         })
     }
 
@@ -161,6 +162,15 @@ pub(crate) struct TypeDef {
     pub(crate) docs: Docs,
     /// Where the type came from.
     pub(crate) provenance: Provenance,
+    /// The document `provenance.pointer` points into, spelled independently of load order: empty
+    /// for the root document, otherwise the local path relative to the root document's directory,
+    /// or the retrieval URL of a vendored remote document.
+    ///
+    /// A pointer alone does not identify a definition — two files can each declare
+    /// `/components/schemas/Shape` — and the span's `FileId` numbers files in discovery order, so
+    /// reordering the document renumbers them. This spelling plus the pointer is the definition's
+    /// own identity, which is what naming ranks a contested type name by.
+    pub(crate) document: String,
 }
 
 /// A reference to a type, plus the two shape modifiers that ride on a use site rather than the

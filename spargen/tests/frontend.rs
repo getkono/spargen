@@ -2303,50 +2303,7 @@ components:
 /// count and not as a wrong type.
 #[test]
 fn two_files_declaring_the_same_component_name_stay_two_types() {
-    let temp = tempfile::tempdir().unwrap();
-    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    std::fs::write(
-        dir.join("openapi.yaml"),
-        r##"
-openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
-servers: [{ url: 'https://e.com' }]
-paths:
-  /a:
-    get:
-      operationId: getA
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json: { schema: { $ref: './a.yaml#/components/schemas/Shape' } }
-  /b:
-    get:
-      operationId: getB
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json: { schema: { $ref: './b.yaml#/components/schemas/Shape' } }
-"##,
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("a.yaml"),
-        "components:\n  schemas:\n    Shape:\n      type: object\n      required: [alpha]\n      \
-         properties: { alpha: { type: string } }\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("b.yaml"),
-        "components:\n  schemas:\n    Shape:\n      type: object\n      required: [beta]\n      \
-         properties: { beta: { type: integer } }\n",
-    )
-    .unwrap();
-    let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
-    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    let code = std::fs::read_to_string(&out).unwrap();
+    let code = generate_two_file_shapes(false);
 
     // Two declarations in two files: two types, and each keeps its own field. A collapse would take
     // one of these fields with it.
@@ -2365,23 +2322,91 @@ paths:
     // *Which* struct owns which field, not merely that both exist somewhere. Counting types and
     // checking for both fields passes under either assignment of the two names, so on its own it
     // says nothing about what `types::Shape` denotes — and what `types::Shape` denotes is a public
-    // API fact a consumer writes into their own code.
-    //
-    // This pins one ordering. It does **not** pin that the assignment survives reordering the
-    // document: `Scope::alloc` hands the un-suffixed name to whichever schema is allocated first,
-    // before it reads provenance at all, so swapping these two `paths` entries swaps which schema
-    // is called `Shape`. That is disclosed rather than repaired — see this pull request's
-    // `## Unresolved review notes`.
+    // API fact a consumer writes into their own code. The contest is decided by each schema's own
+    // `file#pointer`, so `a.yaml`'s declaration keeps the bare name; that it survives reordering is
+    // `a_contested_type_name_survives_reordering_the_paths_that_reach_it`'s to prove.
     assert_eq!(
         field_owner(&code, "pub alpha:").as_deref(),
         Some("Shape"),
-        "the first-allocated schema owns the un-suffixed name: {code}"
+        "the lower `file#pointer` owns the un-suffixed name: {code}"
     );
     assert_eq!(
         field_owner(&code, "pub beta:").as_deref(),
         Some("Shape93360b5f"),
-        "and the second carries the pointer-seeded disambiguator: {code}"
+        "and the other carries the pointer-seeded disambiguator: {code}"
     );
+}
+
+/// Issue #169: which of two same-named schemas keeps the bare type name was decided by the order
+/// lowering met them in, so swapping two `paths` entries — no schema changed — swapped what
+/// `types::Shape` denotes, a rename of public items. The name is now awarded on each schema's own
+/// `file#pointer`, so both orders must emit the same types module with the same owner per field.
+#[test]
+fn a_contested_type_name_survives_reordering_the_paths_that_reach_it() {
+    let forward = types_module(&generate_two_file_shapes(false));
+    let swapped = types_module(&generate_two_file_shapes(true));
+
+    for field in ["pub alpha:", "pub beta:"] {
+        assert_eq!(
+            field_owner(&forward, field),
+            field_owner(&swapped, field),
+            "reordering `paths` moved `{field}` to another type"
+        );
+    }
+    assert_eq!(
+        field_owner(&swapped, "pub alpha:").as_deref(),
+        Some("Shape")
+    );
+    assert_eq!(
+        declared_fields(&forward, "Shape"),
+        declared_fields(&swapped, "Shape")
+    );
+    assert_eq!(
+        declared_fields(&forward, "Shape93360b5f"),
+        declared_fields(&swapped, "Shape93360b5f")
+    );
+}
+
+/// A root document whose two operations reach a `Shape` declared in `a.yaml` and another declared
+/// in `b.yaml`, listed `/a` first unless `b_first`; returns the generated client.
+fn generate_two_file_shapes(b_first: bool) -> String {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let path_item = |letter: &str| {
+        format!(
+            "  /{letter}:\n    get:\n      operationId: get{upper}\n      responses:\n        \
+             '200':\n          description: ok\n          content:\n            \
+             application/json: {{ schema: {{ $ref: './{letter}.yaml#/components/schemas/Shape' }} }}\n",
+            upper = letter.to_uppercase(),
+        )
+    };
+    let (first, second) = if b_first { ("b", "a") } else { ("a", "b") };
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\npaths:\n{}{}",
+            path_item(first),
+            path_item(second),
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("a.yaml"),
+        "components:\n  schemas:\n    Shape:\n      type: object\n      required: [alpha]\n      \
+         properties: { alpha: { type: string } }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.yaml"),
+        "components:\n  schemas:\n    Shape:\n      type: object\n      required: [beta]\n      \
+         properties: { beta: { type: integer } }\n",
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    std::fs::read_to_string(&out).unwrap()
 }
 
 /// The nullability half of the memo entry. A shared sub-file component whose own schema admits

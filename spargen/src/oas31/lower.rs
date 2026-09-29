@@ -5377,11 +5377,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         docs: Docs,
         provenance: Option<crate::diag::Provenance>,
     ) -> Ty {
+        let provenance = provenance.unwrap_or_else(|| self.document.provenance.clone());
+        let document = provenance
+            .span
+            .map(|span| self.resolver.document_key(span.file))
+            .unwrap_or_default();
         let id = self.graph.insert(TypeDef {
             name_hint: hint.to_owned(),
             kind,
             docs,
-            provenance: provenance.unwrap_or_else(|| self.document.provenance.clone()),
+            provenance,
+            document,
         });
         Ty {
             id,

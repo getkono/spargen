@@ -52,6 +52,37 @@ impl<'doc> Resolver<'doc> {
         self.bundle.root_id()
     }
 
+    /// The load-order-independent spelling of `file`: empty for the root document, the retrieval
+    /// URL of a vendored remote document, and otherwise the local path relative to the root
+    /// document's directory (the loaded path itself when it does not sit under that directory).
+    ///
+    /// A [`crate::diag::FileId`] is assigned as the bundle discovers files, so it changes when the
+    /// document's references are reordered; this spelling does not, which is what lets a type's
+    /// `(document, pointer)` identity rank a contested name.
+    pub(super) fn document_key(&self, file: crate::diag::FileId) -> String {
+        let root = self.bundle.root_id();
+        if file == root {
+            return String::new();
+        }
+        if let Some(url) = self.bundle.remote_origin(file) {
+            return url.to_owned();
+        }
+        let Some(loaded) = self.bundle.file(file) else {
+            return String::new();
+        };
+        let root_dir = self
+            .bundle
+            .file(root)
+            .and_then(|root| root.path.parent())
+            .unwrap_or_else(|| camino::Utf8Path::new(""));
+        loaded
+            .path
+            .strip_prefix(root_dir)
+            .unwrap_or(&loaded.path)
+            .as_str()
+            .to_owned()
+    }
+
     /// The `(file, pointer)` pair a `$ref` written at `at` denotes, independent of how it is spelled.
     ///
     /// `lower` keeps three separate in-progress maps, each keyed by a different spelling of the
