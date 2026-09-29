@@ -40,6 +40,15 @@ Both modes run as part of Rust compilation. Spargen is host/build-time only and 
 runtime dependency tree**. The CLI is tooling for `lock`, `check`, `deps`, `diff`, and
 `explain`; it cannot generate code, stream generated source, watch files, or scaffold a crate.
 
+`spargen lock` (the `remote-fetch` feature) is the generator's only networked step. It fetches
+over reqwest's rustls stack with rustls's defaults and the bundled Mozilla roots, and spargen
+holds no TLS position of its own: it interoperates with exactly the peers that rustls release
+accepts, and refuses the rest as `E025` with rustls's reason. Protocol conformance is rustls's,
+so a rustls upgrade may refuse a non-conformant server that an older one accepted. The one
+behaviour pinned here is the strictness an advisory named: `spargen/tests/tls_strictness.rs`
+drives a deliberately non-conformant peer (RUSTSEC-2026-0285) and fails on a rustls that accepts
+it again.
+
 ```rust
 // build.rs — spargen appears only in [build-dependencies].
 let out_dir = std::env::var("OUT_DIR").unwrap();
