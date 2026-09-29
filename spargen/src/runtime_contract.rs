@@ -1478,20 +1478,43 @@ serde_json = "1.0.151"
         }
     }
 
+    /// The release just below `version` at its lowest non-zero component, with the components
+    /// after it zeroed: `1.12.1` gives `1.12.0`, `1.12.0` gives `1.11.0`, and `1.0.0` gives
+    /// `0.0.0`, so a floor that is an `x.y.0` or `x.0.0` release still has one.
+    fn version_below(version: &Version) -> Version {
+        match (version.major, version.minor, version.patch) {
+            (major, minor, patch @ 1..) => Version::new(major, minor, patch - 1),
+            (major, minor @ 1.., 0) => Version::new(major, minor - 1, 0),
+            (major @ 1.., 0, 0) => Version::new(major - 1, 0, 0),
+            (0, 0, 0) => panic!("no release is below 0.0.0"),
+        }
+    }
+
+    #[test]
+    fn version_below_steps_down_at_the_lowest_non_zero_component() {
+        for (version, below) in [
+            ("1.12.1", "1.12.0"),
+            ("1.12.0", "1.11.0"),
+            ("1.0.0", "0.0.0"),
+            ("0.3.0", "0.2.0"),
+        ] {
+            assert_eq!(
+                version_below(&Version::parse(version).unwrap()),
+                Version::parse(below).unwrap(),
+                "{version}"
+            );
+        }
+    }
+
     #[test]
     fn a_requirement_that_admits_a_version_below_the_floor_is_rejected() {
-        // One patch release below the contract's floor, in place of `CORE_MANIFEST`'s entry: both
-        // are read rather than restated, so a floor bump in either place moves this fixture with it.
+        // A version just below the contract's floor, in place of `CORE_MANIFEST`'s entry: both
+        // are read rather than restated, so a floor bump in either place moves this fixture with
+        // it, whether the new floor is a patch, minor, or major release.
         let (core_bytes, _) = core_entry("bytes");
         let floor = BYTES.floor_version();
-        let below = Version::new(
-            floor.major,
-            floor.minor,
-            floor
-                .patch
-                .checked_sub(1)
-                .expect("the bytes floor has a patch release below it"),
-        );
+        let below = version_below(&floor);
+        assert!(below < floor, "{below} is not below {floor}");
         let manifest = replace_once(CORE_MANIFEST, core_bytes, &format!("bytes = \"{below}\""));
         let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
         assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
