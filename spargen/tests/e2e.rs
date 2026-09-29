@@ -1257,35 +1257,144 @@ fn an_undeclared_2xx_is_never_decoded_through_default_beside_a_declared_success(
     server.join().unwrap();
 }
 
-// Issue #127: a bodyless `default` is dropped from a single-body error shape, and the emitted status
-// table must drop it too. A `500` carrying a well-formed `Problem` is therefore
-// `Error::UnexpectedStatus` with its body preserved — were `StatusSpec::Any` in the table, it would
-// decode as the documented `404` body. Beside two bodied errors the same `default` is the enum's
-// unit `Default` variant instead; that match is exhaustive, so a variant appearing or vanishing
-// fails to compile.
+// Issues #127 and #204: a bodyless error entry beside exactly one error body is its own unit
+// variant — a bodyless `default`, `403`, or `304` alike — where the single-body newtype dropped it,
+// so a documented status arrived as `Error::UnexpectedStatus` or, under a bodied `default`, had its
+// empty body decoded as that model. Every match is exhaustive with no wildcard, so a variant
+// appearing or vanishing fails to compile.
 #[test]
-fn bodyless_default_beside_one_bodied_error_is_not_a_documented_status() {
+fn a_bodyless_error_entry_beside_one_error_body_is_its_own_variant() {
     let problem: &'static [u8] = br#"{"title":"t","detail":"d"}"#;
     let (base, server) = serve_once("application/json", "404 Not Found", problem);
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_bodyless_default().unwrap_err() {
         basic_client::Error::Api(response) => {
             assert_eq!(response.status(), 404);
-            let basic_client::GetBodylessDefaultError(body) = response.into_inner();
-            assert_eq!(body.title, "t");
+            match response.into_inner() {
+                basic_client::GetBodylessDefaultError::Status404(body) => {
+                    assert_eq!(body.title, "t")
+                }
+                basic_client::GetBodylessDefaultError::Default => {
+                    panic!("a 404 took the bodyless `default`")
+                }
+            }
         }
         other => panic!("expected the typed 404 error body, got {other:?}"),
     }
     server.join().unwrap();
 
+    // A `500` is the documented bodyless `default`: `Api`, and its body is never parsed as the
+    // `404`'s `Problem`.
+    for body in [problem, b"".as_slice()] {
+        let (base, server) = serve_once("application/json", "500 Internal Server Error", body);
+        let client = basic_client::BlockingClient::new(&base).unwrap();
+        match client.get_bodyless_default().unwrap_err() {
+            basic_client::Error::Api(response) => {
+                assert_eq!(response.status(), 500);
+                match response.into_inner() {
+                    basic_client::GetBodylessDefaultError::Default => {}
+                    basic_client::GetBodylessDefaultError::Status404(body) => {
+                        panic!("a 500 decoded as the documented 404: {body:?}")
+                    }
+                }
+            }
+            other => panic!("expected the unit `Default` error variant, got {other:?}"),
+        }
+        server.join().unwrap();
+    }
+
+    // The issue's repro: a documented bodyless `403` is `Api(Status403)`, not `UnexpectedStatus`.
+    let (base, server) = serve_once("application/json", "403 Forbidden", b"");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_bodyless_sibling().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 403);
+            match response.into_inner() {
+                basic_client::GetBodylessSiblingError::Status403 => {}
+                basic_client::GetBodylessSiblingError::Status404(body) => {
+                    panic!("a 403 decoded as the 404: {body:?}")
+                }
+            }
+        }
+        other => panic!("expected the unit `Status403` error variant, got {other:?}"),
+    }
+    server.join().unwrap();
+    // The bodied `404` still decodes, and an undocumented `500` is still unexpected.
+    let (base, server) = serve_once("application/json", "404 Not Found", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_bodyless_sibling().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetBodylessSiblingError::Status404(body) => assert_eq!(body.title, "t"),
+            basic_client::GetBodylessSiblingError::Status403 => panic!("a 404 took the 403"),
+        },
+        other => panic!("expected the typed 404 error body, got {other:?}"),
+    }
+    server.join().unwrap();
     let (base, server) = serve_once("application/json", "500 Internal Server Error", problem);
     let client = basic_client::BlockingClient::new(&base).unwrap();
-    match client.get_bodyless_default().unwrap_err() {
+    match client.get_bodyless_sibling().unwrap_err() {
         basic_client::Error::UnexpectedStatus { status, body, .. } => {
             assert_eq!(status, 500);
             assert_eq!(&body[..], problem);
         }
-        other => panic!("a bodyless `default` must not classify a 500 as `Api`, got {other:?}"),
+        other => panic!("an undocumented 500 must stay unexpected, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // The same shape with an XML error body: the `404` arm decodes XML, the `403` reads nothing.
+    let (base, server) = serve_once(
+        "application/xml",
+        "404 Not Found",
+        b"<XmlReceipt><ReceiptCode>A1</ReceiptCode></XmlReceipt>",
+    );
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_xml_bodyless_sibling().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetXmlBodylessSiblingError::Status404(body) => {
+                assert_eq!(body.code, "A1")
+            }
+            basic_client::GetXmlBodylessSiblingError::Status403 => panic!("a 404 took the 403"),
+        },
+        other => panic!("expected the typed XML 404 error body, got {other:?}"),
+    }
+    server.join().unwrap();
+    let (base, server) = serve_once("application/xml", "403 Forbidden", b"");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_xml_bodyless_sibling().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetXmlBodylessSiblingError::Status403 => {}
+            basic_client::GetXmlBodylessSiblingError::Status404(body) => {
+                panic!("a 403 decoded as the 404: {body:?}")
+            }
+        },
+        other => panic!("expected the unit `Status403` error variant, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // A bodyless `304` beside a bodied `default`: its own variant, the empty body never decoded.
+    let (base, server) = serve_once("application/json", "304 Not Modified", b"");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_conditional().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 304);
+            match response.into_inner() {
+                basic_client::GetConditionalError::Status304 => {}
+                basic_client::GetConditionalError::Default(body) => {
+                    panic!("a 304 decoded as the `default` body: {body:?}")
+                }
+            }
+        }
+        other => panic!("expected the unit `Status304` error variant, got {other:?}"),
+    }
+    server.join().unwrap();
+    let (base, server) = serve_once("application/json", "500 Internal Server Error", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_conditional().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetConditionalError::Default(body) => assert_eq!(body.title, "t"),
+            basic_client::GetConditionalError::Status304 => panic!("a 500 took the 304"),
+        },
+        other => panic!("expected the typed `default` error body, got {other:?}"),
     }
     server.join().unwrap();
 
@@ -3320,10 +3429,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Problem"
-  # A BODYLESS `default` beside one bodied error (issue #127): only bodies are counted, so the error
-  # type is the single-body newtype `GetBodylessDefaultError(types::Problem)`, and the status table
-  # it classifies against must hold `404` alone — no `StatusSpec::Any` — or an undocumented `500`
-  # would decode as a `Problem` instead of surfacing as `Error::UnexpectedStatus`.
+  # A BODYLESS `default` beside one bodied error (issues #127, #204): two error entries, so the
+  # error type is the enum `GetBodylessDefaultError { Status404(_), Default }`, and a `500` is the
+  # unit `Default` variant — never a `Problem` decoded from whatever body it carried.
   /bodyless-default:
     get:
       operationId: getBodylessDefault
@@ -3360,6 +3468,54 @@ paths:
                 $ref: "#/components/schemas/Problem"
         default:
           description: Anything else
+  # Issue #204: a bodyless `403` beside one bodied `404` is its own unit variant of
+  # `GetBodylessSiblingError`, where the single-body newtype dropped it and a real `403` arrived as
+  # `Error::UnexpectedStatus`.
+  /bodyless-sibling:
+    get:
+      operationId: getBodylessSibling
+      responses:
+        "200":
+          description: OK
+        "403":
+          description: Forbidden
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  # The same shape with the one error body in XML: the enum arm decodes it through the XML codec
+  # (`support::decode_xml_body`), since a lone XML error body is not the rejected two-XML-bodies
+  # shape.
+  /xml-bodyless-sibling:
+    get:
+      operationId: getXmlBodylessSibling
+      responses:
+        "200":
+          description: OK
+        "403":
+          description: Forbidden
+        "404":
+          description: Not Found
+          content:
+            application/xml:
+              schema:
+                $ref: "#/components/schemas/XmlReceipt"
+  # A bodyless `304` beside a bodied `default` and no success status: the `304` is its own unit
+  # variant ahead of `Default`, where it once matched `default` and had its empty body decoded.
+  /conditional:
+    get:
+      operationId: getConditional
+      responses:
+        "304":
+          description: Not Modified
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   # The single-body newtype over the same nullable component: `GetMaybeSingleError(Option<T>)`,
   # whose `ApiErrorBody::Body` is the bare `types::MaybeProblem` so one bound covers it and
   # `GetMaybeError` alike.

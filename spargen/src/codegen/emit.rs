@@ -533,8 +533,10 @@ pub(crate) fn emit_operation(
         ErrorShape::None => quote! {
             Err(support::unexpected_status::<#error_ty>(&self.core, response).await)
         },
-        // A single documented error body: classify against the documented status table into the
-        // aliased `E` (or `Error::UnexpectedStatus` for an undocumented status).
+        // A single documented error body, the operation's only error entry: classify against its
+        // one-entry status table into the aliased `E` (or `Error::UnexpectedStatus` for any other
+        // status). A bodyless entry beside it makes the shape an enum, so the filters below keep
+        // exactly that entry.
         ErrorShape::Single(body_ty) => {
             let mut documented = operation
                 .responses
@@ -602,7 +604,8 @@ pub(crate) fn emit_operation(
                 Err(#classify)
             }
         }
-        // Multiple documented error bodies: read the capped body once, then dispatch by status in
+        // Several documented error entries, at least one bodied (several bodies, or one beside a
+        // bodyless entry): read the capped body once, then dispatch by status in
         // precedence order (exact before range before default) into the matching enum variant →
         // `Error::Api`; a parse failure → `Error::Decode`; an undocumented status →
         // `Error::UnexpectedStatus` (capped body preserved either way).
@@ -615,12 +618,15 @@ pub(crate) fn emit_operation(
                     Some(ty) => {
                         let body_ty = *ty;
                         let ty = response_payload_ty_tokens(body_ty, names, options, true);
+                        let media = response_media_for_spec(&operation.responses, *spec);
                         let decode = if is_bytes_ty(api, body_ty) {
                             quote! { Ok::<#ty, String>(Box::new(body.clone())) }
-                        } else if response_media_for_spec(&operation.responses, *spec)
-                            == Some(MediaType::Text)
-                        {
+                        } else if media == Some(MediaType::Text) {
                             quote! { support::decode_text_body::<#ty>(&body) }
+                        } else if media == Some(MediaType::Xml) {
+                            // Only as the lone body beside bodyless error entries: a second bodied
+                            // error beside an XML one is rejected (`xml_in_multi_status`).
+                            quote! { support::decode_xml_body::<#ty>(&body) }
                         } else {
                             quote! {
                                 serde_json::from_slice::<#ty>(&body)
@@ -2177,7 +2183,8 @@ fn status_label(spec: crate::ir::StatusSpec) -> String {
 }
 
 /// Emit an operation's typed error type: a payload-carrying enum for several documented error
-/// bodies, a transparent newtype for one, and the uninhabited alias for none.
+/// entries of which at least one is bodied (several bodies, or one body beside a bodyless status),
+/// a transparent newtype for a lone bodied entry, and the uninhabited alias for no error body.
 pub(crate) fn emit_error_enum(
     operation: &Operation,
     api: &Api,
@@ -2192,7 +2199,7 @@ pub(crate) fn emit_error_enum(
     let shape = operation.responses.error();
     let api_error_body = shape.api_error_body(&api.types);
     match shape {
-        // Multiple documented error bodies → a payload-carrying enum, one variant per status. The
+        // Several documented error entries → a payload-carrying enum, one variant per status. The
         // variant is chosen by HTTP status at classification time, so it derives no whole-enum
         // `Deserialize` (and never `serde(untagged)`); each variant's body is decoded on its own.
         ErrorShape::Enum(entries) => {

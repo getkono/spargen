@@ -524,6 +524,29 @@ fn changing_a_documented_error_type_is_major() {
     assert_eq!(report.bump, Impact::Major);
 }
 
+#[test]
+fn documenting_a_bodyless_error_status_beside_the_one_error_body_is_major() {
+    // A bodyless `403` beside the one bodied `404` turns the newtype over the `404` body into an
+    // error enum with a `Status403` variant (issue #204), so every consumer destructuring the
+    // newtype breaks.
+    let old = full(&with_error("{ type: string }"), PET_SCHEMA);
+    let new = full(
+        &format!(
+            "{}        '403':\n          description: forbidden\n",
+            with_error("{ type: string }")
+        ),
+        PET_SCHEMA,
+    );
+    let report = diff(&old, &new);
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::ErrorTypeChanged],
+        "{:?}",
+        report.changes
+    );
+    assert_eq!(report.bump, Impact::Major);
+}
+
 /// `get /pets` with documented `404` and `409` bodies, plus `extra` status entries spliced in at
 /// 8-space indent (a bodyless `'410'`, and so on).
 fn with_errors(e404: &str, e409: &str, extra: &str) -> String {

@@ -139,14 +139,9 @@ impl StatusSpec {
     /// method enters its success branch on the transport's `StatusCode::is_success()`, which is
     /// exactly 2xx, so a status this predicate put on the success side would be a variant no
     /// response could reach. A documented bodyless `304` therefore reaches the caller from the
-    /// error side: as a unit variant where that side is an enum (two or more documented error
-    /// bodies), and as `UnexpectedStatus` carrying the status where it has no documented error
-    /// body. Where it has exactly one (`ErrorShape::Single`), the `304` is dropped from the shape,
-    /// and what a real `304` becomes depends on that body's selector: `UnexpectedStatus` when the
-    /// body is documented under a selector that does not cover `304` (a `404`, a `4XX`), but a
-    /// decode of the empty body — `Error::Decode` for a JSON body — when it is documented under a
-    /// `3XX` or `default`, which the emitted classification table then matches `304` against.
-    /// That exception is issue #204, not a decision of this predicate. A documented
+    /// error side: as a unit variant where that side documents any error body (the `304` is then
+    /// one more entry of the error enum; see `Responses::error`), and as `UnexpectedStatus`
+    /// carrying the status where it documents none. A documented
     /// `301`/`302`/`303`/`307`/`308` reaches the error side only when the injected client's
     /// redirect policy does not follow it.
     pub(crate) fn is_success(self) -> bool {
@@ -241,7 +236,7 @@ impl Responses {
     /// tests below pin both, since issue #105 exists because this comment was once false). It is the success source only when `by_status`
     /// documents no success status at all (see [`Self::default_is_success_source`]) — the early
     /// return that bypasses the count above — and is offered to the error shape as the `Range(0)`
-    /// sentinel whenever it is declared, subject there to the same body count (see
+    /// sentinel whenever it is declared, subject there to the same entry rule (see
     /// [`Self::error`]).
     ///
     /// The two `default` claims above, pinned through the public pipeline (this item is private, so
@@ -393,8 +388,9 @@ impl Responses {
     }
 
     /// The media type of the operation's single bodied error response, when exactly one error
-    /// response carries a body (i.e. [`Self::error`] is [`ErrorShape::Single`]). Codegen uses this to
-    /// route the error-body classification. `None` when there is no single bodied error.
+    /// response carries a body. Codegen uses this to route the [`ErrorShape::Single`] classification
+    /// (a single body beside a bodyless error entry is an [`ErrorShape::Enum`], routed per status
+    /// instead). `None` when there is no single bodied error.
     pub(crate) fn single_error_media(&self) -> Option<MediaType> {
         let mut bodied = self
             .error_responses()
@@ -408,16 +404,27 @@ impl Responses {
 
     /// Whether an XML body appears in a response position that lowers to a *multi-status* enum
     /// with two or more bodied success or error statuses. XML decode is scoped to the single-body
-    /// success/error paths — a lone XML success body beside a bodyless sibling is still that one
-    /// body, decoded as XML by its enum arm — so this exotic combination is rejected cleanly during
-    /// lowering (narrowed `E009`) rather than silently mis-decoding an XML body as JSON.
+    /// success/error paths — a lone XML body beside a bodyless sibling, on either side, is still
+    /// that one body, decoded as XML by its enum arm — so this exotic combination is rejected
+    /// cleanly during lowering (narrowed `E009`) rather than silently mis-decoding an XML body as
+    /// JSON.
     pub(crate) fn xml_in_multi_status(&self) -> bool {
         let is_xml = |response: &&Response| response.media == Some(MediaType::Xml);
         let success_multi =
             self.multiple_success_bodies() && self.success_responses().iter().any(is_xml);
-        let error_multi = matches!(self.error(), ErrorShape::Enum(_))
-            && self.error_responses().iter().any(is_xml);
+        let error_multi = self.multiple_error_bodies() && self.error_responses().iter().any(is_xml);
         success_multi || error_multi
+    }
+
+    /// Whether two or more error responses (the `default` included) carry a body — the error
+    /// shapes whose enum decodes more than one body. Distinct from [`ErrorShape::Enum`], which a
+    /// single body beside a bodyless error entry also yields.
+    fn multiple_error_bodies(&self) -> bool {
+        self.error_responses()
+            .iter()
+            .filter(|response| response.body.is_some())
+            .nth(1)
+            .is_some()
     }
 
     /// Whether a bodied streaming response (`text/event-stream` / `application/x-ndjson`) sits
@@ -486,20 +493,27 @@ impl Responses {
     }
 
     /// The error shape of the operation. No bodied error entry yields `None`; one bodied entry
-    /// yields the typed `E` body; two or more yield a per-operation error enum, sorted into
-    /// classification precedence (exact code ascending, then range ascending, then `default` — the
-    /// `Range(0)` sentinel — last) and carrying each bodyless error *entry* as a unit variant.
+    /// *alone* yields the typed `E` body; anything more yields a per-operation error enum, sorted
+    /// into classification precedence (exact code ascending, then range ascending, then `default`
+    /// — the `Range(0)` sentinel — last) and carrying each bodyless error *entry* as a unit
+    /// variant: two or more bodied entries, or one bodied entry beside a documented bodyless one
+    /// (a bodied `404` beside a bodyless `403`, `5XX`, or `default`). A newtype over the one body
+    /// has no way to represent the bodyless status, which would otherwise be classified as
+    /// `UnexpectedStatus` — or, where the body's selector covers it (a `3XX` or `default` beside a
+    /// bodyless `304`), have its empty body decoded as that model (issue #204). This is the
+    /// success side's rule (issue #121) without its streaming exception, since lowering rejects a
+    /// bodied stream on the error side.
     ///
     /// The entries are the lowered non-success statuses of `by_status` plus the sentinel a declared
     /// `default` contributes, not everything the document declares: the count and the variants
     /// follow what lowering kept. `default` is *offered* here as `Range(0)` whenever it is
     /// declared — including when it is also the operation's sole success source (see
     /// [`Self::success`]), which then types both sides with that one body, as the specification
-    /// does: `default` documents every undeclared status, of either class — but it reaches the
-    /// shape only through the body count above. (A bodied *streaming* `default` cannot be typed on
-    /// both sides — the success side would stream and this side decode it whole — so lowering
-    /// rejects it; see [`Self::stream_outside_single_success`].) A bodyless `default` therefore
-    /// becomes the catch-all unit variant of an `Enum` and is dropped from a `None` or a `Single`.
+    /// does: `default` documents every undeclared status, of either class. (A bodied *streaming*
+    /// `default` cannot be typed on both sides — the success side would stream and this side
+    /// decode it whole — so lowering rejects it; see [`Self::stream_outside_single_success`].) With
+    /// no bodied entry at all the shape is `None`, whatever bodyless entries are declared: every
+    /// non-success status is then `UnexpectedStatus`, status and body preserved.
     pub(crate) fn error(&self) -> ErrorShape {
         let mut entries: Vec<(StatusSpec, Option<Ty>)> = Vec::new();
         for (status, response) in &self.by_status {
@@ -510,22 +524,26 @@ impl Responses {
         if let Some(default) = &self.default {
             entries.push((StatusSpec::Range(0), default.body));
         }
-        finish_shape(
-            entries,
-            ErrorShape::None,
-            ErrorShape::Single,
-            |mut entries| {
-                entries.sort_by_key(|(status, _)| precedence_key(*status));
-                ErrorShape::Enum(entries)
-            },
-        )
+        let into_enum = |mut entries: Vec<(StatusSpec, Option<Ty>)>| {
+            entries.sort_by_key(|(status, _)| precedence_key(*status));
+            ErrorShape::Enum(entries)
+        };
+        // One body beside a documented bodyless entry: two outcomes a newtype over the body cannot
+        // tell apart, so the bodyless one gets its own unit variant.
+        let bodied = entries.iter().filter(|(_, body)| body.is_some()).count();
+        if bodied == 1 && entries.len() > 1 {
+            return into_enum(entries);
+        }
+        finish_shape(entries, ErrorShape::None, ErrorShape::Single, into_enum)
     }
 }
 
 /// Collapse per-status entries into a response shape by counting how many carry a body: zero → the
-/// `unit` shape, exactly one → the `single` shape over that lone body (bodyless siblings are not
-/// modeled here; on the success side [`Responses::success`] promotes that case to its enum before
-/// calling this), two or more → the `multi` shape over all entries (bodied and bodyless alike).
+/// `unit` shape, exactly one → the `single` shape over that lone body, two or more → the `multi`
+/// shape over all entries (bodied and bodyless alike). Bodyless siblings of a lone body are not
+/// modeled here: [`Responses::error`] promotes that case to its enum before calling this, so the
+/// error side reaches `single` only with its one entry, and [`Responses::success`] does the same
+/// except for a streaming body, which an empty sibling response satisfies as-is.
 fn finish_shape<S>(
     entries: Vec<(StatusSpec, Option<Ty>)>,
     unit: S,
@@ -589,12 +607,14 @@ pub(crate) enum SuccessShape {
 pub(crate) enum ErrorShape {
     /// No documented error body.
     None,
-    /// A single documented error body type.
+    /// The body type of the operation's only error entry, which carries it. Every other shape with
+    /// a documented error body is an [`ErrorShape::Enum`].
     Single(Ty),
-    /// Two or more entries *carrying a body*, counted over the non-success `by_status` entries plus
-    /// the `Range(0)` sentinel a present `default` contributes. Counting entries instead of bodies
-    /// would be wrong: a bodied `404` beside a bodyless `403` is two entries and still yields
-    /// [`ErrorShape::Single`]. Generated as a per-operation error enum, one variant per entry — a
+    /// Two or more entries of which at least one carries a body, counted over the non-success
+    /// `by_status` entries plus the `Range(0)` sentinel a present `default` contributes: several
+    /// bodies, or a single body beside a documented bodyless entry (a bodied `404` beside a
+    /// bodyless `403` is `Status404(E)` and `Status403`, since a newtype over the `404` body has
+    /// nowhere to put the `403`). Generated as a per-operation error enum, one variant per entry — a
     /// payload-carrying variant for a bodied status, a unit variant for a bodyless one. Entries are
     /// pre-sorted into classification precedence (exact before range; `default` — carried as the
     /// `Range(0)` sentinel — last); classification dispatches by HTTP status in that order.
@@ -982,8 +1002,7 @@ mod tests {
     fn a_documented_304_or_3xx_is_on_the_error_side_and_promotes_no_success_enum() {
         // A bodied `200` beside a bodyless `304`: the `304` is no success entry, so the lone body
         // stays plain `T` (a bodyless 2xx sibling would have made it an enum), and the `304` is an
-        // error-side entry — dropped from `Single` beside one bodied error, a unit variant of the
-        // error enum beside two.
+        // error-side entry — a unit variant of the error enum beside one bodied error or several.
         let single = Responses {
             by_status: vec![
                 (StatusSpec::Exact(200), resp(Some(1))),
@@ -993,7 +1012,13 @@ mod tests {
             default: None,
         };
         assert!(matches!(single.success(), SuccessShape::Plain(body) if body.id == TypeId(1)));
-        assert!(matches!(single.error(), ErrorShape::Single(body) if body.id == TypeId(2)));
+        assert_eq!(
+            shape(single.error()),
+            Shape::Enum(vec![
+                (StatusSpec::Exact(304), None),
+                (StatusSpec::Exact(404), Some(2)),
+            ])
+        );
 
         let multi = Responses {
             by_status: vec![
@@ -1023,16 +1048,21 @@ mod tests {
         }
 
         // Only a `304` and a `default` documented: no success status is declared, so `default`
-        // is the success source, and the `304` does not claim it. On the error side `default` is
-        // the one bodied entry, so the shape is `Single(default)` and the bodyless `304` is
-        // dropped from it — the issue #204 case, where a real `304` matches `default` in the
-        // emitted classification table and its empty body is decoded.
+        // is the success source, and the `304` does not claim it. On the error side the bodyless
+        // `304` is its own unit variant ahead of `default` (issue #204): as a `Single(default)` it
+        // was dropped, and a real `304` matched `default` and had its empty body decoded.
         let conditional = Responses {
             by_status: vec![(StatusSpec::Exact(304), resp(None))],
             default: Some(resp(Some(1))),
         };
         assert!(matches!(conditional.success(), SuccessShape::Plain(body) if body.id == TypeId(1)));
-        assert!(matches!(conditional.error(), ErrorShape::Single(body) if body.id == TypeId(1)));
+        assert_eq!(
+            shape(conditional.error()),
+            Shape::Enum(vec![
+                (StatusSpec::Exact(304), None),
+                (StatusSpec::Range(0), Some(1)),
+            ])
+        );
     }
 
     /// The statuses of an enum shape, in the order it holds them.
@@ -1093,9 +1123,9 @@ mod tests {
     }
 
     #[test]
-    fn a_bodyless_default_is_a_unit_error_variant_only_inside_an_enum() {
-        // `finish_shape` counts bodies: a bodyless `default` beside one bodied error is dropped
-        // from the `Single`, and beside two it survives as the trailing unit variant.
+    fn a_bodyless_default_is_the_trailing_unit_error_variant_beside_any_error_body() {
+        // A bodyless `default` beside one bodied error makes the shape an enum (issue #204), as it
+        // does beside two, and is its trailing unit variant either way.
         let single = Responses {
             by_status: vec![
                 (StatusSpec::Exact(200), resp(Some(1))),
@@ -1103,7 +1133,13 @@ mod tests {
             ],
             default: Some(resp(None)),
         };
-        assert!(matches!(single.error(), ErrorShape::Single(body) if body.id == TypeId(2)));
+        assert_eq!(
+            shape(single.error()),
+            Shape::Enum(vec![
+                (StatusSpec::Exact(404), Some(2)),
+                (StatusSpec::Range(0), None),
+            ])
+        );
 
         let multi = Responses {
             by_status: vec![
@@ -1156,21 +1192,34 @@ mod tests {
     #[test]
     fn the_error_shape_grid_over_bodied_errors_and_default_body_presence() {
         // Issue #127: every cell of bodied non-default errors (0 / 1 / 2) x `default` (absent /
-        // bodied / bodyless), each with and without a bodyless error status beside them. Only
-        // bodies are counted, so a bodyless `default` or `403` never lifts a `None` or `Single` to
-        // an `Enum`; once two bodies make it an enum, every declared error entry is a variant.
-        // `codegen`'s single-body status table must agree cell for cell (`e2e.rs`,
-        // `bodyless_default_beside_one_bodied_error_is_not_a_documented_status`).
+        // bodied / bodyless), each with and without a bodyless error status beside them. With no
+        // body the shape is `None`; a lone bodied entry is `Single`; anything else is an `Enum`
+        // with every declared error entry a variant, so a bodyless `default` or `403` beside one
+        // body is a unit variant rather than dropped (issue #204). `codegen`'s classification must
+        // agree cell for cell (`e2e.rs`, `a_bodyless_error_entry_beside_one_error_body_is_its_own_variant`).
         const DEFAULT: u32 = 9;
         let (e404, e409) = (StatusSpec::Exact(404), StatusSpec::Exact(409));
         let (e403, any) = (StatusSpec::Exact(403), StatusSpec::Range(0));
         for bodyless_sibling in [false, true] {
             let sibling = || bodyless_sibling.then_some((e403, None));
+            // The shape one body takes: `Single` alone, an enum beside the bodyless `403`.
+            let lone = |status: StatusSpec, body: u32| {
+                if bodyless_sibling {
+                    Shape::Enum(
+                        sibling()
+                            .into_iter()
+                            .chain([(status, Some(body))])
+                            .collect(),
+                    )
+                } else {
+                    Shape::Single(body)
+                }
+            };
             let cells: [(usize, Option<Option<u32>>, Shape); 9] = [
                 (0, None, Shape::None),
-                (0, Some(Some(DEFAULT)), Shape::Single(DEFAULT)),
+                (0, Some(Some(DEFAULT)), lone(any, DEFAULT)),
                 (0, Some(None), Shape::None),
-                (1, None, Shape::Single(4)),
+                (1, None, lone(e404, 4)),
                 (
                     1,
                     Some(Some(DEFAULT)),
@@ -1181,7 +1230,16 @@ mod tests {
                             .collect(),
                     ),
                 ),
-                (1, Some(None), Shape::Single(4)),
+                (
+                    1,
+                    Some(None),
+                    Shape::Enum(
+                        sibling()
+                            .into_iter()
+                            .chain([(e404, Some(4)), (any, None)])
+                            .collect(),
+                    ),
+                ),
                 (
                     2,
                     None,
