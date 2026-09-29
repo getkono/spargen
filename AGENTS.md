@@ -69,9 +69,11 @@ mise run doc-links  # rustdoc over the workspace, warnings denied, private items
 `hk.pkl` wires these into git hooks, and every step delegates to a `mise` task rather than
 keeping a second copy of a gate: `fmt` and `lint` fix the working tree on pre-commit;
 `fmt-check`, `lint`, `test`, and `commit-range` (Conventional Commits over the outgoing range)
-gate pre-push; `commit-msg` validates each message as it is written. CI runs the same gates but
-spells the commands out itself rather than calling `mise`. The policy is that a `mise` task and
-its CI counterpart are **identical** — the same commands with the same flags, in the same order,
+gate pre-push, and so does `deny` when the outgoing range changes a `Cargo.lock` or `Cargo.toml`
+anywhere, `deny.toml`, or `mise.toml` — globbed, unlike the others, because the audit is not
+hermetic (below), so an unglobbed step would let a new advisory block every push; `commit-msg`
+validates each message as it is written. CI runs the same gates but spells the commands out
+itself rather than calling `mise`. The policy is that a `mise` task and its CI counterpart are **identical** — the same commands with the same flags, in the same order,
 under the same environment — and neither may be stricter or narrower than the other; change both
 sides together. `spargen/tests/corpus_manifest.rs` enforces it:
 `every_mise_task_runs_exactly_what_its_ci_job_runs` pairs every CI job with every task and compares
@@ -113,7 +115,7 @@ pin is bumped by hand, in a PR of its own that changes `rust-toolchain.toml`'s `
 passes clippy and fmt on the new release; locally, `rustup` installs the new release on the first
 `cargo` call in the checkout. The rest — `check`, `bench-build`,
 `msrv`, `package`, `runtime-dependencies`, `powerset`, `corpus-smoke`, `example`, `github-api`,
-`deny`, `deny-published`, `docs`, and the rustdoc link check `doc-links` runs (a step inside the `docs` job, not a
+`deny-published`, `docs`, and the rustdoc link check `doc-links` runs (a step inside the `docs` job, not a
 job of its own) — never run in a hook; they are too slow, so a green pre-push is not a green CI.
 `msrv` needs `rustup toolchain install 1.88.0`, and `package` a clean tree. Run `mise run hooks`
 once to install them.
