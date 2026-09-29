@@ -2403,41 +2403,85 @@ fn a_synthesized_type_with_no_identity_never_takes_a_name_from_a_declared_schema
 fn generate_two_file_shapes(b_first: bool) -> String {
     let temp = tempfile::tempdir().unwrap();
     let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
-    let path_item = |letter: &str| {
-        format!(
-            "  /{letter}:\n    get:\n      operationId: get{upper}\n      responses:\n        \
-             '200':\n          description: ok\n          content:\n            \
-             application/json: {{ schema: {{ $ref: './{letter}.yaml#/components/schemas/Shape' }} }}\n",
-            upper = letter.to_uppercase(),
-        )
-    };
-    let (first, second) = if b_first { ("b", "a") } else { ("a", "b") };
-    std::fs::write(
-        dir.join("openapi.yaml"),
-        format!(
-            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\n\
-             servers: [{{ url: 'https://e.com' }}]\npaths:\n{}{}",
-            path_item(first),
-            path_item(second),
-        ),
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("a.yaml"),
-        "components:\n  schemas:\n    Shape:\n      type: object\n      required: [alpha]\n      \
-         properties: { alpha: { type: string } }\n",
-    )
-    .unwrap();
-    std::fs::write(
-        dir.join("b.yaml"),
-        "components:\n  schemas:\n    Shape:\n      type: object\n      required: [beta]\n      \
-         properties: { beta: { type: integer } }\n",
-    )
-    .unwrap();
+    let refs = [
+        ("a", "./a.yaml#/components/schemas/Shape"),
+        ("b", "./b.yaml#/components/schemas/Shape"),
+    ];
+    std::fs::write(dir.join("openapi.yaml"), two_shape_root(refs, b_first)).unwrap();
+    std::fs::write(dir.join("a.yaml"), SHAPE_ALPHA_YAML).unwrap();
+    std::fs::write(dir.join("b.yaml"), SHAPE_BETA_YAML).unwrap();
     let out = dir.join("client.rs");
     let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     std::fs::read_to_string(&out).unwrap()
+}
+
+/// A document declaring a `Shape` whose one field is `alpha`.
+const SHAPE_ALPHA_YAML: &str = "components:\n  schemas:\n    Shape:\n      type: object\n      \
+                                required: [alpha]\n      properties: { alpha: { type: string } }\n";
+/// A document declaring a `Shape` whose one field is `beta`.
+const SHAPE_BETA_YAML: &str = "components:\n  schemas:\n    Shape:\n      type: object\n      \
+                               required: [beta]\n      properties: { beta: { type: integer } }\n";
+
+/// A root document with one operation per `(path, $ref)` in `refs`, each answering `200` with the
+/// schema the `$ref` names; the second entry is listed first when `swap`.
+fn two_shape_root(refs: [(&str, &str); 2], swap: bool) -> String {
+    let path_item = |(letter, reference): (&str, &str)| {
+        format!(
+            "  /{letter}:\n    get:\n      operationId: get{upper}\n      responses:\n        \
+             '200':\n          description: ok\n          content:\n            \
+             application/json: {{ schema: {{ $ref: '{reference}' }} }}\n",
+            upper = letter.to_uppercase(),
+        )
+    };
+    let [first, second] = refs;
+    let (first, second) = if swap {
+        (second, first)
+    } else {
+        (first, second)
+    };
+    format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\npaths:\n{}{}",
+        path_item(first),
+        path_item(second),
+    )
+}
+
+/// A document reached through `..`, outside the root document's directory, is ranked by its full
+/// loaded path, which begins with the filesystem root and so sorts before any root-relative spelling.
+/// `z.yaml` sits outside and `a.yaml` inside: a key spelled by file name alone would hand the bare
+/// `Shape` to `a.yaml`, and one spelled by discovery order would move it when `paths` is reordered.
+/// Both orders must give it to the outside file.
+#[test]
+fn a_contested_type_name_ranks_a_file_outside_the_root_directory_by_its_full_loaded_path() {
+    for swap in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let root_dir = dir.join("spec");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let refs = [
+            ("a", "./a.yaml#/components/schemas/Shape"),
+            ("z", "../z.yaml#/components/schemas/Shape"),
+        ];
+        std::fs::write(root_dir.join("openapi.yaml"), two_shape_root(refs, swap)).unwrap();
+        std::fs::write(root_dir.join("a.yaml"), SHAPE_BETA_YAML).unwrap();
+        std::fs::write(dir.join("z.yaml"), SHAPE_ALPHA_YAML).unwrap();
+        let out = dir.join("client.rs");
+        let report = spargen::generate(&build(root_dir.join("openapi.yaml"), out.clone()));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let code = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(
+            field_owner(&code, "pub alpha:").as_deref(),
+            Some("Shape"),
+            "swap={swap}: the outside file's full path ranks first: {code}"
+        );
+        assert_eq!(
+            field_owner(&code, "pub beta:").as_deref(),
+            Some("Shape93360b5f"),
+            "swap={swap}: {code}"
+        );
+    }
 }
 
 /// The nullability half of the memo entry. A shared sub-file component whose own schema admits
@@ -6045,6 +6089,51 @@ mod remote {
             );
             // It never reached resolution, so no drift/unpinned diagnostic fires.
             assert!(!has_code(&report, Code::VendoredRefDrift), "{report:#?}");
+        }
+    }
+
+    /// A vendored remote document is ranked by its retrieval URL, not by where its copy is
+    /// vendored. Every type a remote document yields is hinted by its whole reference URL, so two
+    /// remote documents contest a name only when their URLs spell the same identifier:
+    /// `a-example.com` and `a.example.com` both become `HttpsAExampleComShapeYaml`. Both are whole
+    /// documents at the empty pointer, so only the document key tells them apart, and `-` sorts
+    /// before `.`. The lock vendors the copies in the opposite order (`z/` and `a/`), so ranking by
+    /// the vendored path would hand the bare name to `a.example.com`'s schema, and ranking by
+    /// discovery order would move it when `paths` is reordered. Both orders must give it to
+    /// `a-example.com`'s.
+    #[test]
+    fn a_contested_type_name_ranks_a_vendored_remote_document_by_its_url() {
+        const DASH_URL: &str = "https://a-example.com/shape.yaml";
+        const DOT_URL: &str = "https://a.example.com/shape.yaml";
+        const ALPHA_YAML: &str =
+            "type: object\nrequired: [alpha]\nproperties: { alpha: { type: string } }\n";
+        const BETA_YAML: &str =
+            "type: object\nrequired: [beta]\nproperties: { beta: { type: integer } }\n";
+        const ALPHA_SHA: &str = "ddc1311e15bb569ce61ed7e650a34cdcbc0a1c123025149aede8df402b86e9b8";
+        const BETA_SHA: &str = "ae8c71c6ff85f26973d98c92f545011b417f902b20990dcbf631997fc1de047a";
+        const NAME: &str = "HttpsAExampleComShapeYaml";
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{DASH_URL}\"\nsha256 = \"{ALPHA_SHA}\"\npath = \
+             \"z/shape.yaml\"\n\n[[remote]]\nurl = \"{DOT_URL}\"\nsha256 = \"{BETA_SHA}\"\npath = \
+             \"a/shape.yaml\"\n"
+        );
+        let vendor = [("z/shape.yaml", ALPHA_YAML), ("a/shape.yaml", BETA_YAML)];
+        for swap in [false, true] {
+            let spec = two_shape_root([("a", DASH_URL), ("b", DOT_URL)], swap);
+            let (report, _temp, out) = run_layout(&spec, Some(&lock), &vendor, false);
+            assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+            let code = std::fs::read_to_string(&out).unwrap();
+            assert_eq!(
+                field_owner(&code, "pub alpha:").as_deref(),
+                Some(NAME),
+                "swap={swap}: the lower retrieval URL keeps the bare name: {code}"
+            );
+            // The loser's suffix is the hash of its pointer, which is empty for a whole document.
+            assert_eq!(
+                field_owner(&code, "pub beta:").as_deref(),
+                Some("HttpsAexampleComShapeYaml84222325"),
+                "swap={swap}: the other document carries the disambiguator: {code}"
+            );
         }
     }
 }
