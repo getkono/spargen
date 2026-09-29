@@ -128,6 +128,10 @@ pub(crate) enum StatusSpec {
     Exact(u16),
     /// A status range by leading digit, e.g. `Range(2)` for `2XX`.
     Range(u8),
+    /// The `default` response, which covers every status no other selector documents. Lowering
+    /// stores that response in [`Responses::default`], and [`Responses::error`] offers it to the
+    /// error shape under this selector, classified last.
+    Default,
 }
 
 impl StatusSpec {
@@ -143,11 +147,14 @@ impl StatusSpec {
     /// one more entry of the error enum; see `Responses::error`), and as `UnexpectedStatus`
     /// carrying the status where it documents none. A documented
     /// `301`/`302`/`303`/`307`/`308` reaches the error side only when the injected client's
-    /// redirect policy does not follow it.
+    /// redirect policy does not follow it. `default` is not a success selector: it documents
+    /// statuses of either class, and [`Responses::success`] decides separately when it is the
+    /// success source.
     pub(crate) fn is_success(self) -> bool {
         match self {
             StatusSpec::Exact(code) => (200..300).contains(&code),
             StatusSpec::Range(prefix) => prefix == 2,
+            StatusSpec::Default => false,
         }
     }
 }
@@ -235,8 +242,8 @@ impl Responses {
     /// a bodyless `304` is plain `T`, and the `304` is on the error side (issue #198; the
     /// tests below pin both, since issue #105 exists because this comment was once false). It is the success source only when `by_status`
     /// documents no success status at all (see [`Self::default_is_success_source`]) — the early
-    /// return that bypasses the count above — and is offered to the error shape as the `Range(0)`
-    /// sentinel whenever it is declared, subject there to the same entry rule (see
+    /// return that bypasses the count above — and is offered to the error shape as
+    /// [`StatusSpec::Default`] whenever it is declared, subject there to the same entry rule (see
     /// [`Self::error`]).
     ///
     /// The two `default` claims above, pinned through the public pipeline (this item is private, so
@@ -494,8 +501,8 @@ impl Responses {
 
     /// The error shape of the operation. No bodied error entry yields `None`; one bodied entry
     /// *alone* yields the typed `E` body; anything more yields a per-operation error enum, sorted
-    /// into classification precedence (exact code ascending, then range ascending, then `default`
-    /// — the `Range(0)` sentinel — last) and carrying each bodyless error *entry* as a unit
+    /// into classification precedence (exact code ascending, then range ascending, then
+    /// [`StatusSpec::Default`] last) and carrying each bodyless error *entry* as a unit
     /// variant: two or more bodied entries, or one bodied entry beside a documented bodyless one
     /// (a bodied `404` beside a bodyless `403`, `5XX`, or `default`). A newtype over the one body
     /// has no way to represent the bodyless status, which would otherwise be classified as
@@ -504,10 +511,10 @@ impl Responses {
     /// success side's rule (issue #121) without its streaming exception, since lowering rejects a
     /// bodied stream on the error side.
     ///
-    /// The entries are the lowered non-success statuses of `by_status` plus the sentinel a declared
-    /// `default` contributes, not everything the document declares: the count and the variants
-    /// follow what lowering kept. `default` is *offered* here as `Range(0)` whenever it is
-    /// declared — including when it is also the operation's sole success source (see
+    /// The entries are the lowered non-success statuses of `by_status` plus the
+    /// [`StatusSpec::Default`] entry a declared `default` contributes, not everything the document
+    /// declares: the count and the variants follow what lowering kept. `default` is *offered*
+    /// here whenever it is declared — including when it is also the operation's sole success source (see
     /// [`Self::success`]), which then types both sides with that one body, as the specification
     /// does: `default` documents every undeclared status, of either class. (A bodied *streaming*
     /// `default` cannot be typed on both sides — the success side would stream and this side
@@ -523,7 +530,7 @@ impl Responses {
             }
         }
         if let Some(default) = &self.default {
-            entries.push((StatusSpec::Range(0), default.body));
+            entries.push((StatusSpec::Default, default.body));
         }
         let into_enum = |mut entries: Vec<(StatusSpec, Option<Ty>)>| {
             entries.sort_by_key(|(status, _)| precedence_key(*status));
@@ -560,17 +567,17 @@ fn finish_shape<S>(
 }
 
 /// The deterministic decode-precedence sort key for a lowered status selector: exact codes first
-/// (ascending), then ranges (ascending by leading digit), then the `default` response (the
-/// `Range(0)` sentinel) last. The key is the selector itself, so the sort is total exactly when the
-/// selectors within one operation's entries are unique — which is a property of lowering, not of
-/// the document's map keys: distinct keys stay distinct selectors only because the frontend admits
-/// no `Responses` key outside the specification's grammar (on which parsing is injective) and only
-/// `default` lowers to `Range(0)`.
+/// (ascending), then ranges (ascending by leading digit), then [`StatusSpec::Default`] last. The
+/// key is injective over selectors, so the sort is total exactly when the selectors within one
+/// operation's entries are unique — which is a property of lowering, not of the document's map
+/// keys: distinct keys stay distinct selectors only because the frontend admits no `Responses` key
+/// outside the specification's grammar (on which parsing is injective), and lowering stores
+/// `default` in its own field, so it contributes at most one entry.
 fn precedence_key(status: StatusSpec) -> (u8, u16) {
     match status {
         StatusSpec::Exact(code) => (0, code),
-        StatusSpec::Range(0) => (2, 0),
         StatusSpec::Range(prefix) => (1, u16::from(prefix)),
+        StatusSpec::Default => (2, 0),
     }
 }
 
@@ -607,9 +614,9 @@ pub(crate) enum SuccessShape {
 #[derive(Debug, Clone)]
 pub(crate) enum ErrorShape {
     /// Every lowered error entry is bodyless, or there is none: the entries are the non-success
-    /// `by_status` statuses plus the `Range(0)` sentinel a present `default` contributes, which is
-    /// a fact about the lowered entries, not about what the document declares. Every non-success
-    /// status is then `UnexpectedStatus` with its status and headers, retaining at most
+    /// `by_status` statuses plus the [`StatusSpec::Default`] entry a present `default` contributes,
+    /// which is a fact about the lowered entries, not about what the document declares. Every
+    /// non-success status is then `UnexpectedStatus` with its status and headers, retaining at most
     /// `max_error_body` bytes of the body (silently truncated past that cap); a failed body read
     /// returns the read error instead.
     None,
@@ -617,13 +624,13 @@ pub(crate) enum ErrorShape {
     /// shape with a bodied error entry is an [`ErrorShape::Enum`].
     Single(Ty),
     /// Two or more entries of which at least one carries a body, counted over the non-success
-    /// `by_status` entries plus the `Range(0)` sentinel a present `default` contributes: several
-    /// bodies, or a single body beside a documented bodyless entry (a bodied `404` beside a
+    /// `by_status` entries plus the [`StatusSpec::Default`] entry a present `default` contributes:
+    /// several bodies, or a single body beside a documented bodyless entry (a bodied `404` beside a
     /// bodyless `403` is `Status404(E)` and `Status403`, since a newtype over the `404` body has
     /// nowhere to put the `403`). Generated as a per-operation error enum, one variant per entry — a
     /// payload-carrying variant for a bodied status, a unit variant for a bodyless one. Entries are
-    /// pre-sorted into classification precedence (exact before range; `default` — carried as the
-    /// `Range(0)` sentinel — last); classification dispatches by HTTP status in that order.
+    /// pre-sorted into classification precedence (exact before range; [`StatusSpec::Default`]
+    /// last); classification dispatches by HTTP status in that order.
     Enum(Vec<(StatusSpec, Option<Ty>)>),
 }
 
@@ -784,11 +791,14 @@ mod tests {
     #[test]
     fn error_enum_sorts_exact_before_range_before_default() {
         // Document order: range 4XX, then exact 409, then a default — all must reorder to
-        // exact < range < default (the `Range(0)` sentinel is last).
+        // exact < range < default. A `Range(0)`, which the frontend never admits, is included to
+        // pin that a range prefix of `0` is an ordinary range here, sorted among the ranges and
+        // distinct from the `default` entry (issue #233: it once *was* the `default` entry).
         let responses = Responses {
             by_status: vec![
                 (StatusSpec::Range(4), resp(Some(1))),
                 (StatusSpec::Exact(409), resp(Some(2))),
+                (StatusSpec::Range(0), resp(Some(4))),
             ],
             default: Some(resp(Some(3))),
         };
@@ -799,8 +809,9 @@ mod tests {
                     specs,
                     vec![
                         StatusSpec::Exact(409),
-                        StatusSpec::Range(4),
                         StatusSpec::Range(0),
+                        StatusSpec::Range(4),
+                        StatusSpec::Default,
                     ]
                 );
             }
@@ -861,7 +872,7 @@ mod tests {
                     StatusSpec::Exact(409),
                     StatusSpec::Range(4),
                     StatusSpec::Range(5),
-                    StatusSpec::Range(0),
+                    StatusSpec::Default,
                 ]
             ),
             other => panic!("expected Enum, got {other:?}"),
@@ -1044,9 +1055,9 @@ mod tests {
                 "range {prefix}XX"
             );
         }
-        // `default`'s sentinel is never a success selector; it reaches the success side only
-        // through `default_is_success_source`.
-        assert!(!StatusSpec::Range(0).is_success());
+        // `default` is never a success selector; it reaches the success side only through
+        // `default_is_success_source`.
+        assert!(!StatusSpec::Default.is_success());
     }
 
     #[test]
@@ -1111,7 +1122,7 @@ mod tests {
             shape(conditional.error()),
             Shape::Enum(vec![
                 (StatusSpec::Exact(304), None),
-                (StatusSpec::Range(0), Some(1)),
+                (StatusSpec::Default, Some(1)),
             ])
         );
     }
@@ -1167,7 +1178,7 @@ mod tests {
         match responses.error() {
             ErrorShape::Enum(entries) => assert_eq!(
                 statuses(&entries),
-                vec![StatusSpec::Exact(404), StatusSpec::Range(0)]
+                vec![StatusSpec::Exact(404), StatusSpec::Default]
             ),
             other => panic!("expected Enum, got {other:?}"),
         }
@@ -1188,7 +1199,7 @@ mod tests {
             shape(single.error()),
             Shape::Enum(vec![
                 (StatusSpec::Exact(404), Some(2)),
-                (StatusSpec::Range(0), None),
+                (StatusSpec::Default, None),
             ])
         );
 
@@ -1207,7 +1218,7 @@ mod tests {
                     vec![
                         StatusSpec::Exact(404),
                         StatusSpec::Exact(409),
-                        StatusSpec::Range(0),
+                        StatusSpec::Default,
                     ]
                 );
                 assert!(
@@ -1250,7 +1261,7 @@ mod tests {
         // agree cell for cell (`e2e.rs`, `a_bodyless_error_entry_beside_one_error_body_is_its_own_variant`).
         const DEFAULT: u32 = 9;
         let (e404, e409) = (StatusSpec::Exact(404), StatusSpec::Exact(409));
-        let (e403, any) = (StatusSpec::Exact(403), StatusSpec::Range(0));
+        let (e403, any) = (StatusSpec::Exact(403), StatusSpec::Default);
         for bodyless_sibling in [false, true] {
             let sibling = || bodyless_sibling.then_some((e403, None));
             // The shape one body takes: `Single` alone, an enum beside the bodyless `403`.
@@ -1351,7 +1362,7 @@ mod tests {
     #[test]
     fn a_default_with_no_explicit_status_is_both_the_success_and_the_error_body() {
         // `by_status` empty: the early return makes `default` the sole success source, and the
-        // error side is still offered it as `Range(0)`, so one body types both sides.
+        // error side is still offered it as `StatusSpec::Default`, so one body types both sides.
         let bodied = Responses {
             by_status: Vec::new(),
             default: Some(resp(Some(7))),
@@ -1395,7 +1406,7 @@ mod tests {
         match responses.error() {
             ErrorShape::Enum(entries) => assert_eq!(
                 statuses(&entries),
-                vec![StatusSpec::Exact(404), StatusSpec::Range(0)]
+                vec![StatusSpec::Exact(404), StatusSpec::Default]
             ),
             other => panic!("expected Enum, got {other:?}"),
         }

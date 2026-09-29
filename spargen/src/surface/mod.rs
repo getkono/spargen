@@ -889,8 +889,8 @@ fn status_enum_sig(
 fn status_label(status: StatusSpec) -> String {
     match status {
         StatusSpec::Exact(code) => code.to_string(),
-        StatusSpec::Range(0) => "default".to_owned(),
         StatusSpec::Range(prefix) => format!("{prefix}XX"),
+        StatusSpec::Default => "default".to_owned(),
     }
 }
 
