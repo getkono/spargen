@@ -5586,6 +5586,54 @@ Pet:
     assert!(code.contains("pub id"), "{code}");
 }
 
+/// A reference naming a local `$self` identity through a path spelled differently from the one
+/// `$self` gives (`../canonical/api.yaml` resolved against `canonical/api.yaml` is
+/// `canonical/../canonical/api.yaml`) is that document, not a file to load from disk (#220). No
+/// file exists at `canonical/api.yaml`, so a spelling-sensitive comparison fails the load.
+#[test]
+fn a_reference_naming_a_relative_self_by_another_spelling_is_that_document() {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::create_dir(dir.join("canonical")).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        r##"
+openapi: 3.2.0
+$self: canonical/api.yaml
+info: { title: T, version: 1.0.0 }
+paths:
+  /pet:
+    get:
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '../canonical/api.yaml#/components/schemas/Pet' }
+components:
+  schemas:
+    Pet:
+      type: object
+      properties: { id: { type: string } }
+      required: [id]
+"##,
+    )
+    .unwrap();
+    let spec = dir.join("openapi.yaml");
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(spec.clone(), out.clone()));
+    let checked = spargen::check(&Spec::new(spec));
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::DeclarationHasNoEffect),
+            "{entry}: {report:#?}"
+        );
+    }
+    let code = std::fs::read_to_string(out).unwrap();
+    assert_eq!(code.matches("pub struct Pet").count(), 1, "{code}");
+}
+
 /// A remote-`$ref` spec fixture referencing a single vendored schema, plus a helper to lay it out
 /// in a tempdir with a hand-written lock + vendored file (no network) and run `generate`/`check`.
 mod remote {
@@ -19420,5 +19468,75 @@ fn a_cross_file_reference_cycle_terminates() {
         .expect("a cross-file Reference cycle did not terminate within 60 s");
     for report in [&generated, &checked] {
         assert!(!has_code(report, Code::InvalidInput), "{report:#?}");
+    }
+}
+
+/// A `$ref` that names the root document through its own file is the root, however the path is
+/// spelled (#220). The bundle once compared paths as written, so `sub/../openapi.yaml` loaded the
+/// root a second time under a second file id: every component was emitted twice, and `W011`
+/// reported the root as shadowing a declaration in `sub/../openapi.yaml`, which is the root. The
+/// bare `spargen check openapi.yaml` spelling from the issue is driven through the binary in
+/// `cli.rs`, since only a child process owns its working directory.
+#[test]
+fn a_reference_naming_the_root_by_another_spelling_is_the_root() {
+    let spec = |reference: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /n:
+    get:
+      operationId: getN
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Node' }} }}
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        parent: {{ $ref: '#/components/schemas/MaybeNode' }}
+    MaybeNode:
+      oneOf:
+        - $ref: '{reference}#/components/schemas/Node'
+        - type: 'null'
+"##
+        )
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    let root = dir.join("openapi.yaml");
+    for reference in [
+        "./openapi.yaml".to_owned(),
+        "openapi.yaml".to_owned(),
+        "sub/../openapi.yaml".to_owned(),
+        root.to_string(),
+    ] {
+        std::fs::write(&root, spec(&reference)).unwrap();
+        let out = dir.join("client.rs");
+        let generated = spargen::generate(&build(root.clone(), out.clone()));
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let checked = spargen::check(&Spec::new(root.clone()));
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{reference}/{entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::DeclarationHasNoEffect),
+                "{reference}/{entry}: the root cannot shadow itself: {report:#?}"
+            );
+        }
+        let nodes = code.matches("pub struct Node").count();
+        assert_eq!(
+            nodes, 1,
+            "{reference}: `Node` emitted {nodes} times, so the root was loaded twice: {code}"
+        );
     }
 }
