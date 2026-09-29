@@ -277,6 +277,85 @@ fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
     );
 }
 
+/// Whether `name` is a TLS crate, by the same rule the `example` gate applies to each example
+/// lockfile in `mise.toml` and `ci.yml`: it names `rustls`, `native-tls`, `openssl` or `webpki`,
+/// or ends in `-tls`. The two share a rule so that "no TLS crate" there and "a TLS crate" here
+/// mean the same set.
+fn is_tls_crate(name: &str) -> bool {
+    ["rustls", "native-tls", "openssl", "webpki"]
+        .iter()
+        .any(|family| name.contains(family))
+        || name.ends_with("-tls")
+}
+
+/// The distinct package names in this workspace's resolved graph, from `Cargo.lock` as committed
+/// (`--locked`, as the `deny` gate audits it), with `features` passed to `cargo tree`.
+///
+/// `cargo tree` is read rather than `cargo metadata` because it resolves features the way
+/// cargo-deny does: `cargo metadata`'s package list keeps the target of a weak `dep?/feature`
+/// that nothing enables (reqwest's `quinn`, which depends on `rustls`), so it could report a TLS
+/// crate cargo-deny never audits (#187). Every edge kind on every target is read, the scope
+/// cargo-deny audits by default.
+fn workspace_graph_package_names(features: &[&str]) -> std::collections::BTreeSet<String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let output = fixture_cargo(root)
+        .args(["tree", "--workspace", "--locked", "--target", "all"])
+        .args(["--edges", "normal,build,dev", "--prefix", "none"])
+        .args(["--format", "{p}"])
+        .args(features)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "`cargo tree {features:?}` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The `deny` gate audits under `--all-features` because that is what puts a TLS stack in the
+/// audited graph, and TLS advisories (RUSTSEC-2026-0285) are found only through one that is
+/// there. `the_deny_gate_states_the_feature_scope_it_audits` in `corpus_manifest.rs` pins the
+/// flag; this pins the property the flag stands for. Restructuring `remote-fetch`, dropping
+/// reqwest's `rustls-tls`, or removing the `rustls` floor would otherwise leave the flag in place
+/// and the TLS advisory audit vacuous with every gate green (#227).
+///
+/// Any TLS crate satisfies it, not `rustls` by name, so a backend swap (to `native-tls`, say)
+/// keeps it passing while the audit still sees a TLS stack. The default-features graph is the
+/// control: it must contain none, or the matcher proves nothing and the gate comments saying
+/// `--all-features` is what brings TLS in are false.
+#[test]
+fn the_all_features_workspace_graph_carries_a_tls_stack() {
+    let tls = |features: &[&str]| -> Vec<String> {
+        workspace_graph_package_names(features)
+            .into_iter()
+            .filter(|name| is_tls_crate(name))
+            .collect()
+    };
+
+    let audited = tls(&["--all-features"]);
+    assert!(
+        !audited.is_empty(),
+        "the `--all-features` workspace graph the `deny` gate audits carries no TLS crate, so no \
+         TLS advisory can fail it"
+    );
+
+    let default = tls(&[]);
+    assert!(
+        default.is_empty(),
+        "the default-features workspace graph carries TLS crates {default:?}: `--all-features` is \
+         no longer what puts TLS in the audited graph, so this test's control and the `deny` \
+         gate's stated rationale no longer hold"
+    );
+}
+
 #[test]
 fn cargo_build_rejects_a_runtime_requirement_below_the_supported_floor() {
     let temp = tempfile::tempdir().unwrap();
