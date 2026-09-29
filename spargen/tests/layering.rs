@@ -647,7 +647,8 @@ paths:
     );
 }
 
-/// The path literal of every `include_str!` and `include_bytes!` in `source`, in order. Lines that
+/// The path literal of every `include_str!` and `include_bytes!` in `source`: every `include_str!`
+/// target in source order, then every `include_bytes!` target in source order. Lines that
 /// open with `//` are skipped, so prose citing the macro contributes nothing; whitespace between
 /// the parenthesis and the literal is allowed, since rustfmt breaks a long call there.
 fn include_targets(source: &str) -> Vec<String> {
