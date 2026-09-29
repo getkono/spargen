@@ -72,7 +72,7 @@ requirement that could resolve below these versions or beyond the next semver br
 | Dependency | Required features | When required |
 | --- | --- | --- |
 | `bytes = "1.12.1"` | `serde` only when noted below | Always; `serde` only when a generated serialized aggregate contains bytes |
-| `reqwest = "0.12.28"` | `default-features = false`; `json` for JSON requests; `multipart` for multipart requests; `stream` for sequential responses | Always; the three features are spec-derived |
+| `reqwest = "0.12.28"` | `default-features = false` (in `[workspace.dependencies]` when inherited, see below); `json` for JSON requests; `multipart` for multipart requests; `stream` for sequential responses | Always; the three features are spec-derived |
 | `secrecy = "0.10.3"` | - | Always |
 | `serde = "1.0.229"` | `derive` | Always |
 | `serde_json = "1.0.151"` | - | Always |
@@ -93,6 +93,17 @@ resolved dependencies: build scripts and proc macros run later in the compilatio
 therefore checks the manifest, Cargo performs resolution, and rustc provides the final proof that
 the selected versions expose every API and trait the generated client uses. Extra application
 dependencies and features are allowed.
+
+#### Workspace inheritance and the full contract
+
+A dependency may be declared `workspace = true` and inherited from `[workspace.dependencies]`;
+the audit follows it to the workspace root the way Cargo does. The one trap is `reqwest`'s
+default features: a member's `default-features = false` cannot turn off defaults the root leaves
+on, so disable them in `[workspace.dependencies]` itself. The complete contract, including how the
+root is found and what the diagnostic reports when it cannot be read, is the text
+`spargen explain E023` prints, reproduced here verbatim:
+
+> {{#include ../../../spargen/src/runtime_contract_e023_explain.txt}}
 
 #### Cargo integration
 
