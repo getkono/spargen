@@ -2292,6 +2292,45 @@ fn a_failed_token_provider_is_a_typed_request_construction_error() {
     assert!(provider.downcast_ref::<basic_client::AuthError>().is_some());
 }
 
+// The third credential state: a credential is registered and selects its alternative, but it is of
+// a kind the scheme cannot carry. It is typed from generated output too, with nothing beneath it,
+// so a consumer never has to match on its text.
+#[test]
+fn a_credential_of_the_wrong_kind_is_a_typed_request_construction_error() {
+    use std::future::Future;
+    let client = basic_client::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_credential(
+            "bearer",
+            basic_client::Credential::Basic {
+                username: "aladdin".to_owned(),
+                password: basic_client::SecretString::from("open sesame"),
+            },
+        );
+    let mut call = std::pin::pin!(client.get_user("1", None));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("a credential mismatch must fail before anything is sent");
+    };
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a credential mismatch cannot produce a response"),
+    };
+    match &error {
+        basic_client::Error::RequestConstruction(
+            basic_client::RequestError::CredentialMismatch { scheme, required, registered },
+        ) => {
+            assert_eq!(*scheme, "bearer");
+            assert_eq!(*required, "bearer");
+            assert_eq!(*registered, "Basic");
+        }
+        other => panic!("expected CredentialMismatch, got {other:?}"),
+    }
+    assert!(!error.is_transient());
+    let cause = std::error::Error::source(&error).unwrap();
+    assert!(std::error::Error::source(cause).is_none());
+}
+
 #[test]
 fn the_single_error_body_stays_one_deref_away() {
     let wrapped = basic_client::GetTextErrorError("nope".to_owned());

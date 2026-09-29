@@ -25,8 +25,9 @@ pub enum Error<E> {
     /// produced and delivered to the caller.
     ///
     /// Pre-send, raised while the request is still being assembled — nothing was transmitted:
-    /// no registered credential satisfies the operation's security requirement, a registered token
-    /// provider failed, the base URL is invalid, or a parameter or body did not serialize. Also
+    /// no registered credential satisfies the operation's security requirement, a registered
+    /// credential is of a kind its scheme cannot carry, a registered token provider failed, the
+    /// base URL is invalid, or a parameter or body did not serialize. Also
     /// pre-send: reqwest refusing the request when asked to send it (a builder-kind error), as it
     /// does for a URL scheme other than `http`/`https` or plain `http` on an `https_only` client.
     ///
@@ -46,7 +47,7 @@ pub enum Error<E> {
     /// is not a safe recovery — it re-delivers events the caller has already consumed and acted
     /// on.
     ///
-    /// [`RequestError`] types the two credential causes; every other cause — reqwest's own
+    /// [`RequestError`] types the three credential causes; every other cause — reqwest's own
     /// request-error and builder-error classes and both reconnect-clone failures included —
     /// arrives as
     /// [`RequestError::Other`].
@@ -322,10 +323,12 @@ impl std::error::Error for MessageError {}
 
 /// Request-construction failure (taxonomy #1).
 ///
-/// The two credential causes are the ones a consumer routes on — they mean "unauthenticated", not
-/// "malformed request" — so each is a variant of its own: [`RequestError::MissingCredential`] when
-/// no registered credential satisfies the requirement, and [`RequestError::CredentialProvider`]
-/// when a registered token provider fails. Both are raised before anything is sent. Every other
+/// The three credential causes are the ones a consumer routes on — they mean "unauthenticated",
+/// not "malformed request" — so each is a variant of its own: [`RequestError::MissingCredential`]
+/// when no registered credential satisfies the requirement,
+/// [`RequestError::CredentialMismatch`] when the selected alternative has a credential registered
+/// that its scheme cannot carry, and [`RequestError::CredentialProvider`] when a registered token
+/// provider fails. All three are raised before anything is sent. Every other
 /// cause arrives as [`RequestError::Other`] with its source attached — and [`RequestError::Other`]
 /// is **not** uniformly pre-send; see its own documentation before retrying on it.
 ///
@@ -357,6 +360,25 @@ pub enum RequestError {
         /// empty one, and skips an empty alternative when listing.
         alternatives: Vec<Vec<&'static str>>,
     },
+    /// The selected alternative has a credential registered under one of its schemes, but of a
+    /// kind that scheme cannot carry — a `Credential::Basic` under a bearer or `apiKey` scheme, or
+    /// anything but `Credential::Basic` under an `http basic` one. Raised before anything is sent,
+    /// and before a registered token provider is asked for a token. The payload is the whole cause,
+    /// so `source()` is `None`.
+    ///
+    /// Registration selected the alternative, so there is no fall-through to a later one: the
+    /// registration is what needs correcting.
+    CredentialMismatch {
+        /// The `securitySchemes` key the credential is registered under.
+        scheme: &'static str,
+        /// What the scheme carries on the wire: `"http basic"`, `"bearer"` (also every `oauth2`
+        /// and `openIdConnect` scheme, which attach their token as a bearer credential), or
+        /// `"apiKey"`.
+        required: &'static str,
+        /// The `Credential` variant registered under `scheme`: `"Bearer"`, `"Basic"`, `"ApiKey"`,
+        /// or `"Provider"`.
+        registered: &'static str,
+    },
     /// The selected alternative's token provider returned an error. Raised before anything is
     /// sent; `source()` is the provider's [`AuthError`].
     CredentialProvider {
@@ -367,8 +389,8 @@ pub enum RequestError {
     },
     /// Any other request-construction failure, with the cause reachable through `source()`.
     ///
-    /// Pre-send: an unparseable base URL, a parameter or body that did not serialize, or a
-    /// credential registered under the wrong kind for its scheme.
+    /// Pre-send: an unparseable base URL, or a parameter, body, or credential value that did not
+    /// serialize.
     ///
     /// Not pre-send: an error reqwest classifies as a request error. reqwest raises that class
     /// from inside the send, so the request may already have been transmitted. This variant is
@@ -529,6 +551,15 @@ impl std::fmt::Display for RequestError {
                 }
                 f.write_str(")")
             }
+            RequestError::CredentialMismatch {
+                scheme,
+                required,
+                registered,
+            } => write!(
+                f,
+                "the `Credential::{registered}` registered for security scheme `{scheme}` cannot \
+                 satisfy its `{required}` type"
+            ),
             RequestError::CredentialProvider { scheme, .. } => write!(
                 f,
                 "the token provider registered for security scheme `{scheme}` failed"
@@ -541,7 +572,9 @@ impl std::fmt::Display for RequestError {
 impl std::error::Error for RequestError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            RequestError::MissingCredential { .. } => None,
+            RequestError::MissingCredential { .. } | RequestError::CredentialMismatch { .. } => {
+                None
+            }
             RequestError::CredentialProvider { source, .. } => Some(source),
             // The boxed cause itself, not its wrapper, so the chain and `downcast_ref` stay exactly
             // as they were when the box was a private field.
@@ -721,7 +754,7 @@ mod tests {
 
     /// How many variants `RequestError` has. `every_request_variant` returns an array of exactly
     /// this length, so raising it will not compile until a value of the new variant is listed.
-    const REQUEST_VARIANTS: usize = 3;
+    const REQUEST_VARIANTS: usize = 4;
 
     /// Each variant's position in `every_request_variant`. Indices are dense and unique, which is
     /// what `every_request_variant_lists_each_variant_exactly_once` checks.
@@ -759,6 +792,7 @@ mod tests {
             RequestError::MissingCredential { .. } => 0,
             RequestError::CredentialProvider { .. } => 1,
             RequestError::Other(_) => 2,
+            RequestError::CredentialMismatch { .. } => 3,
         }
     }
 
@@ -779,6 +813,11 @@ mod tests {
             RequestError::Other(super::RequestCause(Box::new(super::MessageError(
                 "bad path segment".to_owned(),
             )))),
+            RequestError::CredentialMismatch {
+                scheme: "login",
+                required: "http basic",
+                registered: "Provider",
+            },
         ]
     }
 
@@ -837,19 +876,24 @@ mod tests {
                     "the token provider registered for security scheme `token` failed"
                 }
                 RequestError::Other(_) => "bad path segment",
+                RequestError::CredentialMismatch { .. } => {
+                    "the `Credential::Provider` registered for security scheme `login` cannot \
+                     satisfy its `http basic` type"
+                }
             };
             assert_eq!(rendered, expected, "a variant does not name its cause");
         }
     }
 
-    /// `MissingCredential` *is* the whole cause, so it ends the chain; the other two carry a
-    /// separate cause and must hand it over. A consumer walking the chain must not find a phantom
-    /// source, nor lose a real one.
+    /// `MissingCredential` and `CredentialMismatch` *are* the whole cause, so they end the chain;
+    /// the other two carry a separate cause and must hand it over. A consumer walking the chain
+    /// must not find a phantom source, nor lose a real one.
     #[test]
     fn request_source_is_present_exactly_where_the_cause_is_separate() {
         for error in every_request_variant() {
             let expected = match &error {
-                RequestError::MissingCredential { .. } => false,
+                RequestError::MissingCredential { .. }
+                | RequestError::CredentialMismatch { .. } => false,
                 RequestError::CredentialProvider { .. } | RequestError::Other(_) => true,
             };
             assert_eq!(
