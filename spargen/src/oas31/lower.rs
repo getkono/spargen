@@ -2071,6 +2071,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Lower one union member, returning its type and — when the member is a `$ref` to a component —
     /// that component's name (used to derive the variant name and implicit discriminator tag).
+    ///
+    /// The name is a fact about how the member is *written*; the type is what it *means*. A bare
+    /// component `$ref` means its target, so it is that component's shared type. A `$ref` beside
+    /// shape-bearing siblings means the intersection of the two — `$ref` is an applicator in
+    /// 2020-12 — so it lowers through `lower_schema_or`, the same `$ref`-sibling intersection every
+    /// other position takes (an empty or unrepresentable one is `E013` at the member), and keeps
+    /// the component name only for naming. Returning the target here instead discarded the
+    /// siblings in silence (#279).
     fn lower_union_variant(
         &mut self,
         member: &SchemaOr,
@@ -2080,8 +2088,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let (Some(name), SchemaOr::Schema(schema)) =
             (member_component_name(member, root), member)
         {
-            let ty =
-                self.ensure_component(name, schema.reference.as_deref(), &schema.provenance)?;
+            let mut sibling = schema.as_ref().clone();
+            sibling.reference = None;
+            let ty = if schema_has_shape_constraint(&sibling) {
+                self.lower_schema_or(member, hint)?
+            } else {
+                self.ensure_component(name, schema.reference.as_deref(), &schema.provenance)?
+            };
             return Some((ty, Some(name.to_owned())));
         }
         let ty = self.lower_schema_or(member, hint)?;
