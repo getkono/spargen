@@ -3088,6 +3088,46 @@ serde_json.workspace = true
         assert_eq!(result.manifests.len(), 2, "{:#?}", result.manifests);
     }
 
+    #[test]
+    fn a_relative_manifest_path_with_no_root_names_the_absolute_path_searched_from() {
+        // "No workspace manifest was found above `Cargo.toml`" names no directory at all. The
+        // search runs from the absolutized path, and the message must name that one; reporting
+        // the caller's spelling instead left every test green (#202).
+        let directory = tempfile::tempdir().unwrap();
+        let member_dir = directory.path().join("client");
+        std::fs::create_dir(&member_dir).unwrap();
+        std::fs::write(
+            member_dir.join("Cargo.toml"),
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let _lock = WORKING_DIRECTORY
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _restore = RestoreWorkingDirectory(std::env::current_dir().unwrap());
+        std::env::set_current_dir(&member_dir).unwrap();
+        // How the platform spells the temporary directory is its own business (`/tmp` may be a
+        // symlink), so the expected path is the working directory as the process reports it.
+        let searched_from =
+            Utf8PathBuf::from_path_buf(std::env::current_dir().unwrap().join("Cargo.toml"))
+                .unwrap();
+
+        let result = audit(Utf8Path::new("Cargo.toml"), &RuntimeRequirements::default());
+        assert!(!result.diagnostics.is_empty());
+        for diagnostic in &result.diagnostics {
+            assert_eq!(
+                manifest_named_after(
+                    &diagnostic.message,
+                    "no workspace manifest was found above `"
+                ),
+                Some(searched_from.as_str()),
+                "{}",
+                diagnostic.message
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn the_walk_climbs_a_symlinked_member_path_as_written() {
