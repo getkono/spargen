@@ -2150,6 +2150,13 @@ fn xml_body_types_carry_attribute_and_rename() {
         quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
     assert_eq!(receipt.code, "OK");
     assert_eq!(receipt.note, None);
+    // A present optional element is decoded as the field's own type through its present-value
+    // deserializer, not through quick-xml's `Option` handling.
+    let noted: basic_client::types::XmlReceipt = quick_xml::de::from_str(
+        "<XmlReceipt><ReceiptCode>OK</ReceiptCode><note>late</note></XmlReceipt>",
+    )
+    .unwrap();
+    assert_eq!(noted.note.as_deref(), Some("late"));
 }
 
 #[test]
