@@ -138,10 +138,17 @@ impl StatusSpec {
     /// "Redirection 3xx"), and it is the only one the generated dispatch can honour: an emitted
     /// method enters its success branch on the transport's `StatusCode::is_success()`, which is
     /// exactly 2xx, so a status this predicate put on the success side would be a variant no
-    /// response could reach. A documented `304` is therefore a typed outcome of the error side —
-    /// a unit variant of the operation's error enum, or `UnexpectedStatus` carrying the status
-    /// where that side has no enum — never a decode failure; a documented `301`/`302`/`303`/
-    /// `307`/`308` reaches it only when the injected client's redirect policy does not follow it.
+    /// response could reach. A documented bodyless `304` therefore reaches the caller from the
+    /// error side: as a unit variant where that side is an enum (two or more documented error
+    /// bodies), and as `UnexpectedStatus` carrying the status where it has no documented error
+    /// body. Where it has exactly one (`ErrorShape::Single`), the `304` is dropped from the shape,
+    /// and what a real `304` becomes depends on that body's selector: `UnexpectedStatus` when the
+    /// body is documented under a selector that does not cover `304` (a `404`, a `4XX`), but a
+    /// decode of the empty body — `Error::Decode` for a JSON body — when it is documented under a
+    /// `3XX` or `default`, which the emitted classification table then matches `304` against.
+    /// That exception is issue #204, not a decision of this predicate. A documented
+    /// `301`/`302`/`303`/`307`/`308` reaches the error side only when the injected client's
+    /// redirect policy does not follow it.
     pub(crate) fn is_success(self) -> bool {
         match self {
             StatusSpec::Exact(code) => (200..300).contains(&code),
@@ -953,12 +960,16 @@ mod tests {
         }
 
         // Only a `304` and a `default` documented: no success status is declared, so `default`
-        // is the success source, and the `304` stays an error entry rather than claiming it.
+        // is the success source, and the `304` does not claim it. On the error side `default` is
+        // the one bodied entry, so the shape is `Single(default)` and the bodyless `304` is
+        // dropped from it — the issue #204 case, where a real `304` matches `default` in the
+        // emitted classification table and its empty body is decoded.
         let conditional = Responses {
             by_status: vec![(StatusSpec::Exact(304), resp(None))],
             default: Some(resp(Some(1))),
         };
         assert!(matches!(conditional.success(), SuccessShape::Plain(body) if body.id == TypeId(1)));
+        assert!(matches!(conditional.error(), ErrorShape::Single(body) if body.id == TypeId(1)));
     }
 
     /// The statuses of an enum shape, in the order it holds them.
