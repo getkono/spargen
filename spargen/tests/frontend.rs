@@ -1401,6 +1401,70 @@ components:
     }
 }
 
+/// A sub-file component whose body is a nullable union keeps its nullability at every use, as the
+/// same component in the root document does.
+///
+/// `schema_is_nullable` reads only `type`, `enum` and `const`, so for `oneOf: [null, string]` it
+/// answers `false`, while lowering the union answers `true`. `ensure_component` stopped writing
+/// that provisional answer back over the body's; `ensure_resolved` still did, and cached it, so
+/// both required fields below were emitted as a bare `M` and a `null` the description allows would
+/// fail to decode. Two fields, because the first use returns the lowered `Ty` and the second the
+/// cached one, and each carried the overwrite separately.
+#[test]
+fn a_sub_file_nullable_union_component_stays_nullable_at_every_use() {
+    const COMPONENTS: &str = r##"
+components:
+  schemas:
+    W:
+      type: object
+      required: [a, b]
+      properties:
+        a: { $ref: '#/components/schemas/M' }
+        b: { $ref: '#/components/schemas/M' }
+    M:
+      oneOf:
+        - { type: 'null' }
+        - { type: string }
+"##;
+    let (generated, checked, code) = split("./lib.yaml#/components/schemas/W", COMPONENTS);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    for field in ["pub a:", "pub b:"] {
+        assert_eq!(
+            field_type(&code, field).as_deref(),
+            Some("Option<M>"),
+            "{field}: {code}"
+        );
+    }
+
+    // The root-document control: the same components, the same field types.
+    let (report, root) = generate_with_code(&format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/W' }} }}
+{COMPONENTS}"##
+    ));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    for field in ["pub a:", "pub b:"] {
+        assert_eq!(
+            field_type(&root, field).as_deref(),
+            Some("Option<M>"),
+            "{field}: {root}"
+        );
+    }
+}
+
 /// A sub-file component's `default` reaches its generated type's rustdoc, as a root component's
 /// does. `ensure_resolved` lowers the sub-file root's body and then appends the note to the lifted
 /// definition itself, so dropping that step loses the documented default with nothing else
@@ -5340,6 +5404,62 @@ mod remote {
             "{code}"
         );
         assert!(!code.contains("serde_json::Value>"), "{code}");
+    }
+
+    /// The remote spelling of
+    /// `a_sub_file_nullable_union_component_stays_nullable_at_every_use`: a vendored schema whose
+    /// body is `oneOf: [null, string]`, used by two required fields. `ensure_remote` wrote
+    /// `schema_is_nullable`'s provisional `false` back over the union's own `true` and cached it,
+    /// so both fields were a bare type a `null` would fail to decode into.
+    #[test]
+    fn a_vendored_nullable_union_stays_nullable_at_every_use() {
+        const MAYBE_URL: &str = "https://api.example.com/schemas/maybe.yaml";
+        const MAYBE_YAML: &str = "oneOf:\n  - type: 'null'\n  - type: string\n";
+        const MAYBE_SHA: &str = "734c50f67b492acbbf4be1e9e09901db3f69ba14154ce2256cdd9bfe2e039fa7";
+
+        let spec = format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths:\n\
+             \x20 /it:\n\
+             \x20   get:\n\
+             \x20     operationId: getIt\n\
+             \x20     responses:\n\
+             \x20       '200':\n\
+             \x20         description: ok\n\
+             \x20         content:\n\
+             \x20           application/json:\n\
+             \x20             schema:\n\
+             \x20               type: object\n\
+             \x20               required: [a, b]\n\
+             \x20               properties:\n\
+             \x20                 a: {{ $ref: \"{MAYBE_URL}\" }}\n\
+             \x20                 b: {{ $ref: \"{MAYBE_URL}\" }}\n"
+        );
+        let lock = format!(
+            "version = 1\n\n[[remote]]\nurl = \"{MAYBE_URL}\"\nsha256 = \"{MAYBE_SHA}\"\npath = \
+             \"api.example.com/schemas/maybe.yaml\"\n"
+        );
+        let vendor = [("api.example.com/schemas/maybe.yaml", MAYBE_YAML)];
+
+        let (generated, _temp, out) = run_layout(&spec, Some(&lock), &vendor, false);
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        let (checked, _temp2, _out2) = run_layout(&spec, Some(&lock), &vendor, true);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            // The pin is live, so the document really reaches lowering.
+            assert!(
+                !has_code(report, Code::VendoredRefDrift),
+                "{entry}: {report:#?}"
+            );
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        }
+        for field in ["pub a:", "pub b:"] {
+            assert_eq!(
+                field_type(&code, field).as_deref(),
+                Some("Option<HttpsApiExampleComSchemasMaybeYaml>"),
+                "{field}: {code}"
+            );
+        }
     }
 
     /// A vendored remote schema that refers to **itself** directly, with no alias in between: the

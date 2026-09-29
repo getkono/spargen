@@ -966,10 +966,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(alias);
         }
 
-        let nullable = schema_is_nullable(&schema);
+        // Provisional, as in `ensure_component`: a back-edge met mid-body needs an answer before the
+        // body has one, and `schema_is_nullable` cannot see a composed body's null.
+        let provisional_nullable = schema_is_nullable(&schema);
         let root_id = self.graph.reserve();
         self.remote_in_progress
-            .insert(reference.to_owned(), (root_id, nullable));
+            .insert(reference.to_owned(), (root_id, provisional_nullable));
         let lowered = self.lower_schema(&schema, reference);
         self.remote_in_progress.remove(reference);
         let mut ty = lowered?;
@@ -986,9 +988,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.graph.fill(root_id, def);
         ty.id = root_id;
-        ty.nullable = nullable;
+        // The body's answer, cached under the same value so a direct return and a later cache hit
+        // yield an identical `Ty` — see `ensure_component`.
         self.remote_components
-            .insert(reference.to_owned(), (root_id, nullable));
+            .insert(reference.to_owned(), (root_id, ty.nullable));
         Some(ty)
     }
 
@@ -1109,10 +1112,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(alias);
         }
 
-        let nullable = schema_is_nullable(&schema);
+        // Provisional, as in `ensure_component`: a back-edge met mid-body needs an answer before the
+        // body has one, and `schema_is_nullable` cannot see a composed body's null.
+        let provisional_nullable = schema_is_nullable(&schema);
         let root_id = self.graph.reserve();
         self.resolved_in_progress
-            .insert(key.clone(), (root_id, nullable));
+            .insert(key.clone(), (root_id, provisional_nullable));
         let lowered = self.lower_schema(&schema, &hint);
         self.resolved_in_progress.remove(&key);
         let mut ty = lowered?;
@@ -1129,8 +1134,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.graph.fill(root_id, def);
         ty.id = root_id;
-        ty.nullable = nullable;
-        self.resolved_components.insert(key, (root_id, nullable));
+        // The body's answer, cached under the same value so a direct return and a later cache hit
+        // yield an identical `Ty` — see `ensure_component`.
+        self.resolved_components.insert(key, (root_id, ty.nullable));
         Some(ty)
     }
 
