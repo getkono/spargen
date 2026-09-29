@@ -17636,11 +17636,11 @@ fn inline_spec_with_response_entries(entries: &str) -> String {
 ///
 /// `references/3.2.0.md` closes the grammar — *"Only the following range definitions are allowed:
 /// `1XX`, `2XX`, `3XX`, `4XX`, and `5XX`"* — and the metaschema spells it `^[1-5](?:[0-9]{2}|XX)$`.
-/// Before the key was checked behind a `$ref`, `0XX` lowered to `StatusSpec::Range(0)`, which is the
-/// sentinel `default` itself lowers to: the operation's error enum got **two** `Default` variants
-/// and `rustc` refused the emitted module with `E0428` — at outcome `Generated`, with zero
-/// diagnostics. That is the fourth, silent behavior the contract forbids, on a construct the
-/// specification explicitly closes.
+/// Before the key was checked behind a `$ref`, `0XX` lowered to `StatusSpec::Range(0)`, which was
+/// then the sentinel `default` itself lowered to (it is now `StatusSpec::Default`): the
+/// operation's error enum got **two** `Default` variants and `rustc` refused the emitted module
+/// with `E0428` — at outcome `Generated`, with zero diagnostics. That is the fourth, silent
+/// behavior the contract forbids, on a construct the specification explicitly closes.
 #[test]
 fn e011_out_of_grammar_response_key_behind_a_ref_is_rejected() {
     let (generated, checked) = generate_and_check_refd_path_item(
