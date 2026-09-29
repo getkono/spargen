@@ -897,7 +897,9 @@ struct WorkspaceRoot {
 /// ancestors to walk, which would report every inherited dependency as unresolvable. Absolutizing
 /// is lexical and keeps any `..`, since folding those away changes which file a path names when a
 /// component is a symlink; the walk therefore climbs the path as written, not as the filesystem
-/// would resolve it.
+/// would resolve it. For the same reason it is never canonicalized: Cargo climbs the manifest path
+/// it hands the build, symlinks unresolved, so a canonical walk from a member reached through a
+/// symlinked directory would find a different root than Cargo did.
 fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> WorkspaceRoot {
     let absolute = std::path::absolute(manifest_path)
         .ok()
@@ -3084,6 +3086,53 @@ serde_json.workspace = true
         // depends on how the platform resolves the temporary directory, so only the count is
         // asserted.
         assert_eq!(result.manifests.len(), 2, "{:#?}", result.manifests);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_walk_climbs_a_symlinked_member_path_as_written() {
+        // Absolutization is lexical: `std::path::absolute`, not `canonicalize`. Swapping one for
+        // the other left every test green (#202), and they disagree exactly here — a member reached
+        // through a symlinked directory. Cargo climbs the path it was given, which is the path it
+        // hands the build as `CARGO_MANIFEST_DIR`, so the root is the one above the link, not the
+        // one above where the link points.
+        let directory = tempfile::tempdir().unwrap();
+        let lexical = directory.path().join("lexical");
+        let physical = directory.path().join("physical");
+        std::fs::create_dir_all(physical.join("client")).unwrap();
+        std::fs::create_dir(&lexical).unwrap();
+        std::os::unix::fs::symlink(physical.join("client"), lexical.join("client")).unwrap();
+        let lexical_root = Utf8PathBuf::from_path_buf(lexical.join("Cargo.toml")).unwrap();
+        let physical_root = Utf8PathBuf::from_path_buf(physical.join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &lexical_root,
+            format!(
+                "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n{}",
+                core_workspace_dependencies()
+            ),
+        )
+        .unwrap();
+        // A root above the link's target that declares nothing, so resolving against it cannot
+        // pass for resolving against the lexical one.
+        std::fs::write(
+            &physical_root,
+            "[workspace]\nmembers = [\"client\"]\n\n[workspace.dependencies]\n",
+        )
+        .unwrap();
+        let member = Utf8PathBuf::from_path_buf(lexical.join("client").join("Cargo.toml")).unwrap();
+        std::fs::write(
+            &member,
+            format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{CORE_INHERITED}"),
+        )
+        .unwrap();
+
+        let result = audit(&member, &RuntimeRequirements::default());
+        assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+        assert_eq!(
+            result.manifests,
+            vec![lexical_root, member],
+            "the workspace root must be the one above the link as written"
+        );
     }
 
     #[test]
