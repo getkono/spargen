@@ -89,17 +89,14 @@ where
 
 /// Deserialize an already-read XML body into `T`, returning a human-readable error string (invalid
 /// UTF-8 or a quick-xml parse error) suitable for [`Error::Decode`]'s `path`. The XML analogue of
-/// [`crate::decode_text_body`]: a multi-status success enum reads the body once and decodes the arm
-/// its status selects through this.
+/// [`crate::decode_text_body`]: a multi-status success or error enum reads the body once and
+/// decodes the arm its status selects through this.
 ///
 /// An empty body always fails, whatever `T` is: XML 1.0 requires a root element, so there is no
 /// empty document to decode. This differs from [`crate::decode_text_body`], which reads an empty
-/// body as the empty string. A documented bodyless status is a unit variant of the response enum
-/// on the success side and on an error side with several documented bodies, and is not decoded
-/// there. On an error side with one documented body it is `Error::UnexpectedStatus`, unless that
-/// body is documented under a range (`4XX`) or `default` that also covers the bodyless status: the
-/// status then matches the range or `default` entry, so [`classify_error_xml`] decodes its empty
-/// body here and returns [`Error::Decode`] (#204 tracks the bodyless-error-beside-one-body shape).
+/// body as the empty string. A documented bodyless status beside a documented body is a unit
+/// variant of the response enum, on the success side and the error side alike, and is not decoded
+/// here.
 pub fn decode_xml_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, String> {
     let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
     quick_xml::de::from_str::<T>(text).map_err(|error| error.to_string())

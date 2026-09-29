@@ -11685,6 +11685,85 @@ components:
 }
 
 #[test]
+fn a_bodyless_error_status_beside_one_error_body_is_its_own_variant() {
+    // Issue #204: a documented bodyless error entry beside exactly one documented error body was
+    // dropped from the generated error type — a newtype over that one body — with no diagnostic,
+    // so a real `403` arrived as `UnexpectedStatus` and a bodyless `304` under a bodied `default`
+    // had its empty body decoded as the `default` model. Every declared error entry is now a
+    // variant once there is more than one, as on the success side (issue #121): the bodyless one
+    // a unit variant. A lone bodied error entry is still the newtype.
+    const PROBLEM: &str = "{ description: problem, content: { application/json: { schema: { $ref: '#/components/schemas/Problem' } } } }";
+    const PET: &str = "{ description: pet, content: { application/json: { schema: { $ref: '#/components/schemas/Pet' } } } }";
+    const XML: &str = "{ description: problem, content: { application/xml: { schema: { $ref: '#/components/schemas/Problem' } } } }";
+    const NONE: &str = "{ description: none }";
+    let spec = |responses: &[(&str, &str)]| {
+        let responses: String = responses
+            .iter()
+            .map(|(key, response)| format!("        '{key}': {response}\n"))
+            .collect();
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths:\n  /x:\n    get:\n      \
+             operationId: getX\n      responses:\n{responses}components:\n  schemas:\n    \
+             Pet: {{ type: object, properties: {{ name: {{ type: string }} }} }}\n    \
+             Problem: {{ type: object, properties: {{ detail: {{ type: string }} }} }}\n"
+        )
+    };
+    for (responses, expected) in [
+        // The issue's repro: a bodyless `403` beside a bodied `404`.
+        (
+            &[("200", PET), ("403", NONE), ("404", PROBLEM)][..],
+            &["Status403", "Status404(Box<types::Problem>)"][..],
+        ),
+        // A bodyless range beside one bodied exact status, in either document order.
+        (
+            &[("200", PET), ("5XX", NONE), ("404", PROBLEM)][..],
+            &["Status404(Box<types::Problem>)", "Status5xx"][..],
+        ),
+        // A bodyless `default` beside one bodied status is the catch-all unit variant, as it
+        // already was beside two.
+        (
+            &[("200", PET), ("404", PROBLEM), ("default", NONE)][..],
+            &["Status404(Box<types::Problem>)", "Default"][..],
+        ),
+        // A bodyless `304` beside a bodied `default`, with no success status declared: the `304`
+        // is its own variant rather than a status the `default` body is decoded for.
+        (
+            &[("304", NONE), ("default", PROBLEM)][..],
+            &["Status304", "Default(Box<types::Problem>)"][..],
+        ),
+        // One XML error body beside a bodyless status is still one body to decode as XML — not
+        // the rejected two-XML-bodies shape (narrowed `E009`).
+        (
+            &[("200", PET), ("403", NONE), ("404", XML)][..],
+            &["Status403", "Status404(Box<types::Problem>)"][..],
+        ),
+    ] {
+        let spec = spec(responses);
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{spec}\n{report:#?}");
+        assert!(report.diagnostics().is_empty(), "{spec}\n{report:#?}");
+        assert_eq!(enum_variants(&code, "GetXError"), expected, "{spec}");
+        assert!(!code.contains("pub struct GetXError("), "{spec}");
+        let checked = check(&spec);
+        assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+        assert!(checked.diagnostics().is_empty(), "{checked:#?}");
+    }
+
+    // A single bodied error entry and nothing else on the error side is still the newtype.
+    for responses in [
+        &[("200", PET), ("404", PROBLEM)][..],
+        &[("200", PET), ("default", PROBLEM)][..],
+    ] {
+        let (report, code) = generate_with_code(&spec(responses));
+        assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+        assert!(
+            code.contains("pub struct GetXError(pub types::Problem);"),
+            "{responses:?}"
+        );
+    }
+}
+
+#[test]
 fn multi_status_enum_precedence_emits_exact_arm_before_range_and_a_bodyless_unit_variant() {
     // Both classes list a RANGE before an overlapping EXACT in document order (and mix in a bodyless
     // 204). The emitter must reorder to exact-before-range so a real 200/409 dispatches to its exact
