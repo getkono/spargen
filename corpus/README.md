@@ -24,3 +24,31 @@ gate (`E001`) on major APIs; `meilisearch` is genuine OpenAPI 3.1.0 and exercise
 document validation past the gate, rejecting its null Tag `externalDocs.description` fields (`E011`).
 
 Deliberately not included: HoneyHive, IOTA gas-station, and Redocly.
+
+## What a green corpus does not prove
+
+A passing `corpus-smoke`, `corpus_manifest`, `snapshot`, or `recipes` run is evidence only for the
+constructs these descriptions contain and that reach the code being changed. It is silent about
+the rest. Five of the nine cases (and the `poem-openapi` recipe) are rejected before any schema is
+lowered: `E001` for the four OpenAPI 3.0.x documents and the recipe, and `E011` document validation
+for `meilisearch`. Schema lowering is reached only by `github-api-3-1`, `openai-openapi`, `ollama`,
+`openapi-boilerplate`, and the `utoipa`, `utoipa-untagged-overlap`, and `aide` recipes.
+
+**Schema Object `$ref` beside shape-bearing sibling keywords** (the intersection the support matrix
+describes, and its `E013` rejections) has no coverage here at all. Every such behaviour is pinned
+only by the inline fixtures in `spargen/tests/frontend.rs`. Measured on `master@16eda2e`:
+
+- Mutation: making every shape-bearing `$ref` sibling that reaches the intersection in
+  `spargen/src/oas31/lower.rs` reject with `E013` left `corpus_manifest` (14 tests), `snapshot` (9)
+  and `recipes` (4) green, with no snapshot changed. `frontend.rs` failed 20 of its 366 tests.
+- Scan: in every pinned document and recipe, the only `$ref` with a sibling other than an
+  annotation (`description`, `title`, `deprecated`, `default`, 3.0's `nullable`) is
+  `openai-openapi`'s `/components/schemas/InputItem/oneOf/1`, which sets `type: object` beside
+  `$ref: '#/components/schemas/Item'`. It is a `oneOf` member, and a union member's `$ref` siblings
+  are currently dropped before lowering ([#279](https://github.com/getkono/spargen/issues/279)),
+  so it never reaches the intersection either. Once #279 is fixed it becomes the corpus's only
+  such case. Re-measure this section then.
+
+Before relying on a green corpus run for a change to a construct, check that some pinned
+description contains that construct in a position that reaches the code. If none does, the
+evidence has to come from `frontend.rs` and `e2e.rs` fixtures, or from a new corpus case.
