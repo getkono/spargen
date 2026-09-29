@@ -117,13 +117,18 @@ impl<'a> RetryOutcome<'a> {
         }
     }
 
-    /// Whether the outcome is transient by the runtime's default classifier — the same rule
-    /// [`crate::Error::is_transient`] applies: any transport failure, plus a `429` or `5xx`
-    /// response. Policies are free to ignore this and key on [`Self::status`] /
-    /// [`Self::transport_error`] directly.
+    /// Whether the outcome is transient by the runtime's default classifier: exactly what
+    /// [`crate::Error::is_transient`] answers for the error this outcome becomes. A `429` or `5xx`
+    /// response is transient. A transport failure is classified as [`crate::Error::from_reqwest`]
+    /// classifies it, so a timeout or a failed connection is transient, and a redirect-policy or
+    /// protocol failure is not. Neither is a request reqwest refused before sending anything — a
+    /// URL scheme other than `http`/`https`, plain `http` on an `https_only` client — which is
+    /// refused again on every attempt, nor any other request-kind failure, which reqwest may raise
+    /// after the request was transmitted. Policies are free to ignore this and key on
+    /// [`Self::status`] / [`Self::transport_error`] directly.
     pub fn is_transient(&self) -> bool {
         match self {
-            RetryOutcome::Transport(_) => true,
+            RetryOutcome::Transport(error) => error.is_transient(),
             RetryOutcome::Response(response) => {
                 let status = response.status();
                 status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
@@ -242,7 +247,7 @@ mod tests {
 
     use reqwest::{Method, Request};
 
-    use crate::transport::{ExecuteFuture, HttpBackend};
+    use crate::transport::{ExecuteFuture, HttpBackend, ReqwestBackend};
 
     use super::{exponential_backoff, RetryBackend, RetryOutcome, RetryPolicy};
 
@@ -405,6 +410,62 @@ mod tests {
         assert!(outcome.response().is_some());
         assert!(outcome.transport_error().is_none());
         assert!(outcome.result().is_ok());
+    }
+
+    /// Counts executions while delegating to the real reqwest transport, so a test can see how
+    /// many times `RetryBackend` re-sent a request that reqwest refuses before any I/O.
+    #[derive(Debug)]
+    struct CountingBackend {
+        inner: ReqwestBackend,
+        calls: AtomicU32,
+    }
+
+    impl HttpBackend for CountingBackend {
+        fn execute(&self, request: Request) -> ExecuteFuture<'_> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.inner.execute(request)
+        }
+    }
+
+    /// A request reqwest refuses to send is refused identically on every attempt: nothing about
+    /// waiting and re-sending can change a URL scheme. reqwest raises that refusal from `execute`
+    /// itself — the request built fine — as a builder-kind error, which the backend reports as a
+    /// `TransportError`. Two ways to reach it with a base URL `ClientCore` accepts: a scheme
+    /// other than `http`/`https` (it has a host, so `build` passes), and plain `http` on a client
+    /// configured `https_only`. Neither may be retried, even against a generous budget; the
+    /// refusal is returned after exactly one execution. reqwest answers without touching the
+    /// network, so the future is ready on the first poll.
+    #[test]
+    fn a_request_reqwest_refuses_to_send_is_executed_exactly_once() {
+        let https_only = reqwest::Client::builder()
+            .https_only(true)
+            .build()
+            .expect("build an https-only client");
+        for (client, url) in [
+            (reqwest::Client::new(), "ftp://example.com/op"),
+            (https_only, "http://example.com/op"),
+        ] {
+            let request = client
+                .request(Method::GET, url)
+                .build()
+                .expect("reqwest builds the request; it refuses it only at execute");
+            let inner = Arc::new(CountingBackend {
+                inner: ReqwestBackend::new(client),
+                calls: AtomicU32::new(0),
+            });
+            let backend = RetryBackend::new(inner.clone(), Arc::new(MaxRetries { max_retries: 5 }));
+            let error =
+                poll_ready(backend.execute(request)).expect_err("reqwest refuses the request");
+            let source = std::error::Error::source(&error)
+                .and_then(|source| source.downcast_ref::<reqwest::Error>())
+                .expect("a transport error wraps a reqwest error");
+            assert!(source.is_builder(), "{url}: {error}");
+            assert_eq!(inner.calls.load(Ordering::SeqCst), 1, "{url}");
+            assert!(
+                !RetryOutcome::Transport(&error).is_transient(),
+                "{url}: a builder-kind refusal is permanent"
+            );
+        }
     }
 
     #[test]
