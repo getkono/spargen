@@ -68,11 +68,61 @@ fn resolved_hint(provenance: &Provenance, fallback: &str) -> String {
 }
 
 /// Lower a typed OpenAPI 3.1 or 3.2 [`Document`] into the version-agnostic [`Api`] IR.
+///
+/// Lowering runs as one or more whole passes over the document, and only the last one's IR and
+/// diagnostics are kept. A back-edge — a `$ref` taken while its target's body is still being
+/// lowered — has to be typed before that body has decided whether the target is nullable, so it is
+/// typed from a reserve-time guess ([`schema_is_nullable`], which cannot see a `null` that a union
+/// member, an `allOf`, or a referenced component supplies). When the body then decides otherwise,
+/// every field that took the back-edge disagrees with every field that referenced the finished
+/// component, and the one that took it cannot decode a value its schema admits (issue #222). A pass
+/// that found such a disagreement is discarded and the document is lowered again with the body's
+/// answer settled for that reservation, so the back-edge reads what a finished reference reads.
+///
+/// Each extra pass settles at least one reservation it had not settled before, and a settled value
+/// is never revised, so the loop ends within one pass per reservation plus one. A document with no
+/// such back-edge — every one without a recursive nullable component — is lowered exactly once.
 pub(crate) fn lower(
     document: &Document,
     resolver: &Resolver,
     diags: &mut Diagnostics,
 ) -> Result<Api, Aborted> {
+    let mut settled = HashMap::new();
+    loop {
+        let mut pass = diags.clone();
+        let (api, revisions) = lower_pass(document, resolver, &mut pass, &settled);
+        let mut changed = false;
+        for (reservation, nullable) in revisions {
+            if let std::collections::hash_map::Entry::Vacant(entry) = settled.entry(reservation) {
+                entry.insert(nullable);
+                changed = true;
+            }
+        }
+        if !changed {
+            *diags = pass;
+            return api;
+        }
+    }
+}
+
+/// One reservation's identity, in whichever of the three memos holds it: a root component by name,
+/// a remote target by absolute `url#fragment`, a bundle target by resolved `file#pointer`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Reservation {
+    Component(String),
+    Remote(String),
+    Resolved(String),
+}
+
+/// One lowering pass. `settled` holds the nullability an earlier pass's bodies decided for the
+/// reservations whose back-edges read a guess that turned out wrong; the second value returned is
+/// every such reservation this pass found (see [`lower`]).
+fn lower_pass(
+    document: &Document,
+    resolver: &Resolver,
+    diags: &mut Diagnostics,
+    settled: &HashMap<Reservation, bool>,
+) -> (Result<Api, Aborted>, Vec<(Reservation, bool)>) {
     let mut security_schemes = lower_security_schemes(document, diags);
     // OpenAPI 3.2 lets a security requirement name a Security Scheme Object by URI instead of by
     // component name. A component name always wins — the specification is explicit that name
@@ -95,6 +145,9 @@ pub(crate) fn lower(
         resolved_in_progress: HashMap::new(),
         resolved_alias_stack: HashSet::new(),
         resolved_contributions: HashMap::new(),
+        settled,
+        guessed: HashSet::new(),
+        revisions: Vec::new(),
         depth: 0,
     };
 
@@ -379,6 +432,7 @@ pub(crate) fn lower(
         .iter()
         .filter_map(|server| lower_server(server, ctx.diags))
         .collect();
+    let revisions = std::mem::take(&mut ctx.revisions);
     let api = Api {
         info: Info {
             title: document.info.title.clone(),
@@ -390,7 +444,7 @@ pub(crate) fn lower(
         types: ctx.graph,
         security_schemes,
     };
-    ctx.diags.result(api)
+    (ctx.diags.result(api), revisions)
 }
 
 fn append_text(target: &mut Option<String>, text: String) {
@@ -440,9 +494,11 @@ struct LowerCtx<'a, 'doc> {
     /// used via `$ref` would emit a non-`Option` field that rejects a conforming `null` payload.
     components: HashMap<String, (TypeId, bool)>,
     /// Components currently being lowered, mapped to the id reserved for their root and their
-    /// nullability (computed at reserve time from the schema). A `$ref` that re-enters a name still
-    /// in this map is a cycle-closing back-edge and is boxed against the reserved id, carrying the
-    /// same nullability a completed lowering would.
+    /// provisional nullability (an earlier pass's settled answer, else a reserve-time guess from
+    /// the schema). A `$ref` that re-enters a name still in this map is a cycle-closing back-edge
+    /// and is boxed against the reserved id; a guess it read that the body contradicts is recorded
+    /// in [`Self::revisions`], and [`lower`] lowers again until each back-edge carries the same
+    /// nullability a completed lowering does.
     in_progress: HashMap<String, (TypeId, bool)>,
     /// Guards chains of component aliases (`A -> B -> A`) that do not have a concrete schema body
     /// to enter the normal reserve/box recursion path.
@@ -486,6 +542,14 @@ struct LowerCtx<'a, 'doc> {
     /// reports again, at its next use, as it always did. What is replayed is a copy the enclosing
     /// merge consumes, so nothing one composition does to the merged fields reaches the next use.
     resolved_contributions: HashMap<String, Vec<Contribution>>,
+    /// The nullability earlier passes' bodies decided for reservations whose back-edges read a
+    /// wrong reserve-time guess; consulted before [`schema_is_nullable`] when a reservation opens.
+    settled: &'a HashMap<Reservation, bool>,
+    /// Open reservations whose provisional nullability a back-edge has read during this pass.
+    guessed: HashSet<Reservation>,
+    /// Reservations whose body decided a nullability other than the provisional one a back-edge
+    /// read, with the body's answer: the pass is stale, and [`lower`] runs another.
+    revisions: Vec<(Reservation, bool)>,
     /// Current schema-lowering recursion depth, incremented on entry to [`Self::lower_schema`] and
     /// decremented on exit. A `$ref`/allOf/array/object chain that pushes this past
     /// [`MAX_SCHEMA_DEPTH`] is rejected (`E014`) rather than allowed to overflow the stack.
@@ -533,7 +597,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(&(id, nullable)) = self.in_progress.get(name) {
             // Re-entered while still lowering this component: a cycle-closing `$ref` back-edge.
             // Box the reference so the recursive type has a finite size instead of rejecting it;
-            // the reserved id will hold the root def once the in-progress body finishes.
+            // the reserved id will hold the root def once the in-progress body finishes. The
+            // nullability is provisional, so say it was read: the body checks it when it finishes.
+            self.guessed.insert(Reservation::Component(name.to_owned()));
             return Some(Ty {
                 id,
                 nullable,
@@ -652,8 +718,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // over `types`, `enum_values` and `const_value` and never looks at `oneOf`/`anyOf`/`$ref`/
         // `allOf`, so for any composed body it is a guess. Writing it back over the lowered result
         // discarded every decision `lower_union` makes about null the moment a union was spelled as
-        // a named component — the dominant spelling in real descriptions.
-        let provisional_nullable = schema_is_nullable(schema);
+        // a named component — the dominant spelling in real descriptions. A guess a back-edge read
+        // and the body then contradicted is reported by `settle_reservation`, and the next pass
+        // opens this reservation with the body's answer instead (see [`lower`]).
+        let reservation = Reservation::Component(name.to_owned());
+        let provisional_nullable = self.provisional_nullability(&reservation, schema);
         // Reserve the root id before lowering the body so any back-edge encountered mid-body can
         // box a reference to it. The root's def is inserted last (children first) and then lifted
         // into this reserved slot, which keeps ids dense and stable.
@@ -662,6 +731,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .insert(name.to_owned(), (root_id, provisional_nullable));
         let lowered = self.lower_schema(schema, name);
         self.in_progress.remove(name);
+        self.settle_reservation(
+            reservation,
+            provisional_nullable,
+            lowered.map(|ty| ty.nullable),
+        );
         let mut ty = lowered?;
         let (popped_id, mut def) = self.graph.pop_last().expect("component root def");
         // Hard invariant (release too): a component root's def is always the last graph insert
@@ -690,6 +764,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let nullable = ty.nullable;
         self.components.insert(name.to_owned(), (root_id, nullable));
         Some(ty)
+    }
+
+    /// The nullability a reservation opens with: an earlier pass's settled answer for it when there
+    /// is one, [`schema_is_nullable`]'s guess otherwise.
+    fn provisional_nullability(&self, reservation: &Reservation, schema: &Schema) -> bool {
+        self.settled
+            .get(reservation)
+            .copied()
+            .unwrap_or_else(|| schema_is_nullable(schema))
+    }
+
+    /// Close a reservation's nullability bookkeeping once its body is lowered: when a back-edge read
+    /// the `provisional` value and the body decided otherwise, record the body's answer, which makes
+    /// this pass stale (see [`lower`]). A body that failed to lower decides nothing.
+    fn settle_reservation(
+        &mut self,
+        reservation: Reservation,
+        provisional: bool,
+        lowered: Option<bool>,
+    ) {
+        let read = self.guessed.remove(&reservation);
+        if let Some(lowered) = lowered {
+            if read && lowered != provisional {
+                self.revisions.push((reservation, lowered));
+            }
+        }
     }
 
     /// Resolve the component `name`, whose root is an alias for `reference`, to the target's type and
@@ -899,13 +999,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // root wins silently retargets a sub-file's own declaration — supported as the
                     // matrix describes, but unreported, which the matrix also promises against.
                     self.warn_if_root_shadows_the_referring_file(name, Some(reference), at);
+                    // And instead of `ensure_component`'s back-edge arm, which is where a read of
+                    // the provisional nullability is otherwise recorded.
+                    self.guessed.insert(Reservation::Component(name.to_owned()));
                 }
                 return entry;
             }
         } else if is_remote_ref(reference) {
             // `ensure_remote` keys on the absolute URL, and a reference inside a vendored document
             // has already been rewritten absolute, so the reference *is* the key.
-            return self.remote_in_progress.get(reference).copied();
+            let entry = self.remote_in_progress.get(reference).copied();
+            if entry.is_some() {
+                self.guessed
+                    .insert(Reservation::Remote(reference.to_owned()));
+            }
+            return entry;
         }
         let (file, pointer) = self.resolver.reference_identity(reference, at)?;
         // `ensure_resolved` routes a target inside the root's component map back to
@@ -917,13 +1025,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .filter(|name| !name.is_empty() && !name.contains('/'))
             {
                 if self.document.components.schemas.contains_key(name) {
-                    return self.in_progress.get(name).copied();
+                    let entry = self.in_progress.get(name).copied();
+                    if entry.is_some() {
+                        self.guessed.insert(Reservation::Component(name.to_owned()));
+                    }
+                    return entry;
                 }
             }
         }
-        self.resolved_in_progress
-            .get(&format!("{}#{}", file.0, pointer))
-            .copied()
+        let key = format!("{}#{}", file.0, pointer);
+        let entry = self.resolved_in_progress.get(&key).copied();
+        if entry.is_some() {
+            self.guessed.insert(Reservation::Resolved(key));
+        }
+        entry
     }
 
     /// Lower a remote (`http`/`https`) `$ref` to a shared, cycle-safe type — the remote analogue of
@@ -941,6 +1056,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         }
         if let Some(&(id, nullable)) = self.remote_in_progress.get(reference) {
+            self.guessed
+                .insert(Reservation::Remote(reference.to_owned()));
             return Some(Ty {
                 id,
                 nullable,
@@ -982,12 +1099,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         // Provisional, as in `ensure_component`: a back-edge met mid-body needs an answer before the
         // body has one, and `schema_is_nullable` cannot see a composed body's null.
-        let provisional_nullable = schema_is_nullable(&schema);
+        let reservation = Reservation::Remote(reference.to_owned());
+        let provisional_nullable = self.provisional_nullability(&reservation, &schema);
         let root_id = self.graph.reserve();
         self.remote_in_progress
             .insert(reference.to_owned(), (root_id, provisional_nullable));
         let lowered = self.lower_schema(&schema, reference);
         self.remote_in_progress.remove(reference);
+        self.settle_reservation(
+            reservation,
+            provisional_nullable,
+            lowered.map(|ty| ty.nullable),
+        );
         let mut ty = lowered?;
         let (popped_id, mut def) = self.graph.pop_last().expect("remote root def");
         // Same last-insert invariant as `ensure_component`: the remote type's root is the final
@@ -1088,6 +1211,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         }
         if let Some(&(id, nullable)) = self.resolved_in_progress.get(&key) {
+            self.guessed.insert(Reservation::Resolved(key));
             return Some(Ty {
                 id,
                 nullable,
@@ -1130,12 +1254,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         // Provisional, as in `ensure_component`: a back-edge met mid-body needs an answer before the
         // body has one, and `schema_is_nullable` cannot see a composed body's null.
-        let provisional_nullable = schema_is_nullable(&schema);
+        let reservation = Reservation::Resolved(key.clone());
+        let provisional_nullable = self.provisional_nullability(&reservation, &schema);
         let root_id = self.graph.reserve();
         self.resolved_in_progress
             .insert(key.clone(), (root_id, provisional_nullable));
         let lowered = self.lower_schema(&schema, &hint);
         self.resolved_in_progress.remove(&key);
+        self.settle_reservation(
+            reservation,
+            provisional_nullable,
+            lowered.map(|ty| ty.nullable),
+        );
         let mut ty = lowered?;
         let (popped_id, mut def) = self.graph.pop_last().expect("resolved root def");
         // Same last-insert invariant as `ensure_component` and `ensure_remote`: the target's root is

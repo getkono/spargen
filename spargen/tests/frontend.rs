@@ -3908,33 +3908,29 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
         //
         // Declaring the alias first lowers `B` first, so `A` is not open when `B`'s body is read,
         // the alias recogniser does not fire, and `b` binds `B` as an ordinary in-progress
-        // back-edge. The `Option` is then missing, and that is WRONG: `B`'s `"null"` member makes
-        // `B` nullable, so `{"b": null}` is legal against this document and will not decode. It is
-        // pinned as it is emitted rather than as it ought to be, because fixing it is issue #222 —
-        // `ensure_component` overwrites a body's computed nullability with the value
-        // `schema_is_nullable` produced at reserve time, and that function inspects `type`, `enum`
-        // and `const` only, never a union's members. It reproduces on master with a document that
-        // has no recursion in it at all, so it is not this change's to fix; when #222 lands this
-        // expectation becomes `Option<Box<B>>`. Until then this assertion is the only thing
-        // anywhere in the repository standing over what that order emits.
-        // One message per order. The two orders are pinned for opposite reasons — one is the
-        // correct type, one is the knowingly-wrong one — and a single format string over both
-        // hands a reader of the first iteration a paragraph written about the second, 3,000
-        // output lines above the `left`/`right` that would correct it.
+        // back-edge. That back-edge is taken before `B`'s body has an answer about null, so it
+        // reads the reserve-time guess — `schema_is_nullable`, which never looks at a union's
+        // members — and `B`'s `"null"` member made `B` nullable only after `A.b` had been typed
+        // `Box<B>`, a field that could not decode the legal `{"b": null}` (issue #222). The
+        // back-edge now carries `B`'s lowered nullability, so it is `Option<Box<B>>`: optional
+        // because `B` is, boxed because the cycle must have a finite size.
+        // One message per order: the two orders take different paths, and a single format string
+        // over both hands a reader of the first iteration a paragraph written about the second,
+        // 3,000 output lines above the `left`/`right` that would correct it.
         let (expected, why) = if first == "A" {
             (
                 "Option<Box<A>>",
                 "this order takes the nullable-alias path, so `b` binds `A` itself — optional \
                  because of the `\"null\"` member, boxed because the cycle must have a finite \
-                 size. This is the correct type and is NOT issue #222: a red here is a \
-                 regression in the alias path, not a pin that needs updating",
+                 size: a red here is a regression in the alias path",
             )
         } else {
             (
-                "Box<B>",
-                "this order's expectation is the knowingly-wrong `Box<B>` that issue #222 \
-                 exists to fix, pinned as emitted rather than as it ought to be — if this went \
-                 red while fixing #222, the expectation becomes `Option<Box<B>>`",
+                "Option<Box<B>>",
+                "this order binds `b` as an ordinary back-edge into `B` while `B` is still \
+                 open, and `B`'s `\"null\"` member makes it nullable: `Box<B>` here is issue \
+                 #222 back, a back-edge carrying the reserve-time nullability guess instead of \
+                 the body's lowered answer",
             )
         };
         assert_eq!(
@@ -3947,6 +3943,324 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
             "{first} before {second}: {code}"
         );
     }
+}
+
+/// A back-edge into a component whose nullability only its lowered body knows carries that
+/// nullability, not the reserve-time guess — in the root document, a sub-file, and a vendored remote.
+///
+/// `N` is "a node with a required `next` that is another `N`, or null". Its `"null"` lives in a
+/// `oneOf` member, which `schema_is_nullable` never reads, so while `N`'s body is open the only
+/// answer there is says non-nullable, and `next` — the one reference taken while it is open — was
+/// typed `Box<N>`: `{"next": null}`, which ends every such list, did not decode (issue #222). `W.n`
+/// is the control, taken after `N` finished: it was already `Option<N>`, so one schema meant two
+/// things depending on when it was referenced. Both must be optional now.
+#[test]
+fn a_back_edge_into_a_union_nullable_component_is_optional() {
+    const COMPONENTS: &str = r##"
+components:
+  schemas:
+    W:
+      type: object
+      required: [n]
+      properties:
+        n: { $ref: '#/components/schemas/N' }
+    N:
+      oneOf:
+        - type: object
+          required: [next]
+          properties:
+            next: { $ref: '#/components/schemas/N' }
+        - { type: 'null' }
+"##;
+    let document = |components: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/W' }} }}
+{components}"##
+        )
+    };
+    let root = document(COMPONENTS);
+    let (generated, root_code) = generate_with_code(&root);
+    let checked = check(&root);
+    let (split_generated, split_checked, split_code) =
+        split("./lib.yaml#/components/schemas/W", COMPONENTS);
+    for (entry, report) in [
+        ("root/generate", &generated),
+        ("root/check", &checked),
+        ("split/generate", &split_generated),
+        ("split/check", &split_checked),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    for (spelling, code) in [("root", &root_code), ("split", &split_code)] {
+        assert_eq!(
+            field_type(code, "pub n:").as_deref(),
+            Some("Option<N>"),
+            "{spelling}: the control, taken after `N` finished: {code}"
+        );
+        assert_eq!(
+            field_type(code, "pub next:").as_deref(),
+            Some("Option<Box<N>>"),
+            "{spelling}: the back-edge taken while `N` was open must carry `N`'s lowered \
+             nullability, as the control does: {code}"
+        );
+    }
+
+    // The vendored-remote spelling: `N` is a whole remote document whose `next` refers back to
+    // that document by URL, so the back-edge is `ensure_remote`'s own. Its type is named for the
+    // URL, so the field types are compared with each other rather than with a literal name.
+    use sha2::{Digest, Sha256};
+    const URL: &str = "https://api.example.com/schemas/node.yaml";
+    const VENDORED: &str = "api.example.com/schemas/node.yaml";
+    let node = format!(
+        "oneOf:\n  - type: object\n    required: [next]\n    properties:\n      next: {{ $ref: '{URL}' }}\n  - {{ type: 'null' }}\n"
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        document(&format!(
+            "components:\n  schemas:\n    W:\n      type: object\n      required: [n]\n      properties:\n        n: {{ $ref: '{URL}' }}\n"
+        )),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("spargen.lock"),
+        format!(
+            "version = 1\n\n[[remote]]\nurl = \"{URL}\"\nsha256 = \"{:x}\"\npath = \"{VENDORED}\"\n",
+            Sha256::digest(node.as_bytes())
+        ),
+    )
+    .unwrap();
+    let vendored = dir.join(".spargen/vendor").join(VENDORED);
+    std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
+    std::fs::write(&vendored, &node).unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    assert_ne!(report.outcome(), Outcome::Rejected, "remote: {report:#?}");
+    let control = field_type(&code, "pub n:").expect("remote: `W.n` is emitted");
+    let target = control
+        .strip_prefix("Option<")
+        .and_then(|rest| rest.strip_suffix('>'))
+        .unwrap_or_else(|| panic!("remote: the control is optional: {control}\n{code}"));
+    assert_eq!(
+        field_type(&code, "pub next:"),
+        Some(format!("Option<Box<{target}>>")),
+        "remote: the back-edge taken while the remote target was open must carry its lowered \
+         nullability, as the control does: {code}"
+    );
+}
+
+/// A nullable-alias back-edge carries its target's lowered nullability, not the reserve-time
+/// guess — for each spelling `open_reservation_for_ref` keys a reservation by.
+///
+/// `A` is "an object with a required `b`, or null"; its `"null"` lives in a `oneOf` member, which
+/// `schema_is_nullable` never reads. `B` is a one-member `oneOf` over `A`, so when `A.b` lowers
+/// `B` while `A` is still open, the alias recogniser answers `b` with `A`'s open reservation
+/// instead of taking an ordinary back-edge into `B`. That reservation's nullability is still the
+/// guess, so without a recorded read the pass is never revised and `b` is `Box<A>`, which cannot
+/// decode the legal `{"b": null}`. `W.a` is the control, taken after `A` finished.
+///
+/// The spellings reach the four sites that record the read: a root component named by its local
+/// pointer, a root component named through the root file's own path (routed back to the
+/// component map), a sub-file's own component (the resolved-pointer frame), and a vendored remote
+/// document (the remote frame).
+#[test]
+fn a_nullable_alias_back_edge_carries_its_targets_lowered_nullability() {
+    let components = |alias_target: &str| {
+        format!(
+            r##"
+components:
+  schemas:
+    W:
+      type: object
+      required: [a]
+      properties:
+        a: {{ $ref: '#/components/schemas/A' }}
+    A:
+      oneOf:
+        - type: object
+          required: [b]
+          properties:
+            b: {{ $ref: '#/components/schemas/B' }}
+        - {{ type: 'null' }}
+    B:
+      oneOf:
+        - {{ $ref: '{alias_target}' }}
+"##
+        )
+    };
+    let document = |components: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/W' }} }}
+{components}"##
+        )
+    };
+    let assert_optional = |spelling: &str, code: &str| {
+        let control = field_type(code, "pub a:")
+            .unwrap_or_else(|| panic!("{spelling}: `W.a` is emitted: {code}"));
+        let target = control
+            .strip_prefix("Option<")
+            .and_then(|rest| rest.strip_suffix('>'))
+            .unwrap_or_else(|| panic!("{spelling}: the control is optional: {control}\n{code}"));
+        assert_eq!(
+            field_type(code, "pub b:"),
+            Some(format!("Option<Box<{target}>>")),
+            "{spelling}: the alias back-edge taken while `A` was open must carry `A`'s lowered \
+             nullability, as the control does: {code}"
+        );
+    };
+
+    let root = document(&components("#/components/schemas/A"));
+    let (generated, code) = generate_with_code(&root);
+    let checked = check(&root);
+    for (entry, report) in [("root/generate", &generated), ("root/check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_optional("root", &code);
+
+    // The root component `A` named through the root file's own path: not the local
+    // `#/components/schemas/` spelling, so it goes through the resolver and is routed back to the
+    // component map.
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        document(&components("./openapi.yaml#/components/schemas/A")),
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let routed = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let routed_checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for (entry, report) in [
+        ("routed/generate", &routed),
+        ("routed/check", &routed_checked),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_optional("routed", &std::fs::read_to_string(&out).unwrap_or_default());
+
+    let (split_generated, split_checked, split_code) = split(
+        "./lib.yaml#/components/schemas/W",
+        &components("#/components/schemas/A"),
+    );
+    for (entry, report) in [
+        ("split/generate", &split_generated),
+        ("split/check", &split_checked),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_optional("split", &split_code);
+
+    // The vendored-remote spelling: `A` and `B` in a remote document, whose local references are
+    // rewritten absolute, so `B`'s member is the remote reservation's own key. The control `W.a`
+    // is the root's, referring to the remote `A` by URL; the remote document's own `W` is unused.
+    use sha2::{Digest, Sha256};
+    const URL: &str = "https://api.example.com/schemas/lib.yaml";
+    const VENDORED: &str = "api.example.com/schemas/lib.yaml";
+    let lib = components("#/components/schemas/A");
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        document(&format!(
+            "components:\n  schemas:\n    W:\n      type: object\n      required: [a]\n      properties:\n        a: {{ $ref: '{URL}#/components/schemas/A' }}\n"
+        )),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("spargen.lock"),
+        format!(
+            "version = 1\n\n[[remote]]\nurl = \"{URL}\"\nsha256 = \"{:x}\"\npath = \"{VENDORED}\"\n",
+            Sha256::digest(lib.as_bytes())
+        ),
+    )
+    .unwrap();
+    let vendored = dir.join(".spargen/vendor").join(VENDORED);
+    std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
+    std::fs::write(&vendored, &lib).unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    assert_ne!(report.outcome(), Outcome::Rejected, "remote: {report:#?}");
+    assert_optional("remote", &std::fs::read_to_string(&out).unwrap_or_default());
+}
+
+/// The mirror of [`a_back_edge_into_a_union_nullable_component_is_optional`]: the reserve-time
+/// guess says nullable and the body says otherwise, and the back-edge follows the body.
+///
+/// `N`'s type array admits `"null"`, which is all `schema_is_nullable` reads, but its `oneOf` has
+/// no null branch, so `null` matches no member and fails the union: `N` is not nullable, and the
+/// finished reference `W.n` is a plain `N`. The back-edge `next` read the guess and was
+/// `Option<Box<N>>`, which accepts a `null` the schema rejects.
+#[test]
+fn a_back_edge_into_a_component_whose_body_denies_null_is_not_optional() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/W' } }
+components:
+  schemas:
+    W:
+      type: object
+      required: [n]
+      properties:
+        n: { $ref: '#/components/schemas/N' }
+    N:
+      type: [object, 'null']
+      oneOf:
+        - type: object
+          required: [next]
+          properties:
+            next: { $ref: '#/components/schemas/N' }
+"##;
+    let (generated, code) = generate_with_code(spec);
+    let checked = check(spec);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_eq!(
+        field_type(&code, "pub n:").as_deref(),
+        Some("N"),
+        "the control: {code}"
+    );
+    assert_eq!(
+        field_type(&code, "pub next:").as_deref(),
+        Some("Box<N>"),
+        "the back-edge must follow the body, not the type array's guess: {code}"
+    );
 }
 
 /// The `A`/`B` mutual-recursion skeleton of `a_nullable_alias_under_mutual_recursion_generates`,
