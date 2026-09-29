@@ -94,6 +94,7 @@ pub(crate) fn lower(
         resolved_components: HashMap::new(),
         resolved_in_progress: HashMap::new(),
         resolved_alias_stack: HashSet::new(),
+        resolved_contributions: HashMap::new(),
         depth: 0,
     };
 
@@ -472,6 +473,19 @@ struct LowerCtx<'a, 'doc> {
     /// Guards a chain of bare-`$ref` (alias) bundle targets, which have no body to reserve a root
     /// against; the counterpart of [`Self::remote_alias_stack`].
     resolved_alias_stack: HashSet<String>,
+    /// What a bundle-`$ref` `allOf` member contributes, keyed by the resolved target's own
+    /// `file#pointer` (see [`resolved_identity`]): the [`Self::resolved_components`] analogue for the
+    /// one resolution site that does not lower its target to a type. `allOf` is an applicator, so
+    /// [`Self::gather_member`] flattens such a target's fields into the enclosing object instead of
+    /// referencing a shared type, and without this memo it re-expanded the target at every use — a
+    /// branching reuse graph cost work and generated types exponential in its depth. The target is
+    /// expanded once and its contribution replayed at every later use, so the types its body lowers
+    /// to are shared exactly as a root component member's are through [`Self::push_ref_member`].
+    ///
+    /// A contribution is recorded only once its expansion succeeds; one that failed re-expands, and
+    /// reports again, at its next use, as it always did. What is replayed is a copy the enclosing
+    /// merge consumes, so nothing one composition does to the merged fields reaches the next use.
+    resolved_contributions: HashMap<String, Vec<Contribution>>,
     /// Current schema-lowering recursion depth, incremented on entry to [`Self::lower_schema`] and
     /// decremented on exit. A `$ref`/allOf/array/object chain that pushes this past
     /// [`MAX_SCHEMA_DEPTH`] is rejected (`E014`) rather than allowed to overflow the stack.
@@ -2607,7 +2621,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     "an `allOf` member is a direct recursive `$ref` to the schema being lowered",
                 );
             }
-            return self.gather_inline(&target, hint, out);
+            // Expand the target once per resolved `file#pointer` and replay its contribution at
+            // every later use: see `resolved_contributions`. The in-progress test above runs
+            // first on every use, so a replay never stands in for a refusal.
+            let Some(key) = resolved_identity(&target.provenance) else {
+                // No span, so no identity to key on — expand un-memoised, as `ensure_resolved`
+                // lowers un-deduplicated in the same case.
+                return self.gather_inline(&target, hint, out);
+            };
+            if let Some(recorded) = self.resolved_contributions.get(&key) {
+                out.extend(recorded.iter().cloned());
+                return Some(());
+            }
+            // Name what the body lowers to for the schema it came from, not for whichever use
+            // reached it first — once one expansion serves every use, a per-use hint would make
+            // the generated names depend on lowering order (as in `ensure_resolved`).
+            let hint = resolved_hint(&target.provenance, hint);
+            let mut contributed = Vec::new();
+            self.gather_inline(&target, &hint, &mut contributed)?;
+            self.resolved_contributions.insert(key, contributed.clone());
+            out.extend(contributed);
+            return Some(());
         }
 
         if !schema.all_of.is_empty() {
@@ -6797,6 +6831,9 @@ fn append_doc_note(docs: &mut Docs, note: String) {
 /// compute from the same schema.
 /// One `allOf` member's contribution to the merged type: either a set of object fields (with its
 /// `additionalProperties` policy and its own `required` names) to flatten, or a scalar/leaf type.
+/// `Clone` so a bundle-`$ref` member's contribution can be recorded once and replayed at every use
+/// (see `LowerCtx::resolved_contributions`).
+#[derive(Clone)]
 enum Contribution {
     Object {
         fields: Vec<Field>,
