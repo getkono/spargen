@@ -1110,6 +1110,68 @@ fn default_beside_multiple_bodied_successes_stays_on_the_error_side() {
     server.join().unwrap();
 }
 
+// Issue #151: beside a declared success status, `default` satisfies no undeclared 2xx in any of
+// the three success shapes. The enum shape is pinned above (`getMultiDefault`'s 202 is
+// `UnexpectedStatus`); here the plain and unit shapes take an undeclared 201 as their one success,
+// and a `default`-shaped 201 body is never decoded as `Problem`.
+#[test]
+fn an_undeclared_2xx_is_never_decoded_through_default_beside_a_declared_success() {
+    let problem: &'static [u8] = br#"{"title":"t","detail":"d"}"#;
+
+    // Plain: the 201 is the single success body, `MultiOk`.
+    let (base, server) = serve_once("application/json", "201 Created", br#"{"ok":"yes"}"#);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    let response = client.get_plain_default().expect("any 2xx is the plain success");
+    assert_eq!(response.status(), 201);
+    assert_eq!(response.into_inner().ok, "yes");
+    server.join().unwrap();
+
+    // A `Problem` body on that 201 is a malformed `MultiOk`, not a `default` decode.
+    let (base, server) = serve_once("application/json", "201 Created", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_plain_default().unwrap_err() {
+        basic_client::Error::Decode { status, body, .. } => {
+            assert_eq!(status, 201);
+            assert_eq!(&body[..], problem);
+        }
+        other => panic!("a 2xx must decode as the declared success, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // Unit: the 201 is `()`, its `Problem` body discarded rather than decoded.
+    let (base, server) = serve_once("application/json", "201 Created", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    let response = client.get_unit_default().expect("any 2xx is the unit success");
+    assert_eq!(response.status(), 201);
+    let () = response.into_inner();
+    server.join().unwrap();
+
+    // Both still classify a non-2xx through `default`.
+    let (base, server) = serve_once("application/json", "500 Internal Server Error", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_plain_default().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 500);
+            let basic_client::GetPlainDefaultError(body) = response.into_inner();
+            assert_eq!(body.title, "t");
+        }
+        other => panic!("expected the typed `default` error body, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    let (base, server) = serve_once("application/json", "500 Internal Server Error", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_unit_default().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 500);
+            let basic_client::GetUnitDefaultError(body) = response.into_inner();
+            assert_eq!(body.title, "t");
+        }
+        other => panic!("expected the typed `default` error body, got {other:?}"),
+    }
+    server.join().unwrap();
+}
+
 // Issue #127: a bodyless `default` is dropped from a single-body error shape, and the emitted status
 // table must drop it too. A `500` carrying a well-formed `Problem` is therefore
 // `Error::UnexpectedStatus` with its body preserved — were `StatusSpec::Any` in the table, it would
@@ -3053,6 +3115,38 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MultiCreated"
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  # The other two success shapes beside the same bodied `default` (issue #151): one bodied success
+  # is the plain `MultiOk`, and one bodyless success is `()`. Neither shape names a status, so an
+  # undeclared 2xx is that one success — decoded as `MultiOk`, or `()` with the body discarded —
+  # never a `default` decode, exactly as the enum shape above never decodes one.
+  /plain-default:
+    get:
+      operationId: getPlainDefault
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiOk"
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  /unit-default:
+    get:
+      operationId: getUnitDefault
+      responses:
+        "204":
+          description: No Content
         default:
           description: Anything else
           content:
