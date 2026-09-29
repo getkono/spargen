@@ -3908,33 +3908,29 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
         //
         // Declaring the alias first lowers `B` first, so `A` is not open when `B`'s body is read,
         // the alias recogniser does not fire, and `b` binds `B` as an ordinary in-progress
-        // back-edge. The `Option` is then missing, and that is WRONG: `B`'s `"null"` member makes
-        // `B` nullable, so `{"b": null}` is legal against this document and will not decode. It is
-        // pinned as it is emitted rather than as it ought to be, because fixing it is issue #222 —
-        // `ensure_component` overwrites a body's computed nullability with the value
-        // `schema_is_nullable` produced at reserve time, and that function inspects `type`, `enum`
-        // and `const` only, never a union's members. It reproduces on master with a document that
-        // has no recursion in it at all, so it is not this change's to fix; when #222 lands this
-        // expectation becomes `Option<Box<B>>`. Until then this assertion is the only thing
-        // anywhere in the repository standing over what that order emits.
-        // One message per order. The two orders are pinned for opposite reasons — one is the
-        // correct type, one is the knowingly-wrong one — and a single format string over both
-        // hands a reader of the first iteration a paragraph written about the second, 3,000
-        // output lines above the `left`/`right` that would correct it.
+        // back-edge. That back-edge is taken before `B`'s body has an answer about null, so it
+        // reads the reserve-time guess — `schema_is_nullable`, which never looks at a union's
+        // members — and `B`'s `"null"` member made `B` nullable only after `A.b` had been typed
+        // `Box<B>`, a field that could not decode the legal `{"b": null}` (issue #222). The
+        // back-edge now carries `B`'s lowered nullability, so it is `Option<Box<B>>`: optional
+        // because `B` is, boxed because the cycle must have a finite size.
+        // One message per order: the two orders take different paths, and a single format string
+        // over both hands a reader of the first iteration a paragraph written about the second,
+        // 3,000 output lines above the `left`/`right` that would correct it.
         let (expected, why) = if first == "A" {
             (
                 "Option<Box<A>>",
                 "this order takes the nullable-alias path, so `b` binds `A` itself — optional \
                  because of the `\"null\"` member, boxed because the cycle must have a finite \
-                 size. This is the correct type and is NOT issue #222: a red here is a \
-                 regression in the alias path, not a pin that needs updating",
+                 size: a red here is a regression in the alias path",
             )
         } else {
             (
-                "Box<B>",
-                "this order's expectation is the knowingly-wrong `Box<B>` that issue #222 \
-                 exists to fix, pinned as emitted rather than as it ought to be — if this went \
-                 red while fixing #222, the expectation becomes `Option<Box<B>>`",
+                "Option<Box<B>>",
+                "this order binds `b` as an ordinary back-edge into `B` while `B` is still \
+                 open, and `B`'s `\"null\"` member makes it nullable: `Box<B>` here is issue \
+                 #222 back, a back-edge carrying the reserve-time nullability guess instead of \
+                 the body's lowered answer",
             )
         };
         assert_eq!(
@@ -3945,6 +3941,76 @@ fn a_nullable_alias_under_mutual_recursion_generates() {
         assert!(
             !code.contains("serde_json::Value>"),
             "{first} before {second}: {code}"
+        );
+    }
+}
+
+/// A back-edge into a component whose nullability only its lowered body knows carries that
+/// nullability, not the reserve-time guess — in the root document and in a sub-file alike.
+///
+/// `N` is "a node with a required `next` that is another `N`, or null". Its `"null"` lives in a
+/// `oneOf` member, which `schema_is_nullable` never reads, so while `N`'s body is open the only
+/// answer there is says non-nullable, and `next` — the one reference taken while it is open — was
+/// typed `Box<N>`: `{"next": null}`, which ends every such list, did not decode (issue #222). `W.n`
+/// is the control, taken after `N` finished: it was already `Option<N>`, so one schema meant two
+/// things depending on when it was referenced. Both must be optional now.
+#[test]
+fn a_back_edge_into_a_union_nullable_component_is_optional() {
+    const COMPONENTS: &str = r##"
+components:
+  schemas:
+    W:
+      type: object
+      required: [n]
+      properties:
+        n: { $ref: '#/components/schemas/N' }
+    N:
+      oneOf:
+        - type: object
+          required: [next]
+          properties:
+            next: { $ref: '#/components/schemas/N' }
+        - { type: 'null' }
+"##;
+    let root = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/W' }} }}
+{COMPONENTS}"##
+    );
+    let (generated, root_code) = generate_with_code(&root);
+    let checked = check(&root);
+    let (split_generated, split_checked, split_code) =
+        split("./lib.yaml#/components/schemas/W", COMPONENTS);
+    for (entry, report) in [
+        ("root/generate", &generated),
+        ("root/check", &checked),
+        ("split/generate", &split_generated),
+        ("split/check", &split_checked),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    for (spelling, code) in [("root", &root_code), ("split", &split_code)] {
+        assert_eq!(
+            field_type(code, "pub n:").as_deref(),
+            Some("Option<N>"),
+            "{spelling}: the control, taken after `N` finished: {code}"
+        );
+        assert_eq!(
+            field_type(code, "pub next:").as_deref(),
+            Some("Option<Box<N>>"),
+            "{spelling}: the back-edge taken while `N` was open must carry `N`'s lowered \
+             nullability, as the control does: {code}"
         );
     }
 }
