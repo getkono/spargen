@@ -190,17 +190,53 @@ impl InputBundle {
             .map(|file| (file.path.as_path(), file.bytes.as_ref()))
     }
 
-    /// Find a loaded file by its stored path, exact first and suffix second for ergonomic
-    /// file-local omit rules.
+    /// Find a loaded file by its stored path: exact first, then relative to the root document's
+    /// directory, and suffix last for ergonomic file-local omit rules.
+    ///
+    /// The relative step comes before the suffix one because a suffix is ambiguous — `lib.yaml` is
+    /// a suffix of `xlib.yaml` — and the first match in load order would win. A path
+    /// [`Self::root_relative_path`] produced always resolves at the relative step, to its own file.
     pub(crate) fn file_id_for_path(&self, path: &str) -> Option<FileId> {
+        let relative = self.root_dir().join(path);
         self.files
             .iter()
             .find_map(|(id, file)| (file.path.as_str() == path).then_some(*id))
             .or_else(|| {
                 self.files
                     .iter()
+                    .find_map(|(id, file)| (file.path == relative).then_some(*id))
+            })
+            .or_else(|| {
+                self.files
+                    .iter()
                     .find_map(|(id, file)| file.path.as_str().ends_with(path).then_some(*id))
             })
+    }
+
+    /// The path a file-scoped omit rule names `file` by: its stored path relative to the root
+    /// document's directory, or the stored path itself when it lies outside that directory. Either
+    /// resolves back to `file` through [`Self::file_id_for_path`].
+    ///
+    /// Relative, so a rule auto-carve derives — and the omit fingerprint stamped into generated
+    /// output — does not depend on where the checkout lives.
+    pub(crate) fn root_relative_path(&self, file: FileId) -> Option<&str> {
+        let path = &self.file(file)?.path;
+        Some(
+            path.strip_prefix(self.root_dir())
+                .map_or(path.as_str(), Utf8Path::as_str),
+        )
+    }
+
+    /// Every loaded document's id, in load order (root first).
+    pub(crate) fn file_ids(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.values.keys().copied()
+    }
+
+    /// The directory the root document was loaded from, against which relative paths resolve.
+    fn root_dir(&self) -> &Utf8Path {
+        self.file(self.root_id())
+            .and_then(|root| root.path.parent())
+            .unwrap_or_else(|| Utf8Path::new(""))
     }
 }
 

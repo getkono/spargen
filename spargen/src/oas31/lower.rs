@@ -488,11 +488,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`crate::compat`]'s auto-carve maps back to an enclosing operation, so a root-level
     /// provenance here would make the rejection un-carvable.
     ///
-    /// Carvability holds for a `$ref` site in the root document. `omittable_enclosing` keys on the
-    /// pointer alone and not on the file, so a rejection whose provenance lies in a referenced
-    /// sub-file still yields a rule read against the root document, which matches nothing and ends
-    /// the run with `E019`. That is pre-existing and not specific to this diagnostic, but this
-    /// diagnostic can reach it.
+    /// Carvability holds for a `$ref` site in a referenced sub-file too, provided `at` carries that
+    /// file's span: `compat::carve_rules` reads the pointer in the file the span lies in, and
+    /// carves a sub-file construct as a file-scoped pointer rule.
     ///
     /// A name the root document does not declare is handed to [`Self::ensure_resolved`], because a
     /// `$ref` written inside a sub-file spells that file's own components the same way. That is a

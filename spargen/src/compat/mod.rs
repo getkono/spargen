@@ -22,7 +22,9 @@
 
 use std::borrow::Cow;
 
+use std::cell::OnceCell;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 
 use crate::diag::{
@@ -614,30 +616,195 @@ pub(crate) const MAX_CARVE_ROUNDS: usize = 64;
 /// a `$ref`-target site outside `paths`/`components`, …) yields no rule — the facade reports it as a
 /// residual, un-carvable rejection rather than looping. The returned rules are de-duplicated and
 /// sorted deterministically, so the carve set is stable for a given set of diagnostics.
-pub(crate) fn carve_rules(diagnostics: &[Diagnostic]) -> Vec<OmitRule> {
-    let mut rules: Vec<OmitRule> = Vec::new();
+///
+/// A diagnostic is read in the file its span lies in (the root document when it has no span),
+/// because its pointer addresses that file:
+///
+/// * in the **root document**, the construct is named by path, operation, or component, as above;
+/// * in a **referenced sub-file**, the same constructs are carved as a file-scoped
+///   [`OmitRule::Pointer`] (`lib.yaml#/components/schemas/Node`), since a path- or component-named
+///   rule is read against the root document and would match nothing there (`E019`). Removing it
+///   dangles the `$ref`s that reached it, and the next round carves those;
+/// * a sub-file pointer outside `paths`/`components` — a bare schema or path item file, which has
+///   no construct that can be omitted without reshaping it — is carved at every `$ref` site in the
+///   bundle whose target encloses it, followed back file by file until each reaches a construct.
+///
+/// `bundle` is the one the diagnostics were produced from, with the current omit profile already
+/// applied, so every rule derived here names a construct that is still present.
+pub(crate) fn carve_rules(diagnostics: &[Diagnostic], bundle: &InputBundle) -> Vec<OmitRule> {
+    let mut carver = Carver {
+        bundle,
+        sites: OnceCell::new(),
+        visited: HashSet::new(),
+        rules: Vec::new(),
+    };
     for diagnostic in diagnostics {
         if diagnostic.severity != Severity::Error {
             continue;
         }
-        if let Some(rule) = omittable_enclosing(&diagnostic.pointer) {
-            if !rules.contains(&rule) {
-                rules.push(rule);
-            }
-        }
+        let file = diagnostic
+            .span
+            .map_or_else(|| bundle.root_id(), |span| span.file);
+        carver.carve_at(file, &diagnostic.pointer);
     }
+    let mut rules = carver.rules;
     // Deterministic carve set: order is independent of diagnostic order.
     rules.sort_by_key(|rule| rule.describe());
     rules
 }
 
-/// The smallest omittable construct enclosing `pointer`, or `None` if none is (root / unmodelled).
+/// The state of one [`carve_rules`] call.
+struct Carver<'a> {
+    bundle: &'a InputBundle,
+    /// Every `$ref` in the bundle, walked only once a sub-file pointer needs its referrers.
+    sites: OnceCell<Vec<ReferenceSite>>,
+    /// Sub-file pointers already expanded, which is what ends a `$ref` cycle between sub-files.
+    visited: HashSet<(FileId, String)>,
+    rules: Vec<OmitRule>,
+}
+
+impl Carver<'_> {
+    /// Derive the rule(s) that carve `pointer` in `file`; see [`carve_rules`].
+    fn carve_at(&mut self, file: FileId, pointer: &JsonPointer) {
+        let bundle = self.bundle;
+        if file == bundle.root_id() {
+            // The root document's un-carvable pointers stay residual: the root is the API itself,
+            // so there is nothing above it to carve instead.
+            if let Some(rule) = omittable_enclosing(pointer) {
+                self.push(rule);
+            }
+            return;
+        }
+        if !self.visited.insert((file, pointer.as_str().to_owned())) {
+            return;
+        }
+        let tokens = pointer_tokens(pointer);
+        if let Some(rule) = file_scoped_enclosing(bundle, file, &tokens) {
+            self.push(rule);
+            return;
+        }
+        let referrers: Vec<(FileId, JsonPointer)> = self
+            .sites
+            .get_or_init(|| reference_sites(bundle))
+            .iter()
+            .filter(|site| site.target_file == file && is_prefix(&site.target_tokens, &tokens))
+            .map(|site| (site.file, site.pointer.clone()))
+            .collect();
+        for (referrer, at) in referrers {
+            self.carve_at(referrer, &at);
+        }
+    }
+
+    fn push(&mut self, rule: OmitRule) {
+        if !self.rules.contains(&rule) {
+            self.rules.push(rule);
+        }
+    }
+}
+
+/// One `$ref` in the bundle: the object that carries it, and the construct its target resolves to.
+struct ReferenceSite {
+    file: FileId,
+    pointer: JsonPointer,
+    target_file: FileId,
+    target_tokens: Vec<String>,
+}
+
+/// Every `$ref` in every loaded document that resolves to a loaded document, in load and document
+/// order.
+fn reference_sites(bundle: &InputBundle) -> Vec<ReferenceSite> {
+    let mut sites = Vec::new();
+    for file in bundle.file_ids() {
+        collect_reference_sites(
+            bundle,
+            file,
+            bundle.value_at(file),
+            &JsonPointer::root(),
+            &mut sites,
+        );
+    }
+    sites
+}
+
+fn collect_reference_sites(
+    bundle: &InputBundle,
+    file: FileId,
+    value: &SpannedValue,
+    at: &JsonPointer,
+    sites: &mut Vec<ReferenceSite>,
+) {
+    match &value.node {
+        Node::Object(object) => {
+            if let Some(target) = value
+                .get("$ref")
+                .and_then(SpannedValue::as_str)
+                .and_then(|reference| bundle.reference_target(reference, file))
+            {
+                sites.push(ReferenceSite {
+                    file,
+                    pointer: at.clone(),
+                    target_file: target.0,
+                    target_tokens: pointer_tokens(&target.1),
+                });
+            }
+            for (key, child) in object.iter() {
+                collect_reference_sites(bundle, file, child, &at.push(&key.name), sites);
+            }
+        }
+        Node::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                collect_reference_sites(bundle, file, child, &at.index(index), sites);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Whether `prefix` is a token-wise prefix of (or equal to) `tokens`.
+fn is_prefix(prefix: &[String], tokens: &[String]) -> bool {
+    tokens.len() >= prefix.len() && tokens[..prefix.len()] == *prefix
+}
+
+/// An omittable construct a pointer lies in: how many of its leading tokens name the construct,
+/// and the root-document rule that omits it.
+struct Enclosing {
+    depth: usize,
+    rule: OmitRule,
+}
+
+/// The smallest omittable construct enclosing a root-document `pointer`, as the rule that omits
+/// it, or `None` if none is (root / unmodelled).
+fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
+    enclosing(&pointer_tokens(pointer)).map(|enclosing| enclosing.rule)
+}
+
+/// The same construct as [`omittable_enclosing`], found in the sub-file `file` and named by a
+/// file-scoped pointer to it, which is how an omit rule reaches a construct outside the root.
+fn file_scoped_enclosing(
+    bundle: &InputBundle,
+    file: FileId,
+    tokens: &[String],
+) -> Option<OmitRule> {
+    let enclosing = enclosing(tokens)?;
+    let path = bundle.root_relative_path(file)?;
+    let pointer: String = tokens[..enclosing.depth]
+        .iter()
+        .map(|token| format!("/{}", escape_glob_meta(&escape_pointer_token(token))))
+        .collect();
+    // The file is matched as a path, never as a glob, so it is carried verbatim; only the pointer
+    // is glob-escaped.
+    Some(OmitRule::pointer(
+        Some(Cow::Owned(path.to_owned())),
+        pointer,
+    ))
+}
+
+/// Classify the construct `tokens` lies in; see [`omittable_enclosing`].
 ///
 /// Every path and component name here is literal text lifted out of the document, so its glob
 /// metacharacters are escaped: a path such as `/files/*` is a legal URI path, and an unescaped rule
 /// for it would be reinterpreted as a bulk pattern and carve away its supported siblings too.
-fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
-    let tokens = pointer_tokens(pointer);
+fn enclosing(tokens: &[String]) -> Option<Enclosing> {
     match tokens.first()?.as_str() {
         "paths" => {
             let path = escape_glob_meta(tokens.get(1)?);
@@ -649,26 +816,40 @@ fn omittable_enclosing(pointer: &JsonPointer) -> Option<OmitRule> {
                 .is_some_and(|token| token == "additionalOperations")
             {
                 let method = tokens.get(3)?;
-                return Some(OmitRule::pointer(
-                    None,
-                    format!(
-                        "/paths/{}/additionalOperations/{}",
-                        escape_pointer_token(&path),
-                        escape_glob_meta(&escape_pointer_token(method))
+                return Some(Enclosing {
+                    depth: 4,
+                    rule: OmitRule::pointer(
+                        None,
+                        format!(
+                            "/paths/{}/additionalOperations/{}",
+                            escape_pointer_token(&path),
+                            escape_glob_meta(&escape_pointer_token(method))
+                        ),
                     ),
-                ));
+                });
             }
-            match tokens
-                .get(2)
-                .and_then(|token| token.parse::<OmitMethod>().ok())
-            {
-                Some(method) => Some(OmitRule::operation(method, path)),
-                None => Some(OmitRule::path(path)),
-            }
+            Some(
+                match tokens
+                    .get(2)
+                    .and_then(|token| token.parse::<OmitMethod>().ok())
+                {
+                    Some(method) => Enclosing {
+                        depth: 3,
+                        rule: OmitRule::operation(method, path),
+                    },
+                    None => Enclosing {
+                        depth: 2,
+                        rule: OmitRule::path(path),
+                    },
+                },
+            )
         }
         "components" => {
             let kind = tokens.get(1)?.parse::<ComponentKind>().ok()?;
-            Some(OmitRule::component(kind, escape_glob_meta(tokens.get(2)?)))
+            Some(Enclosing {
+                depth: 3,
+                rule: OmitRule::component(kind, escape_glob_meta(tokens.get(2)?)),
+            })
         }
         _ => None,
     }
@@ -1291,7 +1472,8 @@ components:
             error("/paths/~1b/get/responses/404"),
             warning,
         ];
-        let rules = carve_rules(&diagnostics);
+        // No span, so every diagnostic is read against the root document.
+        let rules = carve_rules(&diagnostics, &bundle_of(MULTI_SPEC));
         // Warnings ignored; duplicates collapsed; sorted deterministically by description.
         assert_eq!(
             rules,
@@ -1300,6 +1482,83 @@ components:
                 OmitRule::operation(OmitMethod::Get, "/b"),
             ]
         );
+    }
+
+    /// Load a root document plus sub-files, all written beside each other.
+    fn bundle_of_files(root: &str, files: &[(&str, &str)]) -> InputBundle {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, contents) in files {
+            std::fs::write(dir.path().join(name), contents).unwrap();
+        }
+        let path = dir.path().join("openapi.yaml");
+        std::fs::write(&path, root).unwrap();
+        let mut diags = Diagnostics::default();
+        InputBundle::load(camino::Utf8Path::from_path(&path).unwrap(), &mut diags).unwrap()
+    }
+
+    /// An error reported at `pointer` in the loaded file named `file`.
+    fn error_in(bundle: &InputBundle, file: &str, pointer: &str) -> Diagnostic {
+        let id = bundle.file_id_for_path(file).unwrap();
+        Diagnostic::error(
+            Code::UnresolvedRef,
+            Provenance::new(
+                JsonPointer::from(pointer.to_owned()),
+                Some(bundle.value_at(id).span()),
+            ),
+        )
+        .build()
+    }
+
+    /// A sub-file construct is carved as a pointer into that file, and its name is literal text: a
+    /// `/` is pointer-escaped and a glob metacharacter glob-escaped, so applying the rule removes
+    /// exactly that component and not its sibling a glob `A*B` would also match.
+    #[test]
+    fn a_sub_file_construct_is_carved_by_an_escaped_file_scoped_pointer() {
+        let lib = "components:\n  schemas:\n    \"A*B/C\": { type: object }\n    AxB/C: { type: object }\n";
+        let root = "openapi: 3.1.0\ninfo: { title: t, version: 1.0.0 }\npaths: {}\n\
+                    components: { schemas: { X: { $ref: './lib.yaml#/components/schemas/A*B~1C' } } }\n";
+        let mut bundle = bundle_of_files(root, &[("lib.yaml", lib)]);
+        let rules = carve_rules(
+            &[error_in(
+                &bundle,
+                "lib.yaml",
+                "/components/schemas/A*B~1C/properties/x",
+            )],
+            &bundle,
+        );
+        assert_eq!(
+            rules,
+            vec![OmitRule::pointer(
+                Some("lib.yaml".into()),
+                r"/components/schemas/A\*B~1C"
+            )]
+        );
+
+        let mut diags = Diagnostics::default();
+        Omit { rules }.apply(&mut bundle, &mut diags).unwrap();
+        let lib_id = bundle.file_id_for_path("lib.yaml").unwrap();
+        let remaining: Vec<_> = bundle
+            .value_at(lib_id)
+            .get("components")
+            .and_then(|components| components.get("schemas"))
+            .and_then(|schemas| schemas.as_object())
+            .map(|object| object.iter().map(|(key, _)| key.name.clone()).collect())
+            .unwrap();
+        assert_eq!(remaining, vec!["AxB/C".to_owned()]);
+    }
+
+    /// Two bare sub-files that reference each other form a cycle the referrer walk must leave: it
+    /// expands each site once, and still reaches the root operation that pulled the pair in.
+    #[test]
+    fn the_referrer_walk_terminates_on_a_cycle_between_sub_files() {
+        let a = "type: object\nproperties:\n  b: { $ref: './b.yaml' }\n";
+        let b = "type: object\nproperties:\n  a: { $ref: './a.yaml' }\n  bad: { $ref: '#/nope' }\n";
+        let root = "openapi: 3.1.0\ninfo: { title: t, version: 1.0.0 }\npaths:\n  /x:\n    get:\n      \
+                    responses:\n        \"200\":\n          description: ok\n          content:\n            \
+                    application/json: { schema: { $ref: './a.yaml' } }\n";
+        let bundle = bundle_of_files(root, &[("a.yaml", a), ("b.yaml", b)]);
+        let rules = carve_rules(&[error_in(&bundle, "b.yaml", "/properties/bad")], &bundle);
+        assert_eq!(rules, vec![OmitRule::operation(OmitMethod::Get, "/x")]);
     }
 
     #[test]

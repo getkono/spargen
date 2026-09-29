@@ -1156,15 +1156,167 @@ fn carve_removes_a_union_whose_sole_member_cannot_be_intersected() {
     );
 }
 
-/// A rejection whose provenance lies in a referenced sub-file is **not** carvable today, and this
-/// pins that limit so a change to it is deliberate. `compat::carve_rules` keys the rule it derives
-/// on the pointer alone, not on the file the pointer is written in, so a dangling `$ref` inside
-/// `lib.yaml`'s `Node` yields the rule `component schemas Node`, which is read against the root
-/// document, matches nothing there, and ends the run with `E019` instead of recovering it. The
-/// root-document counterpart, which does recover, is
+/// The W009 messages of a report, which name the rule that removed each construct.
+fn w009_messages(report: &Report) -> Vec<&str> {
+    report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == Code::OmittedConstruct)
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect()
+}
+
+/// A rejection whose provenance lies in a referenced sub-file is carved in the file it is written
+/// in. The rule used to be derived from the pointer alone, so a dangling `$ref` inside `lib.yaml`'s
+/// `Node` yielded `component schemas Node`, which was read against the root document, matched
+/// nothing there, and ended the run with `E019`, taking the healthy operations with it. Now the
+/// derived rule is a file-scoped pointer (`lib.yaml#/components/schemas/Node`); the next round
+/// finds the root's `$ref` to it dangling and carves the operation that holds it.
+///
+/// `xlib.yaml` is loaded first and declares a healthy `Node` of its own, so a file-scoped rule
+/// resolved by bare suffix (`lib.yaml` is a suffix of `xlib.yaml`) would remove the wrong one and
+/// carve away `getUsesHealthy` too. The root-document counterpart is
 /// `a_dangling_ref_in_an_unreferenced_component_rejects_and_omitting_it_recovers`.
 #[test]
-fn carve_cannot_recover_a_rejection_whose_provenance_lies_in_a_sub_file() {
+fn carve_recovers_a_rejection_whose_provenance_lies_in_a_sub_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = write_split_description(temp.path());
+    let out = temp.path().join("client.rs");
+
+    // Without carve, the sub-file's dangling reference rejects the document.
+    let report = spargen::generate(&config(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::UnresolvedRef),
+        "the dangling sub-file reference is E004: {report:#?}"
+    );
+
+    // With carve, the sub-file's component is removed from the sub-file, the root operation whose
+    // `$ref` that leaves dangling is carved on the next round, and the rest generates.
+    let report = spargen::generate(&carving(&spec, &out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        !report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::InvalidOmitRule),
+        "no derived rule misses its construct: {report:#?}"
+    );
+    let mut carved = w009_messages(&report);
+    carved.sort_unstable();
+    assert_eq!(
+        carved,
+        [
+            "omitted construct matched by `get /uses-node`",
+            "omitted construct matched by `pointer lib.yaml#/components/schemas/Node`",
+        ],
+        "exactly the sub-file component and its one referrer are carved: {report:#?}"
+    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(generated.contains("fn get_good"), "{generated}");
+    assert!(
+        generated.contains("fn get_uses_healthy"),
+        "the same-named component in `xlib.yaml` is not the one carved: {generated}"
+    );
+    assert!(!generated.contains("fn get_uses_node"), "{generated}");
+
+    // The derived rule names the sub-file relative to the root document, so the omit fingerprint
+    // stamped into the header does not depend on where the description lives.
+    let elsewhere = tempfile::tempdir().unwrap();
+    let moved = write_split_description(elsewhere.path());
+    let moved_out = elsewhere.path().join("client.rs");
+    let report = spargen::generate(&carving(&moved, &moved_out));
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let fingerprint = |source: &str| {
+        let line = source
+            .lines()
+            .find(|line| line.starts_with("// source: "))
+            .expect("provenance header names its source");
+        line[line
+            .find(" omit=")
+            .expect("a carved build stamps its omit profile")..]
+            .to_owned()
+    };
+    assert_eq!(
+        fingerprint(&generated),
+        fingerprint(&std::fs::read_to_string(&moved_out).unwrap())
+    );
+}
+
+/// The split description [`carve_recovers_a_rejection_whose_provenance_lies_in_a_sub_file`]
+/// carves, written into `dir`; returns the root document's path.
+fn write_split_description(dir: &Path) -> std::path::PathBuf {
+    let spec = write_spec(
+        dir,
+        "openapi.yaml",
+        r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [ { url: https://example.com } ]
+paths:
+  /good:
+    get:
+      operationId: getGood
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { type: object, properties: { id: { type: string } } }
+  /uses-healthy:
+    get:
+      operationId: getUsesHealthy
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "./xlib.yaml#/components/schemas/Node" }
+  /uses-node:
+    get:
+      operationId: getUsesNode
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "./lib.yaml#/components/schemas/Node" }
+"##,
+    );
+    write_spec(
+        dir,
+        "xlib.yaml",
+        r##"
+components:
+  schemas:
+    Node: { type: object, properties: { name: { type: string } } }
+"##,
+    );
+    write_spec(
+        dir,
+        "lib.yaml",
+        r##"
+components:
+  schemas:
+    Node:
+      type: object
+      properties:
+        missing: { $ref: "#/components/schemas/Missing" }
+"##,
+    );
+    spec
+}
+
+/// A sub-file that is a bare schema (or a bare path item) declares no `paths` or `components` of
+/// its own, so no construct inside it can be omitted without editing the schema's shape. The
+/// rejection is instead carved at every construct that references it — here transitively, through
+/// `schemas/wrapper.yaml` referencing `schemas/node.yaml` — ending at the root operations that
+/// reach it. `getAlsoGood` references the healthy half of `schemas/wrapper.yaml` only, and survives.
+#[test]
+fn carve_follows_a_bare_sub_file_rejection_back_to_the_root_constructs_that_reach_it() {
     let temp = tempfile::tempdir().unwrap();
     let spec = write_spec(
         temp.path(),
@@ -1183,59 +1335,61 @@ paths:
           content:
             application/json:
               schema: { type: object, properties: { id: { type: string } } }
-  /uses-node:
+  /also-good:
     get:
-      operationId: getUsesNode
+      operationId: getAlsoGood
       responses:
         "200":
           description: OK
           content:
             application/json:
-              schema: { $ref: "./lib.yaml#/components/schemas/Node" }
+              schema: { $ref: "./schemas/wrapper.yaml#/$defs/Healthy" }
+  /uses-wrapper:
+    get:
+      operationId: getUsesWrapper
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "./schemas/wrapper.yaml" }
+"##,
+    );
+    std::fs::create_dir(temp.path().join("schemas")).unwrap();
+    write_spec(
+        temp.path(),
+        "schemas/wrapper.yaml",
+        r##"
+type: object
+properties:
+  node: { $ref: "./node.yaml" }
+$defs:
+  Healthy: { type: object, properties: { name: { type: string } } }
 "##,
     );
     write_spec(
         temp.path(),
-        "lib.yaml",
+        "schemas/node.yaml",
         r##"
-components:
-  schemas:
-    Node:
-      type: object
-      properties:
-        missing: { $ref: "#/components/schemas/Missing" }
+type: object
+properties:
+  missing: { $ref: "#/$defs/Missing" }
 "##,
     );
     let out = temp.path().join("client.rs");
 
-    // Without carve, the sub-file's dangling reference rejects the document.
     let report = spargen::generate(&config(&spec, &out));
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|d| d.code == Code::UnresolvedRef),
-        "the dangling sub-file reference is E004: {report:#?}"
-    );
 
-    // With carve, the derived rule names the sub-file's component but is read against the root
-    // document, which declares no `Node`, so the rule itself fails with `E019`.
     let report = spargen::generate(&carving(&spec, &out));
-    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    assert!(
-        report
-            .diagnostics()
-            .iter()
-            .any(|d| d.code == Code::InvalidOmitRule
-                && d.message
-                    .contains("omit rule did not match any source construct")
-                && d.message.contains("component schemas Node")),
-        "E019 names the sub-file component rule that matched nothing in the root: {report:#?}"
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert_eq!(
+        w009_messages(&report),
+        ["omitted construct matched by `get /uses-wrapper`"],
+        "only the root operation that reaches the bad file is carved: {report:#?}"
     );
-    assert!(
-        !out.exists(),
-        "an un-carvable rejection writes no output: {}",
-        out.display()
-    );
+    let generated = std::fs::read_to_string(&out).unwrap();
+    assert!(generated.contains("fn get_good"), "{generated}");
+    assert!(generated.contains("fn get_also_good"), "{generated}");
+    assert!(!generated.contains("fn get_uses_wrapper"), "{generated}");
 }

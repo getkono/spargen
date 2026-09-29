@@ -51,7 +51,14 @@ into a generate-what-you-can outcome. Instead of failing on rejections, spargen:
 1. runs the frontend audit;
 2. maps each error diagnostic's JSON pointer to the smallest enclosing **omittable** construct — a
    pointer under `/paths/<path>/<method>/…` carves that operation, one at the path-item level carves
-   the path, one under `/components/<kind>/<name>/…` carves that component;
+   the path, one under `/components/<kind>/<name>/…` carves that component. A pointer is read in
+   the file it was reported in, so a rejection inside a referenced sub-file is carved there:
+   - the same constructs in a sub-file are carved as a file-scoped pointer rule
+     (`lib.yaml#/components/schemas/Node`, the file named relative to the root document), and the
+     `$ref`s left dangling by it are carved on the next round;
+   - a sub-file with no `paths` or `components` of its own — a bare schema or path item file — is
+     carved at every construct whose `$ref` reaches the rejected part of it, followed back through
+     any intermediate files to the root document;
 3. adds those omit rules and re-runs, **iterating to a fixpoint** (omitting one construct can clear
    some rejections and surface others — e.g. a now-dangling `$ref`) until the frontend is clean or a
    round makes no progress. The number of rounds is bounded, so it always terminates.
@@ -132,6 +139,11 @@ name = "LegacyPet"                      #   schema / response / parameter / requ
 pointer = "/components/schemas/X"       # pointer → OmitRule::Pointer
 file = "extra.yaml"                     #   file optional (file-local pointer)
 ```
+
+A pointer rule's `file` names a loaded document by its path exactly as loaded, else by its path
+relative to the root document's directory, else by suffix. The suffix step is the ambiguous one —
+`lib.yaml` is a suffix of `xlib.yaml` — so name a file relative to the root document to be sure
+which one a rule reaches; the rules auto-carve derives are always written that way.
 
 `error_body_cap` bounds what a generated client retains on an error. For bodies read as errors on
 native targets it bounds *reading* too: one that exceeds the cap is abandoned partway rather than
