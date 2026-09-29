@@ -97,9 +97,11 @@ jobs:
         with:
           tool: cargo-hack@0.6.39
       # Every other job runs `--all-features`, so a combination such as `xml` on and `time` off was
-      # never compiled — and those are exactly the subsets the generator embeds per spec.
+      # never compiled — and those are exactly the subsets the generator embeds per spec. The
+      # `--all-targets` lines compile `#[cfg(test)]` code at each point too (#237).
       - run: cargo hack check --workspace --each-feature --no-dev-deps
-      - run: cargo hack check -p support-runtime --feature-powerset
+      - run: cargo hack check --workspace --exclude support-runtime --each-feature --all-targets
+      - run: cargo hack check -p support-runtime --all-targets --feature-powerset
 
   runtime-dependencies:
     name: Runtime dependency floors
