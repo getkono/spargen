@@ -167,11 +167,18 @@ pub(crate) fn vendor(
                     let bytes = match fetcher.fetch(&url) {
                         Ok(bytes) => bytes,
                         Err(error) => {
+                            // A fetch failure is a fact about the network, not the document:
+                            // the ref is well-formed and exactly what this step exists to pin.
                             Diagnostic::error(
-                                Code::AbsoluteRefUnsupported,
+                                Code::RemoteFetchFailed,
                                 Provenance::new(JsonPointer::root(), None),
                             )
                             .message(format!("failed to fetch remote $ref `{url}`: {error}"))
+                            .remedy(
+                                "check the URL and the reported error, then re-run \
+                                 `spargen lock`; or vendor the document by hand and use a \
+                                 relative $ref",
+                            )
                             .emit(diags);
                             continue;
                         }
@@ -295,6 +302,56 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| format!("404 {url}"))
         }
+    }
+
+    /// A failed fetch is `E025`, never `E003` "not pinned": the document is fine, the network
+    /// is not. The message carries the URL and the fetcher's own error, nothing is vendored for
+    /// that URL, and the unrelated ref beside it is still fetched and pinned.
+    #[test]
+    fn a_fetch_failure_is_e025_naming_the_url_and_the_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let spec = dir.join("openapi.yaml");
+        std::fs::write(
+            &spec,
+            "openapi: 3.1.0\n\
+             components:\n\
+             \x20 schemas:\n\
+             \x20   Pet:\n\
+             \x20     $ref: \"https://api.example.com/missing.yaml\"\n\
+             \x20   Tag:\n\
+             \x20     $ref: \"https://api.example.com/tag.yaml\"\n",
+        )
+        .unwrap();
+        let mut docs = std::collections::HashMap::new();
+        docs.insert(
+            "https://api.example.com/tag.yaml".to_owned(),
+            b"type: string\n".to_vec(),
+        );
+        let fetcher = StubFetcher { docs };
+
+        let mut diags = Diagnostics::default();
+        assert!(vendor(&spec, &fetcher, &mut diags).is_err());
+
+        let codes: Vec<Code> = diags.items().iter().map(|diag| diag.code).collect();
+        assert_eq!(codes, [Code::RemoteFetchFailed], "{:?}", diags.items());
+        let message = &diags.items()[0].message;
+        assert!(
+            message.contains("https://api.example.com/missing.yaml"),
+            "{message}"
+        );
+        assert!(
+            message.contains("404 https://api.example.com/missing.yaml"),
+            "the fetcher's own error must be carried: {message}"
+        );
+
+        let vendor_dir = dir.join(VENDOR_DIR);
+        assert!(!vendor_dir
+            .join(vendor_path_for_url("https://api.example.com/missing.yaml"))
+            .exists());
+        assert!(vendor_dir
+            .join(vendor_path_for_url("https://api.example.com/tag.yaml"))
+            .exists());
     }
 
     #[test]

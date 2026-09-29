@@ -25,6 +25,9 @@ pub enum Code {
     /// A vendored remote `$ref` document drifted from its `spargen.lock` pin (sha256 mismatch, or
     /// the vendored copy is missing) — the lock is the source of truth, so it is refused.
     VendoredRefDrift,
+    /// `spargen lock` could not fetch a remote `$ref` it had to vendor: the request failed in
+    /// transport (DNS, refused connection, TLS, timeout) or the server answered an error status.
+    RemoteFetchFailed,
     /// A validation-only keyword (`pattern`, `minimum`, …) was ignored (W-class).
     ValidationKeywordIgnored,
     /// `patternProperties` cannot be represented as a typed overflow map — heterogeneous value
@@ -109,6 +112,7 @@ impl Code {
             Code::AbsoluteRefUnsupported => "E003",
             Code::UnresolvedRef => "E004",
             Code::VendoredRefDrift => "E021",
+            Code::RemoteFetchFailed => "E025",
             Code::ValidationKeywordIgnored => "W001",
             Code::PatternPropertiesRejected => "E005",
             Code::DynamicRefRejected => "E006",
@@ -156,6 +160,7 @@ impl Code {
             Code::AbsoluteRefUnsupported => "remote $ref not pinned",
             Code::UnresolvedRef => "unresolved $ref",
             Code::VendoredRefDrift => "vendored remote $ref drifted from lock",
+            Code::RemoteFetchFailed => "remote $ref fetch failed",
             Code::ValidationKeywordIgnored => "validation-only keyword ignored",
             Code::PatternPropertiesRejected => "patternProperties not representable as a typed map",
             Code::DynamicRefRejected => "dynamic reference unsupported",
@@ -220,6 +225,9 @@ impl Code {
             }
             Code::VendoredRefDrift => {
                 "A remote `$ref` is pinned in `spargen.lock`, but its vendored copy under `.spargen/vendor/` is missing or its bytes no longer match the pinned sha256. The lock is the source of truth, so the drifted content is refused rather than used silently. Re-run `spargen lock <spec>` to re-vendor and re-pin, or restore the vendored file to its pinned bytes."
+            }
+            Code::RemoteFetchFailed => {
+                "`spargen lock` is the only step that touches the network, and this error means it could not fetch a remote (`http`/`https`) `$ref` it had to vendor: the request failed in transport (the name did not resolve, the connection was refused or timed out, a proxy or the TLS handshake rejected it), or the server answered with an error status. The message names the URL and carries the underlying error. It says nothing about the document itself — the `$ref` is well-formed and is what `spargen lock` exists to pin — so the fix is on the network side: check the URL and the status or transport error the message reports, then re-run `spargen lock <spec>`. The failed URL is neither vendored nor pinned, and the run is rejected. If the document cannot be reached from where the lock step runs, vendor it by hand and reference it with a relative file path. `generate` and `check` never fetch, so they never report this code."
             }
             Code::ValidationKeywordIgnored => {
                 "The keyword affects runtime validation but not the static Rust shape. Spargen records a warning and generates the shape. OpenAPI 3.2 `contentMediaType`/`contentSchema` are consumed without this warning only on the string `data` property of a sequential `text/event-stream` item envelope, where they define the JSON payload type."
@@ -323,6 +331,7 @@ impl Code {
             Code::AbsoluteRefUnsupported,
             Code::UnresolvedRef,
             Code::VendoredRefDrift,
+            Code::RemoteFetchFailed,
             Code::DuplicateObjectKey,
             Code::PatternPropertiesRejected,
             Code::DynamicRefRejected,
@@ -570,6 +579,7 @@ mod tests {
             Code::AbsoluteRefUnsupported => "AbsoluteRefUnsupported",
             Code::UnresolvedRef => "UnresolvedRef",
             Code::VendoredRefDrift => "VendoredRefDrift",
+            Code::RemoteFetchFailed => "RemoteFetchFailed",
             Code::DuplicateObjectKey => "DuplicateObjectKey",
             Code::PatternPropertiesRejected => "PatternPropertiesRejected",
             Code::DynamicRefRejected => "DynamicRefRejected",
@@ -637,7 +647,7 @@ mod tests {
     /// and this fails until `all()` lists it too.
     #[test]
     fn all_lists_every_declared_variant() {
-        const DECLARED: usize = 32;
+        const DECLARED: usize = 33;
 
         assert_eq!(
             Code::all().len(),
@@ -899,9 +909,9 @@ mod tests {
     }
 
     /// CLAUDE.md: every code gets "a fixture in `spargen/tests/frontend.rs`", enforced by tests
-    /// rather than convention. Frontend codes are asserted there; the seven the frontend cannot
-    /// produce — the `compat` omit rules and the facade's own Cargo-integration and
-    /// runtime-audit diagnostics — are asserted in the suite that *can* produce them, and each
+    /// rather than convention. Frontend codes are asserted there; the eight the frontend cannot
+    /// produce — the `compat` omit rules, the facade's own Cargo-integration and runtime-audit
+    /// diagnostics, and `spargen lock`'s fetch failure — are asserted in the suite that *can* produce them, and each
     /// must say so here. A new code that lands in neither place fails, which is the point.
     #[test]
     fn every_code_is_asserted_by_the_suite_that_owns_it() {
@@ -917,6 +927,9 @@ mod tests {
             // spec; `frontend.rs` deliberately runs every fixture with the integration off.
             ("CargoIntegrationDegraded", "config.rs"),
             ("CargoIntegrationRequired", "config.rs"),
+            // `spargen lock`'s fetch failure: `check`/`generate` never fetch, so only a vendor
+            // run over the real fetcher can produce it.
+            ("RemoteFetchFailed", "vendor_remote.rs"),
         ];
 
         let Some(root) = repo_root() else {
