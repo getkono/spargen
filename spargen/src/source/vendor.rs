@@ -557,6 +557,7 @@ mod tests {
         use std::thread::JoinHandle;
         use std::time::{Duration, Instant};
 
+        use rustls::pki_types::pem::PemObject;
         use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
         use super::*;
@@ -584,13 +585,42 @@ mod tests {
             alpn: Option<Vec<u8>>,
         }
 
-        /// A self-signed certificate for `127.0.0.1` and its PKCS#8 key.
-        fn self_signed() -> (CertificateDer<'static>, Vec<u8>) {
-            let certified = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
-                .expect("mint a self-signed certificate");
+        /// A self-signed P-256 end-entity certificate for `IP:127.0.0.1` (`CA:FALSE`, `serverAuth`),
+        /// valid until 2126-09-05, and its key: a test-only fixture, trusted by nothing but the
+        /// test that adds it. Embedded rather than minted so the test needs no dependency beyond
+        /// the rustls `remote-fetch` already links (a certificate-minting crate would bring
+        /// `rustls-pki-types` into the default-features graph). Made with
+        /// `openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 36500
+        /// -subj /CN=spargen-test -addext subjectAltName=IP:127.0.0.1
+        /// -addext basicConstraints=critical,CA:FALSE -addext keyUsage=critical,digitalSignature
+        /// -addext extendedKeyUsage=serverAuth`.
+        const CERTIFICATE_PEM: &str = "-----BEGIN CERTIFICATE-----
+MIIBuTCCAWCgAwIBAgIUMQ5PDmfQIGeB2CWkWzraOMdmoS8wCgYIKoZIzj0EAwIw
+FzEVMBMGA1UEAwwMc3Bhcmdlbi10ZXN0MCAXDTI2MDkyOTIyMzczN1oYDzIxMjYw
+OTA1MjIzNzM3WjAXMRUwEwYDVQQDDAxzcGFyZ2VuLXRlc3QwWTATBgcqhkjOPQIB
+BggqhkjOPQMBBwNCAATeM/pv9KGwcjCeD708X0y6GI4V08wLz/A/Lwh8zf2sORpx
+5dzRI7oSp+ICMvIiTbGx8VlQAm0vsSPk0M/34yZjo4GHMIGEMB0GA1UdDgQWBBT/
+IuqSf4eS+2sbcUsuvja1+KxwnTAfBgNVHSMEGDAWgBT/IuqSf4eS+2sbcUsuvja1
++KxwnTAPBgNVHREECDAGhwR/AAABMAwGA1UdEwEB/wQCMAAwDgYDVR0PAQH/BAQD
+AgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMAoGCCqGSM49BAMCA0cAMEQCIHdk3YK1
+ld3StLgbIWF95gZ1PexX3NwsadyTcn8xGrScAiBLo8+2dtpd3P+v7PB9CKu7CbWm
+u11UFaEGgB1ZbDcTng==
+-----END CERTIFICATE-----
+";
+        const PRIVATE_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgW2trw08Yt5NxD9IA
+dwZUQ3cTNCm3zN7X+n8ukYTTly6hRANCAATeM/pv9KGwcjCeD708X0y6GI4V08wL
+z/A/Lwh8zf2sORpx5dzRI7oSp+ICMvIiTbGx8VlQAm0vsSPk0M/34yZj
+-----END PRIVATE KEY-----
+";
+
+        /// The fixture certificate as DER, and its PKCS#8 key.
+        fn self_signed() -> (CertificateDer<'static>, PrivatePkcs8KeyDer<'static>) {
             (
-                certified.cert.der().clone(),
-                certified.key_pair.serialize_der(),
+                CertificateDer::from_pem_slice(CERTIFICATE_PEM.as_bytes())
+                    .expect("the fixture certificate parses"),
+                PrivatePkcs8KeyDer::from_pem_slice(PRIVATE_KEY_PEM.as_bytes())
+                    .expect("the fixture key parses"),
             )
         }
 
@@ -599,17 +629,14 @@ mod tests {
         fn serve_one(
             listener: TcpListener,
             cert: CertificateDer<'static>,
-            key: Vec<u8>,
+            key: PrivatePkcs8KeyDer<'static>,
         ) -> JoinHandle<Result<Served, String>> {
             let provider = Arc::new(rustls::crypto::ring::default_provider());
             let mut config = rustls::ServerConfig::builder_with_provider(provider)
                 .with_safe_default_protocol_versions()
                 .expect("ring supports the default protocol versions")
                 .with_no_client_auth()
-                .with_single_cert(
-                    vec![cert],
-                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key)),
-                )
+                .with_single_cert(vec![cert], PrivateKeyDer::Pkcs8(key))
                 .expect("the minted key matches its certificate");
             config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
             let config = Arc::new(config);
