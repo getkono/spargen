@@ -4063,6 +4063,152 @@ paths:
     );
 }
 
+/// A nullable-alias back-edge carries its target's lowered nullability, not the reserve-time
+/// guess — for each spelling `open_reservation_for_ref` keys a reservation by.
+///
+/// `A` is "an object with a required `b`, or null"; its `"null"` lives in a `oneOf` member, which
+/// `schema_is_nullable` never reads. `B` is a one-member `oneOf` over `A`, so when `A.b` lowers
+/// `B` while `A` is still open, the alias recogniser answers `b` with `A`'s open reservation
+/// instead of taking an ordinary back-edge into `B`. That reservation's nullability is still the
+/// guess, so without a recorded read the pass is never revised and `b` is `Box<A>`, which cannot
+/// decode the legal `{"b": null}`. `W.a` is the control, taken after `A` finished.
+///
+/// The spellings reach the four sites that record the read: a root component named by its local
+/// pointer, a root component named through the root file's own path (routed back to the
+/// component map), a sub-file's own component (the resolved-pointer frame), and a vendored remote
+/// document (the remote frame).
+#[test]
+fn a_nullable_alias_back_edge_carries_its_targets_lowered_nullability() {
+    let components = |alias_target: &str| {
+        format!(
+            r##"
+components:
+  schemas:
+    W:
+      type: object
+      required: [a]
+      properties:
+        a: {{ $ref: '#/components/schemas/A' }}
+    A:
+      oneOf:
+        - type: object
+          required: [b]
+          properties:
+            b: {{ $ref: '#/components/schemas/B' }}
+        - {{ type: 'null' }}
+    B:
+      oneOf:
+        - {{ $ref: '{alias_target}' }}
+"##
+        )
+    };
+    let document = |components: &str| {
+        format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /u:
+    get:
+      operationId: getU
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/W' }} }}
+{components}"##
+        )
+    };
+    let assert_optional = |spelling: &str, code: &str| {
+        let control = field_type(code, "pub a:")
+            .unwrap_or_else(|| panic!("{spelling}: `W.a` is emitted: {code}"));
+        let target = control
+            .strip_prefix("Option<")
+            .and_then(|rest| rest.strip_suffix('>'))
+            .unwrap_or_else(|| panic!("{spelling}: the control is optional: {control}\n{code}"));
+        assert_eq!(
+            field_type(code, "pub b:"),
+            Some(format!("Option<Box<{target}>>")),
+            "{spelling}: the alias back-edge taken while `A` was open must carry `A`'s lowered \
+             nullability, as the control does: {code}"
+        );
+    };
+
+    let root = document(&components("#/components/schemas/A"));
+    let (generated, code) = generate_with_code(&root);
+    let checked = check(&root);
+    for (entry, report) in [("root/generate", &generated), ("root/check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_optional("root", &code);
+
+    // The root component `A` named through the root file's own path: not the local
+    // `#/components/schemas/` spelling, so it goes through the resolver and is routed back to the
+    // component map.
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        document(&components("./openapi.yaml#/components/schemas/A")),
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let routed = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let routed_checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    for (entry, report) in [
+        ("routed/generate", &routed),
+        ("routed/check", &routed_checked),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_optional("routed", &std::fs::read_to_string(&out).unwrap_or_default());
+
+    let (split_generated, split_checked, split_code) = split(
+        "./lib.yaml#/components/schemas/W",
+        &components("#/components/schemas/A"),
+    );
+    for (entry, report) in [
+        ("split/generate", &split_generated),
+        ("split/check", &split_checked),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+    assert_optional("split", &split_code);
+
+    // The vendored-remote spelling: `A` and `B` in a remote document, whose local references are
+    // rewritten absolute, so `B`'s member is the remote reservation's own key. The control `W.a`
+    // is the root's, referring to the remote `A` by URL; the remote document's own `W` is unused.
+    use sha2::{Digest, Sha256};
+    const URL: &str = "https://api.example.com/schemas/lib.yaml";
+    const VENDORED: &str = "api.example.com/schemas/lib.yaml";
+    let lib = components("#/components/schemas/A");
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        document(&format!(
+            "components:\n  schemas:\n    W:\n      type: object\n      required: [a]\n      properties:\n        a: {{ $ref: '{URL}#/components/schemas/A' }}\n"
+        )),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("spargen.lock"),
+        format!(
+            "version = 1\n\n[[remote]]\nurl = \"{URL}\"\nsha256 = \"{:x}\"\npath = \"{VENDORED}\"\n",
+            Sha256::digest(lib.as_bytes())
+        ),
+    )
+    .unwrap();
+    let vendored = dir.join(".spargen/vendor").join(VENDORED);
+    std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
+    std::fs::write(&vendored, &lib).unwrap();
+    let out = dir.join("client.rs");
+    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    assert_ne!(report.outcome(), Outcome::Rejected, "remote: {report:#?}");
+    assert_optional("remote", &std::fs::read_to_string(&out).unwrap_or_default());
+}
+
 /// The mirror of [`a_back_edge_into_a_union_nullable_component_is_optional`]: the reserve-time
 /// guess says nullable and the body says otherwise, and the back-edge follows the body.
 ///
