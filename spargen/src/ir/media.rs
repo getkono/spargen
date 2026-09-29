@@ -605,10 +605,13 @@ pub(crate) enum SuccessShape {
 /// The typed error body `E` of an operation (matrix: Responses).
 #[derive(Debug, Clone)]
 pub(crate) enum ErrorShape {
-    /// No documented error body.
+    /// Every lowered error entry is bodyless, or there is none: the entries are the non-success
+    /// `by_status` statuses plus the `Range(0)` sentinel a present `default` contributes, which is
+    /// a fact about the lowered entries, not about what the document declares. Every non-success
+    /// status is then `UnexpectedStatus`, status and body preserved.
     None,
-    /// The body type of the operation's only error entry, which carries it. Every other shape with
-    /// a documented error body is an [`ErrorShape::Enum`].
+    /// The body type of the operation's only lowered error entry, which carries it. Every other
+    /// shape with a bodied error entry is an [`ErrorShape::Enum`].
     Single(Ty),
     /// Two or more entries of which at least one carries a body, counted over the non-success
     /// `by_status` entries plus the `Range(0)` sentinel a present `default` contributes: several
