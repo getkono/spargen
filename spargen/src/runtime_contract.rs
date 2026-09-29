@@ -1480,12 +1480,29 @@ serde_json = "1.0.151"
 
     #[test]
     fn a_requirement_that_admits_a_version_below_the_floor_is_rejected() {
-        let manifest = replace_once(CORE_MANIFEST, "1.12.1", "1.12.0");
+        // One patch release below the contract's floor, in place of `CORE_MANIFEST`'s entry: both
+        // are read rather than restated, so a floor bump in either place moves this fixture with it.
+        let (core_bytes, _) = core_entry("bytes");
+        let floor = BYTES.floor_version();
+        let below = Version::new(
+            floor.major,
+            floor.minor,
+            floor
+                .patch
+                .checked_sub(1)
+                .expect("the bytes floor has a patch release below it"),
+        );
+        let manifest = replace_once(CORE_MANIFEST, core_bytes, &format!("bytes = \"{below}\""));
         let diagnostics = audit_manifest(&manifest, RuntimeRequirements::default());
         assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
         assert_eq!(diagnostics[0].code, Code::RuntimeDependencyContract);
         assert!(diagnostics[0].message.contains("bytes"));
-        assert!(diagnostics[0].message.contains(">=1.12.1, <2.0.0"));
+        assert!(diagnostics[0].message.contains(&format!("`{below}`")));
+        assert!(diagnostics[0].message.contains(&format!(
+            ">={}, <{}",
+            BYTES.floor,
+            BYTES.ceiling()
+        )));
     }
 
     #[test]
@@ -1551,14 +1568,7 @@ serde_json = "1.0.151"
     fn reqwest_defaults_and_blocking_wiring_are_part_of_the_contract() {
         // The entry and its floor are read back out of `CORE_MANIFEST` rather than restated, so a
         // bump to the reqwest floor there changes this fixture with it.
-        let core_reqwest = core_workspace_dependencies()
-            .lines()
-            .find(|line| line.starts_with("reqwest = "))
-            .expect("CORE_MANIFEST declares reqwest under that key");
-        let floor = core_reqwest
-            .split('"')
-            .nth(1)
-            .expect("the reqwest entry pins a quoted version");
+        let (core_reqwest, floor) = core_entry("reqwest");
         let manifest = replace_once(
             CORE_MANIFEST,
             core_reqwest,
@@ -1959,11 +1969,14 @@ serde_json = "1.0.151"
     #[test]
     fn a_renamed_tokio_in_a_target_table_follows_the_untargeted_rename_rule() {
         // Untargeted, the rule has two halves: a `package` key on the canonical name is rejected,
-        // and the crate declared under another name is not found at all.
+        // and the crate declared under another name is not found at all. The entry and its version
+        // are read out of `CORE_MANIFEST`, and the missing-crate message names the contract's own
+        // floor, so neither is restated here.
+        let (core_secrecy, version) = core_entry("secrecy");
         let untargeted_package = replace_once(
             CORE_MANIFEST,
-            "secrecy = \"0.10.3\"",
-            "secrecy = { package = \"secrecy\", version = \"0.10.3\" }",
+            core_secrecy,
+            &format!("secrecy = {{ package = \"secrecy\", version = \"{version}\" }}"),
         );
         assert_eq!(
             messages(&audit_manifest_for(
@@ -1975,15 +1988,18 @@ serde_json = "1.0.151"
         );
         let untargeted_alias = replace_once(
             CORE_MANIFEST,
-            "secrecy = \"0.10.3\"",
-            "secret = { package = \"secrecy\", version = \"0.10.3\" }",
+            core_secrecy,
+            &format!("secret = {{ package = \"secrecy\", version = \"{version}\" }}"),
         );
         assert_eq!(
             messages(&audit_manifest_for(
                 &untargeted_alias,
                 &TargetContext::Unknown
             )),
-            "generated client requires `secrecy`; add `secrecy` with version `0.10.3`"
+            format!(
+                "generated client requires `secrecy`; add `secrecy` with version `{}`",
+                SECRECY.floor
+            )
         );
 
         // A target table applies the same two halves to `tokio`, on both paths.
@@ -2351,21 +2367,12 @@ serde_json.workspace = true
         let member_dir = directory.path().join("client");
         std::fs::create_dir(&member_dir).unwrap();
         let member = Utf8PathBuf::from_path_buf(member_dir.join("Cargo.toml")).unwrap();
-        let core_reqwest = core_workspace_dependencies()
-            .lines()
-            .find(|line| line.starts_with("reqwest = "))
-            .expect("CORE_MANIFEST declares reqwest under that key");
+        let (core_reqwest, floor) = core_entry("reqwest");
         let root_dependencies = match root_defaults {
             // `CORE_MANIFEST` already disables them, so this is the core body unchanged.
             RootDefaults::Off => core_workspace_dependencies().to_owned(),
-            RootDefaults::On => {
-                let floor = core_reqwest
-                    .split('"')
-                    .nth(1)
-                    .expect("the reqwest entry pins a quoted version");
-                core_workspace_dependencies()
-                    .replace(core_reqwest, &format!("reqwest = \"{floor}\""))
-            }
+            RootDefaults::On => core_workspace_dependencies()
+                .replace(core_reqwest, &format!("reqwest = \"{floor}\"")),
         };
         std::fs::write(
             &root,
@@ -2774,6 +2781,25 @@ serde_json.workspace = true
     /// the floors in these fixtures cannot drift from the ones every other test audits against.
     fn core_workspace_dependencies() -> &'static str {
         CORE_MANIFEST.split_once("[dependencies]\n").unwrap().1
+    }
+
+    /// `CORE_MANIFEST`'s whole line for the dependency `key`, and the version it pins.
+    ///
+    /// Every fixture that rewrites a core entry locates it here, so the floors in `CORE_MANIFEST`
+    /// are stated once in this module: restating one at a call site made a bump there red the
+    /// fixture on its needle instead of on anything the fixture is about. The key is matched as
+    /// `key = ` at the start of a line, and a missing entry or unquoted version fails loudly.
+    fn core_entry(key: &str) -> (&'static str, &'static str) {
+        let prefix = format!("{key} = ");
+        let line = core_workspace_dependencies()
+            .lines()
+            .find(|line| line.starts_with(&prefix))
+            .unwrap_or_else(|| panic!("CORE_MANIFEST declares `{key}` under that key"));
+        let version = line
+            .split('"')
+            .nth(1)
+            .unwrap_or_else(|| panic!("CORE_MANIFEST's `{key}` entry pins a quoted version"));
+        (line, version)
     }
 
     const CORE_INHERITED: &str = "\
