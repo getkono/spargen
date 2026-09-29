@@ -2573,91 +2573,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
 
         if let Some(reference) = &schema.reference {
-            if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                // A `$ref` to a component still being lowered is a direct recursive allOf member
-                // whose fields are not yet known — irreconcilable (distinct from a member with
-                // recursive *fields*, which lowers fine).
-                if self.in_progress.contains_key(name) {
-                    return self.reject_all_of_unit(
-                        schema.provenance.clone(),
-                        "an `allOf` member is a direct recursive `$ref` to the component being \
-                         lowered",
-                    );
-                }
-                let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
-                // The pre-check above sees root components only. A name the root does not declare
-                // is a *sub-file* component, and it reaches its own reservation through
-                // `ensure_resolved`, so a direct recursive member there arrives here as a back-edge
-                // rather than being caught above; `push_ref_member` refuses to read it.
-                return self.push_ref_member(
-                    ty,
-                    &schema.provenance,
-                    "an `allOf` member is a direct recursive `$ref` to the component being lowered",
-                    out,
-                );
-            }
-            // A remote `$ref` member goes through the cycle-safe remote path, exactly like a
-            // component member: a member still being lowered is a direct recursive ref whose fields
-            // are not yet known (irreconcilable), otherwise its shared type contributes its fields.
-            if is_remote_ref(reference) {
-                if self.remote_in_progress.contains_key(reference) {
-                    return self.reject_all_of_unit(
-                        schema.provenance.clone(),
-                        "an `allOf` member is a direct recursive remote `$ref` to the schema being \
-                         lowered",
-                    );
-                }
-                let ty = self.ensure_remote(reference)?;
-                return self.push_ref_member(
-                    ty,
-                    &schema.provenance,
-                    "an `allOf` member is a direct recursive remote `$ref` to the schema being \
-                     lowered",
-                    out,
-                );
-            }
-            // Non-component refs resolve (or error) exactly as `lower_schema` does; treat the target
-            // as an inline member.
-            let resolved = self
-                .resolver
-                .resolve(reference, &schema.provenance, self.diags)
-                .ok()?;
-            let target = resolved.schema.into_owned();
-            // This arm inlines rather than referencing a shared type, so there is no `Ty` to test —
-            // test the target instead. Without this, a member that is the very schema being lowered
-            // descends into its own body again and stops only at `MAX_SCHEMA_DEPTH`, reporting a
-            // chain length for what is a cycle of length one. The component and remote arms above
-            // refuse to read an in-progress member; this one now does too.
-            if self.resolved_target_in_progress(&target.provenance) {
-                return self.reject_all_of_unit(
-                    schema.provenance.clone(),
-                    "an `allOf` member is a direct recursive `$ref` to the schema being lowered",
-                );
-            }
-            // Expand the target once per resolved `file#pointer` and replay its contribution at
-            // every later use: see `resolved_contributions`. The in-progress test above runs
-            // first on every use, so a replay never stands in for a refusal.
-            let Some(key) = resolved_identity(&target.provenance) else {
-                // No span, so no identity to key on — expand un-memoised, as `ensure_resolved`
-                // lowers un-deduplicated in the same case.
-                return self.gather_inline(&target, hint, out);
-            };
-            if let Some(recorded) = self.resolved_contributions.get(&key) {
-                out.extend(recorded.iter().cloned());
+            self.gather_ref_target(schema, reference, hint, out)?;
+            // `$ref` is an applicator, not a replacement for the member that holds it: the member
+            // is the target AND its own shape-bearing siblings, so those are further conjuncts of
+            // this same merge, gathered exactly as a separate member carrying them would be. Every
+            // arm above used to return once the target was pushed, which silently deleted the
+            // siblings' properties and `required`, and let a sibling contradicting its target
+            // generate as the target alone. The gate is the one `lower_schema_inner` asks of a
+            // `$ref`'s siblings, so the two positions agree on what counts as a shape.
+            let mut sibling = schema.clone();
+            sibling.reference = None;
+            if !schema_has_shape_constraint(&sibling) {
                 return Some(());
             }
-            // Name what the body lowers to for the schema it came from, not for whichever use
-            // reached it first — once one expansion serves every use, a per-use hint would make
-            // the generated names depend on lowering order. The `Member` suffix keeps it off the
-            // hint `ensure_resolved` gives the same target when it is also a direct `$ref`: that
-            // lowers a second copy of the body, and two copies on one hint would leave the bare
-            // name (`Basemeta`, or a scalar target's own `Code`) to whichever lowering ran first.
-            let hint = format!("{}Member", resolved_hint(&target.provenance, hint));
-            let mut contributed = Vec::new();
-            self.gather_inline(&target, &hint, &mut contributed)?;
-            self.resolved_contributions.insert(key, contributed.clone());
-            out.extend(contributed);
-            return Some(());
+            return self.gather_member(
+                &SchemaOr::Schema(Box::new(sibling)),
+                &format!("{hint}Constraint"),
+                out,
+            );
         }
 
         if !schema.all_of.is_empty() {
@@ -2666,6 +2599,103 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         self.gather_inline(schema, hint, out)
+    }
+
+    /// Push the contribution of an `allOf` member's `$ref` target — and only the target: the
+    /// member's own siblings are [`Self::gather_member`]'s to gather, after this returns.
+    fn gather_ref_target(
+        &mut self,
+        schema: &Schema,
+        reference: &str,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
+        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+            // A `$ref` to a component still being lowered is a direct recursive allOf member
+            // whose fields are not yet known — irreconcilable (distinct from a member with
+            // recursive *fields*, which lowers fine).
+            if self.in_progress.contains_key(name) {
+                return self.reject_all_of_unit(
+                    schema.provenance.clone(),
+                    "an `allOf` member is a direct recursive `$ref` to the component being \
+                     lowered",
+                );
+            }
+            let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
+            // The pre-check above sees root components only. A name the root does not declare
+            // is a *sub-file* component, and it reaches its own reservation through
+            // `ensure_resolved`, so a direct recursive member there arrives here as a back-edge
+            // rather than being caught above; `push_ref_member` refuses to read it.
+            return self.push_ref_member(
+                ty,
+                &schema.provenance,
+                "an `allOf` member is a direct recursive `$ref` to the component being lowered",
+                out,
+            );
+        }
+        // A remote `$ref` member goes through the cycle-safe remote path, exactly like a
+        // component member: a member still being lowered is a direct recursive ref whose fields
+        // are not yet known (irreconcilable), otherwise its shared type contributes its fields.
+        if is_remote_ref(reference) {
+            if self.remote_in_progress.contains_key(reference) {
+                return self.reject_all_of_unit(
+                    schema.provenance.clone(),
+                    "an `allOf` member is a direct recursive remote `$ref` to the schema being \
+                     lowered",
+                );
+            }
+            let ty = self.ensure_remote(reference)?;
+            return self.push_ref_member(
+                ty,
+                &schema.provenance,
+                "an `allOf` member is a direct recursive remote `$ref` to the schema being \
+                 lowered",
+                out,
+            );
+        }
+        // Non-component refs resolve (or error) exactly as `lower_schema` does; treat the target
+        // as an inline member.
+        let resolved = self
+            .resolver
+            .resolve(reference, &schema.provenance, self.diags)
+            .ok()?;
+        let target = resolved.schema.into_owned();
+        // This arm inlines rather than referencing a shared type, so there is no `Ty` to test —
+        // test the target instead. Without this, a member that is the very schema being lowered
+        // descends into its own body again and stops only at `MAX_SCHEMA_DEPTH`, reporting a
+        // chain length for what is a cycle of length one. The component and remote arms above
+        // refuse to read an in-progress member; this one now does too.
+        if self.resolved_target_in_progress(&target.provenance) {
+            return self.reject_all_of_unit(
+                schema.provenance.clone(),
+                "an `allOf` member is a direct recursive `$ref` to the schema being lowered",
+            );
+        }
+        // Expand the target once per resolved `file#pointer` and replay its contribution at
+        // every later use: see `resolved_contributions`. The in-progress test above runs
+        // first on every use, so a replay never stands in for a refusal. Only the target is
+        // memoised: the member's siblings belong to this use, and `gather_member` adds them.
+        let Some(key) = resolved_identity(&target.provenance) else {
+            // No span, so no identity to key on — expand un-memoised, as `ensure_resolved`
+            // lowers un-deduplicated in the same case.
+            return self.gather_inline(&target, hint, out);
+        };
+        if let Some(recorded) = self.resolved_contributions.get(&key) {
+            out.extend(recorded.iter().cloned());
+            return Some(());
+        }
+        // Name what the body lowers to for the schema it came from, not for whichever use
+        // reached it first — once one expansion serves every use, a per-use hint would make
+        // the generated names depend on lowering order. The `Member` suffix keeps it off the
+        // hint `ensure_resolved` gives the same target when it is also a direct `$ref`: that
+        // lowers a second copy of the body, and two copies on one hint would leave the bare
+        // name (`Basemeta`, or a scalar target's own `Code`) to whichever lowering ran first.
+        let hint = format!("{}Member", resolved_hint(&target.provenance, hint));
+        let mut contributed = Vec::new();
+        self.gather_inline(&target, &hint, &mut contributed)?;
+        self.resolved_contributions.insert(key, contributed.clone());
+        out.extend(contributed);
+        Some(())
     }
 
     /// Turn a resolved `$ref` member's already-lowered type into a contribution: an object component

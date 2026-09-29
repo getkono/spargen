@@ -6068,6 +6068,74 @@ mod remote {
         )
     }
 
+    /// The remote arm of issue #185: an `allOf` member that is a pinned remote `$ref` with
+    /// shape-bearing siblings contributes the target AND the siblings, exactly as the local arms
+    /// do (`an_all_of_member_ref_intersects_its_shape_bearing_siblings`). It used to contribute the
+    /// vendored `Gizmo` alone, deleting `dropped` and generating `id` as the target's `String`
+    /// over a member that required it to be an integer.
+    #[test]
+    fn a_remote_all_of_member_ref_intersects_its_shape_bearing_siblings() {
+        let wrapping = |siblings: &str| {
+            format!(
+                "openapi: 3.1.0\n\
+                 info: {{ title: T, version: 1.0.0 }}\n\
+                 paths:\n\
+                 \x20 /w:\n\
+                 \x20   get:\n\
+                 \x20     operationId: getW\n\
+                 \x20     responses:\n\
+                 \x20       '200':\n\
+                 \x20         description: ok\n\
+                 \x20         content:\n\
+                 \x20           application/json:\n\
+                 \x20             schema: {{ $ref: '#/components/schemas/Wrap' }}\n\
+                 components:\n\
+                 \x20 schemas:\n\
+                 \x20   Wrap:\n\
+                 \x20     allOf:\n\
+                 \x20       - {{ $ref: '{GIZMO_URL}', {siblings} }}\n"
+            )
+        };
+        let lock = lock(GIZMO_SHA256);
+        let vendor = [(GIZMO_VENDOR_PATH, GIZMO_YAML)];
+
+        let kept = wrapping("properties: { dropped: { type: integer } }, required: [dropped]");
+        let (generated, _temp, out) = run_layout(&kept, Some(&lock), &vendor, false);
+        let (checked, _temp2, _out2) = run_layout(&kept, Some(&lock), &vendor, true);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        }
+        let code = std::fs::read_to_string(&out).unwrap_or_default();
+        assert_eq!(
+            declared_fields(&code, "Wrap"),
+            vec!["id", "dropped"],
+            "{code}"
+        );
+        let dropped = field_type(&code, "pub dropped").unwrap_or_default();
+        assert!(!dropped.starts_with("Option<"), "{code}");
+
+        let contradicted = wrapping("properties: { id: { type: integer } }, required: [id]");
+        for check_only in [false, true] {
+            let (report, _temp, _out) = run_layout(&contradicted, Some(&lock), &vendor, check_only);
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "check_only={check_only}: {report:#?}"
+            );
+            let pointers: Vec<&str> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::AllOfIrreconcilable)
+                .map(|d| d.pointer.as_str())
+                .collect();
+            assert_eq!(
+                pointers,
+                vec!["/components/schemas/Wrap"],
+                "check_only={check_only}: {report:#?}"
+            );
+        }
+    }
+
     #[test]
     fn self_recursive_remote_schema_generates_boxed_not_stack_overflow() {
         // A vendored remote schema that refers to ITSELF (a linked-list `next`) must terminate at
@@ -9601,6 +9669,153 @@ fn e013_fires_when_a_ref_sibling_contradicts_its_target() {
                  {report:#?}"
             );
         }
+    }
+}
+
+/// Lay out a root document whose `Wrap` component is `allOf: [member]`, beside a `lib.yaml`
+/// sub-file, and run both entry points. Returns `(generate, check, generated source)`.
+fn all_of_member_layout(member: &str) -> (Report, Report, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    std::fs::write(
+        dir.join("openapi.yaml"),
+        format!(
+            "openapi: 3.1.0\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             servers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  \
+             /w:\n    \
+             get:\n      \
+             operationId: getW\n      \
+             responses:\n        \
+             '200':\n          \
+             description: ok\n          \
+             content:\n            \
+             application/json:\n              \
+             schema: {{ $ref: '#/components/schemas/Wrap' }}\n\
+             components:\n  \
+             schemas:\n    \
+             Wrap:\n      \
+             allOf:\n        \
+             - {member}\n    \
+             Leaf:\n      \
+             type: object\n      \
+             properties: {{ a: {{ type: string }} }}\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("lib.yaml"),
+        "Leaf:\n  type: object\n  properties: { a: { type: string } }\n",
+    )
+    .unwrap();
+    let out = dir.join("client.rs");
+    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let code = std::fs::read_to_string(&out).unwrap_or_default();
+    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    (generated, checked, code)
+}
+
+/// Issue #185: an `allOf` member that is a `$ref` with shape-bearing siblings used to contribute
+/// its target alone. `gather_member` returned as soon as it had pushed the target, so the member's
+/// own `properties`/`required`/`type` never reached the merge: a property vanished from the
+/// generated client with no diagnostic, and a member contradicting its target generated a type
+/// that looked inhabited. `$ref` is an applicator, so the member is the target AND its siblings,
+/// and inside an `allOf` that is two more conjuncts of the same merge.
+///
+/// Both local arms are driven: the root-component spelling and the file-reference spelling, which
+/// takes the inlining arm. The remote arm has its own fixture in `mod remote`.
+#[test]
+fn an_all_of_member_ref_intersects_its_shape_bearing_siblings() {
+    for target in ["#/components/schemas/Leaf", "./lib.yaml#/Leaf"] {
+        // The dropped-property case: the member adds a required field its target lacks.
+        let (generated, checked, code) = all_of_member_layout(&format!(
+            "{{ $ref: '{target}', type: object, properties: {{ dropped: {{ type: integer }} }}, \
+             required: [dropped] }}"
+        ));
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target} via {entry}: {report:#?}"
+            );
+        }
+        assert_eq!(
+            declared_fields(&code, "Wrap"),
+            vec!["a", "dropped"],
+            "{target}: the member's own property must survive beside its target's: {code}"
+        );
+        let dropped = field_type(&code, "pub dropped").unwrap_or_default();
+        assert!(
+            !dropped.starts_with("Option<"),
+            "{target}: the member's `required` must survive too: {code}"
+        );
+        assert!(
+            code.contains(&format!("pub type {dropped} = i64;")),
+            "{target}: the member's property keeps its own `integer` type: {code}"
+        );
+
+        // The contradictory cases, which are empty intersections and must be E013 at `Wrap`: a
+        // property both sides type differently that the member requires, and a scalar sibling
+        // beside an object target.
+        for siblings in [
+            "properties: { a: { type: integer } }, required: [a]",
+            "type: string",
+        ] {
+            let (generated, checked, _) =
+                all_of_member_layout(&format!("{{ $ref: '{target}', {siblings} }}"));
+            for (entry, report) in [("generate", &generated), ("check", &checked)] {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{target} + `{siblings}` via {entry} must be rejected: {report:#?}"
+                );
+                let pointers: Vec<&str> = report
+                    .diagnostics()
+                    .iter()
+                    .filter(|d| d.code == Code::AllOfIrreconcilable)
+                    .map(|d| d.pointer.as_str())
+                    .collect();
+                assert_eq!(
+                    pointers,
+                    vec!["/components/schemas/Wrap"],
+                    "{target} + `{siblings}` via {entry}: {report:#?}"
+                );
+            }
+        }
+
+        // An optional contradiction empties only the property, not the object. The one-member
+        // spelling must type it exactly as the two-member spelling of the same conjunction does
+        // (`allOf: [{$ref}, {properties}]`), and never as the target's `String`.
+        let (generated, _, one_member) = all_of_member_layout(&format!(
+            "{{ $ref: '{target}', properties: {{ a: {{ type: integer }} }} }}"
+        ));
+        assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+        let (split_report, _, two_members) = all_of_member_layout(&format!(
+            "{{ $ref: '{target}' }}\n        - {{ properties: {{ a: {{ type: integer }} }} }}"
+        ));
+        assert_ne!(
+            split_report.outcome(),
+            Outcome::Rejected,
+            "{split_report:#?}"
+        );
+        assert_ne!(
+            field_type(&one_member, "pub a").as_deref(),
+            Some("Option<String>"),
+            "{target}: the contradicted property must not keep the target's type: {one_member}"
+        );
+        // Field by field rather than whole modules: the two spellings name the dead per-member
+        // alias of `a: integer` differently (`WrapMember0Constrainta`, `WrapMember1a`).
+        assert_eq!(
+            declared_fields(&one_member, "Wrap"),
+            declared_fields(&two_members, "Wrap"),
+            "{target}: one member and two members are one conjunction"
+        );
+        assert_eq!(
+            field_type(&one_member, "pub a:"),
+            field_type(&two_members, "pub a:"),
+            "{target}: one member and two members are one conjunction"
+        );
     }
 }
 
