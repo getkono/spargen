@@ -19,6 +19,7 @@ pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) ->
         .types
         .iter()
         .map(|(id, def)| emit_type_def(id, def, api, names, options));
+    let decode_present = format_ident!("{DECODE_PRESENT}");
     // The RFC 3339 newtypes live beside `types`, so bring them into scope under the same bare names
     // `prim_tokens` emits; at the generated root the prelude re-export supplies them instead.
     let datetime_import = (options.feature_time && api.uses_time()).then(|| {
@@ -31,6 +32,17 @@ pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) ->
             use serde::{Deserialize, Serialize};
             use std::collections::BTreeMap;
             #datetime_import
+
+            /// The `deserialize_with` of every optional, non-nullable field. It is reached only when
+            /// the field is present, and decodes the value — `null` included — as the field's own
+            /// type, so a `null` the schema does not admit is rejected rather than read as absence.
+            fn #decode_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+                T: serde::Deserialize<'de>,
+            {
+                T::deserialize(deserializer).map(Some)
+            }
 
             #(#items)*
         }
@@ -2513,7 +2525,7 @@ fn emit_type_def(
             let fields = object
                 .fields
                 .iter()
-                .map(|field| emit_field(id, field, api, names, options));
+                .map(|field| emit_field(id, field, names, options));
             let providers = object
                 .fields
                 .iter()
@@ -2591,23 +2603,11 @@ fn emit_type_def(
         }
         TypeKind::Never => {
             let error = format!("no JSON value can inhabit schema {}", ident.as_str());
-            let reject_present = format_ident!("{NEVER_REJECT_PRESENT}");
             quote! {
                 #docs
                 #deprecated
                 #[derive(Debug, Clone)]
                 pub enum #ident {}
-
-                impl #ident {
-                    /// The `deserialize_with` of an optional field of this type: it is reached only
-                    /// when the field is present, and no present value — `null` included — is one.
-                    fn #reject_present<'de, D, T>(_deserializer: D) -> Result<Option<T>, D::Error>
-                    where
-                        D: serde::Deserializer<'de>,
-                    {
-                        Err(serde::de::Error::custom(#error))
-                    }
-                }
 
                 impl<'de> serde::Deserialize<'de> for #ident {
                     fn deserialize<D>(_deserializer: D) -> Result<Self, D::Error>
@@ -3003,7 +3003,6 @@ fn emit_type_def(
 fn emit_field(
     id: crate::ir::TypeId,
     field: &Field,
-    api: &Api,
     names: &Names,
     options: &CodegenOptions,
 ) -> TokenStream {
@@ -3042,21 +3041,14 @@ fn emit_field(
     } else {
         quote! { default, skip_serializing_if = "Option::is_none", }
     };
-    // The `Option` wrapping an optional non-nullable uninhabited field stands for absence only, yet
-    // serde's `Option<T>` maps a JSON `null` to `None` without ever calling `T::deserialize`, so the
-    // uninhabited type would never be consulted and `{"x": null}` would decode. Route every
-    // *present* value, `null` included, to the uninhabited type's rejecting deserializer instead;
-    // an absent field still takes `default`. A nullable one keeps plain `Option`, since there
-    // `null` is exactly the one admitted value.
-    let reject_present = (!field.required
-        && !field.ty.nullable
-        && matches!(
-            api.types.get(field.ty.id).map(|def| &def.kind),
-            Some(TypeKind::Never)
-        ))
-    .then(|| {
-        let never = names.types.get(&field.ty.id).expect("type name allocated");
-        let path = format!("{}::{NEVER_REJECT_PRESENT}", never.as_str());
+    // The `Option` wrapping an optional non-nullable field stands for absence only, yet serde's
+    // `Option<T>` maps a JSON `null` to `None` without ever calling `T::deserialize`, so
+    // `{"x": null}` would decode as absent (and re-serialise as `{}`) although the schema admits no
+    // `null` there. Route every *present* value, `null` included, to `T`'s own deserializer, which
+    // rejects it wherever `T` does (an uninhabited `T` rejects every value); an absent field still
+    // takes `default`. A nullable one keeps plain `Option`, since there `null` is an admitted value.
+    let decode_present = (!field.required && !field.ty.nullable).then(|| {
+        let path = DECODE_PRESENT;
         quote! { deserialize_with = #path, }
     });
     let mut notes: Vec<String> = Vec::new();
@@ -3078,14 +3070,16 @@ fn emit_field(
         .map(|note| quote! { #[doc = #note] });
     quote! {
         #(#notes)*
-        #[serde(rename = #wire, #serde_default #reject_present)]
+        #[serde(rename = #wire, #serde_default #decode_present)]
         pub #ident: #ty,
     }
 }
 
-/// The name of the private associated function every uninhabited type carries for an optional field
-/// of it: a `deserialize_with` target that rejects any present value, `null` included.
-const NEVER_REJECT_PRESENT: &str = "reject_present";
+/// The name of the private function `types` carries for every optional, non-nullable field: a
+/// `deserialize_with` target that decodes a present value, `null` included, as the field's own
+/// type. Snake case, so it cannot collide with a `PascalCase` type, and not of the
+/// `default_<id>_<field>` shape a default provider takes.
+const DECODE_PRESENT: &str = "decode_present";
 
 /// The deterministic identifier of a field's generated serde default-provider function. Derived
 /// from the owning type's dense id plus the field's Rust identifier, so it is stable across runs
