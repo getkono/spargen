@@ -931,6 +931,51 @@ mod tests {
     }
 
     #[test]
+    fn every_bodyless_entry_beside_one_body_is_its_own_unit_variant() {
+        // Issue #211: "each bodyless entry" in the plural. Two bodyless entries beside one body
+        // are two unit variants on either side, neither merged into the other nor dropped, and
+        // they sort among the bodied entry by precedence like any other entry.
+        let responses = Responses {
+            by_status: vec![
+                (StatusSpec::Exact(205), resp(None)),
+                (StatusSpec::Exact(200), resp(Some(1))),
+                (StatusSpec::Exact(204), resp(None)),
+                (StatusSpec::Range(5), resp(None)),
+                (StatusSpec::Exact(404), resp(Some(2))),
+                (StatusSpec::Exact(403), resp(None)),
+            ],
+            default: None,
+        };
+        match responses.success() {
+            SuccessShape::Enum(entries) => {
+                let shape: Vec<_> = entries
+                    .iter()
+                    .map(|(status, body)| (*status, body.map(|body| body.id.0)))
+                    .collect();
+                assert_eq!(
+                    shape,
+                    vec![
+                        (StatusSpec::Exact(200), Some(1)),
+                        (StatusSpec::Exact(204), None),
+                        (StatusSpec::Exact(205), None),
+                    ]
+                );
+            }
+            other => panic!("expected Enum, got {other:?}"),
+        }
+        assert!(!responses.multiple_success_bodies());
+        assert_eq!(
+            shape(responses.error()),
+            Shape::Enum(vec![
+                (StatusSpec::Exact(403), None),
+                (StatusSpec::Exact(404), Some(2)),
+                (StatusSpec::Range(5), None),
+            ])
+        );
+        assert!(!responses.multiple_error_bodies());
+    }
+
+    #[test]
     fn a_streaming_body_beside_a_bodyless_sibling_stays_plain() {
         // An empty body is a well-formed empty stream, so the `204` needs no variant of its own;
         // the stream stays the operation's single success body and `EventStream<T>`.
