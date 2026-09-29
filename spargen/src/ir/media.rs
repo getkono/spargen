@@ -513,7 +513,8 @@ impl Responses {
     /// `default` cannot be typed on both sides — the success side would stream and this side
     /// decode it whole — so lowering rejects it; see [`Self::stream_outside_single_success`].) With
     /// no bodied entry at all the shape is `None`, whatever bodyless entries are declared: every
-    /// non-success status is then `UnexpectedStatus`, status and body preserved.
+    /// non-success status is then `UnexpectedStatus`, retaining at most `max_error_body` bytes of
+    /// the body (see [`ErrorShape::None`]).
     pub(crate) fn error(&self) -> ErrorShape {
         let mut entries: Vec<(StatusSpec, Option<Ty>)> = Vec::new();
         for (status, response) in &self.by_status {
@@ -605,10 +606,15 @@ pub(crate) enum SuccessShape {
 /// The typed error body `E` of an operation (matrix: Responses).
 #[derive(Debug, Clone)]
 pub(crate) enum ErrorShape {
-    /// No documented error body.
+    /// Every lowered error entry is bodyless, or there is none: the entries are the non-success
+    /// `by_status` statuses plus the `Range(0)` sentinel a present `default` contributes, which is
+    /// a fact about the lowered entries, not about what the document declares. Every non-success
+    /// status is then `UnexpectedStatus` with its status and headers, retaining at most
+    /// `max_error_body` bytes of the body (silently truncated past that cap); a failed body read
+    /// returns the read error instead.
     None,
-    /// The body type of the operation's only error entry, which carries it. Every other shape with
-    /// a documented error body is an [`ErrorShape::Enum`].
+    /// The body type of the operation's only lowered error entry, which carries it. Every other
+    /// shape with a bodied error entry is an [`ErrorShape::Enum`].
     Single(Ty),
     /// Two or more entries of which at least one carries a body, counted over the non-success
     /// `by_status` entries plus the `Range(0)` sentinel a present `default` contributes: several
