@@ -1,5 +1,6 @@
 //! Structural invariants CLAUDE.md states but nothing checked: the subsystem layering DAG, the
-//! shape of the embedded runtime sources, and the file list that embeds them.
+//! shape of the embedded runtime sources, the file list that embeds them, and that the published
+//! crate carries every file its sources include.
 //!
 //! `lib.rs` promises that the declarations are diffed against the actual inter-module `use` edges.
 //! This suite is where that happens: it needs no extra workspace member and runs under the
@@ -643,5 +644,148 @@ paths:
     assert!(
         !generated.contains("mod tests"),
         "generated output must not carry a `mod tests`"
+    );
+}
+
+/// The path literal of every `include_str!` and `include_bytes!` in `source`, in order. Lines that
+/// open with `//` are skipped, so prose citing the macro contributes nothing; whitespace between
+/// the parenthesis and the literal is allowed, since rustfmt breaks a long call there.
+fn include_targets(source: &str) -> Vec<String> {
+    let code: String = source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut targets = Vec::new();
+    for marker in ["include_str!(", "include_bytes!("] {
+        for (at, _) in code.match_indices(marker) {
+            let Some(literal) = code[at + marker.len()..].trim_start().strip_prefix('"') else {
+                continue;
+            };
+            let path = literal.split('"').next().expect("a closing quote");
+            targets.push(path.to_owned());
+        }
+    }
+    targets
+}
+
+#[test]
+fn the_include_scanner_reads_path_literals_and_skips_comments() {
+    let source = r#"
+//! Embedded with `include_str!("prose.txt")`, which this line only cites.
+const A: &str = include_str!("a.txt");
+const B: &[u8] = include_bytes!("../b.bin");
+const C: (&str, &str) = (
+    "c",
+    include_str!(
+        "sub/c.rs"
+    ),
+);
+    // include_str!("commented.txt")
+const D: &str = include_str!(concat!("not", "a", "literal"));
+"#;
+    assert_eq!(include_targets(source), ["a.txt", "sub/c.rs", "../b.bin"]);
+}
+
+/// Every file an `include_str!` or `include_bytes!` in `spargen/src` names is in the package
+/// `cargo publish` uploads.
+///
+/// `cargo publish --dry-run` builds the packaged crate, so an include the library compiles is
+/// already held there. An include under `#[cfg(test)]` is not: the library builds without its
+/// target, so an `exclude` in `Cargo.toml` or a `.gitignore` pattern could drop the file from the
+/// `.crate` and every packaging gate stays green, while `cargo test` on the published crate no
+/// longer compiles. `src/runtime_contract_e023_explain.txt`, the second copy of `E023`'s explain
+/// body, is such a target (#203). The rule is stated over every include rather than over that file,
+/// so a new test fixture read the same way is held without anyone remembering to list it.
+#[test]
+fn every_included_file_ships_in_the_published_crate() {
+    let crate_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = crate_dir.join("src");
+
+    let mut sources = Vec::new();
+    let mut stack = vec![src.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("readable source directory") {
+            let path = entry.expect("readable directory entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                sources.push(path);
+            }
+        }
+    }
+    sources.sort();
+
+    // Resolved lexically against the including file's directory and never canonicalized: the
+    // `src/support/runtime/` entries are symlinks, and the package lists them at their own paths.
+    let mut included = BTreeMap::new();
+    for source in &sources {
+        let dir = source
+            .parent()
+            .expect("a source file has a directory")
+            .strip_prefix(crate_dir)
+            .expect("sources live under the crate directory");
+        for target in include_targets(&read(source)) {
+            let mut resolved = dir.to_path_buf();
+            for component in Path::new(&target).components() {
+                match component {
+                    std::path::Component::ParentDir => {
+                        assert!(
+                            resolved.pop(),
+                            "{source:?} includes {target:?} above the crate"
+                        );
+                    }
+                    std::path::Component::CurDir => {}
+                    other => resolved.push(other),
+                }
+            }
+            let resolved = resolved
+                .to_str()
+                .expect("UTF-8 path")
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            let site = source
+                .strip_prefix(crate_dir)
+                .expect("under the crate directory");
+            included.insert(resolved, site.to_path_buf());
+        }
+    }
+    assert!(
+        !included.is_empty(),
+        "no include found under {src:?}: the scanner has stopped reading the sources"
+    );
+
+    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+    let output = std::process::Command::new(cargo)
+        .args([
+            "package",
+            "--list",
+            "--allow-dirty",
+            "--offline",
+            "-p",
+            "spargen",
+        ])
+        .current_dir(crate_dir)
+        .output()
+        .expect("cargo runs");
+    assert!(
+        output.status.success(),
+        "`cargo package --list` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let packaged: BTreeSet<String> = String::from_utf8(output.stdout)
+        .expect("UTF-8 file list")
+        .lines()
+        .map(str::to_owned)
+        .collect();
+
+    let missing: Vec<String> = included
+        .iter()
+        .filter(|(path, _)| !packaged.contains(*path))
+        .map(|(path, source)| format!("{path} (included by {})", source.display()))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "these files are included by spargen's sources but absent from `cargo package --list`, so \
+         the published crate does not carry them: {missing:#?}"
     );
 }
