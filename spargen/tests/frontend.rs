@@ -8543,7 +8543,7 @@ paths:
                 assert_eq!(
                     messages_for(&report, Code::AlternativeMediaIgnored),
                     [format!(
-                        "`application/json` is generated; the alternative media type(s) \
+                        "`application/json` is selected; the alternative media type(s) \
                          `{media}` are not"
                     )],
                     "{media} {version}: {report:#?}"
@@ -12959,8 +12959,7 @@ paths:
     assert!(
         report.diagnostics().iter().any(|d| {
             d.code == Code::AlternativeMediaIgnored
-                && d.message
-                    .contains("`application/octet-stream` is generated")
+                && d.message.contains("`application/octet-stream` is selected")
                 && d.message.contains("`image/png`")
         }),
         "{report:#?}"
@@ -13029,7 +13028,7 @@ paths:
     assert!(
         report.diagnostics().iter().any(|d| {
             d.code == Code::AlternativeMediaIgnored
-                && d.message.contains("`text/csv` is generated")
+                && d.message.contains("`text/csv` is selected")
                 && d.message.contains("`image/png`")
         }),
         "{report:#?}"
@@ -13125,7 +13124,7 @@ paths:
         assert!(
             report.diagnostics().iter().any(|d| {
                 d.code == Code::AlternativeMediaIgnored
-                    && d.message.contains("`image/png` is generated")
+                    && d.message.contains("`image/png` is selected")
                     && d.message.contains(&format!("`{range}`"))
             }),
             "{range}: {report:#?}"
@@ -13213,7 +13212,7 @@ paths:
     assert!(
         report.diagnostics().iter().any(|d| {
             d.code == Code::AlternativeMediaIgnored
-                && d.message.contains("`text/*` is generated")
+                && d.message.contains("`text/*` is selected")
                 && d.message.contains("`image/png`")
         }),
         "{report:#?}"
@@ -13272,7 +13271,7 @@ paths:
     assert!(
         report.diagnostics().iter().any(|d| {
             d.code == Code::AlternativeMediaIgnored
-                && d.message.contains("`*/*` is generated")
+                && d.message.contains("`*/*` is selected")
                 && d.message.contains("`image/png`")
         }),
         "{report:#?}"
@@ -13349,7 +13348,7 @@ paths:
         assert!(
             report.diagnostics().iter().any(|d| {
                 d.code == Code::AlternativeMediaIgnored
-                    && d.message.contains("`image/png` is generated")
+                    && d.message.contains("`image/png` is selected")
                     && d.message.contains("`video/*`")
             }),
             "{report:#?}"
@@ -13395,7 +13394,7 @@ paths:
         assert!(
             report.diagnostics().iter().any(|d| {
                 d.code == Code::AlternativeMediaIgnored
-                    && d.message.contains("`image/png` is generated")
+                    && d.message.contains("`image/png` is selected")
                     && d.message.contains("`application/*+json`")
             }),
             "{report:#?}"
@@ -13407,8 +13406,8 @@ paths:
 fn e009_a_request_offering_only_ranges_is_rejected_on_the_first() {
     // With no concrete key at all every candidate is a range, so the ladder and then source order
     // decide as before: `video/*` ties `*/*` at the same rank and, listed first, is selected, and
-    // the selection is then rejected as a request `Content-Type` (`E009`). Nothing is generated, so
-    // no `W014` claims `video/*` "is generated" beside the rejection (#110).
+    // the selection is then rejected as a request `Content-Type` (`E009`). The rejection alone
+    // reports the refused selection: no `W014` names `*/*` as passed over for it (#110).
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -13507,7 +13506,7 @@ paths:
             assert!(
                 report.diagnostics().iter().any(|d| {
                     d.code == Code::AlternativeMediaIgnored
-                        && d.message.contains(&format!("`{selection}` is generated"))
+                        && d.message.contains(&format!("`{selection}` is selected"))
                         && d.message.contains(&format!("`{alternative}`"))
                 }),
                 "{report:#?}"
@@ -15055,7 +15054,7 @@ paths:
             report.diagnostics().iter().any(|diagnostic| {
                 diagnostic.code == Code::AlternativeMediaIgnored
                     && diagnostic.message
-                        == "`application/json` is generated; the alternative media type(s) \
+                        == "`application/json` is selected; the alternative media type(s) \
                             `text/plain/extra` are not"
             }),
             "{report:#?}"
@@ -15197,7 +15196,7 @@ paths:
             "`{generated}` listed first is generated, `{other}` is not: {code}"
         );
         let expected =
-            format!("`{generated}` is generated; the alternative media type(s) `{other}` are not");
+            format!("`{generated}` is selected; the alternative media type(s) `{other}` are not");
         for report in [report, check(&spec)] {
             assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
             assert!(
@@ -15287,7 +15286,7 @@ fn w014_a_structured_suffix_range_yields_to_a_sendable_request_sibling() {
                 "`{sibling}` through {entry}: {report:#?}"
             );
             let expected = format!(
-                "`{sibling}` is generated; the alternative media type(s) `application/*+json` are not"
+                "`{sibling}` is selected; the alternative media type(s) `application/*+json` are not"
             );
             assert!(
                 report.diagnostics().iter().any(|diagnostic| {
@@ -15373,7 +15372,7 @@ fn w014_a_suffix_range_listed_after_a_sendable_request_sibling_is_withheld() {
             ("application/*+json", "{ type: object }"),
         ]);
         let expected = format!(
-            "`{sibling}` is generated; the alternative media type(s) `application/*+json` are not"
+            "`{sibling}` is selected; the alternative media type(s) `application/*+json` are not"
         );
         for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
             assert_ne!(
@@ -15412,7 +15411,7 @@ fn w014_every_suffix_range_beside_a_sendable_request_sibling_is_withheld() {
         assert_eq!(
             messages_with_code(&report, Code::AlternativeMediaIgnored),
             [
-                "`application/json` is generated; the alternative media type(s) \
+                "`application/json` is selected; the alternative media type(s) \
                  `application/*+json`, `application/*+json-seq` are not"
             ],
             "{report:#?}"
@@ -15445,7 +15444,7 @@ fn e009_a_sendable_request_sibling_that_fails_its_own_gate_is_reported_for_itsel
     // Sendable is decided by classification alone. A `text/plain` sibling carrying an object schema
     // is still chosen over the range, and then refused by the raw-text gate for its own reason
     // rather than the range's. Neither the withheld range nor anything else is then reported as
-    // passed over for a `text/plain` that "is generated": it is not (#110).
+    // passed over for a `text/plain` selection that is then refused (#110).
     let spec = request_body_document(&[
         ("application/*+json", "{ type: object }"),
         ("text/plain", "{ type: object }"),
@@ -15491,9 +15490,9 @@ fn w014_a_withheld_suffix_range_beside_two_request_entries_is_reported_separatel
         assert_eq!(
             messages_with_code(&report, Code::AlternativeMediaIgnored),
             [
-                "`application/json` is generated; the alternative media type(s) \
+                "`application/json` is selected; the alternative media type(s) \
                  `application/xml` are not",
-                "`application/json` is generated; the alternative media type(s) \
+                "`application/json` is selected; the alternative media type(s) \
                  `application/*+json` are not",
             ],
             "{report:#?}"
@@ -15505,7 +15504,7 @@ fn w014_a_withheld_suffix_range_beside_two_request_entries_is_reported_separatel
 fn e009_a_rejected_multipart_request_selection_claims_nothing_is_generated() {
     // `multipart/form-data` outranks `application/octet-stream`, so it is selected, and then its
     // shape gate refuses a non-object schema. That rejection is the whole report for this body: no
-    // `W014` names the octet alternative as passed over for a multipart body that "is generated"
+    // `W014` names the octet alternative as passed over for a refused multipart selection
     // (#110), and the gate stops there rather than lowering the refused body's encoding.
     let spec = request_body_document(&[
         ("multipart/form-data", "{ type: string }"),
@@ -15531,7 +15530,8 @@ fn e009_a_rejected_multipart_request_selection_claims_nothing_is_generated() {
 #[test]
 fn e009_a_rejected_response_selection_claims_nothing_is_generated() {
     // The response side of #110: `text/plain` is selected over `text/html` (same rank, listed
-    // first) and refused by the raw-text gate, so no `W014` says it "is generated".
+    // first) and refused by the raw-text gate, so its `E009` alone reports it and no `W014` names
+    // `text/html` as passed over.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -15582,7 +15582,52 @@ paths:
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert_eq!(
             messages_with_code(&report, Code::AlternativeMediaIgnored),
-            ["`text/plain` is generated; the alternative media type(s) `text/html` are not"],
+            ["`text/plain` is selected; the alternative media type(s) `text/html` are not"],
+            "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn w014_on_a_document_rejected_elsewhere_claims_only_the_selection() {
+    // `/page` passes every one of its own gates, so its `W014` is emitted; `/doc` is rejected, so
+    // the run generates nothing — and `check` never generates on any document. The message must
+    // therefore assert only what its emission site decides, the selection, and never that anything
+    // "is generated" (#174). The `openai_openapi` corpus snapshot carries this shape at scale:
+    // `Rejected` with `E009` beside many `W014`s.
+    //
+    // This pins the wording, not the principle: `Diagnostic` has no structured field recording what
+    // its message asserts about the run, so nothing here compares a message's claim against the
+    // outcome, and a different outcome claim in a future rewording would have to be caught by
+    // whoever rewrites this expected string.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /page:
+    get:
+      operationId: getPage
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain: { schema: { type: string } }
+            text/html: { schema: { type: string } }
+  /doc:
+    get:
+      operationId: getDoc
+      responses:
+        "200":
+          description: OK
+          content:
+            application/pdf: { schema: {} }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
+        assert_eq!(
+            messages_with_code(&report, Code::AlternativeMediaIgnored),
+            ["`text/plain` is selected; the alternative media type(s) `text/html` are not"],
             "{report:#?}"
         );
     }
