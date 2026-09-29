@@ -97,8 +97,8 @@ the version it emits, and the idioms spargen handles.
   above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
   (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
   error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
-  preserved), decode failure (`Error::Decode`: serde path + body, capped except on the two paths
-  the emitted `ClientConfig::max_error_body` doc names), interrupted body
+  preserved), decode failure (`Error::Decode`: status, headers, serde path + body, capped except
+  on the two paths the emitted `ClientConfig::max_error_body` doc names), interrupted body
   (`Error::InterruptedBody`). Every generated error
   type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
   `thiserror`. `Error::is_transient()` classifies retry-worthy failures. An error enum whose

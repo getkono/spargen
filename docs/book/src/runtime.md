@@ -49,7 +49,9 @@ documented error response (`Api`), of an undocumented status (`UnexpectedStatus`
 an undocumented 2xx), and of a response whose body failed to decode (`Decode`, whether the status
 was a success or a documented error), and `None` for every class that produced no response, so a
 log line can report which status failed without matching variants. `is_transient()` reads that same
-status for `Decode`: a `429` or `5xx` whose body did not match its schema is still transient. A
+status for `Decode`: a `429` or `5xx` whose body did not match its schema is still transient.
+`Decode` also keeps the response's headers, so a documented `429` whose body a proxy in front of
+the server replaced with an HTML page still exposes its `Retry-After`. A
 `RetryPolicy` is handed a `RetryOutcome`, not an `Error`, and reads the status with
 `RetryOutcome::status()`.
 `RetryWait` is re-exported by the generated client, so a policy names it rather than spelling out

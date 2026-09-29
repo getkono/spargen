@@ -636,6 +636,7 @@ pub(crate) fn emit_operation(
                                     )),
                                     Err(path) => support::Error::Decode {
                                         status,
+                                        headers,
                                         path,
                                         body,
                                         truncated,
@@ -727,13 +728,21 @@ pub(crate) fn emit_operation(
                         };
                         quote! {
                             if #spec_tokens.matches(status) {
-                                let value = #decode
-                                    .map_err(|path| support::Error::<#error_ty>::Decode {
-                                        status,
-                                        path,
-                                        body: body.clone(),
-                                        truncated: false,
-                                    })?;
+                                // A `match`, not `map_err`: the failure moves the headers into
+                                // `Decode`, which a closure capturing them would also do on the
+                                // success path that still needs them.
+                                let value = match #decode {
+                                    Ok(value) => value,
+                                    Err(path) => {
+                                        return Err(support::Error::<#error_ty>::Decode {
+                                            status,
+                                            headers,
+                                            path,
+                                            body,
+                                            truncated: false,
+                                        });
+                                    }
+                                };
                                 return Ok(support::ResponseValue::new(
                                     status,
                                     headers,

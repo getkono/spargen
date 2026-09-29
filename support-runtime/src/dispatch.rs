@@ -322,6 +322,7 @@ where
             let (body, truncated) = cap_body(body, core.config().max_error_body);
             Err(Error::Decode {
                 status,
+                headers,
                 path: error.to_string(),
                 body,
                 truncated,
@@ -351,6 +352,7 @@ where
             let (body, truncated) = cap_body(body, core.config().max_error_body);
             Err(Error::Decode {
                 status,
+                headers,
                 path,
                 body,
                 truncated,
@@ -464,6 +466,7 @@ where
                     Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
                     Err(error) => Error::Decode {
                         status,
+                        headers,
                         path: error.to_string(),
                         body,
                         truncated,
@@ -499,6 +502,7 @@ where
                     Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
                     Err(path) => Error::Decode {
                         status,
+                        headers,
                         path,
                         body,
                         truncated,
@@ -1690,16 +1694,37 @@ mod tests {
         assert_eq!(&body[..], br#"{"ok":true}"#);
     }
 
-    /// Every runtime helper that raises `Decode` keeps the status of the response it failed to
-    /// decode, so `Error::status()` answers it. Each response carries a status other than `200`,
-    /// so a hard-coded status cannot pass.
+    /// Every runtime helper that raises `Decode` keeps the status and headers of the response it
+    /// failed to decode, so `Error::status()` answers it and a caller can still read, say, the
+    /// `Retry-After` of a documented `429` whose body a proxy replaced with HTML (#268). Each
+    /// response carries a status other than `200` and a header value of its own, so neither a
+    /// hard-coded status nor an empty or shared header map can pass.
     #[test]
-    fn every_decode_helper_keeps_the_response_status() {
+    fn every_decode_helper_keeps_the_response_status_and_headers() {
         use reqwest::StatusCode;
 
-        fn assert_decode_status<E: std::fmt::Debug>(error: Error<E>, expected: u16) {
+        fn response(status: u16, retry_after: &'static str, body: &str) -> reqwest::Response {
+            reqwest::Response::from(
+                http::Response::builder()
+                    .status(status)
+                    .header("retry-after", retry_after)
+                    .body(body.to_owned())
+                    .expect("valid synthetic response"),
+            )
+        }
+
+        fn assert_decode<E: std::fmt::Debug>(error: Error<E>, expected: u16, retry_after: &str) {
             match &error {
-                Error::Decode { status, .. } => assert_eq!(status.as_u16(), expected),
+                Error::Decode {
+                    status, headers, ..
+                } => {
+                    assert_eq!(status.as_u16(), expected);
+                    assert_eq!(
+                        headers.get("retry-after").map(|value| value.as_bytes()),
+                        Some(retry_after.as_bytes()),
+                        "the Decode error for {expected} lost its response headers"
+                    );
+                }
                 other => panic!("expected a Decode error, got {other:?}"),
             }
             assert_eq!(error.status(), StatusCode::from_u16(expected).ok());
@@ -1707,30 +1732,30 @@ mod tests {
 
         let success = poll_ready(super::decode_success::<Created>(
             &core(),
-            json_response(203, "not json"),
+            response(203, "1", "not json"),
         ));
-        assert_decode_status(success.unwrap_err(), 203);
+        assert_decode(success.unwrap_err(), 203, "1");
 
         let text = poll_ready(decode_success_text::<TextChoice>(
             &core(),
-            json_response(206, "not a choice"),
+            response(206, "2", "not a choice"),
         ));
-        assert_decode_status(text.unwrap_err(), 206);
+        assert_decode(text.unwrap_err(), 206, "2");
 
-        let documented = [StatusSpec::Exact(422)];
+        let documented = [StatusSpec::Exact(429)];
         let error = poll_ready(super::classify_error::<Created>(
             &core(),
-            json_response(422, "not json"),
+            response(429, "3", "<html>rate limited</html>"),
             &documented,
         ));
-        assert_decode_status(error, 422);
+        assert_decode(error, 429, "3");
 
         let error = poll_ready(classify_error_text::<TextChoice>(
             &core(),
-            json_response(422, "not a choice"),
+            response(429, "4", "not a choice"),
             &documented,
         ));
-        assert_decode_status(error, 422);
+        assert_decode(error, 429, "4");
     }
 
     #[test]
@@ -1773,13 +1798,18 @@ mod tests {
     ) -> Result<ResponseValue<SuccessEnum>, Error<Infallible>> {
         let (status, headers, body) = poll_ready(read_success_body(response))?;
         if StatusSpec::Exact(200).matches(status) {
-            let value =
-                serde_json::from_slice::<Created>(&body).map_err(|error| Error::Decode {
-                    status,
-                    path: error.to_string(),
-                    body: body.clone(),
-                    truncated: false,
-                })?;
+            let value = match serde_json::from_slice::<Created>(&body) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(Error::Decode {
+                        status,
+                        headers,
+                        path: error.to_string(),
+                        body,
+                        truncated: false,
+                    })
+                }
+            };
             return Ok(ResponseValue::new(
                 status,
                 headers,
@@ -1787,13 +1817,18 @@ mod tests {
             ));
         }
         if StatusSpec::Exact(202).matches(status) {
-            let value =
-                serde_json::from_slice::<Accepted>(&body).map_err(|error| Error::Decode {
-                    status,
-                    path: error.to_string(),
-                    body: body.clone(),
-                    truncated: false,
-                })?;
+            let value = match serde_json::from_slice::<Accepted>(&body) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(Error::Decode {
+                        status,
+                        headers,
+                        path: error.to_string(),
+                        body,
+                        truncated: false,
+                    })
+                }
+            };
             return Ok(ResponseValue::new(
                 status,
                 headers,
@@ -1873,6 +1908,7 @@ mod tests {
                 )),
                 Err(error) => Error::Decode {
                     status,
+                    headers,
                     path: error.to_string(),
                     body,
                     truncated,
@@ -1888,6 +1924,7 @@ mod tests {
                 )),
                 Err(error) => Error::Decode {
                     status,
+                    headers,
                     path: error.to_string(),
                     body,
                     truncated,
@@ -2170,6 +2207,7 @@ mod tests {
         match result {
             Err(Error::Decode {
                 status: got,
+                headers: _,
                 path,
                 body,
                 truncated,
