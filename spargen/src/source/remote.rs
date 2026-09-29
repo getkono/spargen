@@ -10,7 +10,9 @@
 //! fetched is [`vendor`](fn@super::vendor) — driven exclusively by `spargen lock`. This is also the anti-SSRF
 //! boundary: no spec content can trigger a network request during a build.
 
-use super::{Node, SpannedValue};
+use crate::diag::JsonPointer;
+
+use super::{canonical_pointer, Node, SpannedValue};
 
 /// Classification of a `$ref` string relative to the document it appears in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,17 +159,95 @@ pub(crate) fn rewrite_refs_to_absolute(value: &mut SpannedValue, base_url: &str)
     }
 }
 
-/// Collect every reference string in a value tree, in document order.
+/// Collect every reference string in a value tree, in document order, outside specification
+/// extensions.
 ///
 /// This is `$ref` plus one other place OpenAPI puts a reference without calling it one: OpenAPI
 /// 3.2 allows a Security Requirement Object's *key* to be the URI of a Security Scheme Object, so
 /// the file it names has to be loaded like any other reference target.
+///
+/// `value` is read as an OpenAPI object — a document root, or the target of a `$ref` — and the walk
+/// does not descend into a specification extension (a `^x-` key of an object whose keys are fixed
+/// fields). The specification admits any value there (`patternProperties: { "^x-": true }`), so a
+/// `$ref`-shaped object inside one is author data rather than a Reference Object, and nothing it
+/// names is loaded. An extension's contents are interpreted only where a reference addresses them;
+/// [`enters_extension`] names those, and the caller walks each one's target as a value of its own.
 pub(crate) fn collect_refs(value: &SpannedValue) -> Vec<String> {
     let mut refs = Vec::new();
-    collect_refs_inner(value, &mut refs);
+    collect_refs_inner(value, Keys::Fields, &mut refs);
     collect_security_requirement_refs(value, &mut refs);
     refs
 }
+
+/// Whether `reference`'s fragment is a JSON Pointer that passes through a key spelled like a
+/// specification extension (`false` for no fragment, a non-pointer fragment, or a path of no `x-`
+/// token).
+///
+/// [`collect_refs`] skips extensions, so a target inside one is the only kind a whole-document
+/// walk has not already read: a reference that addresses it makes its contents part of the
+/// description (`$ref: '#/x-defs/Pet'` is interpreted as whatever its site expects), and their own
+/// references must be loaded like any others. A token such as `components/schemas/x-pet`, where
+/// `x-pet` is a component *name*, also qualifies; walking an already-read value again is redundant,
+/// never wrong.
+pub(crate) fn enters_extension(reference: &str) -> bool {
+    let (_, fragment) = split_fragment(reference);
+    // Decoded first, so `#/%78-defs` is read as the `x-defs` it addresses. A canonical token is
+    // `~`-escaped, which never changes whether it starts with `x-`.
+    canonical_pointer(&JsonPointer::from(fragment.to_owned()))
+        .is_some_and(|pointer| pointer.as_str().split('/').any(is_extension_key))
+}
+
+/// Whether `key` is a specification extension key, spelled exactly as the metaschema's `^x-`
+/// pattern: case-sensitively.
+fn is_extension_key(key: &str) -> bool {
+    key.starts_with("x-")
+}
+
+/// What the keys of an object in an OpenAPI description are, which decides whether an `x-` key in
+/// it is a specification extension.
+#[derive(Clone, Copy)]
+enum Keys {
+    /// The fixed fields of an OpenAPI or JSON Schema object, beside which `^x-` keys are
+    /// specification extensions. A Responses or Callback Object is one too: its other keys are
+    /// status codes or runtime expressions, neither of which can start with `x-`. The Paths Object
+    /// would be as well, but it is walked as [`Keys::Names`] while the parser still reads its `x-`
+    /// keys as path items (#370).
+    Fields,
+    /// Names the author chooses (a map), where `x-rate-limit` is a header like any other and every
+    /// value is an object with fixed fields.
+    Names,
+    /// The Components Object: fixed fields, every one of which is a map of names.
+    Components,
+}
+
+/// The fixed fields, in any OpenAPI 3.1 or 3.2 object or JSON Schema, whose value is a map keyed by
+/// author-chosen names: every `additionalProperties` map the vendored metaschemas declare
+/// (`webhooks`, `variables`, `callbacks`, `content`, `encoding`, `headers`, `links`, `examples`,
+/// `additionalOperations`), their `map-of-strings` fields (`parameters` on a Link, `mapping`,
+/// `scopes`), and JSON Schema's own (`properties`, `patternProperties`, `$defs`,
+/// `dependentSchemas`, and the pre-2019 `definitions` many descriptions still address). The
+/// Components Object's maps are [`Keys::Components`] instead, since `responses` and `parameters`
+/// mean something else elsewhere. Where one of these names is a JSON Schema array (`examples`) or
+/// an Operation's `parameters` list, the value is not an object and the entry has no effect.
+const NAME_KEYED_FIELDS: &[&str] = &[
+    "webhooks",
+    "variables",
+    "callbacks",
+    "content",
+    "encoding",
+    "headers",
+    "links",
+    "examples",
+    "additionalOperations",
+    "parameters",
+    "mapping",
+    "scopes",
+    "properties",
+    "patternProperties",
+    "$defs",
+    "dependentSchemas",
+    "definitions",
+];
 
 /// Collect Security Requirement Object keys that name a scheme by URI rather than component name.
 fn collect_security_requirement_refs(value: &SpannedValue, refs: &mut Vec<String>) {
@@ -196,11 +276,15 @@ fn collect_security_requirement_refs(value: &SpannedValue, refs: &mut Vec<String
         visit(security);
     }
     if let Some(Node::Object(paths)) = root.get("paths").map(|paths| &paths.node) {
+        // Every key, `x-` ones included: `parse_paths` reads them all as path items (#370).
         for (_, item) in paths.iter() {
             let Node::Object(item) = &item.node else {
                 continue;
             };
-            for (_, operation) in item.iter() {
+            for (method, operation) in item.iter() {
+                if is_extension_key(&method.name) {
+                    continue;
+                }
                 if let Some(security) = operation.get("security") {
                     visit(security);
                 }
@@ -209,19 +293,35 @@ fn collect_security_requirement_refs(value: &SpannedValue, refs: &mut Vec<String
     }
 }
 
-fn collect_refs_inner(value: &SpannedValue, refs: &mut Vec<String>) {
+fn collect_refs_inner(value: &SpannedValue, keys: Keys, refs: &mut Vec<String>) {
     match &value.node {
         Node::Object(map) => {
-            if let Some(reference) = map.get("$ref").and_then(SpannedValue::as_str) {
-                refs.push(reference.to_owned());
+            // In a map, `$ref` is an entry's name (a property called `$ref`), not a reference.
+            if matches!(keys, Keys::Fields) {
+                if let Some(reference) = map.get("$ref").and_then(SpannedValue::as_str) {
+                    refs.push(reference.to_owned());
+                }
             }
-            for (_, value) in map.iter() {
-                collect_refs_inner(value, refs);
+            for (key, value) in map.iter() {
+                let key = key.name.as_str();
+                let child = match keys {
+                    Keys::Names => Keys::Fields,
+                    Keys::Fields | Keys::Components if is_extension_key(key) => continue,
+                    Keys::Components => Keys::Names,
+                    Keys::Fields if key == "components" => Keys::Components,
+                    // `parse_paths` still reads an `x-` key of the Paths Object as a path item
+                    // (#370), so the loader reads what it references too; skipping it here would
+                    // turn a file ref the parser follows into a spurious `E004`.
+                    Keys::Fields if key == "paths" => Keys::Names,
+                    Keys::Fields if NAME_KEYED_FIELDS.contains(&key) => Keys::Names,
+                    Keys::Fields => Keys::Fields,
+                };
+                collect_refs_inner(value, child, refs);
             }
         }
         Node::Array(values) => {
             for value in values {
-                collect_refs_inner(value, refs);
+                collect_refs_inner(value, Keys::Fields, refs);
             }
         }
         Node::Null | Node::Bool(_) | Node::Number(_) | Node::String(_) => {}
@@ -255,6 +355,98 @@ mod tests {
             classify_ref("../s/y.yaml#/B", Some("https://h/a/x.yaml")),
             RefTarget::Remote("https://h/s/y.yaml".to_owned())
         );
+    }
+
+    fn refs_in(yaml: &str) -> Vec<String> {
+        let value = super::super::parse_yaml(crate::diag::FileId(0), yaml, &mut Default::default())
+            .unwrap();
+        collect_refs(&value)
+    }
+
+    /// The walk skips a specification extension wherever keys are fixed fields — the document
+    /// root, an Operation, a Responses Object, a Schema, the Components Object — and nowhere keys
+    /// are names: an `x-` header, property, component, media type or webhook is an entry like any
+    /// other (#239). A `$ref` key in a map names an entry. The Paths Object's `x-` keys are still
+    /// walked, because the parser still reads them as path items (#370).
+    #[test]
+    fn collects_refs_outside_extensions_and_under_every_x_named_entry() {
+        let refs = refs_in(
+            "x-root: { $ref: skip-root.yaml }\n\
+             paths:\n\
+             \x20 x-paths: { $ref: paths.yaml }\n\
+             \x20 /p:\n\
+             \x20   get:\n\
+             \x20     x-op: { $ref: skip-op.yaml }\n\
+             \x20     responses:\n\
+             \x20       x-note: { $ref: skip-responses.yaml }\n\
+             \x20       '200':\n\
+             \x20         headers: { x-rate-limit: { $ref: header.yaml } }\n\
+             \x20         content:\n\
+             \x20           x-custom/json:\n\
+             \x20             schema:\n\
+             \x20               x-meta: { $ref: skip-schema.yaml }\n\
+             \x20               properties:\n\
+             \x20                 x-owner: { $ref: property.yaml }\n\
+             \x20                 $ref: { type: string }\n\
+             \x20               $defs: { x-def: { $ref: def.yaml } }\n\
+             webhooks: { x-hook: { $ref: webhook.yaml } }\n\
+             components:\n\
+             \x20 x-components: { $ref: skip-components.yaml }\n\
+             \x20 schemas: { x-pet: { $ref: component.yaml } }\n\
+             \x20 responses: { x-gone: { $ref: component-response.yaml } }\n",
+        );
+        assert_eq!(
+            refs,
+            [
+                "paths.yaml",
+                "header.yaml",
+                "property.yaml",
+                "def.yaml",
+                "webhook.yaml",
+                "component.yaml",
+                "component-response.yaml",
+            ]
+        );
+    }
+
+    /// A Security Requirement key naming a scheme by URI is still collected, but not one inside
+    /// an extension of a Path Item. Under an `x-` key of the Paths Object it is collected, since
+    /// the parser still reads that key as a path item (#370).
+    #[test]
+    fn security_requirement_refs_skip_extensions() {
+        let refs = refs_in(
+            "paths:\n\
+             \x20 x-paths: { get: { security: [{ ./paths-scheme.yaml: [] }] } }\n\
+             \x20 /p:\n\
+             \x20   x-item: { security: [{ skip-item.yaml: [] }] }\n\
+             \x20   get: { security: [{ ./scheme.yaml: [] }] }\n",
+        );
+        assert_eq!(refs, ["paths-scheme.yaml", "scheme.yaml"]);
+    }
+
+    /// Only a pointer through an `x-` token enters an extension, decoded the way the resolver
+    /// decodes it; a component *named* `x-pet` qualifies too, harmlessly.
+    #[test]
+    fn a_reference_enters_an_extension_only_through_an_x_token() {
+        for reference in [
+            "#/x-defs/Pet",
+            "lib.yaml#/x-defs/Pet",
+            "https://h/lib.yaml#/components/x-defs/Pet",
+            "#/%78-defs/Pet",
+            "#/components/schemas/x-pet",
+        ] {
+            assert!(enters_extension(reference), "{reference}");
+        }
+        for reference in [
+            "#/components/schemas/Pet",
+            "lib.yaml",
+            "lib.yaml#",
+            "#x-anchor",
+            "#/components/schemas/X-pet",
+            "#/components/schemas/pet-x-",
+        ] {
+            assert!(!enters_extension(reference), "{reference}");
+        }
     }
 
     #[test]

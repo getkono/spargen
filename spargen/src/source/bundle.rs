@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -7,7 +7,9 @@ use indexmap::IndexMap;
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance};
 
 use super::lock::{Lock, LOCK_FILE_NAME, VENDOR_DIR};
-use super::remote::{classify_ref, collect_refs, resolve_ref_url, split_fragment, RefTarget};
+use super::remote::{
+    classify_ref, collect_refs, enters_extension, resolve_ref_url, split_fragment, RefTarget,
+};
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
 
@@ -59,6 +61,10 @@ impl InputBundle {
     /// remote `$ref`s from the vendored, hash-pinned copies recorded in `spargen.lock` (looked up
     /// next to `root`). No network access occurs. The parse format is chosen by extension
     /// (`.json` vs `.yaml`/`.yml`). Diagnostics flow through `diags`.
+    ///
+    /// A reference inside a specification extension is not followed, so a file it names is not
+    /// read, unless a reference that is followed addresses the extension's contents: then that
+    /// target is walked like a document of its own (see [`collect_refs`]).
     pub(crate) fn load(root: &Utf8Path, diags: &mut Diagnostics) -> Result<InputBundle, Aborted> {
         let mut bundle = InputBundle {
             working_dir: std::env::current_dir()
@@ -74,15 +80,22 @@ impl InputBundle {
         let root_id = bundle.load_file(root.to_path_buf(), diags)?;
         bundle.root = Some(root_id);
 
-        let mut queue = VecDeque::from([root_id]);
-        while let Some(file) = queue.pop_front() {
+        // Each entry is a value to walk: a loaded document's root, or a reference target inside a
+        // specification extension, which the walk of its document skipped (`enters_extension`).
+        let mut queue = VecDeque::from([(root_id, JsonPointer::root())]);
+        let mut walked_targets = HashSet::new();
+        while let Some((file, pointer)) = queue.pop_front() {
             let remote_base = match bundle.origins.get(&file) {
                 Some(Origin::Remote(url)) => Some(url.clone()),
                 _ => None,
             };
-            let refs = collect_refs(bundle.value_at(file));
-            for reference in refs {
-                match classify_ref(&reference, remote_base.as_deref()) {
+            // A dangling target is the resolver's to report, where a site interprets it (`E004`).
+            let Some(value) = bundle.value_at(file).pointer(&pointer) else {
+                continue;
+            };
+            let refs = collect_refs(value);
+            for reference in &refs {
+                match classify_ref(reference, remote_base.as_deref()) {
                     RefTarget::InDocument => {}
                     RefTarget::LocalRelative(path) => {
                         // Only a *local* document produces a local-relative target: a relative ref
@@ -90,7 +103,7 @@ impl InputBundle {
                         let resolved = bundle.resolve_path(file, &path);
                         if bundle.file_id_by_path(&resolved).is_none() {
                             let loaded = bundle.load_file(resolved, diags)?;
-                            queue.push_back(loaded);
+                            queue.push_back((loaded, JsonPointer::root()));
                         }
                     }
                     RefTarget::UnsupportedRemote(url) if bundle.url_to_file.contains_key(&url) => {}
@@ -100,8 +113,16 @@ impl InputBundle {
                             continue;
                         }
                         if let Some(loaded) = bundle.load_remote(&url, file, diags)? {
-                            queue.push_back(loaded);
+                            queue.push_back((loaded, JsonPointer::root()));
                         }
+                    }
+                }
+            }
+            // Every document a reference names is loaded by now, so its target can be found.
+            for reference in refs.iter().filter(|reference| enters_extension(reference)) {
+                if let Some(target) = bundle.reference_target(reference, file) {
+                    if walked_targets.insert(target.clone()) {
+                        queue.push_back(target);
                     }
                 }
             }
