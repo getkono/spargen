@@ -145,6 +145,7 @@ fn lower_pass(
         resolved_in_progress: HashMap::new(),
         resolved_alias_stack: HashSet::new(),
         resolved_contributions: HashMap::new(),
+        resolved_member_stack: Vec::new(),
         settled,
         guessed: HashSet::new(),
         revisions: Vec::new(),
@@ -542,6 +543,12 @@ struct LowerCtx<'a, 'doc> {
     /// reports again, at its next use, as it always did. What is replayed is a copy the enclosing
     /// merge consumes, so nothing one composition does to the merged fields reaches the next use.
     resolved_contributions: HashMap<String, Vec<Contribution>>,
+    /// The bundle-`$ref` `allOf` member targets being expanded right now, outermost first, each
+    /// with whether its body is a bare `$ref` alias. A target is flattened through its own `$ref`
+    /// and `allOf` rather than lowered to a reserved type, so nothing else notices when that
+    /// expansion reaches a target already on this stack; [`Self::gather_ref_target`] does, and
+    /// rejects the loop instead of recursing through it.
+    resolved_member_stack: Vec<(String, bool)>,
     /// The nullability earlier passes' bodies decided for reservations whose back-edges read a
     /// wrong reserve-time guess; consulted before [`schema_is_nullable`] when a reservation opens.
     settled: &'a HashMap<Reservation, bool>,
@@ -1305,22 +1312,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// never accumulate against the cap.
     fn lower_schema(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         if self.depth >= MAX_SCHEMA_DEPTH {
-            Diagnostic::error(Code::SchemaNestingTooDeep, schema.provenance.clone())
-                .message(format!(
-                    "schema nesting exceeds the maximum lowering depth of {MAX_SCHEMA_DEPTH} \
-                     (a very long `$ref` chain or a pathologically nested schema)"
-                ))
-                .remedy(
-                    "flatten the offending schema chain, or omit this API segment with \
-                     spargen::omit!",
-                )
-                .emit(self.diags);
-            return None;
+            return self.reject_too_deep(&schema.provenance);
         }
         self.depth += 1;
         let result = self.lower_schema_inner(schema, hint);
         self.depth -= 1;
         result
+    }
+
+    /// The `E014` rejection [`Self::lower_schema`] reports at [`MAX_SCHEMA_DEPTH`], shared with the
+    /// one other recursion that does not pass through it: [`Self::gather_ref_target`]'s expansion
+    /// of a bundle-`$ref` `allOf` member's target.
+    fn reject_too_deep<T>(&mut self, provenance: &Provenance) -> Option<T> {
+        Diagnostic::error(Code::SchemaNestingTooDeep, provenance.clone())
+            .message(format!(
+                "schema nesting exceeds the maximum lowering depth of {MAX_SCHEMA_DEPTH} \
+                 (a very long `$ref` chain or a pathologically nested schema)"
+            ))
+            .remedy(
+                "flatten the offending schema chain, or omit this API segment with \
+                 spargen::omit!",
+            )
+            .emit(self.diags);
+        None
     }
 
     fn lower_schema_inner(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
@@ -2836,8 +2850,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 out,
             );
         }
-        // Non-component refs resolve (or error) exactly as `lower_schema` does; treat the target
-        // as an inline member.
+        // Non-component refs resolve (or error) exactly as `lower_schema` does; the target is then
+        // gathered as an inline member would be (see `gather_resolved_target`).
         let resolved = self
             .resolver
             .resolve(reference, &schema.provenance, self.diags)
@@ -2860,12 +2874,45 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // memoised: the member's siblings belong to this use, and `gather_member` adds them.
         let Some(key) = resolved_identity(&target.provenance) else {
             // No span, so no identity to key on — expand un-memoised, as `ensure_resolved`
-            // lowers un-deduplicated in the same case.
-            return self.gather_inline(&target, hint, out);
+            // lowers un-deduplicated in the same case. The depth cap still bounds it.
+            return self.gather_resolved_target(target, hint, out);
         };
         if let Some(recorded) = self.resolved_contributions.get(&key) {
             out.extend(recorded.iter().cloned());
             return Some(());
+        }
+        // The target's expansion follows its own `$ref` and `allOf` members, and nothing on that
+        // path reserves a type a re-entry could be boxed against, so a target this expansion is
+        // already inside is a loop: reject it rather than recurse to the depth cap. A loop made
+        // only of bare aliases is the alias cycle `ensure_resolved` reports; one that passes
+        // through a body is a member recursive through its own composition, as the root document
+        // reports it.
+        if let Some(start) = self
+            .resolved_member_stack
+            .iter()
+            .position(|(open, _)| *open == key)
+        {
+            if self.resolved_member_stack[start..]
+                .iter()
+                .all(|&(_, alias)| alias)
+            {
+                // E004 case: cycle
+                Diagnostic::error(Code::UnresolvedRef, schema.provenance.clone())
+                    .message(format!(
+                        "schema reference `{reference}` forms an alias cycle"
+                    ))
+                    .remedy(
+                        "give one component in the cycle a schema body, or break the cycle at one \
+                         of its references",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+            return self.reject_all_of_cycle(
+                schema.provenance.clone(),
+                "an `allOf` member is a recursive `$ref` that reaches itself through its target's \
+                 own `$ref` and `allOf` members",
+            );
         }
         // Name what the body lowers to for the schema it came from, not for whichever use
         // reached it first — once one expansion serves every use, a per-use hint would make
@@ -2875,10 +2922,39 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // name (`Basemeta`, or a scalar target's own `Code`) to whichever lowering ran first.
         let hint = format!("{}Member", resolved_hint(&target.provenance, hint));
         let mut contributed = Vec::new();
-        self.gather_inline(&target, &hint, &mut contributed)?;
+        self.resolved_member_stack
+            .push((key.clone(), target.reference.is_some()));
+        let expanded = self.gather_resolved_target(target, &hint, &mut contributed);
+        self.resolved_member_stack.pop();
+        expanded?;
         self.resolved_contributions.insert(key, contributed.clone());
         out.extend(contributed);
         Some(())
+    }
+
+    /// Expand a bundle-`$ref` `allOf` member's resolved target as [`Self::gather_member`] expands
+    /// any member: a target that is itself a `$ref` chains to *its* target (and gathers its own
+    /// siblings), one that is an `allOf` flattens its members, and only a plain body is read for
+    /// object or scalar keywords. Reading every target as a plain body took an `allOf` or alias
+    /// target, which carries neither kind of keyword, for a pure annotation, and silently dropped
+    /// everything it constrains (issue #306).
+    ///
+    /// This recursion does not pass through [`Self::lower_schema`], so it counts against
+    /// [`Self::depth`] itself: a long acyclic chain of such targets rejects with `E014` rather than
+    /// exhausting the stack. Loops are the caller's to refuse, before this is entered.
+    fn gather_resolved_target(
+        &mut self,
+        target: Schema,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
+        if self.depth >= MAX_SCHEMA_DEPTH {
+            return self.reject_too_deep(&target.provenance);
+        }
+        self.depth += 1;
+        let result = self.gather_member(&SchemaOr::Schema(Box::new(target)), hint, out);
+        self.depth -= 1;
+        result
     }
 
     /// Turn a resolved `$ref` member's already-lowered type into a contribution: an object component
