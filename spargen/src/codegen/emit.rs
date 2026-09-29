@@ -251,24 +251,37 @@ pub(crate) fn emit_operation(
         .params
         .iter()
         .any(|parameter| parameter.location == ParamLoc::QueryString);
-    let uses_json_querystring = operation.params.iter().any(|parameter| {
+    // Lowering admits at most one `in: querystring` parameter per operation, so this is that one.
+    let json_querystring = operation.params.iter().find(|parameter| {
         parameter.location == ParamLoc::QueryString
             && matches!(
                 &parameter.style,
                 crate::ir::ParamStyle::Content(MediaType::Json)
             )
     });
-    let raw_query_init = uses_querystring.then(|| {
-        if uses_json_querystring {
-            quote! { let mut #raw_query_binding: Option<String> = None; }
-        } else {
-            quote! { let #raw_query_binding: Option<String> = None; }
+    // Only a JSON whole-query value sets the raw query. A required one always does, so it is the
+    // binding's initializer rather than an assignment: a `None` it always overwrites would be an
+    // `unused_assignments` warning in every consumer's build.
+    let raw_query_init = uses_querystring.then(|| match json_querystring {
+        Some(parameter) if parameter.required => {
+            let ident = param_ident(parameter, crate::name::IdentRole::Param);
+            let encoded = json_querystring_tokens(quote! { &#ident });
+            quote! { let #raw_query_binding: Option<String> = Some(#encoded); }
         }
+        Some(_) => quote! { let mut #raw_query_binding: Option<String> = None; },
+        None => quote! { let #raw_query_binding: Option<String> = None; },
     });
     let required_querystring = operation
         .params
         .iter()
         .filter(|parameter| parameter.required && parameter.location == ParamLoc::QueryString)
+        // A required JSON whole-query value is already the raw query's initializer.
+        .filter(|parameter| {
+            !matches!(
+                &parameter.style,
+                crate::ir::ParamStyle::Content(MediaType::Json)
+            )
+        })
         .map(|parameter| {
             let ident = param_ident(parameter, crate::name::IdentRole::Param);
             querystring_param_tokens(
@@ -1826,6 +1839,18 @@ fn query_param_tokens(
     }
 }
 
+/// A JSON whole-query value: one opaque, fully-encoded token.
+fn json_querystring_tokens(value: TokenStream) -> TokenStream {
+    quote! {
+        support::encode(
+            &serde_json::to_string(#value).map_err(support::Error::request_construction)?,
+            support::PercentEncoding::Form,
+        )
+    }
+}
+
+/// Emit serialization of an optional `in: querystring` value, or a required one that is not JSON
+/// (a required JSON value initializes the raw query directly).
 fn querystring_param_tokens(
     param: &crate::ir::Parameter,
     value: TokenStream,
@@ -1833,14 +1858,10 @@ fn querystring_param_tokens(
     raw_query_binding: &crate::name::Ident,
 ) -> TokenStream {
     match &param.style {
-        // A JSON whole-query value is one opaque, fully-encoded token.
-        crate::ir::ParamStyle::Content(MediaType::Json) => quote! {
-            #raw_query_binding = Some(support::encode(
-                &serde_json::to_string(#value)
-                    .map_err(support::Error::request_construction)?,
-                support::PercentEncoding::Form,
-            ));
-        },
+        crate::ir::ParamStyle::Content(MediaType::Json) => {
+            let encoded = json_querystring_tokens(value);
+            quote! { #raw_query_binding = Some(#encoded); }
+        }
         crate::ir::ParamStyle::Content(MediaType::FormUrlEncoded) => quote! {
             #query_binding.extend(
                 support::serialize_form("", #value, true, support::PercentEncoding::Form)
