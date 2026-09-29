@@ -753,12 +753,9 @@ fn audit_in(
     let root = workspace_root(manifest_path, &manifest);
     // Only a *separate* workspace manifest is read and reported: a self-rooted one is this very
     // file, already parsed above and already in `manifests`.
-    let separate = root
-        .path
-        .as_deref()
-        .filter(|_| !root.is_self)
-        .and_then(|path| {
-            manifests.push(path.to_path_buf());
+    let separate = match &root {
+        WorkspaceRoot::Separate(path) => {
+            manifests.push(path.clone());
             match read_toml(path, "workspace manifest") {
                 Ok(value) => Some(value),
                 Err(message) => {
@@ -766,27 +763,31 @@ fn audit_in(
                     None
                 }
             }
-        });
-    let workspace = if root.is_self {
-        Some(&manifest)
-    } else {
-        separate.as_ref()
+        }
+        WorkspaceRoot::SelfRooted(_) | WorkspaceRoot::NotFound { .. } => None,
+    };
+    let workspace = match &root {
+        WorkspaceRoot::SelfRooted(_) => Some(&manifest),
+        WorkspaceRoot::Separate(_) | WorkspaceRoot::NotFound { .. } => separate.as_ref(),
     };
     // Three outcomes, not two: a root that resolved, a root that was found and could not be read
     // (already reported just above), and no root at all. Their remedies differ, so an unresolvable
     // inheritance has to be able to tell them apart.
-    let origin = match (&root.path, workspace.is_some()) {
-        (Some(path), true) => WorkspaceOrigin::Resolved(path),
+    let origin = match &root {
+        WorkspaceRoot::SelfRooted(path) => WorkspaceOrigin::Resolved(path),
+        WorkspaceRoot::Separate(path) if separate.is_some() => WorkspaceOrigin::Resolved(path),
         // Read and failed, so `read_toml` has already reported why on its own line.
-        (Some(path), false) => WorkspaceOrigin::Unreadable(path),
+        WorkspaceRoot::Separate(path) => WorkspaceOrigin::Unreadable(path),
         // No root was found. A candidate the walk could not parse is not thereby a root — it may
         // be a sibling crate or a stray file far outside the project — so it never replaces "not
         // found"; it rides along as a hint, carrying its own reason because nothing else is going
         // to print one.
-        (None, _) => WorkspaceOrigin::NotFound {
-            searched_from: &root.searched_from,
-            skipped: root
-                .unreadable
+        WorkspaceRoot::NotFound {
+            searched_from,
+            unreadable,
+        } => WorkspaceOrigin::NotFound {
+            searched_from,
+            skipped: unreadable
                 .as_ref()
                 .map(|(path, reason)| (path.as_path(), reason.as_str())),
         },
@@ -858,27 +859,36 @@ fn read_toml(path: &Utf8Path, kind: &str) -> Result<toml::Value, String> {
 }
 
 /// Which manifest a `workspace = true` dependency resolves its declaration against.
-struct WorkspaceRoot {
-    /// The manifest carrying `[workspace.dependencies]`, when one was found.
-    path: Option<Utf8PathBuf>,
-    /// Whether that manifest is the consumer manifest itself — `[package]` and `[workspace]` in
-    /// one file. It is already parsed, so it must not be read a second time.
-    is_self: bool,
-    /// The absolutized consumer manifest the search ran from. A diagnostic that names the caller's
-    /// raw spelling would say "resolved nothing from `./Cargo.toml`", which tells the reader
-    /// nothing at all.
-    searched_from: Utf8PathBuf,
-    /// The nearest ancestor manifest that exists and does not parse, with the failure that stopped
-    /// it, when the search ended without a root.
-    ///
-    /// A hint appended to "no workspace manifest was found", never a replacement for it: it names
-    /// a file the reader can open and says what is wrong with it, conditionally, because nothing
-    /// here knows it was the workspace root — the walk gave up on it precisely because it could
-    /// not tell, and it may as well be a sibling crate or a stray file far above the project. It
-    /// is never treated as a manifest and never joins `manifests`: treating it as a root would
-    /// turn an ordinary crate that happens to sit under an unparseable `Cargo.toml` into a hard
-    /// `E023`, and naming it as one sends the reader to repair a file unrelated to their build.
-    unreadable: Option<(Utf8PathBuf, String)>,
+///
+/// Each outcome carries only what is read from it: the path searched from exists only where no
+/// root was found, the one place it is named. It was once a field of every outcome, and on the
+/// others it was never read, so nothing could observe what it held (#202).
+enum WorkspaceRoot {
+    /// The consumer manifest itself — `[package]` and `[workspace]` in one file — at its
+    /// absolutized path. It is already parsed and already in `manifests`, so it must not be read or
+    /// recorded a second time.
+    SelfRooted(Utf8PathBuf),
+    /// A separate manifest carrying `[workspace.dependencies]`, still to be read.
+    Separate(Utf8PathBuf),
+    /// None was found.
+    NotFound {
+        /// The absolutized consumer manifest the search ran from. A diagnostic that names the
+        /// caller's raw spelling would say "found nothing above `Cargo.toml`", which tells the
+        /// reader nothing at all.
+        searched_from: Utf8PathBuf,
+        /// The nearest ancestor manifest that exists and does not parse, with the failure that
+        /// stopped it.
+        ///
+        /// A hint appended to "no workspace manifest was found", never a replacement for it: it
+        /// names a file the reader can open and says what is wrong with it, conditionally, because
+        /// nothing here knows it was the workspace root — the walk gave up on it precisely because
+        /// it could not tell, and it may as well be a sibling crate or a stray file far above the
+        /// project. It is never treated as a manifest and never joins `manifests`: treating it as a
+        /// root would turn an ordinary crate that happens to sit under an unparseable `Cargo.toml`
+        /// into a hard `E023`, and naming it as one sends the reader to repair a file unrelated to
+        /// their build.
+        unreadable: Option<(Utf8PathBuf, String)>,
+    },
 }
 
 /// Locate the workspace manifest a `workspace = true` dependency inherits from.
@@ -906,33 +916,24 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
         .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
         .unwrap_or_else(|| manifest_path.to_path_buf());
     if manifest.get("workspace").is_some() {
-        return WorkspaceRoot {
-            // Absolutized for the same reason `searched_from` is: this path is what an
-            // unresolvable inheritance names, and `./Cargo.toml` tells the reader nothing. It is
-            // not added to `manifests` — a self-rooted manifest is the consumer manifest, already
-            // recorded — so naming it fully cannot duplicate a `rerun-if-changed` directive.
-            path: Some(absolute.clone()),
-            is_self: true,
-            searched_from: absolute,
-            unreadable: None,
-        };
+        // Absolutized for the same reason `searched_from` is: this path is what an unresolvable
+        // inheritance names, and `./Cargo.toml` tells the reader nothing. It is not added to
+        // `manifests` — a self-rooted manifest is the consumer manifest, already recorded — so
+        // naming it fully cannot duplicate a `rerun-if-changed` directive.
+        return WorkspaceRoot::SelfRooted(absolute);
     }
-    let separate = |path| WorkspaceRoot {
-        path,
-        is_self: false,
-        searched_from: absolute.clone(),
-        unreadable: None,
-    };
     if let Some(relative) = manifest
         .get("package")
         .and_then(|value| value.get("workspace"))
         .and_then(toml::Value::as_str)
     {
-        return separate(
-            absolute
-                .parent()
-                .map(|parent| parent.join(relative).join("Cargo.toml")),
-        );
+        return match absolute.parent() {
+            Some(parent) => WorkspaceRoot::Separate(parent.join(relative).join("Cargo.toml")),
+            None => WorkspaceRoot::NotFound {
+                searched_from: absolute,
+                unreadable: None,
+            },
+        };
     }
     let mut directory = absolute.parent().and_then(Utf8Path::parent);
     // The nearest candidate that exists and does not parse. Remembered, never acted on: a valid
@@ -950,7 +951,7 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
                     toml::from_str::<toml::Value>(&contents).map_err(|error| error.to_string())
                 }) {
                 Ok(value) if value.get("workspace").is_some() => {
-                    return separate(Some(candidate));
+                    return WorkspaceRoot::Separate(candidate);
                 }
                 // A manifest that parses but declares no `[workspace]` is an ordinary member or an
                 // unrelated crate: keep climbing.
@@ -961,13 +962,11 @@ fn workspace_root(manifest_path: &Utf8Path, manifest: &toml::Value) -> Workspace
         directory = candidate_dir.parent();
     }
     // Nothing on the path declared `[workspace]`, so there is no root to audit. The unreadable
-    // candidate rides along as `unreadable` rather than as `path`: it adds a hint to the
-    // not-found message an unresolvable inheritance prints, and nothing else. Handing it back as a
-    // root would have it audited and recorded as a dependency of the build, turning an ordinary
-    // crate that merely sits beneath a broken `Cargo.toml` into a hard `E023`.
-    WorkspaceRoot {
-        path: None,
-        is_self: false,
+    // candidate rides along as `unreadable` rather than as a root: it adds a hint to the not-found
+    // message an unresolvable inheritance prints, and nothing else. Handing it back as a root
+    // would have it audited and recorded as a dependency of the build, turning an ordinary crate
+    // that merely sits beneath a broken `Cargo.toml` into a hard `E023`.
+    WorkspaceRoot::NotFound {
         searched_from: absolute,
         unreadable,
     }
