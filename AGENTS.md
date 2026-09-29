@@ -78,8 +78,9 @@ sides together. `spargen/tests/corpus_manifest.rs` enforces it:
 them byte for byte, and `ci_installs_exactly_the_tool_versions_mise_pins` holds every tool CI
 installs to the exact version mise's `[tools]` pins (and every pin but `hk`, which CI never runs,
 to being installed by CI, and every job that runs a pinned tool to installing it itself) — so
-`deny` runs mise's cargo-deny rather than one an action bundles, and `the_deny_gate_states_the_feature_scope_it_audits` holds the shared command to
-`--all-features`, `--locked`, and a bare `check`. "Every CI job" is every job of every workflow
+`deny` runs mise's cargo-deny rather than one an action bundles, and `the_deny_gate_states_the_feature_scope_it_audits` holds the shared commands to
+`--all-features` and a bare `check`, the root audit to `--locked`, and every example workspace to
+an audit of its own under `--config deny.toml`. "Every CI job" is every job of every workflow
 under `.github/workflows/`: each file is either a gate workflow whose jobs are all paired or a
 listed non-gate workflow with its reason (only `release-plz.yml`, which publishes), and an
 unclassified file fails. Each gate workflow's `on:`, `concurrency:` and `permissions:` are pinned
@@ -126,8 +127,12 @@ supply-chain audit is **not hermetic** — cargo-deny fetches the RustSec databa
 `yanked = "deny"` reads the registry as it is now — so an advisory can turn every open pull request
 red with nothing committed. Three things hold the audit to the committed artefact:
 
-- `deny` runs with `--locked`, so a lockfile that does not match the manifests fails the audit
-  instead of being silently rewritten and the rewrite audited.
+- `deny` audits the root workspace with `--locked`, so a lockfile that does not match the
+  manifests fails the audit instead of being silently rewritten and the rewrite audited. It also
+  audits each example workspace, under the same `deny.toml`, but unlocked, like every gate that
+  compiles them (their `spargen` stamp goes stale on each release, below): an example audit covers
+  exactly the graph those gates compile, and like `mise run example` it rewrites that stamp
+  locally.
 - `deny.yml` runs it daily on `master` (and on `workflow_dispatch`), so the repository finds a new
   advisory before a contributor's unrelated pull request does. GitHub sends a failed scheduled run
   to whoever last changed the workflow's `cron`, and disables a schedule after 60 days without
@@ -180,7 +185,7 @@ the crate is in. That pull request merges first, and open
 pull requests then merge `master` in; none of them carries the fix. Otherwise a lockfile changes
 only with the manifest change that needs it, and the workspace one also in release-plz's release
 pull request. That pull request does not touch the example lockfiles, so their `spargen` version
-stamp goes stale on each release and a local `mise run example` rewrites it; that rewrite is not
+stamp goes stale on each release and a local `mise run example` or `mise run deny` rewrites it; that rewrite is not
 part of any change and is not committed with one.
 
 Standing invariants:
