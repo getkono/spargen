@@ -4707,6 +4707,300 @@ components:
     );
 }
 
+/// A spec that turns on every capability the requirement table knows: a JSON body (`reqwest/json`),
+/// a multipart body (`reqwest/multipart`), a binary array inside JSON (`bytes/serde`), an XML body
+/// (`quick-xml`), an event stream (`futures-core` + `reqwest/stream`), `format: uuid` (`uuid`) and
+/// `format: date-time` (`time`). The advice round trip below is only as strong as the set it
+/// round-trips, so it asserts this spec really derives all of them.
+const EVERY_CAPABILITY_SPEC: &str = r##"openapi: 3.1.0
+info: { title: Everything, version: 1.0.0 }
+paths:
+  /json:
+    post:
+      operationId: postJson
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Stamped" }
+      responses:
+        "204": { description: ok }
+  /upload:
+    post:
+      operationId: upload
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file: { type: string, format: binary }
+      responses:
+        "204": { description: ok }
+  /binary-array:
+    get:
+      operationId: binaryArray
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { type: string, format: binary }
+  /xml:
+    get:
+      operationId: getXml
+      responses:
+        "200":
+          description: ok
+          content:
+            application/xml:
+              schema: { $ref: "#/components/schemas/XmlBody" }
+  /events:
+    get:
+      operationId: events
+      responses:
+        "200":
+          description: events
+          content:
+            text/event-stream:
+              schema: { type: string }
+components:
+  schemas:
+    Stamped:
+      type: object
+      required: [id, at]
+      properties:
+        id: { type: string, format: uuid }
+        at: { type: string, format: date-time }
+    XmlBody:
+      type: object
+      properties:
+        value: { type: string }
+"##;
+
+/// Write `manifests` (paths relative to `root`) plus an empty `src/lib.rs` beside each, prove Cargo
+/// itself accepts the layout — so the audit is never judged clean on a manifest Cargo would refuse —
+/// and return what the `E023` audit says about `member` for `spec`.
+fn audit_materialized_layout(
+    root: &std::path::Path,
+    manifests: &[(&str, String)],
+    member: &str,
+    spec: &Utf8PathBuf,
+) -> spargen::__private::MacroPreview {
+    for (path, contents) in manifests {
+        let path = root.join(path);
+        let dir = path.parent().unwrap();
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/lib.rs"), "").unwrap();
+        std::fs::write(&path, contents).unwrap();
+    }
+    let manifest = root.join(member);
+    let metadata = Command::new("cargo")
+        .args([
+            "metadata",
+            "--no-deps",
+            "--offline",
+            "--format-version",
+            "1",
+        ])
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .output()
+        .unwrap();
+    assert!(
+        metadata.status.success(),
+        "Cargo must accept the materialized layout before the audit's verdict on it means \
+         anything:\n{}\n{manifests:#?}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    spargen::__private::preview_for_macro(&Spec::new(spec.clone()), manifest.to_str().unwrap())
+}
+
+fn assert_audit_clean(preview: &spargen::__private::MacroPreview, layout: &str) {
+    let contract = preview
+        .report
+        .diagnostics()
+        .iter()
+        .filter(|diagnostic| diagnostic.code == Code::RuntimeDependencyContract)
+        .collect::<Vec<_>>();
+    assert!(
+        contract.is_empty(),
+        "following `spargen deps` ({layout}) must satisfy the E023 audit:\n{contract:#?}"
+    );
+    assert_eq!(
+        preview.report.outcome(),
+        Outcome::Generated,
+        "{layout}: {:#?}",
+        preview.report
+    );
+}
+
+/// #158: `spargen deps` is the advice and the `E023` audit is the check, and a consumer who does
+/// exactly what the first says must pass the second — in both shapes the advice admits. The
+/// requirement set is derived from a real spec through `spargen::requirements` (what backs
+/// `spargen deps`), not written by hand, and each layout is audited through the same entry point a
+/// build uses on a real manifest on disk, with Cargo confirming the layout is one it accepts.
+///
+/// - **Direct:** the printed block pasted verbatim into the member, which is what the advice most
+///   literally says; then with the blocking opt-in taken as the block describes it (declare the
+///   feature, uncomment the dependency).
+/// - **Workspace-inherited:** every requirement moved into the root's `[workspace.dependencies]`
+///   and the member inheriting each with `workspace = true` in the table the advice names. The one
+///   thing that cannot move is `optional = true`: Cargo refuses it in `[workspace.dependencies]`,
+///   so it stays on the member's inheriting line, as it must in any real workspace.
+#[test]
+fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inheritance() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
+    std::fs::write(&spec, EVERY_CAPABILITY_SPEC).unwrap();
+    let requirements = spargen::requirements(&Spec::new(spec.clone())).expect("spec lowers");
+
+    // The set is non-trivial: every conditional crate and feature is in it, so neither layout can
+    // pass by the table having shrunk to the five core crates.
+    let features_of = |name: &str| {
+        requirements
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.name == name)
+            .unwrap_or_else(|| panic!("`{name}` missing from {requirements:#?}"))
+            .features
+            .clone()
+    };
+    for feature in ["json", "multipart", "stream"] {
+        assert!(
+            features_of("reqwest").contains(&feature),
+            "{requirements:#?}"
+        );
+    }
+    assert!(features_of("bytes").contains(&"serde"), "{requirements:#?}");
+    for crate_name in ["futures-core", "quick-xml", "uuid", "time", "tokio"] {
+        features_of(crate_name);
+    }
+
+    let package = |name: &str| format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\n");
+    let block = requirements.manifest_block();
+    let opted_in = block
+        .replace("# [target", "[target")
+        .replace("# tokio", "tokio");
+    assert_ne!(
+        opted_in, block,
+        "the blocking opt-in is rendered commented out:\n{block}"
+    );
+    let blocking = "[features]\nblocking = [\"dep:tokio\"]\n";
+
+    // Direct, verbatim. `[workspace]` keeps each fixture its own root, so the walk upward never
+    // leaves the temporary directory.
+    let direct = temp.path().join("direct");
+    let preview = audit_materialized_layout(
+        &direct,
+        &[(
+            "Cargo.toml",
+            format!("{}\n{block}\n[workspace]\n", package("direct")),
+        )],
+        "Cargo.toml",
+        &spec,
+    );
+    assert_audit_clean(&preview, "direct, verbatim");
+
+    // Direct, with the blocking opt-in.
+    let direct_blocking = temp.path().join("direct-blocking");
+    let preview = audit_materialized_layout(
+        &direct_blocking,
+        &[(
+            "Cargo.toml",
+            format!(
+                "{}\n{blocking}\n{opted_in}\n[workspace]\n",
+                package("direct-blocking")
+            ),
+        )],
+        "Cargo.toml",
+        &spec,
+    );
+    assert_audit_clean(&preview, "direct, blocking opted in");
+
+    // Workspace-inherited, from the same structured requirements `spargen deps --format json`
+    // serializes. The root carries every declaration minus `optional`; the member carries only
+    // `workspace = true` (plus `optional = true` where required), each under the advice's table.
+    let mut root_dependencies = String::from("[workspace.dependencies]\n");
+    for dependency in &requirements.dependencies {
+        let declared = spargen::RequiredDependency {
+            optional: false,
+            ..dependency.clone()
+        };
+        root_dependencies.push_str(&declared.manifest_line());
+        root_dependencies.push('\n');
+    }
+    let inheriting = |include_opt_in: bool| {
+        let mut member = String::new();
+        let mut table = None;
+        for dependency in requirements
+            .dependencies
+            .iter()
+            .filter(|dependency| include_opt_in || dependency.required_by_feature.is_none())
+        {
+            if table != Some(dependency.table) {
+                member.push_str(&format!("\n[{}]\n", dependency.table));
+                table = Some(dependency.table);
+            }
+            let optional = if dependency.optional {
+                ", optional = true"
+            } else {
+                ""
+            };
+            member.push_str(&format!(
+                "{} = {{ workspace = true{optional} }}\n",
+                dependency.name
+            ));
+        }
+        member
+    };
+    let root = format!("[workspace]\nmembers = [\"client\"]\n\n{root_dependencies}");
+
+    let inherited = temp.path().join("inherited");
+    let preview = audit_materialized_layout(
+        &inherited,
+        &[
+            ("Cargo.toml", root.clone()),
+            (
+                "client/Cargo.toml",
+                format!("{}{}", package("inherited"), inheriting(false)),
+            ),
+        ],
+        "client/Cargo.toml",
+        &spec,
+    );
+    assert_audit_clean(&preview, "workspace-inherited");
+    assert!(
+        preview
+            .source_files
+            .iter()
+            .any(|path| path.as_std_path() == inherited.join("Cargo.toml")),
+        "the audit must have resolved the inheritance through the root: {:#?}",
+        preview.source_files
+    );
+
+    let inherited_blocking = temp.path().join("inherited-blocking");
+    let preview = audit_materialized_layout(
+        &inherited_blocking,
+        &[
+            ("Cargo.toml", root),
+            (
+                "client/Cargo.toml",
+                format!(
+                    "{}\n{blocking}{}",
+                    package("inherited-blocking"),
+                    inheriting(true)
+                ),
+            ),
+        ],
+        "client/Cargo.toml",
+        &spec,
+    );
+    assert_audit_clean(&preview, "workspace-inherited, blocking opted in");
+}
+
 /// A preview of a spec that uses an unsupported construct rejects loudly (matching `generate`) and
 /// retains no files — the proc-macro relies on this to raise a `compile_error!` instead of emitting
 /// half-generated code.
