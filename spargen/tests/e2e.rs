@@ -220,6 +220,124 @@ fn an_operation_named_after_a_runtime_type_still_compiles() {
     );
 }
 
+/// Issue #356: the inline schema of the path parameter `date` is given the hint name `Date`, and
+/// the response's `format: date-time` makes the `types` module import the runtime `Date` and
+/// `DateTime`, so the alias otherwise lands beside `use super::{Date, DateTime};` (`E0255`). The
+/// named components exercise every other spelling the `types` module brings into scope by `use`
+/// or names bare from the prelude.
+const TYPES_SCOPE_COLLISION_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /terms/{date}:
+    parameters:
+      - name: date
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getTerms
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  at: { type: string, format: date-time }
+  /everything:
+    get:
+      operationId: getEverything
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  date_time: { $ref: '#/components/schemas/DateTime' }
+                  serialize: { $ref: '#/components/schemas/Serialize' }
+                  deserialize: { $ref: '#/components/schemas/Deserialize' }
+                  b_tree_map: { $ref: '#/components/schemas/BTreeMap' }
+                  string: { $ref: '#/components/schemas/String' }
+                  option: { $ref: '#/components/schemas/Option' }
+                  vec: { $ref: '#/components/schemas/Vec' }
+                  box: { $ref: '#/components/schemas/Box' }
+                  result: { $ref: '#/components/schemas/Result' }
+                  day: { type: string, format: date }
+                  tags: { type: array, items: { type: string } }
+                  extra: { type: object, additionalProperties: { type: string } }
+components:
+  schemas:
+    DateTime: { type: string }
+    Serialize: { type: object, properties: { name: { type: string } } }
+    Deserialize: { type: object, properties: { name: { type: string } } }
+    BTreeMap: { type: object, properties: { name: { type: string } } }
+    String: { type: object, properties: { name: { type: string } } }
+    Option: { type: object, properties: { name: { type: string } } }
+    Vec: { type: object, properties: { name: { type: string } } }
+    Box: { type: object, properties: { next: { $ref: '#/components/schemas/Box' } } }
+    Result: { type: object, properties: { name: { type: string } } }
+"#;
+
+/// A schema whose name the `types` module already uses must be disambiguated like any other clash
+/// rather than emitted beside the import or prelude item of that name (issue #356).
+#[test]
+fn a_schema_named_after_a_name_the_types_module_uses_still_compiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, TYPES_SCOPE_COLLISION_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "types_scope_collide");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("use super::{Date, DateTime};"),
+        "the fixture must make the `types` module import the runtime date types:\n{generated}"
+    );
+    for taken in [
+        "Date",
+        "DateTime",
+        "Serialize",
+        "Deserialize",
+        "BTreeMap",
+        "String",
+        "Option",
+        "Vec",
+        "Box",
+        "Result",
+    ] {
+        for item in ["pub type", "pub struct", "pub enum"] {
+            assert!(
+                !generated.contains(&format!("{item} {taken} ")),
+                "a schema must not take `{taken}` from the `types` module's scope:\n{generated}"
+            );
+        }
+    }
+
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "a schema named after a name the `types` module uses must still generate compiling code"
+    );
+}
+
 /// One operation per fixed inherent method of `Client` and `BlockingClient` (issue #286). The spec
 /// declares a server, so `with_default_server` is emitted too, and the fixture is checked with the
 /// `blocking` feature on, so the `BlockingClient` methods (`inner` among them) are compiled.

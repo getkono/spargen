@@ -3706,4 +3706,228 @@ mod tests {
             );
         }
     }
+
+    /// Every capitalised identifier in `tokens` that is written bare — not after `::` or `.`, and
+    /// not inside an attribute — appended to `into`.
+    fn bare_capitalised_idents(tokens: proc_macro2::TokenStream, into: &mut Vec<String>) {
+        use proc_macro2::TokenTree;
+        let mut previous: Option<TokenTree> = None;
+        let mut before_previous: Option<TokenTree> = None;
+        for token in tokens {
+            match &token {
+                TokenTree::Group(group) => {
+                    let in_attribute = matches!(&previous, Some(TokenTree::Punct(p)) if p.as_char() == '#')
+                        && group.delimiter() == proc_macro2::Delimiter::Bracket;
+                    if !in_attribute {
+                        bare_capitalised_idents(group.stream(), into);
+                    }
+                }
+                TokenTree::Ident(ident) => {
+                    let name = ident.to_string();
+                    let after_path_separator = matches!(
+                        (&before_previous, &previous),
+                        (Some(TokenTree::Punct(a)), Some(TokenTree::Punct(b)))
+                            if a.as_char() == ':' && b.as_char() == ':'
+                    );
+                    let after_dot =
+                        matches!(&previous, Some(TokenTree::Punct(p)) if p.as_char() == '.');
+                    if name.starts_with(|c: char| c.is_ascii_uppercase())
+                        && !after_path_separator
+                        && !after_dot
+                    {
+                        into.push(name);
+                    }
+                }
+                TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+            }
+            before_previous = previous.replace(token);
+        }
+    }
+
+    /// The name every leaf of `tree` brings into scope, appended to `into`.
+    fn use_leaves(tree: &syn::UseTree, into: &mut Vec<String>) {
+        match tree {
+            syn::UseTree::Path(path) => use_leaves(&path.tree, into),
+            syn::UseTree::Name(name) => into.push(name.ident.to_string()),
+            syn::UseTree::Rename(rename) => into.push(rename.rename.to_string()),
+            syn::UseTree::Group(group) => {
+                group.items.iter().for_each(|tree| use_leaves(tree, into))
+            }
+            syn::UseTree::Glob(_) => panic!("a glob import brings in names no list can reserve"),
+        }
+    }
+
+    /// What the `types` module emitted for one alias per `(hint, kind)` beside a `Text` string
+    /// definition: the names its `use` items bring in, the capitalised names it writes bare (the
+    /// emitted functions' own type parameters excluded), and the names it defines.
+    struct TypesModuleNames {
+        imported: Vec<String>,
+        written: Vec<String>,
+        defined: std::collections::BTreeSet<String>,
+    }
+
+    /// The alias kinds [`types_module_names`] can emit: a date, a date-time, or a nullable boxed
+    /// array of the `Text` definition, which writes `Vec`, `Box`, `Option`, and `String` bare.
+    #[derive(Clone, Copy)]
+    enum AliasKind {
+        Date,
+        DateTime,
+        List,
+    }
+
+    fn types_module_names(aliases: &[(&str, AliasKind)]) -> TypesModuleNames {
+        use quote::ToTokens;
+
+        let mut types = TypeGraph::default();
+        let mut define = |name: &str, kind| {
+            types.insert(TypeDef {
+                name_hint: name.to_owned(),
+                kind,
+                docs: Docs::default(),
+                provenance: Provenance::new(JsonPointer::root().push(name), None),
+                document: String::new(),
+            })
+        };
+        let text = define("Text", TypeKind::Primitive(Prim::String));
+        for (name, kind) in aliases {
+            let kind = match kind {
+                AliasKind::Date => TypeKind::Primitive(Prim::Date),
+                AliasKind::DateTime => TypeKind::Primitive(Prim::DateTime),
+                AliasKind::List => TypeKind::Array(Box::new(Ty {
+                    id: text,
+                    nullable: true,
+                    boxed: true,
+                })),
+            };
+            define(name, kind);
+        }
+        let api = Api {
+            info: Info {
+                title: "T".to_owned(),
+                version: "1".to_owned(),
+                description: None,
+            },
+            servers: Vec::new(),
+            operations: Vec::new(),
+            types,
+            security_schemes: IndexMap::new(),
+        };
+        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let file: syn::File =
+            syn::parse2(super::emit_models(&api, &names, &CodegenOptions::default()))
+                .expect("the emitted types module parses");
+        let [syn::Item::Mod(module)] = file.items.as_slice() else {
+            panic!("the models are emitted as one module");
+        };
+        let (_, items) = module.content.as_ref().expect("the module is inline");
+
+        let mut imported = Vec::new();
+        let mut written = Vec::new();
+        let mut defined = std::collections::BTreeSet::new();
+        for item in items {
+            match item {
+                syn::Item::Use(import) => use_leaves(&import.tree, &mut imported),
+                syn::Item::Type(alias) => {
+                    defined.insert(alias.ident.to_string());
+                    bare_capitalised_idents(alias.ty.to_token_stream(), &mut written);
+                }
+                syn::Item::Fn(function) => {
+                    let generics: Vec<String> = function
+                        .sig
+                        .generics
+                        .type_params()
+                        .map(|param| param.ident.to_string())
+                        .collect();
+                    let mut idents = Vec::new();
+                    bare_capitalised_idents(function.to_token_stream(), &mut idents);
+                    written.extend(idents.into_iter().filter(|ident| !generics.contains(ident)));
+                }
+                other => panic!(
+                    "an unexpected item in the types module: {}",
+                    other.to_token_stream()
+                ),
+            }
+        }
+        TypesModuleNames {
+            imported,
+            written,
+            defined,
+        }
+    }
+
+    /// Issue #356: a model is emitted into the `types` module beside that module's own imports and
+    /// the prelude types it writes bare, so a schema hinted `Date` redefined the runtime `Date` the
+    /// module imports (`E0255`). `name::TYPES_MODULE_NAMES` must hold every name the module brings
+    /// in by `use` and every capitalised type-namespace name it writes bare. The first module's
+    /// definitions spell none of those names, so every such use is one the list must reserve; both
+    /// date types are used, so the date import is emitted.
+    #[test]
+    fn types_module_names_cover_every_name_the_types_module_uses() {
+        let used = types_module_names(&[
+            ("Day", AliasKind::Date),
+            ("Moment", AliasKind::DateTime),
+            ("Texts", AliasKind::List),
+        ]);
+        for date in ["Date", "DateTime"] {
+            assert!(
+                used.imported.iter().any(|name| name == date),
+                "the fixture must make the `types` module import `{date}`: {:?}",
+                used.imported
+            );
+        }
+        for bare in ["Box", "Option", "Result", "String", "Vec"] {
+            assert!(
+                used.written.iter().any(|name| name == bare),
+                "the walk must see the bare `{bare}` the fixture emits: {:?}",
+                used.written
+            );
+        }
+        // Enum variants of the prelude live in the value namespace, which no emitted model occupies.
+        let prelude_variants = ["Some", "None", "Ok", "Err", "Self"];
+        for name in used
+            .imported
+            .iter()
+            .chain(used.written.iter().filter(|name| {
+                !prelude_variants.contains(&name.as_str()) && !used.defined.contains(*name)
+            }))
+        {
+            assert!(
+                crate::name::TYPES_MODULE_NAMES.contains(&name.as_str()),
+                "the `types` module uses `{name}`, which `name::TYPES_MODULE_NAMES` does not reserve"
+            );
+        }
+    }
+
+    /// A definition whose hint spells a name the `types` module uses yields it, whichever of the
+    /// shapes the definition has, and the module still imports the date types it needs.
+    #[test]
+    fn a_definition_spelling_a_types_module_name_yields_it() {
+        let aliases: Vec<(&str, AliasKind)> = crate::name::TYPES_MODULE_NAMES
+            .iter()
+            .map(|name| {
+                let kind = match *name {
+                    "Date" => AliasKind::Date,
+                    "DateTime" => AliasKind::DateTime,
+                    _ => AliasKind::List,
+                };
+                (*name, kind)
+            })
+            .collect();
+        let used = types_module_names(&aliases);
+        assert_eq!(
+            used.defined.len(),
+            aliases.len() + 1,
+            "every alias and `Text` must be defined once: {:?}",
+            used.defined
+        );
+        for name in crate::name::TYPES_MODULE_NAMES {
+            assert!(
+                !used.defined.contains(*name),
+                "a definition kept the bare spelling `{name}` the `types` module already uses"
+            );
+        }
+        for date in ["Date", "DateTime"] {
+            assert!(used.imported.iter().any(|name| name == date));
+        }
+    }
 }
