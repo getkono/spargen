@@ -20,6 +20,20 @@ pub(crate) struct Resolved<'doc> {
     pub(crate) schema: Cow<'doc, Schema>,
 }
 
+/// Why [`Resolver::resolve_component`] could not produce its target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ComponentMiss {
+    /// The bundle could not place the reference in a loaded file at a JSON Pointer: it names a
+    /// file the bundle does not hold, or a fragment form (a named anchor) the resolver declines to
+    /// walk, and the bundle cannot tell which.
+    Unclassifiable,
+    /// The reference names a loaded file, but nothing sits at its JSON Pointer.
+    AbsentTarget,
+    /// The target exists but is not the object it should be. The parser has already reported
+    /// that itself, at the target.
+    Unparsable,
+}
+
 impl<'doc> Resolver<'doc> {
     /// Build a resolver over a document and its bundle.
     pub(crate) fn new(document: &'doc Document, bundle: &'doc InputBundle) -> Self {
@@ -36,6 +50,26 @@ impl<'doc> Resolver<'doc> {
     /// it wrong with no test to notice. The authority is one call away, so ask it.
     pub(super) fn root_id(&self) -> crate::diag::FileId {
         self.bundle.root_id()
+    }
+
+    /// The load-order-independent spelling of `file`: empty for the root document, the retrieval
+    /// URL of a vendored remote document, and otherwise the local path relative to the root
+    /// document's directory (the loaded path itself when it does not sit under that directory).
+    ///
+    /// A [`crate::diag::FileId`] is assigned as the bundle discovers files, so it changes when the
+    /// document's references are reordered; this spelling does not, which is what lets a type's
+    /// `(document, pointer)` identity rank a contested name.
+    pub(super) fn document_key(&self, file: crate::diag::FileId) -> String {
+        if file == self.bundle.root_id() {
+            return String::new();
+        }
+        if let Some(url) = self.bundle.remote_origin(file) {
+            return url.to_owned();
+        }
+        self.bundle
+            .root_relative_path(file)
+            .unwrap_or_default()
+            .to_owned()
     }
 
     /// The `(file, pointer)` pair a `$ref` written at `at` denotes, independent of how it is spelled.
@@ -162,6 +196,7 @@ impl<'doc> Resolver<'doc> {
         diags: &mut Diagnostics,
     ) -> Option<super::PathItem> {
         let Some((file, pointer)) = self.bundle.reference_target(reference, from) else {
+            // E004 case: unsupported-or-unresolved
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!(
                     "unsupported or unresolved Path Item `$ref` `{reference}`"
@@ -170,6 +205,7 @@ impl<'doc> Resolver<'doc> {
             return None;
         };
         let Some(node) = self.bundle.value_at(file).pointer(&pointer) else {
+            // E004 case: absent-target
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!(
                     "Path Item `$ref` target `{reference}` was not found in the input bundle"
@@ -185,16 +221,56 @@ impl<'doc> Resolver<'doc> {
     /// Multi-file API descriptions commonly reference a whole file — `../responses/Error.yaml` —
     /// rather than a `#/components/...` entry, so component aliases fall back to the bundle the
     /// same way schema references already do.
+    ///
+    /// A miss says which of the three ways it failed, so the caller can report each in its own
+    /// words rather than one wording for all of them.
     pub(crate) fn resolve_component<T>(
         &self,
         reference: &str,
         from: crate::diag::FileId,
         parse: impl Fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
         diags: &mut Diagnostics,
-    ) -> Option<T> {
-        let (file, pointer) = self.bundle.reference_target(reference, from)?;
-        let node = self.bundle.value_at(file).pointer(&pointer)?;
-        parse(&node.clone(), &pointer, diags)
+    ) -> Result<T, ComponentMiss> {
+        let (node, pointer) = self.component_target(reference, from)?;
+        parse(&node.clone(), &pointer, diags).ok_or(ComponentMiss::Unparsable)
+    }
+
+    /// [`Self::resolve_component`] for a position whose target may itself be a Reference Object —
+    /// the Parameter, Request Body, Response and Header positions, where the specification allows
+    /// `Reference | Object` at every hop.
+    ///
+    /// A target holding a `$ref` is returned as that [`super::RefOr::Ref`], carrying its own
+    /// provenance, so the caller follows the chain from the file the next hop is written in rather
+    /// than parsing the intermediate Reference Object as though it were the object it points to
+    /// (#274): a Parameter with no `in`, or a Response with no content.
+    pub(crate) fn resolve_component_or_ref<T>(
+        &self,
+        reference: &str,
+        from: crate::diag::FileId,
+        parse: fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
+        diags: &mut Diagnostics,
+    ) -> Result<super::RefOr<T>, ComponentMiss> {
+        let (node, pointer) = self.component_target(reference, from)?;
+        super::deserialize::parse_ref_or(&node.clone(), &pointer, diags, parse)
+            .ok_or(ComponentMiss::Unparsable)
+    }
+
+    /// The node a non-component `$ref` written in `from` targets, and its pointer in its file.
+    fn component_target(
+        &self,
+        reference: &str,
+        from: crate::diag::FileId,
+    ) -> Result<(&'doc SpannedValue, crate::diag::JsonPointer), ComponentMiss> {
+        let (file, pointer) = self
+            .bundle
+            .reference_target(reference, from)
+            .ok_or(ComponentMiss::Unclassifiable)?;
+        let node = self
+            .bundle
+            .value_at(file)
+            .pointer(&pointer)
+            .ok_or(ComponentMiss::AbsentTarget)?;
+        Ok((node, pointer))
     }
 
     fn resolve_bundle(
@@ -205,12 +281,14 @@ impl<'doc> Resolver<'doc> {
         diags: &mut Diagnostics,
     ) -> Result<Resolved<'doc>, Aborted> {
         let Some((file, pointer)) = self.bundle.reference_target(reference, from) else {
+            // E004 case: unsupported-or-unresolved
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!("unsupported or unresolved $ref `{reference}`"))
                 .emit(diags);
             return Err(Aborted);
         };
         let Some(node) = self.bundle.value_at(file).pointer(&pointer) else {
+            // E004 case: absent-target
             Diagnostic::error(Code::UnresolvedRef, at.clone())
                 .message(format!(
                     "$ref target `{reference}` was not found in the input bundle"

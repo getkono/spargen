@@ -38,7 +38,8 @@ Commands:
 ```
 
 `check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, `--carve`,
-`--no-uuid`, `--no-time`, `--error-body-cap`, `--batch-cap`, and the repeatable `--omit-path`,
+`--no-uuid`, `--no-time`, `--error-body-cap`, `--batch-cap`, `--open-narrowing`, and the
+repeatable `--omit-path`,
 `--omit-operation`, `--omit-component`, `--omit-pointer` — which is exactly the setter list on
 `spargen::Spec`, so the CLI, `build.rs`, `generate_api!`, and `spargen.toml` cannot drift.
 
@@ -69,6 +70,15 @@ spargen deps <SPEC> [OPTIONS]
 The block it prints is the block the audit accepts — both read one table, and a test pins that they
 agree. Opt-in dependencies (the blocking client's `tokio`) are printed commented out under the
 Cargo feature that would require them. `--format json` emits the same set structurally.
+
+The block is written for the package's own tables, but a workspace member may inherit it instead:
+move each entry, `default-features = false` included, into the root's `[workspace.dependencies]`,
+and declare it `{ workspace = true }` in the member under the table the block names, keeping
+`optional = true` on the member's line (Cargo refuses it in `[workspace.dependencies]`). The audit
+follows that inheritance, and a test drives both layouts through it. A member's
+`default-features = false` does not turn off defaults the root leaves on; the
+[runtime dependency contract](getting-started.md#workspace-inheritance-and-the-full-contract)
+carries the full rules.
 
 ## `spargen lock`
 

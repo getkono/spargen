@@ -853,21 +853,38 @@ fn lower_frontend(
     spec: &Spec,
     diags: &mut diag::Diagnostics,
 ) -> Result<(ir::Api, name::Names), ()> {
+    let bundle = load_bundle(spec, diags)?;
+    lower_bundle(spec, &bundle, diags)
+}
+
+/// The input bundle `spec` names, with its omit profile applied: the first half of
+/// [`lower_frontend`], split out so the carve driver can map a rejection back onto the very bundle
+/// that produced it.
+fn load_bundle(spec: &Spec, diags: &mut diag::Diagnostics) -> Result<source::InputBundle, ()> {
     let mut bundle = source::InputBundle::load(&spec.path, diags).map_err(|_| ())?;
 
     if !spec.omit.is_empty() && spec.omit.apply(&mut bundle, diags).is_err() {
         return Err(());
     }
+    Ok(bundle)
+}
 
+/// The rest of [`lower_frontend`]: validate, parse, audit, lower, and allocate names over `bundle`,
+/// with the lowering options `spec` sets.
+fn lower_bundle(
+    spec: &Spec,
+    bundle: &source::InputBundle,
+    diags: &mut diag::Diagnostics,
+) -> Result<(ir::Api, name::Names), ()> {
     let validator = oas31::MetaSchemaValidator::load_vendored();
-    validator.validate(bundle.root(), diags);
+    validator.validate(bundle, diags);
     if diags.has_errors() {
         return Err(());
     }
 
-    let document = oas31::parse_document(&bundle, diags).map_err(|_| ())?;
+    let document = oas31::parse_document(bundle, diags).map_err(|_| ())?;
 
-    let resolver = oas31::Resolver::new(&document, &bundle);
+    let resolver = oas31::Resolver::new(&document, bundle);
     oas31::audit(&document, &resolver, diags);
     if diags.has_errors() {
         return Err(());
@@ -875,7 +892,10 @@ fn lower_frontend(
 
     // `check` runs the full frontend — lowering, IR invariants, and name allocation — so it fires
     // exactly the diagnostics `generate` would, just without emitting code.
-    let api = oas31::lower(&document, &resolver, diags).map_err(|_| ())?;
+    let options = oas31::LowerOptions {
+        open_narrowing: spec.open_narrowing,
+    };
+    let api = oas31::lower(&document, &resolver, diags, options).map_err(|_| ())?;
     ir::check_invariants(&api, diags);
     if diags.has_errors() {
         return Err(());
@@ -987,15 +1007,20 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
         let probe = Spec {
             omit: omit.clone(),
             carve: false,
-            // The carve mapper must see *every* error diagnostic to carve correctly, so the probe
-            // runs with an unbounded batch (a spec has finitely many constructs). The user's
-            // `batch_cap` still governs the final, user-facing report below.
-            batch_cap: usize::MAX,
             ..spec.clone()
         };
-        // The probe is always a `Check` run, so it never retains a plan.
-        let report = run_pipeline(&probe, PipelineMode::Check).report;
-        if report.outcome != Outcome::Rejected {
+        // The probe is the frontend alone — what a `Check` run does — kept by hand rather than
+        // through `run_pipeline` because the carve mapper needs the bundle it ran over: a
+        // diagnostic's pointer addresses the file its span lies in, and only the bundle can name
+        // that file in a rule or find the `$ref`s that reach it. The mapper must also see *every*
+        // error diagnostic to carve correctly, so the probe's batch is unbounded (a spec has
+        // finitely many constructs); the user's `batch_cap` still governs the final report below.
+        let mut diags = diag::Diagnostics::new(usize::MAX);
+        let bundle = load_bundle(&probe, &mut diags).ok();
+        let lowered = bundle
+            .as_ref()
+            .is_some_and(|bundle| lower_bundle(&probe, bundle, &mut diags).is_ok());
+        if lowered {
             // Converged: generate/preview/check for real with the carved omit set.
             let resolved = Spec {
                 omit,
@@ -1004,8 +1029,13 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
             };
             return run_pipeline(&resolved, mode);
         }
+        let report = report(diags, Outcome::Rejected);
 
-        let new_rules: Vec<compat::OmitRule> = compat::carve_rules(&report.diagnostics)
+        // No bundle means the input did not load or the omit profile itself failed (`E019`/`E020`),
+        // and neither encloses a construct to carve.
+        let new_rules: Vec<compat::OmitRule> = bundle
+            .map(|bundle| compat::carve_rules(&report.diagnostics, &bundle))
+            .unwrap_or_default()
             .into_iter()
             .filter(|rule| !omit.rules.contains(rule))
             .collect();
@@ -1130,7 +1160,7 @@ mod tests {
                 Diagnostic::error(Code::UnsupportedOpenApiVersion, provenance.clone())
                     .message("a rejection")
                     .build(),
-                Diagnostic::warning(Code::DeclarationHasNoEffect, provenance)
+                Diagnostic::warning(Code::ServerInitiatedFlowIgnored, provenance)
                     .message("a warning")
                     .build(),
             ],

@@ -170,21 +170,36 @@ fn all_of_spec(members: &[Member]) -> String {
     spec
 }
 
-/// `true` when some property name is declared with two different types across members — the
-/// irreconcilable case (`E013`).
-fn has_type_conflict(members: &[Member]) -> bool {
+/// Every property name declared with two different types across members. `string` and `integer`
+/// share no value, so such a property can only be absent.
+fn type_conflicts(members: &[Member]) -> BTreeSet<usize> {
     let mut seen: BTreeMap<usize, PropType> = BTreeMap::new();
+    let mut conflicts = BTreeSet::new();
     for member in members {
         for (&name, (ty, _)) in member {
             match seen.get(&name) {
-                Some(existing) if existing != ty => return true,
+                Some(existing) if existing != ty => {
+                    conflicts.insert(name);
+                }
                 _ => {
                     seen.insert(name, *ty);
                 }
             }
         }
     }
-    false
+    conflicts
+}
+
+/// `true` when a conflicting property is required by some member — the irreconcilable case
+/// (`E013`): every instance must carry a value no type admits. A conflict on a property no member
+/// requires leaves the objects that omit it valid, so it is typed uninhabited instead.
+fn has_required_type_conflict(members: &[Member]) -> bool {
+    let conflicts = type_conflicts(members);
+    members.iter().any(|member| {
+        member
+            .iter()
+            .any(|(name, (_, required))| *required && conflicts.contains(name))
+    })
 }
 
 proptest! {
@@ -214,15 +229,16 @@ proptest! {
         prop_assert!(source.contains("pub enum U"), "union was not emitted as a typed enum:\n{source}");
     }
 
-    /// A conflicting property type across members is `E013`; otherwise the merge succeeds keeping the
-    /// UNION of every member's fields (no field loss) and the UNION of every member's `required`.
+    /// A conflicting property type across members that some member requires is `E013`; otherwise the
+    /// merge succeeds keeping the UNION of every member's fields (no field loss) and the UNION of
+    /// every member's `required`, and an optional conflicting property is typed uninhabited.
     #[test]
     fn all_of_merge_reconciles(
         members in proptest::collection::vec(member_strategy(), 2..=3)
     ) {
         let spec = all_of_spec(&members);
 
-        if has_type_conflict(&members) {
+        if has_required_type_conflict(&members) {
             let report = check(&spec);
             prop_assert_eq!(report.outcome(), Outcome::Rejected, "{:#?}", report);
             prop_assert!(has_code(&report, Code::AllOfIrreconcilable), "{:#?}", report);
@@ -233,6 +249,15 @@ proptest! {
         let (report, source) = generate_module(&spec);
         prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
         prop_assert!(!has_code(&report, Code::AllOfIrreconcilable), "{:#?}", report);
+
+        // An optional conflict is an uninhabited type, never a silently widened or dropped one; with
+        // no conflict nothing is uninhabited.
+        prop_assert_eq!(
+            source.contains("no JSON value can inhabit schema"),
+            !type_conflicts(&members).is_empty(),
+            "uninhabited types disagree with the conflicting properties:\n{}",
+            source
+        );
 
         // Expected field set = union of member properties; required = union of member required flags.
         let mut required_union: BTreeSet<usize> = BTreeSet::new();

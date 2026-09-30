@@ -1,0 +1,94 @@
+name: Supply chain
+
+# The audit's verdict depends on when it runs, not only on what is committed: cargo-deny fetches
+# the RustSec database fresh each run, and `yanked = "deny"` reads the registry as it is now. A new
+# advisory therefore turns every open pull request red while `master`'s last status stays green,
+# and before this schedule it was found by whichever contributor's unrelated pull request hit it
+# first (#146). The daily run finds it on `master` itself; CLAUDE.md says who responds. The `deny`
+# job is the same gate pull requests and pushes run, in its own workflow so the schedule re-runs
+# only it; `deny-published` audits the lockfile the latest release ships, on the schedule only.
+on:
+  push:
+    branches: [master]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: deny-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      # The cargo-deny and cargo-audit versions `[tools]` pins in mise.toml, not the copy an action bundles: the
+      # action's version moved with its `@v2` ref and nothing held it to the pin (#228), and its
+      # inputs composed an argv this repository could only partly state (#229).
+      # `ci_installs_exactly_the_tool_versions_mise_pins` holds the version here to the pin.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
+      # `mise run deny`'s commands, byte for byte
+      # (`every_mise_task_runs_exactly_what_its_ci_job_runs`).
+      # cargo-deny filters out every lockfile entry no feature activates (a yanked `chacha20`
+      # reached `Cargo.lock` only through a weak `quinn?/ring` feature and was never checked), so
+      # `cargo audit` reads every entry of each committed lockfile, over the RustSec checkout
+      # `cargo deny fetch db` just made, after the step that logs its commit: the log names the
+      # database revision the verdict was reached against (#187).
+      # `the_lockfile_audit_reads_every_committed_lockfile` pins these steps' shape.
+      - run: cargo deny fetch db
+      - run: git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'
+      - run: cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file Cargo.lock
+      - run: cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/github-api/Cargo.lock
+      - run: cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore/Cargo.lock
+      - run: cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore-macro/Cargo.lock
+      # `--all-features` is what puts the TLS stack in scope: `rustls` reaches the graph only
+      # through reqwest's TLS feature, so without it the audit sees no TLS stack at all (#147).
+      # `--locked` makes the committed `Cargo.lock` the audited one: without it cargo-deny's
+      # `cargo metadata` silently rewrote a skewed lockfile, or wrote a missing one, and audited
+      # that instead (#146). `the_deny_gate_states_the_feature_scope_it_audits` holds the command
+      # to both flags, to a bare `check`, and to no flag outside an allow-list of ones that cannot
+      # narrow the graph (#238).
+      - run: cargo deny --all-features --locked check
+      # Each example workspace's lockfile, under the same policy (#184). No `--locked`, like every
+      # gate that compiles them: their `spargen` path-package stamp goes stale on each release.
+      - run: cargo deny --manifest-path examples/github-api/Cargo.toml --config deny.toml --all-features check
+      - run: cargo deny --manifest-path examples/petstore/Cargo.toml --config deny.toml --all-features check
+      - run: cargo deny --manifest-path examples/petstore-macro/Cargo.toml --config deny.toml --all-features check
+
+  # The lockfile the latest `spargen` release ships, not the committed one: `cargo install spargen
+  # --features cli --locked` installs its pins, and a fix on `master` reaches it only when a release
+  # carries it (#178). Scheduled and manual runs only: a pull request cannot change a published
+  # artefact, and failing every pull request on it would block the release pull request that
+  # carries the fix. `mise run deny-published`'s commands, byte for byte.
+  deny-published:
+    name: cargo-deny (published spargen)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.98.1
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2,cargo-audit@0.22.2
+      - run: |
+          rm -rf target/deny-published
+          mkdir -p target/deny-published/spargen
+          curl -sSf -A 'getkono/spargen deny-published (https://github.com/getkono/spargen)' -o target/deny-published/crate.json https://crates.io/api/v1/crates/spargen
+          version=$(jq -er .crate.max_stable_version target/deny-published/crate.json)
+          curl -sSfL -o target/deny-published/spargen.crate "https://static.crates.io/crates/spargen/spargen-$version.crate"
+          tar -xzf target/deny-published/spargen.crate -C target/deny-published/spargen --strip-components=1
+          printf '\n[workspace]\n' >> target/deny-published/spargen/Cargo.toml
+          echo "auditing the Cargo.lock published in spargen $version"
+      - run: cargo deny fetch db
+      - run: git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'
+      - run: cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file target/deny-published/spargen/Cargo.lock
+      - run: cargo deny --manifest-path target/deny-published/spargen/Cargo.toml --config deny.toml --all-features --locked check advisories

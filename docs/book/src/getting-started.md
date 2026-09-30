@@ -23,8 +23,8 @@ only `generate` takes a `Build`; `check`, `diff`, `requirements`, and `vendor` t
 never ask for an output path they would not use. Both types have private fields and chained
 setters, so a new knob is additive rather than breaking.
 
-`Spec`'s knobs are `uuid`, `time`, `omit`/`omit_rule`, `error_body_cap`, `batch_cap`, and
-`carve`. They can equally be read from a `spargen.toml` (`Spec::config_file`,
+`Spec`'s knobs are `uuid`, `time`, `omit`/`omit_rule`, `error_body_cap`, `batch_cap`, `carve`,
+and `open_narrowing` (see [problem details](./runtime.md#problem-details)). They can equally be read from a `spargen.toml` (`Spec::config_file`,
 `Spec::discover_config_file`) — the same file the CLI and the macro read, parsed by the library
 so the three cannot drift. Setters called afterwards still win, so build code stays
 authoritative.
@@ -72,7 +72,7 @@ requirement that could resolve below these versions or beyond the next semver br
 | Dependency | Required features | When required |
 | --- | --- | --- |
 | `bytes = "1.12.1"` | `serde` only when noted below | Always; `serde` only when a generated serialized aggregate contains bytes |
-| `reqwest = "0.12.28"` | `default-features = false`; `json` for JSON requests; `multipart` for multipart requests; `stream` for sequential responses | Always; the three features are spec-derived |
+| `reqwest = "0.12.28"` | `default-features = false` (in `[workspace.dependencies]` when inherited, see below); `json` for JSON requests; `multipart` for multipart requests; `stream` for sequential responses | Always; the three features are spec-derived |
 | `secrecy = "0.10.3"` | - | Always |
 | `serde = "1.0.229"` | `derive` | Always |
 | `serde_json = "1.0.151"` | - | Always |
@@ -93,6 +93,17 @@ resolved dependencies: build scripts and proc macros run later in the compilatio
 therefore checks the manifest, Cargo performs resolution, and rustc provides the final proof that
 the selected versions expose every API and trait the generated client uses. Extra application
 dependencies and features are allowed.
+
+#### Workspace inheritance and the full contract
+
+A dependency may be declared `workspace = true` and inherited from `[workspace.dependencies]`;
+the audit follows it to the workspace root the way Cargo does. The one trap is `reqwest`'s
+default features: a member's `default-features = false` cannot turn off defaults the root leaves
+on, so disable them in `[workspace.dependencies]` itself. The complete contract, including how the
+root is found and what the diagnostic reports when it cannot be read, is the text
+`spargen explain E023` prints, reproduced here verbatim:
+
+> {{#include ../../../spargen/src/runtime_contract_e023_explain.txt}}
 
 #### Cargo integration
 
@@ -118,7 +129,8 @@ mod api {
 ```
 
 It accepts a positional schema path or `spec = "..."`, plus the same controls as `Spec`:
-`no_uuid`, `no_time`, `carve`, `error_body_cap = N`, `batch_cap = N`, and an `omit { ... }`
+`no_uuid`, `no_time`, `carve`, `open_narrowing`, `error_body_cap = N`, `batch_cap = N`, and an
+`omit { ... }`
 profile. Cargo and rustc track the root schema, every transitive source file, and
 `spargen.lock` through the expansion. See the
 [`spargen-macro` README](https://github.com/getkono/spargen/tree/master/spargen-macro).
@@ -164,11 +176,15 @@ Key points of the surface:
   token providers. Operation `security` requirements pick the first satisfiable alternative and
   attach bearer/basic/apiKey credentials; a missing required credential is a
   request-construction error — typed as `RequestError::MissingCredential`, listing for each
-  security alternative the schemes with no registered credential, and a failed token provider as
+  security alternative the schemes with no registered credential; a credential of a kind its
+  scheme cannot carry as `RequestError::CredentialMismatch`; and a failed token provider as
   `RequestError::CredentialProvider` — never a silent 401.
-- A closed [error taxonomy](./errors.md), identical across all spargen output:
-  request-construction, transport, timeout, protocol, redirect, documented API error (typed `E`),
-  undocumented status (raw body preserved), decode failure, interrupted body.
+- A closed error taxonomy, identical across all spargen output: request-construction
+  (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
+  above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
+  (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
+  error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
+  preserved), decode failure (`Error::Decode`), interrupted body (`Error::InterruptedBody`).
   Every generated error type implements `Display` and `std::error::Error`, so `Error<E>` works
   with `?` into `Box<dyn Error>`, `anyhow`, and `thiserror`. `Error::is_transient()` classifies
   retry-worthy failures — spargen ships no retry policy, but the runtime offers a bring-your-own
@@ -177,7 +193,9 @@ Key points of the surface:
   single-body newtype, and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()`
   hands that body back whichever status carried it (`Error::status()` reports that status, the
   same value as `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by
-  variant instead.
+  variant instead. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the
+  RFC 9457 members of whichever error body a failure carried, across every operation — see
+  [problem details](./runtime.md#problem-details).
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ## Next steps

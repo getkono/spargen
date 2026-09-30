@@ -16,6 +16,9 @@
 //! - every root re-export resolves to something the `support` module re-exports;
 //! - no operation's generated error type shadows a root re-export, even for operation IDs chosen
 //!   to collide with each one;
+//! - every runtime type a root re-export's public inherent signatures or associated types
+//!   mention (a `FromStr::Err`, say) is re-exported at the root too, so a caller can write down
+//!   the type of every value it is handed;
 //! - the root `pub use` surface is a golden file (`snapshots/reexport_lists__root_surface.snap`),
 //!   so any change to the generated public runtime surface is a reviewable diff.
 
@@ -250,7 +253,8 @@ fn every_root_reexport_names_something_the_support_module_reexports() {
 fn no_operation_error_type_shadows_a_root_reexport() {
     // One operation per root re-export named `{Base}Error`, with the operation ID that would name
     // its error type exactly that. Derived from the emitted surface, so a new re-export is covered
-    // the moment it is added.
+    // the moment it is added. The ID is `base` in camelCase, so a multi-word base such as
+    // `DateParse` collides as `dateParse` rather than as `dateparse`, which names `DateparseError`.
     let reexported = root_reexports(&generate(&full_spec("")));
     let bases: Vec<&str> = reexported
         .iter()
@@ -261,10 +265,15 @@ fn no_operation_error_type_shadows_a_root_reexport() {
         bases.contains(&"Request"),
         "the fixture no longer exercises a collision: {reexported:?}"
     );
+    assert!(
+        bases.contains(&"DateParse"),
+        "the fixture no longer exercises a multi-word collision: {reexported:?}"
+    );
+    let camel = |base: &str| base[..1].to_ascii_lowercase() + &base[1..];
     let collisions: String = bases
         .iter()
         .map(|base| {
-            let id = base.to_ascii_lowercase();
+            let id = camel(base);
             format!(
                 "  /collide/{id}:\n    get:\n      operationId: {id}\n      responses:\n        \
                  \"200\":\n          description: ok\n        \"404\":\n          description: \
@@ -286,9 +295,118 @@ fn no_operation_error_type_shadows_a_root_reexport() {
         assert!(
             defined.contains(&widened),
             "operation `{}` did not get the widened error type `{widened}`",
-            base.to_ascii_lowercase()
+            camel(base)
         );
     }
+}
+
+/// Every item of the embedded `support` module, its nested modules' items included.
+fn support_items_deep(items: &[Item]) -> Vec<&Item> {
+    let mut out = Vec::new();
+    for item in items {
+        out.push(item);
+        if let Item::Mod(module) = item {
+            if let Some((_, inner)) = &module.content {
+                out.extend(support_items_deep(inner));
+            }
+        }
+    }
+    out
+}
+
+/// Every identifier `tokens` mentions, at any depth of nesting.
+fn idents(tokens: proc_macro2::TokenStream, out: &mut BTreeSet<String>) {
+    for tree in tokens {
+        match tree {
+            proc_macro2::TokenTree::Ident(ident) => {
+                out.insert(ident.to_string());
+            }
+            proc_macro2::TokenTree::Group(group) => idents(group.stream(), out),
+            _ => {}
+        }
+    }
+}
+
+/// Runtime types a root re-export mentions that the root does not yet re-export, each with the
+/// issue that decides it. An entry that stops being needed fails the test, so this only shrinks.
+const UNNAMEABLE_TRACKED: &[(&str, &str)] = &[];
+
+#[test]
+fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
+    // The root re-export list has to cover every runtime type a caller meets through a type it can
+    // already name, or the caller holds a value whose type it cannot write down: `"…".parse::<Date>()`
+    // returns `Result<Date, <Date as FromStr>::Err>`, so `FromStr::Err` must be at the root too
+    // (#256). The embedded `support` module is private, so the root is the only path there is.
+    // Checked here: every public inherent method's signature, and every associated type of every
+    // impl, on a type the root re-exports. A runtime type they mention must be re-exported too.
+    let mut tracked_seen = BTreeSet::new();
+    for spec in [PLAIN_SPEC.to_owned(), full_spec("")] {
+        let generated = generate(&spec);
+        let root = root_reexports(&generated);
+        let items = support_items_deep(support_items(&generated));
+        let runtime_types: BTreeSet<String> = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Struct(item) if is_pub(&item.vis) => Some(item.ident.to_string()),
+                Item::Enum(item) if is_pub(&item.vis) => Some(item.ident.to_string()),
+                Item::Trait(item) if is_pub(&item.vis) => Some(item.ident.to_string()),
+                Item::Type(item) if is_pub(&item.vis) => Some(item.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        let mut unnameable = BTreeSet::new();
+        for item in &items {
+            let Item::Impl(block) = item else { continue };
+            let syn::Type::Path(self_ty) = block.self_ty.as_ref() else {
+                continue;
+            };
+            let Some(self_name) = self_ty.path.segments.last().map(|s| s.ident.to_string()) else {
+                continue;
+            };
+            if !root.contains(&self_name) {
+                continue;
+            }
+            let mut mentioned = BTreeSet::new();
+            for member in &block.items {
+                match member {
+                    syn::ImplItem::Type(assoc) => {
+                        idents(quote::ToTokens::to_token_stream(&assoc.ty), &mut mentioned);
+                    }
+                    syn::ImplItem::Fn(method) if block.trait_.is_none() && is_pub(&method.vis) => {
+                        idents(
+                            quote::ToTokens::to_token_stream(&method.sig),
+                            &mut mentioned,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            for name in mentioned {
+                if runtime_types.contains(&name) && !root.contains(&name) {
+                    unnameable.insert(format!("{name} (through {self_name})"));
+                }
+            }
+        }
+        unnameable.retain(|found| {
+            let tracked = UNNAMEABLE_TRACKED.iter().any(|(entry, _)| entry == found);
+            if tracked {
+                tracked_seen.insert(found.clone());
+            }
+            !tracked
+        });
+        assert!(
+            unnameable.is_empty(),
+            "a root re-export exposes runtime types the root does not re-export: {unnameable:?}"
+        );
+    }
+    let stale: Vec<_> = UNNAMEABLE_TRACKED
+        .iter()
+        .filter(|(entry, _)| !tracked_seen.contains(*entry))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "tracked exceptions no longer needed; remove them: {stale:?}"
+    );
 }
 
 #[test]

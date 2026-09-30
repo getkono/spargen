@@ -46,6 +46,7 @@ impl TypeGraph {
             kind: TypeKind::Reserved,
             docs: Docs::default(),
             provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
         })
     }
 
@@ -143,6 +144,11 @@ impl TypeGraph {
             (TypeKind::Bytes, TypeKind::Bytes)
             | (TypeKind::Null, TypeKind::Null)
             | (TypeKind::Any, TypeKind::Any) => true,
+            // A reservation's body is unknown, so nothing proves it emits the same type as another
+            // definition — including a second reservation, which may fill to a nominal type that
+            // matches only itself. `false` is this function's sound answer ("not proven one type"),
+            // not a guess; the same reservation on both sides already answered `true` by id above.
+            (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => false,
             _ => false,
         };
         visiting.pop();
@@ -161,6 +167,15 @@ pub(crate) struct TypeDef {
     pub(crate) docs: Docs,
     /// Where the type came from.
     pub(crate) provenance: Provenance,
+    /// The document `provenance.pointer` points into, spelled independently of load order: empty
+    /// for the root document, otherwise the local path relative to the root document's directory,
+    /// or the retrieval URL of a vendored remote document.
+    ///
+    /// A pointer alone does not identify a definition — two files can each declare
+    /// `/components/schemas/Shape` — and the span's `FileId` numbers files in discovery order, so
+    /// reordering the document renumbers them. This spelling plus the pointer is the definition's
+    /// own identity, which is what naming ranks a contested type name by.
+    pub(crate) document: String,
 }
 
 /// A reference to a type, plus the two shape modifiers that ride on a use site rather than the
@@ -220,31 +235,29 @@ pub(crate) enum TypeKind {
     /// no diagnostic. Every **exhaustive** `match` on [`TypeKind`] must now state what it does with a
     /// back edge, and the compiler will not let a new one omit it.
     ///
-    /// **The guarantee is narrower than it first appears, and the difference is worth stating.** A
-    /// dedicated variant turns a read site into a compile error only where the `match` was already
-    /// exhaustive. Seven sites are declared that way; **seventeen** others absorb this variant
-    /// through a catch-all arm and got no error — **ten** in `oas31::lower`, two each in
-    /// `codegen::emit` and `runtime_contract`, and one each in this module, `name` and `surface`.
+    /// **Where the compiler stops, a test takes over.** A dedicated variant turns a read site into
+    /// a compile error only where the `match` is exhaustive; a catch-all arm (`_`, a bare binding,
+    /// `Some(_)`, or a `| _` tail) absorbs it with no error. So a `match` that classifies a
+    /// `TypeKind` either has no catch-all, and the compiler holds it, or names `Reserved` in an
+    /// unguarded arm above its catch-all, and
+    /// `every_type_kind_match_states_its_answer_for_a_reservation` in this module holds it: that
+    /// test walks every `match` in the crate's sources and fails on one that reaches a catch-all
+    /// with no stated answer for a reservation. A site is a `match` at least one of whose arm
+    /// patterns names a `TypeKind` variant; `matches!` and `if let`, which test for one variant
+    /// rather than classify, are not sites, and a catch-all in one position of a tuple pattern
+    /// is not seen. The population is therefore the test's to count, not this comment's — an
+    /// earlier revision published a hand count here and got its breakdown wrong.
     ///
-    /// Counted, not estimated, and by a stated rule so the figure can be re-derived rather than
-    /// re-guessed: a site is every `match` at least one of whose arm patterns names a `TypeKind`
-    /// variant, and it is an absorber when one of that match's own arms is a catch-all (`_`, a bare
-    /// binding, `Some(_)`, or a `| _` tail). `matches!` and `if let`, which test for one variant
-    /// rather than classifying, are not sites. Twenty-four sites satisfy the first rule and seven
-    /// do not satisfy the second, which is the same seven the exhaustive count above reaches
-    /// independently — the two halves agree, which is what an earlier revision of this paragraph
-    /// could not say: it published seventeen over a breakdown that summed to nineteen, in three
-    /// places including this shipped doc comment, because it credited `oas31::lower` with twelve.
-    /// The headline was the right number all along; the breakdown was not.
-    ///
-    /// That population includes [`TypeGraph`]'s own `push_ref_member` in `oas31::lower`,
-    /// which is the historical origin of the whole defect class and is still shaped exactly the same
-    /// way, and it includes `intersect_non_null`, which is the one whose behaviour the new variant
-    /// actually changed: its `TypeKind::Any` arms used to absorb the placeholder and return the
-    /// other operand, and a placeholder now falls to `_ => None` instead. Its callers guard it, and
-    /// the guards live in the *callers*, so a new caller gets no compile error either. Converting
-    /// those arms is a change across five subsystems and is filed rather than rushed; until then,
-    /// the compile-time audit covers the minority of read sites.
+    /// The answers fall into three kinds. Sites that run only on a checked `Api` — codegen,
+    /// `name`, `surface`, `runtime_contract` — refuse with `unreachable!`, as `check_invariants`
+    /// rejects a surviving reservation before any of them runs. Sites in `oas31::lower`, where a
+    /// reservation really is live, answer "not proven": not the same type, not string-like, no
+    /// `simple` shape, no representable default, no required-key discriminator — each routing
+    /// to the refusal or warning that answer already had. And `push_ref_member`, the historical
+    /// origin of the defect class, refuses an in-progress member itself (`E013`'s `allOf` unit
+    /// rejection) rather than trusting each caller to have guarded it, so a new caller inherits
+    /// the refusal. `intersect_non_null` likewise answers `Err(NoMeet::Unrepresentable)` for a
+    /// reservation in its own first arm instead of relying on `intersect_types`' guard alone.
     ///
     /// **Semver.** The breaks are a list, not a pair, and an earlier revision of this paragraph
     /// said "two" where it should have said what follows. Making the placeholder unreadable did not
@@ -543,6 +556,14 @@ pub(crate) struct ScalarEnum {
     pub(crate) repr: ScalarRepr,
     /// The variant wire values, in declared order.
     pub(crate) variants: Vec<ScalarValue>,
+    /// Whether the set is **open**: a string enum whose values name the members the description
+    /// lists, beside one more variant that holds any other string. Only `open_narrowing` produces
+    /// one, for a string `enum`/`const` that narrows a property another `allOf` member (or the
+    /// `$ref` it sits beside) declares as a plain `string`, inside a response body's own schema.
+    /// The open set's domain is that wider declaration's, so it is still exactly what the
+    /// description admits there, minus the narrowing. Always `false` for an integer or boolean
+    /// set.
+    pub(crate) open: bool,
 }
 
 /// The scalar kind backing a [`ScalarEnum`].
@@ -565,4 +586,189 @@ pub(crate) enum ScalarValue {
     Int(i64),
     /// A string value.
     String(String),
+}
+
+#[cfg(test)]
+mod tests {
+    //! The source audit behind [`TypeKind::Reserved`]'s guarantee.
+    //!
+    //! A dedicated variant turns a read site into a compile error only where its `match` is
+    //! exhaustive; a catch-all arm absorbs it silently. This walks every `match` in the crate's
+    //! sources and holds each one that classifies a [`TypeKind`] to stating its answer for a
+    //! reservation, so the audit is checked rather than counted by hand.
+
+    use std::path::{Path, PathBuf};
+
+    use proc_macro2::{Delimiter, TokenStream, TokenTree};
+    use syn::{Arm, ExprMatch, Pat};
+
+    /// Every `.rs` file under `dir`, recursively, in a stable order.
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+            .map(|entry| entry.expect("directory entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Every `match` expression in `tokens`, at any nesting depth, re-parsed on its own.
+    ///
+    /// A `match` scrutinee cannot contain a struct literal, so its arms are the first top-level
+    /// brace group after the keyword; a brace nested in the scrutinee sits inside a paren group.
+    /// The body of a `quote!`-family invocation is emitted code, not this crate's, and is skipped.
+    fn collect_matches(tokens: TokenStream, out: &mut Vec<ExprMatch>) {
+        let trees: Vec<TokenTree> = tokens.into_iter().collect();
+        for (at, tree) in trees.iter().enumerate() {
+            match tree {
+                TokenTree::Group(group) => {
+                    const EMITTING: [&str; 3] = ["quote", "quote_spanned", "parse_quote"];
+                    let emitting = |tree: &TokenTree| match tree {
+                        TokenTree::Ident(name) => EMITTING.iter().any(|emitter| name == emitter),
+                        _ => false,
+                    };
+                    let quoted = at >= 2
+                        && matches!(&trees[at - 1], TokenTree::Punct(p) if p.as_char() == '!')
+                        && emitting(&trees[at - 2]);
+                    if !quoted {
+                        collect_matches(group.stream(), out);
+                    }
+                }
+                TokenTree::Ident(ident) if ident == "match" => {
+                    let arms = trees[at + 1..].iter().position(
+                        |t| matches!(t, TokenTree::Group(g) if g.delimiter() == Delimiter::Brace),
+                    );
+                    let Some(arms) = arms else { continue };
+                    let expr: TokenStream = trees[at..=at + 1 + arms].iter().cloned().collect();
+                    let parsed = syn::parse2::<ExprMatch>(expr.clone())
+                        .unwrap_or_else(|e| panic!("`{expr}` does not parse as a match: {e}"));
+                    out.push(parsed);
+                }
+                TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+            }
+        }
+    }
+
+    /// Whether `path` is `TypeKind::<variant>` (any variant when `variant` is `None`).
+    fn is_kind_path(path: &syn::Path, variant: Option<&str>) -> bool {
+        let segments: Vec<_> = path.segments.iter().collect();
+        segments.len() >= 2
+            && segments[segments.len() - 2].ident == "TypeKind"
+            && variant.is_none_or(|v| segments[segments.len() - 1].ident == v)
+    }
+
+    /// Whether `pat` names a `TypeKind` variant (a specific one when `variant` is `Some`).
+    fn names_kind(pat: &Pat, variant: Option<&str>) -> bool {
+        match pat {
+            Pat::Ident(p) => p
+                .subpat
+                .as_ref()
+                .is_some_and(|(_, sub)| names_kind(sub, variant)),
+            Pat::Or(p) => p.cases.iter().any(|c| names_kind(c, variant)),
+            Pat::Paren(p) => names_kind(&p.pat, variant),
+            Pat::Reference(p) => names_kind(&p.pat, variant),
+            Pat::Slice(p) => p.elems.iter().any(|e| names_kind(e, variant)),
+            Pat::Tuple(p) => p.elems.iter().any(|e| names_kind(e, variant)),
+            Pat::Type(p) => names_kind(&p.pat, variant),
+            Pat::Path(p) => is_kind_path(&p.path, variant),
+            Pat::Struct(p) => {
+                is_kind_path(&p.path, variant)
+                    || p.fields.iter().any(|f| names_kind(&f.pat, variant))
+            }
+            Pat::TupleStruct(p) => {
+                is_kind_path(&p.path, variant) || p.elems.iter().any(|e| names_kind(e, variant))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether `pat` is a catch-all: `_`, a bare binding, `..`, `Some(_)`, a tuple of those, or an
+    /// or-pattern with such a case. It is what absorbs a variant the arms above it never named.
+    fn is_catch_all(pat: &Pat) -> bool {
+        match pat {
+            Pat::Wild(_) | Pat::Rest(_) => true,
+            Pat::Ident(p) => match &p.subpat {
+                Some((_, sub)) => is_catch_all(sub),
+                None => p
+                    .ident
+                    .to_string()
+                    .starts_with(|c: char| c.is_lowercase() || c == '_'),
+            },
+            Pat::Or(p) => p.cases.iter().any(is_catch_all),
+            Pat::Paren(p) => is_catch_all(&p.pat),
+            Pat::Reference(p) => is_catch_all(&p.pat),
+            Pat::Tuple(p) => p.elems.iter().all(is_catch_all),
+            Pat::TupleStruct(p) => p.path.is_ident("Some") && p.elems.iter().all(is_catch_all),
+            _ => false,
+        }
+    }
+
+    /// Whether `arm` answers for a reservation unconditionally.
+    fn answers_reserved(arm: &Arm) -> bool {
+        arm.guard.is_none() && names_kind(&arm.pat, Some("Reserved"))
+    }
+
+    /// Every `match` that classifies a `TypeKind` and carries a catch-all arm names
+    /// `TypeKind::Reserved` in an unguarded arm above that catch-all, so no site reads a
+    /// reservation through a wildcard it never decided on.
+    ///
+    /// A site is a `match` at least one of whose arm patterns names a `TypeKind` variant;
+    /// `matches!` and `if let`, which test for one variant rather than classify, are not sites. A
+    /// catch-all in one position of a tuple pattern (`(TypeKind::Array(a), _)`) is not seen by
+    /// this rule; only a whole arm that matches anything is.
+    #[test]
+    fn every_type_kind_match_states_its_answer_for_a_reservation() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&src, &mut files);
+
+        let mut sites = 0usize;
+        let mut absorbers = Vec::new();
+        for file in &files {
+            let text = std::fs::read_to_string(file)
+                .unwrap_or_else(|e| panic!("reading {}: {e}", file.display()));
+            let tokens: TokenStream = text
+                .parse()
+                .unwrap_or_else(|e| panic!("tokenizing {}: {e}", file.display()));
+            let mut found = Vec::new();
+            collect_matches(tokens, &mut found);
+            for site in found {
+                if !site.arms.iter().any(|arm| names_kind(&arm.pat, None)) {
+                    continue;
+                }
+                sites += 1;
+                let Some(catch_all) = site.arms.iter().position(|arm| is_catch_all(&arm.pat))
+                else {
+                    continue;
+                };
+                if !site.arms[..catch_all].iter().any(answers_reserved) {
+                    let expr = &site.expr;
+                    absorbers.push(format!(
+                        "{}: match {}",
+                        file.strip_prefix(&src).unwrap_or(file).display(),
+                        quote::quote!(#expr)
+                    ));
+                }
+            }
+        }
+
+        // A scanner that silently found nothing would pass vacuously; the crate has dozens.
+        assert!(
+            sites >= 20,
+            "found only {sites} `TypeKind` match sites; the scanner is broken"
+        );
+        assert!(
+            absorbers.is_empty(),
+            "these `match`es classify a `TypeKind` and reach a catch-all arm without an \
+             unguarded `TypeKind::Reserved` arm above it, so a reservation falls through \
+             undecided:\n{}",
+            absorbers.join("\n")
+        );
+    }
 }

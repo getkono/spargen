@@ -26,6 +26,22 @@ pub(crate) use provenance::Provenance;
 pub use severity::Severity;
 pub use span::{FileId, Loc, Span};
 
+/// Whether `source` declares `fn {name}(` immediately preceded by `#[test]`, with only whitespace
+/// between.
+///
+/// Test-only: the one predicate behind every check that a fixture cited for an explain clause is
+/// a `#[test]` in the module named — `EXPLAIN_CLAUSES_OWNED_ELSEWHERE` in `code.rs` and the `E023`
+/// byte-for-byte test in `runtime_contract.rs` — so a fix to it reaches both. It lives in `diag`
+/// because that is the lowest layer both can reach.
+#[cfg(test)]
+pub(crate) fn is_test_fn(source: &str, name: &str) -> bool {
+    source.match_indices(&format!("fn {name}(")).any(|(at, _)| {
+        source[..at]
+            .rsplit_once("#[test]")
+            .is_some_and(|(_, between)| between.trim().is_empty())
+    })
+}
+
 /// A single diagnostic emitted during parsing, validation, or codegen.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Diagnostic {
@@ -140,5 +156,36 @@ impl DiagnosticBuilder {
     /// Build the diagnostic and record it into `diags` in one step.
     pub(crate) fn emit(self, diags: &mut Diagnostics) {
         diags.emit(self.build());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_test_fn;
+
+    #[test]
+    fn is_test_fn_accepts_a_function_its_test_attribute_immediately_precedes() {
+        assert!(is_test_fn("#[test]\nfn pinned() {}\n", "pinned"));
+        assert!(is_test_fn(
+            "mod tests {\n    #[test]\n    fn pinned() {}\n}\n",
+            "pinned"
+        ));
+    }
+
+    #[test]
+    fn is_test_fn_rejects_every_name_that_is_not_a_test() {
+        // Every caller only ever asks about names it expects to be tests, so without these cases
+        // the predicate could accept anything and no fixture citation would notice (#202).
+        // A helper with no attribute at all.
+        assert!(!is_test_fn("fn helper() {}\n", "helper"));
+        // A helper that follows a test: the nearest `#[test]` above it belongs to another item.
+        assert!(!is_test_fn(
+            "#[test]\nfn pinned() {}\n\nfn helper() {}\n",
+            "helper"
+        ));
+        // A name that is only a prefix of the test's.
+        assert!(!is_test_fn("#[test]\nfn pinned_more() {}\n", "pinned"));
+        // A name the source never declares.
+        assert!(!is_test_fn("#[test]\nfn pinned() {}\n", "absent"));
     }
 }

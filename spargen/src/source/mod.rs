@@ -22,7 +22,7 @@ mod vendor;
 
 pub(crate) use bundle::InputBundle;
 pub(crate) use parse::{parse_json, parse_yaml};
-pub(crate) use value::{Node, Number, SpannedKey, SpannedMap, SpannedValue};
+pub(crate) use value::{canonical_pointer, Node, Number, SpannedKey, SpannedMap, SpannedValue};
 
 // Remote-ref helpers shared with `oas31::resolve` for hermetic fragment resolution.
 pub(crate) use remote::is_absolute_ref as is_remote_ref;

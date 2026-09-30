@@ -197,6 +197,24 @@ impl SpannedMap {
     }
 }
 
+/// The node a `$ref` fragment's `pointer` addresses, spelled as the plain RFC 6901 pointer every
+/// other consumer uses: each token decoded exactly as [`SpannedValue::pointer`] decodes it, then
+/// re-escaped by [`JsonPointer::push`]. `None` where a token is malformed, as there.
+///
+/// A fragment and a plain pointer spell one node differently (`#/a%20b` against `/a b`), so code
+/// that looks a fragment up outside [`SpannedValue::pointer`], or compares it with pointers built
+/// by walking a value, must go through this first.
+pub(crate) fn canonical_pointer(pointer: &JsonPointer) -> Option<JsonPointer> {
+    let Some(tokens) = pointer.as_str().strip_prefix('/') else {
+        return pointer.as_str().is_empty().then(JsonPointer::root);
+    };
+    tokens
+        .split('/')
+        .try_fold(JsonPointer::root(), |canonical, token| {
+            Some(canonical.push(&unescape_pointer_token(token)?))
+        })
+}
+
 /// Decode one JSON Pointer reference token.
 ///
 /// A `$ref` carries its pointer in a URI fragment, so characters that are not legal there are

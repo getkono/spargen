@@ -25,7 +25,8 @@ where
 
 /// Decode an XML success response body into `T`, wrapping it with status and headers. The XML
 /// analogue of [`crate::decode_success`]; a parse failure (invalid UTF-8 or malformed XML) becomes
-/// [`Error::Decode`] with the quick-xml error path and a body capped at `max_error_body`.
+/// [`Error::Decode`] with the quick-xml error path and a body capped at `max_error_body`. An empty
+/// body is not an XML document and is a parse failure too (see [`decode_xml_body`]).
 pub async fn decode_success_xml<T>(
     core: &ClientCore,
     response: Response,
@@ -42,6 +43,7 @@ where
             let (body, truncated) = crate::dispatch::cap_body(body, core.config().max_error_body);
             Err(Error::Decode {
                 status,
+                headers,
                 path,
                 body,
                 truncated,
@@ -72,6 +74,7 @@ where
             Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
             Err(path) => Error::Decode {
                 status,
+                headers,
                 path,
                 body,
                 truncated,
@@ -88,8 +91,14 @@ where
 
 /// Deserialize an already-read XML body into `T`, returning a human-readable error string (invalid
 /// UTF-8 or a quick-xml parse error) suitable for [`Error::Decode`]'s `path`. The XML analogue of
-/// [`crate::decode_text_body`]: a multi-status success enum reads the body once and decodes the arm
-/// its status selects through this.
+/// [`crate::decode_text_body`]: a multi-status success or error enum reads the body once and
+/// decodes the arm its status selects through this.
+///
+/// An empty body always fails, whatever `T` is: XML 1.0 requires a root element, so there is no
+/// empty document to decode. This differs from [`crate::decode_text_body`], which reads an empty
+/// body as the empty string. A documented bodyless status beside a documented body is a unit
+/// variant of the response enum, on the success side and the error side alike, and is not decoded
+/// here.
 pub fn decode_xml_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, String> {
     let text = std::str::from_utf8(body).map_err(|error| error.to_string())?;
     quick_xml::de::from_str::<T>(text).map_err(|error| error.to_string())
@@ -143,6 +152,22 @@ mod tests {
         assert!(!error.is_empty());
     }
 
+    /// An empty body is not an XML document (XML 1.0 `document` requires a root element), so a
+    /// status that documents an XML body and sends none is a decode failure, never a defaulted
+    /// value. A documented bodyless status reaches this codec only on an error side with one
+    /// documented body, when that body sits under a range (`4XX`) or `default` covering the
+    /// bodyless status, and then it is this `Decode`; elsewhere it is a unit variant of the
+    /// response enum (#121) or `Error::UnexpectedStatus`. Pinned for both the struct shape
+    /// generated XML bodies take and a bare `String`, so the XML codec cannot quietly acquire the
+    /// text codec's empty-string reading.
+    #[test]
+    fn an_empty_xml_body_is_a_decode_failure() {
+        let error = decode_xml_body::<Point>(b"").unwrap_err();
+        assert!(!error.is_empty());
+        let error = decode_xml_body::<String>(b"").unwrap_err();
+        assert!(!error.is_empty());
+    }
+
     #[test]
     fn invalid_utf8_yields_a_decode_error_path() {
         let error = decode_xml_body::<Point>(&Bytes::from_static(&[0xff, 0xfe])).unwrap_err();
@@ -190,10 +215,11 @@ mod tests {
         }
     }
 
-    /// Both XML helpers that raise `Decode` keep the status of the response they failed to
-    /// decode. Neither status is `200`, so a hard-coded status cannot pass.
+    /// Both XML helpers that raise `Decode` keep the status and headers of the response they
+    /// failed to decode. Neither status is `200` and each response carries a header value of its
+    /// own, so neither a hard-coded status nor an empty header map can pass.
     #[test]
-    fn xml_decode_failures_keep_the_response_status() {
+    fn xml_decode_failures_keep_the_response_status_and_headers() {
         use std::future::Future;
         use std::task::{Context, Poll, Waker};
 
@@ -207,32 +233,93 @@ mod tests {
                 Poll::Pending => panic!("future was not immediately ready"),
             }
         }
-        fn response(status: u16) -> reqwest::Response {
+        fn response(status: u16, retry_after: &'static str) -> reqwest::Response {
             reqwest::Response::from(
                 http::Response::builder()
                     .status(status)
+                    .header("retry-after", retry_after)
                     .body("not xml <")
                     .expect("valid synthetic response"),
             )
         }
+        fn assert_decode<E: std::fmt::Debug>(
+            error: crate::Error<E>,
+            expected: u16,
+            retry_after: &str,
+        ) {
+            match &error {
+                crate::Error::Decode {
+                    status, headers, ..
+                } => {
+                    assert_eq!(status.as_u16(), expected);
+                    assert_eq!(
+                        headers.get("retry-after").map(|value| value.as_bytes()),
+                        Some(retry_after.as_bytes()),
+                        "the XML Decode error for {expected} lost its response headers"
+                    );
+                }
+                other => panic!("expected a Decode error, got {other:?}"),
+            }
+            assert_eq!(error.status().map(|s| s.as_u16()), Some(expected));
+        }
 
         let core = crate::ClientCore::new("https://example.com").unwrap();
-        match poll_ready(super::decode_success_xml::<Point>(&core, response(203))) {
-            Err(error @ crate::Error::Decode { .. }) => {
-                assert_eq!(error.status().map(|s| s.as_u16()), Some(203));
-            }
-            other => panic!("expected a Decode error, got {other:?}"),
-        }
-        let documented = [crate::StatusSpec::Exact(422)];
-        match poll_ready(super::classify_error_xml::<Point>(
+        let success = poll_ready(super::decode_success_xml::<Point>(
             &core,
-            response(422),
+            response(203, "1"),
+        ));
+        assert_decode(success.unwrap_err(), 203, "1");
+        let documented = [crate::StatusSpec::Exact(429)];
+        let error = poll_ready(super::classify_error_xml::<Point>(
+            &core,
+            response(429, "2"),
             &documented,
-        )) {
-            error @ crate::Error::Decode { .. } => {
-                assert_eq!(error.status().map(|s| s.as_u16()), Some(422));
+        ));
+        assert_decode(error, 429, "2");
+    }
+
+    /// A zero-length body has no root element, so the XML codec rejects it as `Decode`, keeping the
+    /// status and the (empty, untruncated) body — through the single-body codec and the per-arm
+    /// `decode_xml_body` a multi-status enum uses.
+    #[test]
+    fn xml_codec_rejects_a_zero_length_success_body() {
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+
+        fn poll_ready<F: Future>(future: F) -> F::Output {
+            let mut future = std::pin::pin!(future);
+            match future
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+            {
+                Poll::Ready(value) => value,
+                Poll::Pending => panic!("future was not immediately ready"),
             }
-            other => panic!("expected a Decode error, got {other:?}"),
+        }
+
+        assert!(decode_xml_body::<Point>(b"").is_err());
+        assert!(decode_xml_body::<String>(b"").is_err());
+        let core = crate::ClientCore::new("https://example.com").unwrap();
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(204)
+                .body("")
+                .expect("valid synthetic response"),
+        );
+        match poll_ready(super::decode_success_xml::<Point>(&core, response)) {
+            Err(crate::Error::Decode {
+                status,
+                headers: _,
+                path,
+                body,
+                truncated,
+            }) => {
+                assert_eq!(status.as_u16(), 204);
+                assert!(!path.is_empty());
+                assert!(body.is_empty());
+                assert!(!truncated);
+            }
+            other => panic!("expected a Decode error for an empty body, got {other:?}"),
         }
     }
 }

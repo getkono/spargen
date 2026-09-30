@@ -7,7 +7,8 @@
 ///
 /// `pre-commit` auto-fixes formatting/lints on the working tree; `pre-push` is the read-only gate
 /// (format check, clippy-as-error, tests) plus Conventional Commit validation of the outgoing
-/// range. `commit-msg` validates each new commit immediately. Commit-message validation is also
+/// range, and the supply-chain audit when that range changes a lockfile, a manifest, or the
+/// policy. `commit-msg` validates each new commit immediately. Commit-message validation is also
 /// enforced in CI on pull requests.
 amends "package://github.com/jdx/hk/releases/download/v1.50.0/hk@1.50.0#/Config.pkl"
 
@@ -58,6 +59,20 @@ hooks {
       }
       ["convco"] {
         check = "mise run commit-range"
+      }
+      // The supply-chain audit, on any push whose range changes what it audits: a lockfile or
+      // manifest anywhere in the tree, the policy, or `mise.toml` (the task and the
+      // cargo-deny pin). It is globbed where the steps above are not because it is not hermetic:
+      // it fetches the advisory database and reads the registry's yank state as they are now, so
+      // unglobbed, a new advisory would block every push, including ones that change nothing it
+      // audits. Such a red is the maintainers' to fix in a `fix(deps):` pull request of its own
+      // (CLAUDE.md, "Lockfiles and advisories"), and that pull request's push trips this step.
+      // It needs the network, which a push has anyway, and it is slower than the gates above.
+      // Like `mise run deny` anywhere, it rewrites an example lockfile's stale `spargen` stamp
+      // after a release; that rewrite is not part of the push and is not committed with it.
+      ["deny"] {
+        glob = List("**/Cargo.lock", "**/Cargo.toml", "deny.toml", "mise.toml")
+        check = "mise run deny"
       }
     }
   }
