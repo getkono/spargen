@@ -34,20 +34,24 @@ pub struct DateTime(pub time::OffsetDateTime);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Date(pub time::Date);
 
-/// A value could not be read as its RFC 3339 form.
+/// A value could not be read as its RFC 3339 form: the `FromStr` error of [`Date`] and
+/// [`DateTime`].
+///
+/// A generated client re-exports it at its root beside those two types, where a bare `ParseError`
+/// would read as the error of any parse and would claim an operation named `parse`'s error type.
 #[derive(Debug)]
-pub struct ParseError {
+pub struct DateParseError {
     /// What was expected, for the message.
     expected: &'static str,
 }
 
-impl fmt::Display for ParseError {
+impl fmt::Display for DateParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(formatter, "expected an RFC 3339 {}", self.expected)
     }
 }
 
-impl std::error::Error for ParseError {}
+impl std::error::Error for DateParseError {}
 
 // --- DateTime ----------------------------------------------------------------------------------
 
@@ -105,12 +109,12 @@ impl fmt::Display for DateTime {
 }
 
 impl FromStr for DateTime {
-    type Err = ParseError;
+    type Err = DateParseError;
 
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         time::OffsetDateTime::parse(text, &Rfc3339)
             .map(Self)
-            .map_err(|_| ParseError {
+            .map_err(|_| DateParseError {
                 expected: "date-time",
             })
     }
@@ -185,13 +189,13 @@ impl fmt::Display for Date {
 }
 
 impl FromStr for Date {
-    type Err = ParseError;
+    type Err = DateParseError;
 
     /// Parses exactly `YYYY-MM-DD`. The length and separator positions are checked first so that a
     /// longer string (an accidental full `date-time`, say) is rejected rather than silently
     /// truncated to its date part.
     fn from_str(text: &str) -> Result<Self, Self::Err> {
-        let invalid = || ParseError {
+        let invalid = || DateParseError {
             expected: "full-date (YYYY-MM-DD)",
         };
         let bytes = text.as_bytes();

@@ -1505,7 +1505,7 @@ components:
     fn carve_rules_are_deduped_sorted_and_error_only() {
         let error = |pointer: &str| {
             Diagnostic::error(
-                Code::NonDisjointUnion,
+                Code::UnsupportedMediaType,
                 Provenance::new(JsonPointer::from(pointer.to_owned()), None),
             )
             .build()
@@ -1551,7 +1551,7 @@ components:
         let id = bundle.file_id_for_path(file).unwrap();
         // Any error code carves the same way; this one is not held to an emission-site marker.
         Diagnostic::error(
-            Code::NonDisjointUnion,
+            Code::UnsupportedMediaType,
             Provenance::new(
                 JsonPointer::from(pointer.to_owned()),
                 Some(bundle.value_at(id).span()),

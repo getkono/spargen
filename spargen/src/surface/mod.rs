@@ -81,8 +81,9 @@ struct ParamSurface {
 enum TypeSurface {
     /// A `struct`: fields keyed by generated field name.
     Struct(BTreeMap<String, FieldSurface>),
-    /// A string `enum`: the set of variant wire values.
-    Enum(BTreeSet<String>),
+    /// A string `enum`: the set of variant wire values, and for an open enum (`open_narrowing`)
+    /// the generated name of the variant holding any other string.
+    Enum(BTreeSet<String>, Option<String>),
     /// A union enum: variants keyed by generated variant name → canonical payload type.
     Union(BTreeMap<String, String>),
 }
@@ -92,7 +93,7 @@ impl TypeSurface {
     fn kind_label(&self) -> &'static str {
         match self {
             TypeSurface::Struct(_) => "struct",
-            TypeSurface::Enum(_) => "enum",
+            TypeSurface::Enum(..) => "enum",
             TypeSurface::Union(_) => "union",
         }
     }
@@ -427,7 +428,11 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
                     .iter()
                     .map(scalar_value_label)
                     .collect();
-                TypeSurface::Enum(variants)
+                let open = names
+                    .open_variants
+                    .get(&id)
+                    .map(|ident| ident.as_str().to_owned());
+                TypeSurface::Enum(variants, open)
             }
             TypeKind::Union(union) => {
                 let mut variants = BTreeMap::new();
@@ -639,8 +644,9 @@ fn diff_type(name: &str, old: &TypeSurface, new: &TypeSurface, changes: &mut Vec
         (TypeSurface::Struct(old_fields), TypeSurface::Struct(new_fields)) => {
             diff_struct(name, old_fields, new_fields, changes);
         }
-        (TypeSurface::Enum(old_variants), TypeSurface::Enum(new_variants)) => {
+        (TypeSurface::Enum(old_variants, old_open), TypeSurface::Enum(new_variants, new_open)) => {
             diff_variant_set(name, old_variants, new_variants, changes);
+            diff_open_variant(name, old_open.as_deref(), new_open.as_deref(), changes);
         }
         (TypeSurface::Union(old_variants), TypeSurface::Union(new_variants)) => {
             diff_union(name, old_variants, new_variants, changes);
@@ -737,6 +743,29 @@ fn diff_variant_set(
             ChangeKind::VariantRemoved,
             name,
             format!("variant removed: `{variant}`"),
+        ));
+    }
+}
+
+/// An open enum's catch-all is a variant like any other to a consumer that matches on the enum:
+/// opening a closed enum adds one (`VariantAdded`, the additive rule), closing an open one removes
+/// it, and renaming it — a listed value spelled `other` taking its name — is both.
+fn diff_open_variant(name: &str, old: Option<&str>, new: Option<&str>, changes: &mut Vec<Change>) {
+    if old == new {
+        return;
+    }
+    if let Some(variant) = new {
+        changes.push(Change::new(
+            ChangeKind::VariantAdded,
+            name,
+            format!("variant added: `{variant}(String)`, holding any unlisted value"),
+        ));
+    }
+    if let Some(variant) = old {
+        changes.push(Change::new(
+            ChangeKind::VariantRemoved,
+            name,
+            format!("variant removed: `{variant}(String)`, which held any unlisted value"),
         ));
     }
 }
@@ -889,8 +918,8 @@ fn status_enum_sig(
 fn status_label(status: StatusSpec) -> String {
     match status {
         StatusSpec::Exact(code) => code.to_string(),
-        StatusSpec::Range(0) => "default".to_owned(),
         StatusSpec::Range(prefix) => format!("{prefix}XX"),
+        StatusSpec::Default => "default".to_owned(),
     }
 }
 

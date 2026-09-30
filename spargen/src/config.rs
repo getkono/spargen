@@ -20,6 +20,7 @@
 //! carve = false           # auto-carve unsupported constructs (same as `--carve`)
 //! batch_cap = 100         # max diagnostics collected before batching stops
 //! error_body_cap = 65536  # max bytes of a response body retained on error variants
+//! open_narrowing = false  # open a response body's string `const` narrowings (default false)
 //!
 //! # Zero or more omit rules. The rule KIND is discriminated by field presence. A path/name (or
 //! # pointer) value that contains a glob metacharacter (`*`, `**`, `?`) is matched as a glob and
@@ -67,11 +68,12 @@ pub struct Spec {
     pub(crate) error_body_cap: usize,
     pub(crate) batch_cap: usize,
     pub(crate) carve: bool,
+    pub(crate) open_narrowing: bool,
 }
 
 impl Spec {
     /// A spec with defaults: `uuid` and `time` on, a 64 KiB error-body cap, a 100-diagnostic
-    /// batch, no omissions, no carving.
+    /// batch, no omissions, no carving, no open narrowing.
     pub fn new(path: impl Into<Utf8PathBuf>) -> Self {
         Self {
             path: path.into(),
@@ -81,6 +83,7 @@ impl Spec {
             error_body_cap: DEFAULT_ERROR_BODY_CAP,
             batch_cap: DEFAULT_BATCH_CAP,
             carve: false,
+            open_narrowing: false,
         }
     }
 
@@ -148,6 +151,29 @@ impl Spec {
         self
     }
 
+    /// Lower a string `enum`/`const` that narrows a plain `string` as an **open** set (default
+    /// `false`), inside a response body's own schema.
+    ///
+    /// The construct is a property that one `allOf` member (or the `$ref` it sits beside) declares
+    /// as a plain `string` and another narrows with `enum`/`const` — the RFC 9457 shape
+    /// `allOf: [$ref: Problem, {properties: {type: {const: …}}}]` that gives each documented error
+    /// status its own problem `type`. By default the narrowing is exact: the field is a closed
+    /// enum, and a value the description does not list is a decode failure (`Error::Decode`).
+    /// With this on, the field is an open enum instead: each listed value is still its own
+    /// variant, and one more variant holds any other string, which is the domain the wider
+    /// declaration admits. A server that adds a problem type then still decodes into `Error::Api`.
+    ///
+    /// It applies to the schema written in the response itself, and to what that schema contains
+    /// other than a `oneOf`/`anyOf`; a narrowing written inside a `$ref` target stays closed. A
+    /// target is shared by every use and can be a union variant somewhere else, and a union tells
+    /// its variants apart by what each one refuses, so opening a set there could make two variants
+    /// accept the same value. A narrowing whose value set is itself a `$ref` target opens a copy
+    /// and leaves the target closed. Request bodies and parameters are not affected.
+    pub fn open_narrowing(mut self, enabled: bool) -> Self {
+        self.open_narrowing = enabled;
+        self
+    }
+
     /// Where to write the generated module. The result is the input to [`generate`](crate::generate).
     pub fn build(self, output: impl Into<Utf8PathBuf>) -> Build {
         Build::new(self, output)
@@ -206,6 +232,9 @@ impl Spec {
         }
         if let Some(value) = file.error_body_cap {
             self.error_body_cap = value;
+        }
+        if let Some(value) = file.open_narrowing {
+            self.open_narrowing = value;
         }
         for (index, entry) in file.omit.iter().enumerate() {
             let rule = entry.to_rule().map_err(|message| {
@@ -318,6 +347,7 @@ struct FileConfig {
     carve: Option<bool>,
     batch_cap: Option<usize>,
     error_body_cap: Option<usize>,
+    open_narrowing: Option<bool>,
     /// Retained solely to give the removed 0.2 `[features]` table a targeted error.
     features: Option<toml::Value>,
     #[serde(default)]
@@ -399,6 +429,7 @@ mod tests {
         assert!(!spec.carve);
         assert_eq!(spec.batch_cap, 100);
         assert_eq!(spec.error_body_cap, 64 * 1024);
+        assert!(!spec.open_narrowing);
         assert!(spec.omit.is_empty());
         assert_eq!(Build::new(spec, "out.rs").cargo, CargoIntegration::Auto);
     }
@@ -412,6 +443,7 @@ mod tests {
             carve = true
             batch_cap = 7
             error_body_cap = 11
+            open_narrowing = true
             "#,
         )
         .unwrap();
@@ -420,6 +452,7 @@ mod tests {
         assert!(spec.carve);
         assert_eq!(spec.batch_cap, 7);
         assert_eq!(spec.error_body_cap, 11);
+        assert!(spec.open_narrowing);
     }
 
     #[test]

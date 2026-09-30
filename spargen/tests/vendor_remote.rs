@@ -6,8 +6,10 @@
 //! [`spargen::vendor`] facade (and, under `cli`, the `spargen lock` binary) fetches them for real:
 //! request, status handling, redirect following, and connection failure are all the real ones.
 //!
-//! What this does **not** reach is the TLS handshake: the fetcher trusts only the bundled web
-//! roots, so a local HTTPS server would need a certificate-trust seam the fetcher does not have.
+//! What this does **not** reach is a completed TLS handshake: the fetcher trusts only the bundled
+//! web roots, so a local HTTPS server would need a certificate-trust seam the fetcher does not
+//! have. `tests/tls_strictness.rs` drives the handshake up to the point it is refused, which
+//! needs no trust.
 
 #![cfg(feature = "remote-fetch")]
 
@@ -159,17 +161,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// The single `E003` a failed fetch reports, with its message.
+/// The single diagnostic a failed fetch reports — `E025`, and never `E003` "not pinned", which
+/// would blame the document for a network failure — with its message.
 fn fetch_failure(report: &Report) -> String {
     assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    let messages: Vec<&str> = report
-        .diagnostics()
-        .iter()
-        .filter(|diag| diag.code == Code::AbsoluteRefUnsupported)
-        .map(|diag| diag.message.as_str())
-        .collect();
-    assert_eq!(messages.len(), 1, "{report:#?}");
-    messages[0].to_owned()
+    let diagnostics = report.diagnostics();
+    assert_eq!(diagnostics.len(), 1, "{report:#?}");
+    assert_eq!(diagnostics[0].code, Code::RemoteFetchFailed, "{report:#?}");
+    diagnostics[0].message.clone()
 }
 
 #[test]
@@ -227,7 +226,7 @@ fn vendors_remote_refs_over_http_and_then_resolves_them_without_the_network() {
 }
 
 #[test]
-fn an_http_error_status_is_e003_naming_the_url_and_the_status() {
+fn an_http_error_status_is_e025_naming_the_url_and_the_status() {
     let server = MockServer::start(&[("/gone.yaml", Reply::Status("410 Gone"))]);
     let url = server.url("/gone.yaml");
     let (_temp, spec_path) = workspace(&url);
@@ -261,7 +260,7 @@ fn a_redirect_is_followed_and_pinned_under_the_url_the_spec_names() {
 }
 
 #[test]
-fn a_refused_connection_is_e003_naming_the_url() {
+fn a_refused_connection_is_e025_naming_the_url() {
     // Bind and release a port so nothing is listening on it.
     let port = TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -275,6 +274,9 @@ fn a_refused_connection_is_e003_naming_the_url() {
 
     let message = fetch_failure(&report);
     assert!(message.contains(&url), "{message}");
+    // The cause, not only reqwest's "error sending request": the refused connect's own I/O
+    // error, whose std rendering always carries the OS error number.
+    assert!(message.contains("(os error "), "{message}");
 }
 
 /// The same fetch through the installed binary, so `spargen lock`'s own wiring is reached too.

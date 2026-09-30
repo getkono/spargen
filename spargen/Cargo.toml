@@ -51,13 +51,17 @@ reqwest = { workspace = true, features = [
     "blocking",
     "rustls-tls",
 ], optional = true }
-# Never named in code: a version floor on the rustls reqwest's `rustls-tls` links. reqwest
+# A version floor on the rustls reqwest's `rustls-tls` links, never named in library code. reqwest
 # requires only `0.23.4`, and Cargo ignores a dependency's lockfile, so without this a consumer
 # enabling `remote-fetch` from `build.rs` resolves rustls itself and may pick a release an
 # advisory names. Default features stay off so this adds no feature (and no second crypto
 # provider) to what reqwest selects. Each floor is mirrored by a `[bans] deny` entry in
 # `deny.toml` naming its advisory; `advisory_floors_are_manifest_requirements` in
-# `tests/corpus_manifest.rs` holds the two equal.
+# `tests/corpus_manifest.rs` holds the two equal. The TLS handshake test in
+# `src/source/vendor.rs` serves TLS through this entry, on the `ring` and `std` features
+# reqwest's stack enables, rather than through a dev-dependency: that would put a TLS crate in
+# the default-features graph `the_all_features_workspace_graph_carries_a_tls_stack` holds free
+# of one. Removing this floor means giving that test another way to name rustls.
 rustls = { version = "0.23.45", default-features = false, optional = true }
 
 [dev-dependencies]
@@ -73,6 +77,13 @@ sha2 = { workspace = true }
 
 [[bin]]
 name = "spargen"
+required-features = ["cli"]
+
+# Every case in `tests/cli.rs` spawns `CARGO_BIN_EXE_spargen`, which `env!` expands to a path
+# even when the `cli` feature is off and the binary is not built; gating the target on the same
+# feature skips the suite then, instead of running it against whatever file occupies that path.
+[[test]]
+name = "cli"
 required-features = ["cli"]
 
 # End-to-end generation-pipeline benchmarks. `harness = false` hands argument parsing and

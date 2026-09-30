@@ -256,8 +256,8 @@ pub(crate) enum TypeKind {
     /// to the refusal or warning that answer already had. And `push_ref_member`, the historical
     /// origin of the defect class, refuses an in-progress member itself (`E013`'s `allOf` unit
     /// rejection) rather than trusting each caller to have guarded it, so a new caller inherits
-    /// the refusal. `intersect_non_null` likewise answers `None` for a reservation in its own
-    /// first arm instead of relying on `intersect_types`' guard alone.
+    /// the refusal. `intersect_non_null` likewise answers `Err(NoMeet::Unrepresentable)` for a
+    /// reservation in its own first arm instead of relying on `intersect_types`' guard alone.
     ///
     /// **Semver.** The breaks are a list, not a pair, and an earlier revision of this paragraph
     /// said "two" where it should have said what follows. Making the placeholder unreadable did not
@@ -556,6 +556,14 @@ pub(crate) struct ScalarEnum {
     pub(crate) repr: ScalarRepr,
     /// The variant wire values, in declared order.
     pub(crate) variants: Vec<ScalarValue>,
+    /// Whether the set is **open**: a string enum whose values name the members the description
+    /// lists, beside one more variant that holds any other string. Only `open_narrowing` produces
+    /// one, for a string `enum`/`const` that narrows a property another `allOf` member (or the
+    /// `$ref` it sits beside) declares as a plain `string`, inside a response body's own schema.
+    /// The open set's domain is that wider declaration's, so it is still exactly what the
+    /// description admits there, minus the narrowing. Always `false` for an integer or boolean
+    /// set.
+    pub(crate) open: bool,
 }
 
 /// The scalar kind backing a [`ScalarEnum`].

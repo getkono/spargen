@@ -61,7 +61,7 @@ pub use auth::{
 pub use blocking::BlockingRuntime;
 pub use client::{ClientConfig, ClientCore};
 #[cfg(feature = "time")]
-pub use datetime::{Date, DateTime, ParseError};
+pub use datetime::{Date, DateParseError, DateTime};
 pub use dispatch::{
     attach_auth, build_url, build_url_on, build_url_with_query_string,
     build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text,
@@ -69,8 +69,8 @@ pub use dispatch::{
     read_success_body, send, unexpected_status, StatusSpec,
 };
 pub use error::{
-    ApiErrorBody, Error, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind,
-    TransportError,
+    ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError,
+    RequestCause, RequestError, TimeoutKind, TransportError,
 };
 pub use header::{parse_header, require_header, HeaderError, HeaderShape};
 pub use middleware::{Middleware, MiddlewareBackend, Next};

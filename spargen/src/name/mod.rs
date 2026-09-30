@@ -47,6 +47,10 @@ pub(crate) struct Names {
     pub(crate) struct_overflow: HashMap<TypeId, Ident>,
     /// Variant name per `(type, wire variant value)`.
     pub(crate) variants: HashMap<(TypeId, String), Ident>,
+    /// The variant holding any unlisted string, per open string enum. Allocated in the enum's
+    /// variant scope after every listed value, so a listed value keeps the name it has in the
+    /// closed enum, and one spelled `other` pushes this one to a disambiguated name instead.
+    pub(crate) open_variants: HashMap<TypeId, Ident>,
     /// Builder type name per declared server, by index.
     pub(crate) servers: Vec<Ident>,
     /// Enum type name per `(server index, variable name)`, for a variable with a closed `enum`.
@@ -60,6 +64,47 @@ pub(crate) struct Names {
     /// Field name per `(operation, status label, header name)`.
     pub(crate) response_header_fields: HashMap<(OperationId, String, String), Ident>,
 }
+
+/// The fixed inherent methods codegen emits on `Client` and `BlockingClient`, beside one method
+/// per operation. Operation method names are allocated after these are reserved, so an
+/// `operationId` that spells one of them (`withCredential`, `new`, …) is disambiguated instead of
+/// emitting a duplicate definition. `with_default_server` is emitted only when the specification
+/// declares a server and `inner` only on `BlockingClient`; both are reserved unconditionally, so
+/// an operation's method name does not change when a server is added. `codegen`'s tests hold this
+/// list to exactly the methods it emits.
+pub(crate) const CLIENT_METHODS: &[&str] = &[
+    "new",
+    "with_default_server",
+    "with_client",
+    "with_backend",
+    "core",
+    "with_credential",
+    "inner",
+];
+
+/// The type-namespace names codegen's `types` module already uses when a model is emitted into
+/// it: the items it brings in with `use` (`serde`'s derives, `BTreeMap`, and the runtime `Date` and
+/// `DateTime`) and the prelude types it writes bare. Model type names are allocated after these are
+/// reserved, so a schema spelling one of them (a path parameter `date` whose inline schema is
+/// hinted `Date`, a component named `String`) is disambiguated instead of redefining an imported
+/// name (`E0255`) or shadowing the prelude type every other model refers to.
+///
+/// `Date` and `DateTime` are imported only when the API uses a date type with the `time` mapping
+/// on; they are reserved unconditionally, so a model's name does not change when an unrelated
+/// part of the spec starts using dates. `codegen`'s tests hold this list to every such name the
+/// emitted module uses.
+pub(crate) const TYPES_MODULE_NAMES: &[&str] = &[
+    "BTreeMap",
+    "Box",
+    "Date",
+    "DateTime",
+    "Deserialize",
+    "Option",
+    "Result",
+    "Serialize",
+    "String",
+    "Vec",
+];
 
 /// Generator-owned bindings emitted inside one operation method.
 #[derive(Debug)]
@@ -135,8 +180,12 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     // and reordering a mapping changes no schema. The contest is decided on each definition's own
     // `(document, pointer)` identity instead. A definition carrying none (the root document's own
     // pointer, which synthesized types fall back to) ranks after every definition that has one, so
-    // it can never take a name from a declared schema.
+    // it can never take a name from a declared schema. The names the `types` module itself uses are
+    // taken before any definition asks for one.
     let mut type_scope = Scope::default();
+    for name in TYPES_MODULE_NAMES {
+        type_scope.reserve(name, IdentRole::Type);
+    }
     let definitions: Vec<_> = api.types.iter().collect();
     let requests: Vec<_> = definitions
         .iter()
@@ -162,13 +211,13 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             .responses
             .by_status
             .iter()
-            .map(|(spec, response)| (status_label(Some(*spec)), response))
+            .map(|(spec, response)| (status_label(*spec), response))
             .chain(
                 operation
                     .responses
                     .default
                     .as_ref()
-                    .map(|response| (status_label(None), response)),
+                    .map(|response| (status_label(crate::ir::StatusSpec::Default), response)),
             );
         for (label, response) in responses {
             if response.headers.is_empty() {
@@ -190,7 +239,12 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
         }
     }
 
+    // Operation methods share `impl Client` and `impl BlockingClient` with the fixed methods, so
+    // those spellings are taken before any operation asks for one.
     let mut operation_scope = Scope::default();
+    for method in CLIENT_METHODS {
+        operation_scope.reserve(method, IdentRole::Method);
+    }
     let mut params_scope = Scope::default();
     for operation in &api.operations {
         names.operations.insert(
@@ -285,6 +339,12 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                         scope.alloc(&value, IdentRole::Variant, &def.provenance.pointer),
                     );
                 }
+                if enumeration.open {
+                    names.open_variants.insert(
+                        id,
+                        scope.alloc("Other", IdentRole::Variant, &def.provenance.pointer),
+                    );
+                }
             }
             TypeKind::Union(union) => {
                 // Union variants share the scalar-enum `variants` table, keyed by `(TypeId, hint)`.
@@ -317,10 +377,10 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
 
 /// The stable label for one documented status, shared by naming and codegen so a header struct and
 /// its response variant always agree.
-pub(crate) fn status_label(spec: Option<crate::ir::StatusSpec>) -> String {
+pub(crate) fn status_label(spec: crate::ir::StatusSpec) -> String {
     match spec {
-        Some(crate::ir::StatusSpec::Exact(code)) => format!("Status{code}"),
-        Some(crate::ir::StatusSpec::Range(0)) | None => "Default".to_owned(),
-        Some(crate::ir::StatusSpec::Range(prefix)) => format!("Status{prefix}xx"),
+        crate::ir::StatusSpec::Exact(code) => format!("Status{code}"),
+        crate::ir::StatusSpec::Range(prefix) => format!("Status{prefix}xx"),
+        crate::ir::StatusSpec::Default => "Default".to_owned(),
     }
 }

@@ -97,9 +97,13 @@ jobs:
         with:
           tool: cargo-hack@0.6.39
       # Every other job runs `--all-features`, so a combination such as `xml` on and `time` off was
-      # never compiled — and those are exactly the subsets the generator embeds per spec.
+      # never compiled — and those are exactly the subsets the generator embeds per spec. The
+      # `--no-dev-deps` lines check the libs without dev-dependency feature unification; the
+      # `--all-targets` lines compile `#[cfg(test)]` code at each point too (#237).
       - run: cargo hack check --workspace --each-feature --no-dev-deps
-      - run: cargo hack check -p support-runtime --feature-powerset
+      - run: cargo hack check -p support-runtime --no-dev-deps --feature-powerset
+      - run: cargo hack check --workspace --exclude support-runtime --each-feature --all-targets
+      - run: cargo hack check -p support-runtime --all-targets --feature-powerset
 
   runtime-dependencies:
     name: Runtime dependency floors
@@ -172,6 +176,9 @@ jobs:
       # fail the official 3.1 document schema before lowering.
       - run: cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json > target/corpus-smoke/meili.json || test $? -eq 1
       - run: grep -q E011 target/corpus-smoke/meili.json
+      # Mastodon is 3.1.0 and generates: its recursive-nullable `$ref`s and `$ref`-with-`type`
+      # siblings must keep clearing lowering, so check must succeed with no rejection.
+      - run: cargo run -q -p spargen --features cli -- check corpus/mastodon-openapi/schema.json --format json
 
   github-api:
     name: GitHub API generated client
@@ -250,6 +257,28 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --workspace --all-features --document-private-items
+
+  release-preview:
+    name: Release preview (release-plz)
+    runs-on: ubuntu-latest
+    steps:
+      # Full history and tags: release-plz reads every commit since the last release's tag.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@1.98.1
+      # The release-plz version `[tools]` pins in mise.toml, which is also the `version:` input
+      # release-plz.yml's action runs (`ci_installs_exactly_the_tool_versions_mise_pins`).
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: release-plz@0.3.160
+      # `mise run release-preview`'s commands, byte for byte: the version bumps and CHANGELOG
+      # section the next release pull request would write, printed to the log (#190).
+      - run: rm -rf target/release-preview
+      - run: GIT_LFS_SKIP_SMUDGE=1 git clone --quiet --no-local . target/release-preview
+      - run: git -C target/release-preview switch --quiet --create release-preview
+      - run: cd target/release-preview && GIT_LFS_SKIP_SMUDGE=1 release-plz update --repo-url https://github.com/getkono/spargen
+      - run: git -C target/release-preview --no-pager diff
 
   # The `deny` job lives in deny.yml, which runs it on the same triggers plus a daily schedule.
 

@@ -27,6 +27,7 @@ the library API.
 | `E022` | Error | duplicate object key |
 | `E023` | Error | invalid generated-runtime dependency contract |
 | `E024` | Error | cargo integration required but unavailable |
+| `E025` | Error | remote `$ref` fetch failed |
 | `W001` | Warning | validation-only keyword ignored |
 | `W002` | Warning | server-initiated flow ignored |
 | `W005` | Warning | schema default not applied |

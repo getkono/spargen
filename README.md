@@ -40,6 +40,15 @@ Both modes run as part of Rust compilation. Spargen is host/build-time only and 
 runtime dependency tree**. The CLI is tooling for `lock`, `check`, `deps`, `diff`, and
 `explain`; it cannot generate code, stream generated source, watch files, or scaffold a crate.
 
+`spargen lock` (the `remote-fetch` feature) is the generator's only networked step. It fetches
+over reqwest's rustls stack with rustls's defaults and the bundled Mozilla roots, and spargen
+holds no TLS position of its own: it interoperates with exactly the peers that rustls release
+accepts, and refuses the rest as `E025` with rustls's reason. Protocol conformance is rustls's,
+so a rustls upgrade may refuse a non-conformant server that an older one accepted. The one
+behaviour pinned here is the strictness an advisory named: `spargen/tests/tls_strictness.rs`
+drives a deliberately non-conformant peer (RUSTSEC-2026-0285) and fails on a rustls that accepts
+it again.
+
 ```rust
 // build.rs — spargen appears only in [build-dependencies].
 let out_dir = std::env::var("OUT_DIR").unwrap();
@@ -74,18 +83,26 @@ the version it emits, and the idioms spargen handles.
 - One `async` method per operation: required parameters positional, optional parameters in a
   per-operation `…Params` struct deriving `Default`, `Result<ResponseValue<T>, Error<E>>` out.
   String parameters and the params bundle take `impl Into<…>`, so `client.get_pet("1")` and
-  `client.list_pets(params)` need no `to_owned()` or `Some`.
+  `client.list_pets(params)` need no `to_owned()` or `Some`. An operation whose method name
+  would spell one of `Client`'s or `BlockingClient`'s fixed methods (`new`, `with_credential`,
+  …) takes a disambiguated name instead. `with_default_server` and `inner` are reserved on both
+  clients whether or not that client emits them, so declaring a server never renames an operation.
 - `Client::with_credential(scheme, credential)` registers static secrets (via
   [`secrecy`](https://docs.rs/secrecy)) or async token providers; operation `security`
   requirements pick the first satisfiable alternative and attach bearer/basic/apiKey credentials.
   A missing required credential is a request-construction error — typed as
   `RequestError::MissingCredential`, listing for each security alternative the schemes with no
-  registered credential, and a failed token provider as `RequestError::CredentialProvider` —
-  never a silent 401.
-- A closed error taxonomy, identical across all spargen output: request-construction, transport,
-  timeout, protocol, redirect, documented API error (typed `E`), undocumented status (raw body
-  preserved), decode failure (serde path + body, capped except on the two paths the emitted
-  `ClientConfig::max_error_body` doc names), interrupted body. Every generated error
+  registered credential; a credential of a kind its scheme cannot carry as
+  `RequestError::CredentialMismatch`; and a failed token provider as
+  `RequestError::CredentialProvider` — never a silent 401.
+- A closed error taxonomy, identical across all spargen output: request-construction
+  (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
+  above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout
+  (`Error::Timeout`), protocol (`Error::Protocol`), redirect (`Error::Redirect`), documented API
+  error (`Error::Api`, typed `E`), undocumented status (`Error::UnexpectedStatus`, raw body
+  preserved), decode failure (`Error::Decode`: status, headers, serde path + body, capped except
+  on the two paths the emitted `ClientConfig::max_error_body` doc names), interrupted body
+  (`Error::InterruptedBody`). Every generated error
   type is `Display` + `std::error::Error`, so `Error<E>` drops straight into `?`, `anyhow`, or
   `thiserror`. `Error::is_transient()` classifies retry-worthy failures. An error enum whose
   bodied statuses carry the same body type (one schema, or schemas that generate the same Rust
@@ -93,13 +110,24 @@ the version it emits, and the idioms spargen handles.
   and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()` hands that body back
   whichever status carried it (`Error::status()` reports that status, the same value as
   `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by variant
-  instead.
+  instead. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the RFC 9457
+  members (`type`, `title`, `status`, `detail`, `instance`) of whichever error body a failure
+  carried, across every operation and body type: the typed body on `Error::Api`, and the raw body
+  of a `4xx`/`5xx` `Error::Decode` or `Error::UnexpectedStatus`. The opt-in `open_narrowing`
+  lowers a response's per-status problem `type` narrowing as an open enum (each listed value, plus
+  `Other(String)`), so a problem type the description does not list still decodes into
+  `Error::Api`. See [problem details](docs/book/src/runtime.md#problem-details).
 - Beyond the request/response path, the embedded runtime carries a swappable transport seam
   (`HttpBackend`) with composable retry and middleware adapters, `Link:`-header pagination, typed
   SSE/NDJSON/JSON-sequence streams, an opt-in `blocking` client, and `wasm32-unknown-unknown`
   support. Each is opt-in and adds no dependency; spargen ships no retry *policy* and no async
   timer — the caller supplies both. See the
   [runtime reference](docs/book/src/runtime.md).
+- Each schema becomes a model in the generated `types` module. A model whose name would spell one
+  of the ten names that module itself uses (`Date`, `DateTime`, `Serialize`, `Deserialize`,
+  `BTreeMap`, `String`, `Option`, `Vec`, `Box`, `Result`) takes a disambiguated name instead.
+  All ten are reserved whether or not the module writes them, so starting to use a date type never
+  renames a model.
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ### Design guarantees
@@ -194,8 +222,9 @@ mise run hooks        # install git hooks
 | `mise run bench` | Criterion benchmarks over the generation pipeline |
 | `mise run github-api` | Generate and compile the full pinned GitHub API client (native strict Clippy + wasm) |
 | `mise run example` | Run the end-to-end petstore example |
-| `mise run deny` | Supply-chain audit (licenses, advisories, bans) |
+| `mise run deny` | Supply-chain audit (licenses, advisories, bans, sources) of every committed lockfile |
 | `mise run deny-published` | Advisory audit of the `Cargo.lock` the latest `spargen` release ships on crates.io |
+| `mise run release-preview` | Preview the version bumps and `CHANGELOG` section the next release pull request writes |
 | `mise run docs` | Build the mdBook site (fails on broken links or includes) |
 | `mise run doc-links` | Rustdoc over the workspace, warnings denied, private items included |
 

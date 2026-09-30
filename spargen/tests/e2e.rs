@@ -134,6 +134,18 @@ fn generate_fixture_crate_in_edition(
     name: &str,
     edition: &str,
 ) -> spargen::Report {
+    generate_configured_fixture_crate(spec, out, name, edition, |spec| spec)
+}
+
+/// [`generate_fixture_crate_in_edition`] with the `Spec` passed through `configure` first, for a
+/// fixture that needs a generation option set.
+fn generate_configured_fixture_crate(
+    spec: &std::path::Path,
+    out: &std::path::Path,
+    name: &str,
+    edition: &str,
+    configure: impl FnOnce(Spec) -> Spec,
+) -> spargen::Report {
     std::fs::create_dir_all(out.join("src")).unwrap();
     std::fs::write(
         out.join("Cargo.toml"),
@@ -164,11 +176,13 @@ tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
     )
     .unwrap();
     spargen::generate(
-        &Spec::new(Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap())
-            .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
-            // This test process is not a build script; the fixture crate below is compiled by a
-            // real `cargo build`, which is where the manifest audit belongs.
-            .cargo(CargoIntegration::Off),
+        &configure(Spec::new(
+            Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap(),
+        ))
+        .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
+        // This test process is not a build script; the fixture crate below is compiled by a
+        // real `cargo build`, which is where the manifest audit belongs.
+        .cargo(CargoIntegration::Off),
     )
 }
 
@@ -217,6 +231,197 @@ fn an_operation_named_after_a_runtime_type_still_compiles() {
     assert!(
         status.success(),
         "an operationId matching a runtime re-export must still generate compiling code"
+    );
+}
+
+/// Issue #356: the inline schema of the path parameter `date` is given the hint name `Date`, and
+/// the response's `format: date-time` makes the `types` module import the runtime `Date` and
+/// `DateTime`, so the alias otherwise lands beside `use super::{Date, DateTime};` (`E0255`). The
+/// named components exercise every other spelling the `types` module brings into scope by `use`
+/// or names bare from the prelude.
+const TYPES_SCOPE_COLLISION_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /terms/{date}:
+    parameters:
+      - name: date
+        in: path
+        required: true
+        schema: { type: string }
+    get:
+      operationId: getTerms
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  at: { type: string, format: date-time }
+  /everything:
+    get:
+      operationId: getEverything
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  date_time: { $ref: '#/components/schemas/DateTime' }
+                  serialize: { $ref: '#/components/schemas/Serialize' }
+                  deserialize: { $ref: '#/components/schemas/Deserialize' }
+                  b_tree_map: { $ref: '#/components/schemas/BTreeMap' }
+                  string: { $ref: '#/components/schemas/String' }
+                  option: { $ref: '#/components/schemas/Option' }
+                  vec: { $ref: '#/components/schemas/Vec' }
+                  box: { $ref: '#/components/schemas/Box' }
+                  result: { $ref: '#/components/schemas/Result' }
+                  day: { type: string, format: date }
+                  tags: { type: array, items: { type: string } }
+                  extra: { type: object, additionalProperties: { type: string } }
+components:
+  schemas:
+    DateTime: { type: string }
+    Serialize: { type: object, properties: { name: { type: string } } }
+    Deserialize: { type: object, properties: { name: { type: string } } }
+    BTreeMap: { type: object, properties: { name: { type: string } } }
+    String: { type: object, properties: { name: { type: string } } }
+    Option: { type: object, properties: { name: { type: string } } }
+    Vec: { type: object, properties: { name: { type: string } } }
+    Box: { type: object, properties: { next: { $ref: '#/components/schemas/Box' } } }
+    Result: { type: object, properties: { name: { type: string } } }
+"#;
+
+/// A schema whose name the `types` module already uses must be disambiguated like any other clash
+/// rather than emitted beside the import or prelude item of that name (issue #356).
+#[test]
+fn a_schema_named_after_a_name_the_types_module_uses_still_compiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, TYPES_SCOPE_COLLISION_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "types_scope_collide");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert!(
+        generated.contains("use super::{Date, DateTime};"),
+        "the fixture must make the `types` module import the runtime date types:\n{generated}"
+    );
+    for taken in [
+        "Date",
+        "DateTime",
+        "Serialize",
+        "Deserialize",
+        "BTreeMap",
+        "String",
+        "Option",
+        "Vec",
+        "Box",
+        "Result",
+    ] {
+        for item in ["pub type", "pub struct", "pub enum"] {
+            assert!(
+                !generated.contains(&format!("{item} {taken} ")),
+                "a schema must not take `{taken}` from the `types` module's scope:\n{generated}"
+            );
+        }
+    }
+
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "a schema named after a name the `types` module uses must still generate compiling code"
+    );
+}
+
+/// One operation per fixed inherent method of `Client` and `BlockingClient` (issue #286). The spec
+/// declares a server, so `with_default_server` is emitted too, and the fixture is checked with the
+/// `blocking` feature on, so the `BlockingClient` methods (`inner` among them) are compiled.
+const CLIENT_METHOD_COLLISION_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers:
+  - url: https://api.example.com
+paths:
+  /new:
+    get: { operationId: new, responses: { "204": { description: ok } } }
+  /with-default-server:
+    get: { operationId: withDefaultServer, responses: { "204": { description: ok } } }
+  /with-client:
+    get: { operationId: withClient, responses: { "204": { description: ok } } }
+  /with-backend:
+    get: { operationId: withBackend, responses: { "204": { description: ok } } }
+  /core:
+    get: { operationId: core, responses: { "204": { description: ok } } }
+  /with-credential:
+    get: { operationId: withCredential, responses: { "204": { description: ok } } }
+  /inner:
+    get: { operationId: inner, responses: { "204": { description: ok } } }
+"#;
+
+/// An `operationId` spelling one of the client's own inherent methods must still produce a module
+/// that compiles. Operation methods share `impl Client` (and `impl BlockingClient`) with the
+/// constructors and accessors, so `operationId: withCredential` otherwise emits a second
+/// `pub fn with_credential`, which is `E0592`.
+#[test]
+fn an_operation_named_after_a_client_method_still_compiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, CLIENT_METHOD_COLLISION_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "client_method_collide");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    for method in [
+        "new",
+        "with_default_server",
+        "with_client",
+        "with_backend",
+        "core",
+        "with_credential",
+        "inner",
+    ] {
+        assert!(
+            generated.contains(&format!("pub async fn {method}_")),
+            "operation `{method}` must yield to the client method of that name:\n{generated}"
+        );
+    }
+
+    let status = fixture_cargo(&out)
+        .args([
+            "clippy",
+            "--all-features",
+            "--",
+            "-D",
+            "warnings",
+            "-W",
+            "clippy::expect-used",
+        ])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "an operationId matching a fixed client method must still generate compiling code"
     );
 }
 
@@ -274,6 +479,85 @@ fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
     assert!(
         status.success(),
         "generated output must compile against the block `spargen deps` prints"
+    );
+}
+
+/// Whether `name` is a TLS crate, by the same rule the `example` gate applies to each example
+/// lockfile in `mise.toml` and `ci.yml`: it names `rustls`, `native-tls`, `openssl` or `webpki`,
+/// or ends in `-tls`. The two share a rule so that "no TLS crate" there and "a TLS crate" here
+/// mean the same set.
+fn is_tls_crate(name: &str) -> bool {
+    ["rustls", "native-tls", "openssl", "webpki"]
+        .iter()
+        .any(|family| name.contains(family))
+        || name.ends_with("-tls")
+}
+
+/// The distinct package names in this workspace's resolved graph, from `Cargo.lock` as committed
+/// (`--locked`, as the `deny` gate audits it), with `features` passed to `cargo tree`.
+///
+/// `cargo tree` is read rather than `cargo metadata` because it resolves features the way
+/// cargo-deny does: `cargo metadata`'s package list keeps the target of a weak `dep?/feature`
+/// that nothing enables (reqwest's `quinn`, which depends on `rustls`), so it could report a TLS
+/// crate cargo-deny never audits (#187). Every edge kind on every target is read, the scope
+/// cargo-deny audits by default.
+fn workspace_graph_package_names(features: &[&str]) -> std::collections::BTreeSet<String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let output = fixture_cargo(root)
+        .args(["tree", "--workspace", "--locked", "--target", "all"])
+        .args(["--edges", "normal,build,dev", "--prefix", "none"])
+        .args(["--format", "{p}"])
+        .args(features)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "`cargo tree {features:?}` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The `deny` gate audits under `--all-features` because that is what puts a TLS stack in the
+/// audited graph, and TLS advisories (RUSTSEC-2026-0285) are found only through one that is
+/// there. `the_deny_gate_states_the_feature_scope_it_audits` in `corpus_manifest.rs` pins the
+/// flag; this pins the property the flag stands for. Restructuring `remote-fetch`, dropping
+/// reqwest's `rustls-tls`, or removing the `rustls` floor would otherwise leave the flag in place
+/// and the TLS advisory audit vacuous with every gate green (#227).
+///
+/// Any TLS crate satisfies it, not `rustls` by name, so a backend swap (to `native-tls`, say)
+/// keeps it passing while the audit still sees a TLS stack. The default-features graph is the
+/// control: it must contain none, or the matcher proves nothing and the gate comments saying
+/// `--all-features` is what brings TLS in are false.
+#[test]
+fn the_all_features_workspace_graph_carries_a_tls_stack() {
+    let tls = |features: &[&str]| -> Vec<String> {
+        workspace_graph_package_names(features)
+            .into_iter()
+            .filter(|name| is_tls_crate(name))
+            .collect()
+    };
+
+    let audited = tls(&["--all-features"]);
+    assert!(
+        !audited.is_empty(),
+        "the `--all-features` workspace graph the `deny` gate audits carries no TLS crate, so no \
+         TLS advisory can fail it"
+    );
+
+    let default = tls(&[]);
+    assert!(
+        default.is_empty(),
+        "the default-features workspace graph carries TLS crates {default:?}: `--all-features` is \
+         no longer what puts TLS in the audited graph, so this test's control and the `deny` \
+         gate's stated rationale no longer hold"
     );
 }
 
@@ -1269,8 +1553,9 @@ fn an_undeclared_2xx_is_never_decoded_through_default_beside_a_declared_success(
     let (base, server) = serve_once("application/json", "201 Created", problem);
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_plain_default().unwrap_err() {
-        basic_client::Error::Decode { status, body, .. } => {
+        basic_client::Error::Decode { status, headers, body, .. } => {
             assert_eq!(status, 201);
+            assert_eq!(headers.get("content-type").unwrap(), "application/json");
             assert_eq!(&body[..], problem);
         }
         other => panic!("a 2xx must decode as the declared success, got {other:?}"),
@@ -1311,35 +1596,144 @@ fn an_undeclared_2xx_is_never_decoded_through_default_beside_a_declared_success(
     server.join().unwrap();
 }
 
-// Issue #127: a bodyless `default` is dropped from a single-body error shape, and the emitted status
-// table must drop it too. A `500` carrying a well-formed `Problem` is therefore
-// `Error::UnexpectedStatus` with its body preserved — were `StatusSpec::Any` in the table, it would
-// decode as the documented `404` body. Beside two bodied errors the same `default` is the enum's
-// unit `Default` variant instead; that match is exhaustive, so a variant appearing or vanishing
-// fails to compile.
+// Issues #127 and #204: a bodyless error entry beside exactly one error body is its own unit
+// variant — a bodyless `default`, `403`, or `304` alike — where the single-body newtype dropped it,
+// so a documented status arrived as `Error::UnexpectedStatus` or, under a bodied `default`, had its
+// empty body decoded as that model. Every match is exhaustive with no wildcard, so a variant
+// appearing or vanishing fails to compile.
 #[test]
-fn bodyless_default_beside_one_bodied_error_is_not_a_documented_status() {
+fn a_bodyless_error_entry_beside_one_error_body_is_its_own_variant() {
     let problem: &'static [u8] = br#"{"title":"t","detail":"d"}"#;
     let (base, server) = serve_once("application/json", "404 Not Found", problem);
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_bodyless_default().unwrap_err() {
         basic_client::Error::Api(response) => {
             assert_eq!(response.status(), 404);
-            let basic_client::GetBodylessDefaultError(body) = response.into_inner();
-            assert_eq!(body.title, "t");
+            match response.into_inner() {
+                basic_client::GetBodylessDefaultError::Status404(body) => {
+                    assert_eq!(body.title, "t")
+                }
+                basic_client::GetBodylessDefaultError::Default => {
+                    panic!("a 404 took the bodyless `default`")
+                }
+            }
         }
         other => panic!("expected the typed 404 error body, got {other:?}"),
     }
     server.join().unwrap();
 
+    // A `500` is the documented bodyless `default`: `Api`, and its body is never parsed as the
+    // `404`'s `Problem`.
+    for body in [problem, b"".as_slice()] {
+        let (base, server) = serve_once("application/json", "500 Internal Server Error", body);
+        let client = basic_client::BlockingClient::new(&base).unwrap();
+        match client.get_bodyless_default().unwrap_err() {
+            basic_client::Error::Api(response) => {
+                assert_eq!(response.status(), 500);
+                match response.into_inner() {
+                    basic_client::GetBodylessDefaultError::Default => {}
+                    basic_client::GetBodylessDefaultError::Status404(body) => {
+                        panic!("a 500 decoded as the documented 404: {body:?}")
+                    }
+                }
+            }
+            other => panic!("expected the unit `Default` error variant, got {other:?}"),
+        }
+        server.join().unwrap();
+    }
+
+    // The issue's repro: a documented bodyless `403` is `Api(Status403)`, not `UnexpectedStatus`.
+    let (base, server) = serve_once("application/json", "403 Forbidden", b"");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_bodyless_sibling().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 403);
+            match response.into_inner() {
+                basic_client::GetBodylessSiblingError::Status403 => {}
+                basic_client::GetBodylessSiblingError::Status404(body) => {
+                    panic!("a 403 decoded as the 404: {body:?}")
+                }
+            }
+        }
+        other => panic!("expected the unit `Status403` error variant, got {other:?}"),
+    }
+    server.join().unwrap();
+    // The bodied `404` still decodes, and an undocumented `500` is still unexpected.
+    let (base, server) = serve_once("application/json", "404 Not Found", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_bodyless_sibling().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetBodylessSiblingError::Status404(body) => assert_eq!(body.title, "t"),
+            basic_client::GetBodylessSiblingError::Status403 => panic!("a 404 took the 403"),
+        },
+        other => panic!("expected the typed 404 error body, got {other:?}"),
+    }
+    server.join().unwrap();
     let (base, server) = serve_once("application/json", "500 Internal Server Error", problem);
     let client = basic_client::BlockingClient::new(&base).unwrap();
-    match client.get_bodyless_default().unwrap_err() {
+    match client.get_bodyless_sibling().unwrap_err() {
         basic_client::Error::UnexpectedStatus { status, body, .. } => {
             assert_eq!(status, 500);
             assert_eq!(&body[..], problem);
         }
-        other => panic!("a bodyless `default` must not classify a 500 as `Api`, got {other:?}"),
+        other => panic!("an undocumented 500 must stay unexpected, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // The same shape with an XML error body: the `404` arm decodes XML, the `403` reads nothing.
+    let (base, server) = serve_once(
+        "application/xml",
+        "404 Not Found",
+        b"<XmlReceipt><ReceiptCode>A1</ReceiptCode></XmlReceipt>",
+    );
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_xml_bodyless_sibling().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetXmlBodylessSiblingError::Status404(body) => {
+                assert_eq!(body.code, "A1")
+            }
+            basic_client::GetXmlBodylessSiblingError::Status403 => panic!("a 404 took the 403"),
+        },
+        other => panic!("expected the typed XML 404 error body, got {other:?}"),
+    }
+    server.join().unwrap();
+    let (base, server) = serve_once("application/xml", "403 Forbidden", b"");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_xml_bodyless_sibling().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetXmlBodylessSiblingError::Status403 => {}
+            basic_client::GetXmlBodylessSiblingError::Status404(body) => {
+                panic!("a 403 decoded as the 404: {body:?}")
+            }
+        },
+        other => panic!("expected the unit `Status403` error variant, got {other:?}"),
+    }
+    server.join().unwrap();
+
+    // A bodyless `304` beside a bodied `default`: its own variant, the empty body never decoded.
+    let (base, server) = serve_once("application/json", "304 Not Modified", b"");
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_conditional().unwrap_err() {
+        basic_client::Error::Api(response) => {
+            assert_eq!(response.status(), 304);
+            match response.into_inner() {
+                basic_client::GetConditionalError::Status304 => {}
+                basic_client::GetConditionalError::Default(body) => {
+                    panic!("a 304 decoded as the `default` body: {body:?}")
+                }
+            }
+        }
+        other => panic!("expected the unit `Status304` error variant, got {other:?}"),
+    }
+    server.join().unwrap();
+    let (base, server) = serve_once("application/json", "500 Internal Server Error", problem);
+    let client = basic_client::BlockingClient::new(&base).unwrap();
+    match client.get_conditional().unwrap_err() {
+        basic_client::Error::Api(response) => match response.into_inner() {
+            basic_client::GetConditionalError::Default(body) => assert_eq!(body.title, "t"),
+            basic_client::GetConditionalError::Status304 => panic!("a 500 took the 304"),
+        },
+        other => panic!("expected the typed `default` error body, got {other:?}"),
     }
     server.join().unwrap();
 
@@ -1446,12 +1840,14 @@ fn success_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
     }
     server.join().unwrap();
 
-    // A body the matched arm cannot parse is `Error::Decode` at that status, with the body kept.
-    let (base, server) = serve_once("application/json", "202 Accepted", b"not json");
+    // A body the matched arm cannot parse is `Error::Decode` at that status, with the headers
+    // (#268) and the body kept.
+    let (base, server) = serve_once("text/plain", "202 Accepted", b"not json");
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_ranged().unwrap_err() {
-        basic_client::Error::Decode { status, body, .. } => {
+        basic_client::Error::Decode { status, headers, body, .. } => {
             assert_eq!(status, 202);
+            assert_eq!(headers.get("content-type").unwrap(), "text/plain");
             assert_eq!(&body[..], b"not json");
         }
         other => panic!("expected a decode error, got {other:?}"),
@@ -1510,11 +1906,14 @@ fn error_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
     }
     server.join().unwrap();
 
-    let (base, server) = serve_once("application/json", "409 Conflict", b"not json");
+    // Issue #268: a documented status whose body does not decode (here an HTML page, as a proxy
+    // in front of the server would send) keeps its status and headers on `Decode`.
+    let (base, server) = serve_once("text/html", "409 Conflict", b"not json");
     let client = basic_client::BlockingClient::new(&base).unwrap();
     match client.get_error_ranged().unwrap_err() {
-        basic_client::Error::Decode { status, body, truncated, .. } => {
+        basic_client::Error::Decode { status, headers, body, truncated, .. } => {
             assert_eq!(status, 409);
+            assert_eq!(headers.get("content-type").unwrap(), "text/html");
             assert_eq!(&body[..], b"not json");
             assert!(!truncated);
         }
@@ -1600,6 +1999,46 @@ fn a_nullable_uninhabited_field_still_admits_null() {
         serde_json::from_str(r#"{"x": null}"#).unwrap();
     assert!(present.x.is_none());
     assert!(serde_json::from_str::<basic_client::types::NullOnlyProperty>(r#"{"x": 1}"#).is_err());
+}
+
+// serde's `Option<T>` maps a JSON `null` to `None` without calling `T::deserialize`, so an
+// optional non-nullable field would decode `{"name": null}` as absent and re-serialise it as `{}`:
+// a value the schema does not admit, accepted and then silently rewritten. A present value, `null`
+// included, is decoded as the field's own type instead.
+#[test]
+fn an_optional_non_nullable_field_rejects_a_present_null() {
+    use basic_client::types::OptionalFields;
+    for field in ["name", "count", "flag", "tags", "mode", "nested", "choice", "colour"] {
+        let document = format!(r#"{{"{field}": null}}"#);
+        let decoded = serde_json::from_str::<OptionalFields>(&document);
+        assert!(
+            decoded.is_err(),
+            "{document}: `{field}` is not nullable, yet decoded as {decoded:?}"
+        );
+    }
+    // Absence is still `None` (or the schema default), and serialises back to absence.
+    let absent: OptionalFields = serde_json::from_str("{}").unwrap();
+    assert!(absent.name.is_none() && absent.count.is_none() && absent.choice.is_none());
+    assert_eq!(absent.colour.as_deref(), Some("red"));
+    // A present, well-typed value still decodes.
+    let present: OptionalFields = serde_json::from_str(
+        r#"{"name": "n", "count": 2, "flag": false, "tags": [], "mode": "manual", "nested": {},
+            "choice": 3, "colour": "blue"}"#,
+    )
+    .unwrap();
+    assert_eq!(present.name.as_deref(), Some("n"));
+    assert_eq!(present.count, Some(2));
+    assert_eq!(present.colour.as_deref(), Some("blue"));
+    // An untyped property admits `null` as a value of its own, and keeps it present on the wire.
+    let untyped: OptionalFields = serde_json::from_str(r#"{"anything": null}"#).unwrap();
+    assert_eq!(untyped.anything, Some(serde_json::Value::Null));
+    assert_eq!(
+        serde_json::to_value(&untyped).unwrap(),
+        serde_json::json!({"anything": null, "colour": "red"})
+    );
+    // A nullable optional property is where `null` and absence both mean `None`.
+    let nullable: OptionalFields = serde_json::from_str(r#"{"maybe": null}"#).unwrap();
+    assert!(nullable.maybe.is_none());
 }
 
 #[test]
@@ -1897,6 +2336,13 @@ fn xml_body_types_carry_attribute_and_rename() {
         quick_xml::de::from_str("<XmlReceipt><ReceiptCode>OK</ReceiptCode></XmlReceipt>").unwrap();
     assert_eq!(receipt.code, "OK");
     assert_eq!(receipt.note, None);
+    // A present optional element is decoded as the field's own type through its present-value
+    // deserializer, not through quick-xml's `Option` handling.
+    let noted: basic_client::types::XmlReceipt = quick_xml::de::from_str(
+        "<XmlReceipt><ReceiptCode>OK</ReceiptCode><note>late</note></XmlReceipt>",
+    )
+    .unwrap();
+    assert_eq!(noted.note.as_deref(), Some("late"));
 }
 
 #[test]
@@ -2342,8 +2788,53 @@ fn a_failed_token_provider_is_a_typed_request_construction_error() {
     // through the chain, which is how an application reports *why* the refresh failed.
     assert!(!error.is_transient());
     let cause = std::error::Error::source(&error).unwrap();
+    // The request-level message is a fixed sentence naming the scheme, not the provider's text:
+    // the provider's own message is one level further down, where it is downcast below.
+    assert_eq!(
+        cause.to_string(),
+        "the token provider registered for security scheme `bearer` failed"
+    );
     let provider = std::error::Error::source(cause).unwrap();
     assert!(provider.downcast_ref::<basic_client::AuthError>().is_some());
+}
+
+// The third credential state: a credential is registered and selects its alternative, but it is of
+// a kind the scheme cannot carry. It is typed from generated output too, with nothing beneath it,
+// so a consumer never has to match on its text.
+#[test]
+fn a_credential_of_the_wrong_kind_is_a_typed_request_construction_error() {
+    use std::future::Future;
+    let client = basic_client::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_credential(
+            "bearer",
+            basic_client::Credential::Basic {
+                username: "aladdin".to_owned(),
+                password: basic_client::SecretString::from("open sesame"),
+            },
+        );
+    let mut call = std::pin::pin!(client.get_user("1", None));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("a credential mismatch must fail before anything is sent");
+    };
+    let error = match result {
+        Err(error) => error,
+        Ok(_) => panic!("a credential mismatch cannot produce a response"),
+    };
+    match &error {
+        basic_client::Error::RequestConstruction(
+            basic_client::RequestError::CredentialMismatch { scheme, required, registered },
+        ) => {
+            assert_eq!(*scheme, "bearer");
+            assert_eq!(*required, "bearer");
+            assert_eq!(*registered, "Basic");
+        }
+        other => panic!("expected CredentialMismatch, got {other:?}"),
+    }
+    assert!(!error.is_transient());
+    let cause = std::error::Error::source(&error).unwrap();
+    assert!(std::error::Error::source(cause).is_none());
 }
 
 #[test]
@@ -2408,6 +2899,45 @@ fn every_error_shape_implements_api_error_body() {
         error.api_body().is_none()
     }
     assert!(never(&basic_client::Error::request_message("x")));
+}
+
+// `Error::problem` is generic over every operation, including an enum whose statuses carry
+// DIFFERENT body types (`getMulti`), which has no `ApiErrorBody` and so no `api_body`.
+#[test]
+fn the_problem_reader_is_generic_over_every_error_shape() {
+    fn detail<E: basic_client::ApiErrorProblem>(error: &basic_client::Error<E>) -> Option<String> {
+        error.problem().and_then(|problem| problem.detail)
+    }
+    fn api<E>(status: reqwest::StatusCode, body: E) -> basic_client::Error<E> {
+        basic_client::Error::Api(basic_client::ResponseValue::new(status, Default::default(), body))
+    }
+    // The uniform-body enum.
+    let shared = basic_client::GetSharedError::Status409(Box::new(basic_client::types::Problem {
+        title: "conflict".to_owned(),
+        detail: "dup".to_owned(),
+    }));
+    assert_eq!(detail(&api(reqwest::StatusCode::CONFLICT, shared)), Some("dup".to_owned()));
+    // The heterogeneous enum: a body with no `detail` member answers with the members it has.
+    let multi = basic_client::GetMultiError::Status404(Box::new(
+        basic_client::types::NotFoundError { reason: "gone".to_owned() },
+    ));
+    let problem = api(reqwest::StatusCode::NOT_FOUND, multi).problem().expect("an object body");
+    assert_eq!(problem, basic_client::ProblemDetails::default());
+    // A documented bodyless status, a textual body, and a raw-bytes body have no members.
+    let unit = api(reqwest::StatusCode::UNAUTHORIZED, basic_client::GetSharedError::Status401);
+    assert!(unit.problem().is_none());
+    let text = basic_client::GetRawMultiError::Status400(Box::new("bad".to_owned()));
+    assert!(api(reqwest::StatusCode::BAD_REQUEST, text).problem().is_none());
+    let raw = basic_client::GetRawMultiError::Status409(Box::new(bytes::Bytes::from_static(
+        br#"{"detail":"never read"}"#,
+    )));
+    assert!(api(reqwest::StatusCode::CONFLICT, raw).problem().is_none());
+    // The single-body newtype and the uninhabited shape.
+    let wrapped = basic_client::GetTextErrorError("nope".to_owned());
+    assert!(api(reqwest::StatusCode::BAD_REQUEST, wrapped).problem().is_none());
+    let never: basic_client::Error<std::convert::Infallible> =
+        basic_client::Error::request_message("x");
+    assert!(never.problem().is_none());
 }
 
 #[test]
@@ -2475,6 +3005,152 @@ fn an_alias_equal_error_body_is_one_body_type() {
         status.success(),
         "the BlockingClient round-trip must pass with --features blocking"
     );
+}
+
+/// A response shape as the emitted client spells it, with the side's naming stripped: no body type
+/// (`()` on the success side, the uninhabited alias on the error side), one body type alone, or an
+/// enum listing, per variant, the index of the entry it stands for and its payload type (`None` for
+/// a unit variant).
+#[derive(Debug, PartialEq)]
+enum EmittedShape {
+    NoBody,
+    OneBody(String),
+    Enum(Vec<(u16, Option<String>)>),
+}
+
+/// The variants of the emitted `pub enum {name}`, each as its status minus `base` and its payload.
+fn emitted_variants(code: &str, name: &str, base: u16) -> Vec<(u16, Option<String>)> {
+    let head = format!("pub enum {name} {{\n");
+    let start = code.find(&head).expect(&head) + head.len();
+    let body = &code[start..start + code[start..].find("\n}").unwrap()];
+    body.lines()
+        .filter_map(|line| line.trim().strip_prefix("Status"))
+        .map(|variant| {
+            let variant = variant.trim_end_matches(',');
+            let (status, payload) = match variant.split_once('(') {
+                Some((status, payload)) => (status, Some(payload.trim_end_matches(')').to_owned())),
+                None => (variant, None),
+            };
+            (status.parse::<u16>().unwrap() - base, payload)
+        })
+        .collect()
+}
+
+/// `Responses::success` and `Responses::error` count bodies through one computation, and their doc
+/// comments state the resulting rule once per side. They disagreed for two rounds of review with
+/// every gate green (issue #210), because each side was pinned on its own. This drives every
+/// pattern of one to three bodied/bodyless entries through `spargen::generate` twice — once as the
+/// success statuses `200..` of one operation, once as the error statuses `400..` of another, each
+/// entry `i` carrying the same body `Bi` on both sides — and requires the two emitted shapes to be
+/// the same: both count bodies, both emit one variant per entry in status order, and both give a
+/// bodyless entry beside any body its own unit variant. Only then is the shared rule itself checked.
+/// The success side's streaming exception is the one deliberate asymmetry, and these bodies are
+/// JSON, so it never applies.
+#[test]
+fn success_and_error_shapes_agree_on_the_shared_rule() {
+    let patterns: Vec<Vec<bool>> = (1..=3u32)
+        .flat_map(|len| {
+            (0..1u32 << len).map(move |bits| (0..len).map(|i| bits & (1 << i) != 0).collect())
+        })
+        .collect();
+    let entries = |base: u16, pattern: &[bool]| -> String {
+        pattern
+            .iter()
+            .enumerate()
+            .map(|(i, bodied)| {
+                let content = if *bodied {
+                    format!(
+                        ", content: {{application/json: {{schema: {{$ref: '#/components/schemas/B{i}'}}}}}}"
+                    )
+                } else {
+                    String::new()
+                };
+                format!("        '{}': {{description: d{content}}}\n", base + i as u16)
+            })
+            .collect()
+    };
+    let mut spec = String::from("openapi: 3.1.0\ninfo: {title: t, version: '1'}\npaths:\n");
+    for (n, pattern) in patterns.iter().enumerate() {
+        spec.push_str(&format!(
+            "  /ok{n}:\n    get:\n      operationId: okSide{n}\n      responses:\n{}",
+            entries(200, pattern)
+        ));
+        spec.push_str(&format!(
+            "  /err{n}:\n    get:\n      operationId: errSide{n}\n      responses:\n        '200': {{description: ok}}\n{}",
+            entries(400, pattern)
+        ));
+    }
+    spec.push_str("components:\n  schemas:\n");
+    for i in 0..3 {
+        spec.push_str(&format!(
+            "    B{i}: {{type: object, properties: {{field{i}: {{type: string}}}}}}\n"
+        ));
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = temp.path().join("openapi.yaml");
+    std::fs::write(&spec_path, &spec).unwrap();
+    let out = temp.path().join("client.rs");
+    let report = spargen::generate(
+        &Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap())
+            .build(Utf8PathBuf::from_path_buf(out.clone()).unwrap())
+            .cargo(CargoIntegration::Off),
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}\n{spec}");
+    let code = std::fs::read_to_string(out).unwrap();
+
+    for (n, pattern) in patterns.iter().enumerate() {
+        // The signature, whitespace removed, since the formatter wraps a long one across lines.
+        let method = format!("pub async fn ok_side{n}(");
+        let start = code.find(&method).expect(&method);
+        let signature: String = code[start..start + code[start..].find('{').unwrap()]
+            .split_whitespace()
+            .collect();
+        let head = "Result<support::ResponseValue<";
+        let start = signature.find(head).expect(head) + head.len();
+        let success_ty =
+            &signature[start..start + signature[start..].find(">,support::Error<").unwrap()];
+        let success = match success_ty {
+            "()" => EmittedShape::NoBody,
+            enum_ty if enum_ty == format!("OkSide{n}Response") => {
+                EmittedShape::Enum(emitted_variants(&code, enum_ty, 200))
+            }
+            body => EmittedShape::OneBody(body.to_owned()),
+        };
+
+        let error_ty = format!("ErrSide{n}Error");
+        let newtype = format!("pub struct {error_ty}(pub ");
+        let error = if code.contains(&format!("pub type {error_ty} = std::convert::Infallible;")) {
+            EmittedShape::NoBody
+        } else if let Some(at) = code.find(&newtype) {
+            let start = at + newtype.len();
+            EmittedShape::OneBody(code[start..start + code[start..].find(");").unwrap()].to_owned())
+        } else {
+            EmittedShape::Enum(emitted_variants(&code, &error_ty, 400))
+        };
+
+        assert_eq!(
+            success, error,
+            "the success and error sides disagree on the entry pattern {pattern:?} (bodied?)"
+        );
+
+        let bodied: Vec<usize> = (0..pattern.len()).filter(|&i| pattern[i]).collect();
+        let expected = match (bodied.as_slice(), pattern.len()) {
+            ([], _) => EmittedShape::NoBody,
+            ([only], 1) => EmittedShape::OneBody(format!("types::B{only}")),
+            _ => EmittedShape::Enum(
+                pattern
+                    .iter()
+                    .enumerate()
+                    .map(|(i, bodied)| (i as u16, bodied.then(|| format!("Box<types::B{i}>"))))
+                    .collect(),
+            ),
+        };
+        assert_eq!(
+            success, expected,
+            "both sides departed from the shared rule on {pattern:?} (bodied?)"
+        );
+    }
 }
 
 #[test]
@@ -3378,10 +4054,9 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Problem"
-  # A BODYLESS `default` beside one bodied error (issue #127): only bodies are counted, so the error
-  # type is the single-body newtype `GetBodylessDefaultError(types::Problem)`, and the status table
-  # it classifies against must hold `404` alone — no `StatusSpec::Any` — or an undocumented `500`
-  # would decode as a `Problem` instead of surfacing as `Error::UnexpectedStatus`.
+  # A BODYLESS `default` beside one bodied error (issues #127, #204): two error entries, so the
+  # error type is the enum `GetBodylessDefaultError { Status404(_), Default }`, and a `500` is the
+  # unit `Default` variant — never a `Problem` decoded from whatever body it carried.
   /bodyless-default:
     get:
       operationId: getBodylessDefault
@@ -3418,6 +4093,54 @@ paths:
                 $ref: "#/components/schemas/Problem"
         default:
           description: Anything else
+  # Issue #204: a bodyless `403` beside one bodied `404` is its own unit variant of
+  # `GetBodylessSiblingError`, where the single-body newtype dropped it and a real `403` arrived as
+  # `Error::UnexpectedStatus`.
+  /bodyless-sibling:
+    get:
+      operationId: getBodylessSibling
+      responses:
+        "200":
+          description: OK
+        "403":
+          description: Forbidden
+        "404":
+          description: Not Found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+  # The same shape with the one error body in XML: the enum arm decodes it through the XML codec
+  # (`support::decode_xml_body`), since a lone XML error body is not the rejected two-XML-bodies
+  # shape.
+  /xml-bodyless-sibling:
+    get:
+      operationId: getXmlBodylessSibling
+      responses:
+        "200":
+          description: OK
+        "403":
+          description: Forbidden
+        "404":
+          description: Not Found
+          content:
+            application/xml:
+              schema:
+                $ref: "#/components/schemas/XmlReceipt"
+  # A bodyless `304` beside a bodied `default` and no success status: the `304` is its own unit
+  # variant ahead of `Default`, where it once matched `default` and had its empty body decoded.
+  /conditional:
+    get:
+      operationId: getConditional
+      responses:
+        "304":
+          description: Not Modified
+        default:
+          description: Anything else
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Problem"
   # The single-body newtype over the same nullable component: `GetMaybeSingleError(Option<T>)`,
   # whose `ApiErrorBody::Body` is the bare `types::MaybeProblem` so one bound covers it and
   # `GetMaybeError` alike.
@@ -4074,6 +4797,28 @@ components:
           anyOf:
             - false
             - type: "null"
+    # Optional, non-nullable properties of every kind of type. A present `null` is a value none of
+    # these schemas admits, so it is rejected wherever the property's own type rejects it rather
+    # than decoding as absent; absence still decodes as `None`. The untyped `anything` admits
+    # `null` and keeps it as a present value, and the nullable `maybe` keeps collapsing `null`.
+    OptionalFields:
+      type: object
+      properties:
+        name: { type: string }
+        count: { type: integer }
+        flag: { type: boolean }
+        tags:
+          type: array
+          items: { type: string }
+        mode: { $ref: "#/components/schemas/Mode" }
+        nested: { $ref: "#/components/schemas/ForbiddenProperty" }
+        choice:
+          oneOf:
+            - type: string
+            - type: integer
+        colour: { type: string, default: red }
+        anything: {}
+        maybe: { type: [string, "null"] }
     StringLiteral:
       type: string
       enum: [special]
@@ -5392,6 +6137,34 @@ paths:
             )],
             ..PLAIN
         },
+        // #317: an inheriting line takes only `workspace`, `features`, `default-features` and
+        // `optional` (plus `public`); Cargo warns about any other key and ignores it. Only the
+        // root's `package` renames an inherited dependency, and only the root's `version` bounds it.
+        Case {
+            name: "a member `package` beside `workspace = true` is ignored by Cargo",
+            member: &[(
+                "bytes",
+                r#"bytes = { workspace = true, package = "bytes-fork" }"#,
+            )],
+            ..PLAIN
+        },
+        Case {
+            name: "the same ignored member `package`, on edition 2024",
+            member: &[(
+                "bytes",
+                r#"bytes = { workspace = true, package = "bytes-fork" }"#,
+            )],
+            package: "edition = \"2024\"\n",
+            ..PLAIN
+        },
+        Case {
+            name: "a member `version` beside `workspace = true` is ignored by Cargo",
+            member: &[(
+                "bytes",
+                r#"bytes = { workspace = true, version = "0.0.1" }"#,
+            )],
+            ..PLAIN
+        },
         Case {
             name: "a required crate the member does not inherit",
             member: &[("secrecy", "")],
@@ -6476,4 +7249,372 @@ fn a_gen_named_spec_compiles_under_edition_2024() {
         "a spec naming things `gen` must compile for an edition-2024 consumer:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The RFC 9457 shape from #268: each documented error status narrows the shared `Problem`'s
+/// `type` with a `const`, spelled as an `allOf` member (`404`) and as `$ref` siblings (`409`). The
+/// positions `open_narrowing` leaves closed sit beside them: a union of narrowed problems (`400`),
+/// a narrowing inside a component (`410`), and a request body.
+const OPEN_NARROWING_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: Problems, version: 1.0.0 }
+paths:
+  /problems:
+    post:
+      operationId: postProblems
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/Problem"
+                - properties: { type: { const: "https://example.com/probs/request" } }
+      responses:
+        "200":
+          description: a narrowed success body opens too
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties: { type: { const: "https://example.com/probs/none" } }
+        "400":
+          description: a union of narrowed problems stays closed
+          content:
+            application/problem+json:
+              schema:
+                oneOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties: { type: { const: "https://example.com/probs/a" } }
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties: { type: { const: "https://example.com/probs/b" } }
+        "403":
+          description: the narrowing value is itself a component, which stays closed
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties: { type: { $ref: "#/components/schemas/ForbiddenType" } }
+        "404":
+          description: not found
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties: { type: { const: "https://example.com/probs/not-found" } }
+        "409":
+          description: conflict, narrowed beside the `$ref`, with a value spelled `other`
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+                properties: { type: { enum: ["https://example.com/probs/conflict", "other"] } }
+        "410":
+          description: a component's narrowing stays closed
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/GoneProblem" }
+        "422":
+          description: a response's own set met by a union, the union last, keeps its variants closed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ const: a }, { const: b }]
+        "423":
+          description: the same set with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ const: a }, { const: b }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+        "424":
+          description: a union that narrows to its one string branch, the union last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ type: string }, { type: integer }]
+        "425":
+          description: the same union with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ type: string }, { type: integer }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+        "426":
+          description: a union keeping a plain string branch beside another, the union last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ const: a }, { type: string }]
+        "427":
+          description: the same union with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ const: a }, { type: string }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+components:
+  schemas:
+    Problem:
+      type: object
+      required: [type, title]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        detail: { type: string }
+    GoneProblem:
+      allOf:
+        - $ref: "#/components/schemas/Problem"
+        - properties: { type: { const: "https://example.com/probs/gone" } }
+    ForbiddenType:
+      const: "https://example.com/probs/forbidden"
+"##;
+
+#[test]
+fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("problems.yaml");
+    std::fs::write(&spec, OPEN_NARROWING_SPEC).unwrap();
+
+    // The option off: the narrowing is exact, as before.
+    let closed = temp.path().join("closed");
+    let report = generate_fixture_crate(&spec, &closed, "closed_problems");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let generated = std::fs::read_to_string(closed.join("src/lib.rs")).unwrap();
+    assert!(
+        !generated.contains("Other(String)"),
+        "without the option no set is open:\n{generated}"
+    );
+
+    let out = temp.path().join("client");
+    let report = generate_configured_fixture_crate(&spec, &out, "open_problems", "2021", |spec| {
+        spec.open_narrowing(true)
+    });
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        report.diagnostics().is_empty(),
+        "the option reports nothing: {report:#?}"
+    );
+    // Exactly the positions it applies to open: the `200`, `403`, `404`, and `409` bodies, and the
+    // `424`/`425` `kind`, whose union narrows to one branch. The `{enum: [a, b, c]}` members of
+    // `422`, `423`, `426`, and `427` open in place too, as intermediates no field uses: a union
+    // that keeps two branches meets them into closed branch sets (`tests/open.rs` decodes both).
+    // Only an open enum emits `as_str`.
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert_eq!(
+        generated.matches("pub fn as_str(&self) -> &str").count(),
+        10,
+        "{generated}"
+    );
+
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the open enums must pass clippy -D warnings"
+    );
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/open.rs"),
+        r##"use open_problems::{Error, PostProblemsError, ResponseValue};
+
+/// Decode `json` as the body type the variant constructor `_variant` carries, without naming the
+/// generated (hash-disambiguated) type.
+fn decode<T: serde::de::DeserializeOwned, E>(
+    _variant: fn(Box<T>) -> E,
+    json: &str,
+) -> Result<T, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
+#[test]
+fn a_listed_value_is_its_own_variant_and_an_unlisted_one_is_kept() {
+    let listed = decode(
+        PostProblemsError::Status404,
+        r#"{"type":"https://example.com/probs/not-found","title":"t"}"#,
+    )
+    .expect("a listed type decodes");
+    assert_eq!(format!("{:?}", listed.r#type), "HttpsExampleComProbsNotFound");
+    assert_eq!(listed.r#type.as_str(), "https://example.com/probs/not-found");
+
+    // A problem type the description does not list: it decodes, and keeps its value.
+    let unlisted = decode(
+        PostProblemsError::Status404,
+        r#"{"type":"https://example.com/probs/moved","title":"t","detail":"d"}"#,
+    )
+    .expect("an unlisted type still decodes");
+    assert_eq!(
+        format!("{:?}", unlisted.r#type),
+        r#"Other("https://example.com/probs/moved")"#
+    );
+    assert_eq!(unlisted.r#type.to_string(), "https://example.com/probs/moved");
+    // It is still a string on the wire, both ways.
+    let wire = serde_json::to_value(&unlisted).unwrap();
+    assert_eq!(wire["type"], "https://example.com/probs/moved");
+    // A non-string is refused: the open set's domain is the `string` it narrowed.
+    assert!(decode(PostProblemsError::Status404, r#"{"type":7,"title":"t"}"#).is_err());
+}
+
+#[test]
+fn the_ref_sibling_spelling_opens_and_a_value_spelled_other_keeps_its_name() {
+    let other = decode(PostProblemsError::Status409, r#"{"type":"other","title":"t"}"#).unwrap();
+    // The listed `other` keeps `Other`; the catch-all takes the next name.
+    assert_eq!(format!("{:?}", other.r#type), "Other");
+    let unlisted =
+        decode(PostProblemsError::Status409, r#"{"type":"elsewhere","title":"t"}"#).unwrap();
+    assert!(
+        format!("{:?}", unlisted.r#type).ends_with(r#"("elsewhere")"#),
+        "{unlisted:?}"
+    );
+}
+
+#[test]
+fn a_union_and_a_component_stay_closed() {
+    // Each union variant still refuses the other's type, so exactly one matches...
+    assert!(decode(
+        PostProblemsError::Status400,
+        r#"{"type":"https://example.com/probs/b","title":"t"}"#,
+    )
+    .is_ok());
+    // ...and a type neither lists matches neither.
+    assert!(decode(
+        PostProblemsError::Status400,
+        r#"{"type":"https://example.com/probs/c","title":"t"}"#,
+    )
+    .is_err());
+    assert!(decode(
+        PostProblemsError::Status410,
+        r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
+    )
+    .is_err());
+    // A narrowing through a `$ref`'d value opens a copy in the response and leaves the component
+    // closed for its other uses.
+    let copy = decode(
+        PostProblemsError::Status403,
+        r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
+    )
+    .expect("the response's own copy is open");
+    assert_eq!(copy.r#type.as_str(), "https://example.com/probs/moved");
+    assert!(serde_json::from_str::<open_problems::types::ForbiddenType>(
+        r#""https://example.com/probs/moved""#
+    )
+    .is_err());
+    // A request body is never opened.
+    assert!(serde_json::from_str::<open_problems::types::RequestBody>(
+        r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
+    )
+    .is_err());
+}
+
+#[test]
+fn a_union_meeting_an_open_set_decodes_in_either_member_order() {
+    // `422` writes the union last, after the set has opened; `423` writes it first. Either way
+    // each variant stays closed, so a listed value matches exactly one of them.
+    for (order, decoded) in [
+        ("union last", decode(PostProblemsError::Status422, r#"{"kind":"a"}"#).map(|_| ())),
+        ("union last", decode(PostProblemsError::Status422, r#"{"kind":"b"}"#).map(|_| ())),
+        ("union first", decode(PostProblemsError::Status423, r#"{"kind":"a"}"#).map(|_| ())),
+        ("union first", decode(PostProblemsError::Status423, r#"{"kind":"b"}"#).map(|_| ())),
+    ] {
+        decoded.unwrap_or_else(|error| panic!("{order}: a value one variant lists: {error}"));
+    }
+    // A value the set lists but no variant does, and one nothing lists, match no variant.
+    for kind in ["c", "z"] {
+        let json = format!(r#"{{"kind":"{kind}"}}"#);
+        assert!(decode(PostProblemsError::Status422, &json).is_err(), "union last: {kind}");
+        assert!(decode(PostProblemsError::Status423, &json).is_err(), "union first: {kind}");
+    }
+    // A union that narrows to one branch is no union: in either order the result is the response's
+    // own open set, so an unlisted value is kept.
+    for kind in ["a", "z"] {
+        let json = format!(r#"{{"kind":"{kind}"}}"#);
+        let last = decode(PostProblemsError::Status424, &json).expect("union last");
+        let first = decode(PostProblemsError::Status425, &json).expect("union first");
+        assert_eq!(last.kind.as_str(), kind);
+        assert_eq!(first.kind.as_str(), kind);
+    }
+    // A plain `string` branch kept beside another stays closed in either order: `b` matches it
+    // alone, `a` matches both branches (which `oneOf` forbids), and `z` matches neither.
+    macro_rules! closed_beside_another {
+        ($status:expr, $order:literal) => {
+            decode($status, r#"{"kind":"b"}"#).unwrap_or_else(|error| panic!("{}: {error}", $order));
+            assert!(decode($status, r#"{"kind":"a"}"#).is_err(), "{}: a", $order);
+            assert!(decode($status, r#"{"kind":"z"}"#).is_err(), "{}: z", $order);
+        };
+    }
+    closed_beside_another!(PostProblemsError::Status426, "union last");
+    closed_beside_another!(PostProblemsError::Status427, "union first");
+}
+
+#[test]
+fn the_problem_reader_reads_the_opened_type() {
+    let body = decode(
+        PostProblemsError::Status404,
+        r#"{"type":"https://example.com/probs/moved","title":"t","detail":"d"}"#,
+    )
+    .unwrap();
+    let error = Error::Api(ResponseValue::new(
+        reqwest::StatusCode::NOT_FOUND,
+        Default::default(),
+        PostProblemsError::Status404(Box::new(body)),
+    ));
+    let problem = error.problem().expect("an object body");
+    assert_eq!(problem.problem_type.as_deref(), Some("https://example.com/probs/moved"));
+    assert_eq!(problem.detail.as_deref(), Some("d"));
+}
+"##,
+    )
+    .unwrap();
+    let status = fixture_cargo(&out)
+        .args(["test", "--test", "open"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the open enums must decode as documented");
 }

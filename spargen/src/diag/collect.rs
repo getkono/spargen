@@ -8,7 +8,10 @@ use super::Diagnostic;
 ///
 /// `cap_reached` is what `Report::truncated` reports, so a run that hits `batch_cap` says so
 /// instead of presenting a partial list as a complete one.
-#[derive(Debug)]
+///
+/// `Clone` so a stage that may discard a whole attempt (`oas31::lower`'s passes) can collect into a
+/// copy and keep only the attempt it accepts.
+#[derive(Debug, Clone)]
 pub(crate) struct Diagnostics {
     items: Vec<Diagnostic>,
     cap: usize,
