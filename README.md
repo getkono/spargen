@@ -117,6 +117,11 @@ the version it emits, and the idioms spargen handles.
   support. Each is opt-in and adds no dependency; spargen ships no retry *policy* and no async
   timer — the caller supplies both. See the
   [runtime reference](docs/book/src/runtime.md).
+- Each schema becomes a model in the generated `types` module. A model whose name would spell one
+  of the ten names that module itself uses (`Date`, `DateTime`, `Serialize`, `Deserialize`,
+  `BTreeMap`, `String`, `Option`, `Vec`, `Box`, `Result`) takes a disambiguated name instead.
+  All ten are reserved whether or not the module writes them, so starting to use a date type never
+  renames a model.
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ### Design guarantees
