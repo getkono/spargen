@@ -278,3 +278,26 @@ fn openapi_boilerplate_generates() {
     let source = source.expect("openapi-boilerplate generates a module");
     insta::assert_snapshot!("openapi_boilerplate_surface", api_surface(&source));
 }
+
+#[test]
+fn mastodon_openapi_generates() {
+    // Manifest expectation: `generate`. The corpus's only real-world recursive-nullable `$ref`
+    // (`oneOf: [{$ref: Self}, {type: 'null'}]`) and its only `$ref`s with a shape-bearing sibling.
+    // Like GitHub 3.1 it is too large for a surface snapshot, so the histogram pins the diagnostic
+    // set, and the idiom's typed answer is asserted directly: "did not reject" would also pass on a
+    // field silently degraded to `serde_json::Value` or stripped of its `Option`.
+    let (report, source) = generate_corpus("mastodon-openapi/schema.json", false);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    insta::assert_snapshot!("mastodon_openapi", summary(&report));
+    let source = source.expect("mastodon-openapi generates a module");
+    for field in [
+        "pub moved: Option<Box<Account>>",
+        "pub reblog: Option<Box<Status>>",
+        "pub quoted_status: Option<Box<Status>>",
+    ] {
+        assert!(
+            source.contains(field),
+            "the recursive-nullable `$ref` no longer lowers to `{field}`"
+        );
+    }
+}

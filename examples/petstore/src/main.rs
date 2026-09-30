@@ -1,5 +1,7 @@
 //! Drives the generated petstore client end to end against a local mock server: typed models,
-//! query/header/path parameters, JSON bodies, bearer auth, typed API errors, undocumented-status
+//! query/header/path parameters, JSON bodies, bearer auth (a static token and an async token
+//! provider, succeeding and failing), typed API errors, RFC 9457 problems read generically (one
+//! with a problem type the description does not list), undocumented-status
 //! handling, a refused connection, the transient-failure classifier, and the bring-your-own-policy retry adapter.
 //! Everything runs on 127.0.0.1 — no external API, no real credentials.
 
@@ -18,8 +20,9 @@ mod petstore {
 }
 
 use petstore::{
-    exponential_backoff, types, Client, Credential, Error, HttpBackend, RequestError,
-    ReqwestBackend, RetryBackend, RetryOutcome, RetryPolicy, RetryWait,
+    exponential_backoff, types, ApiErrorProblem, AuthError, Client, CreatePetError, Credential,
+    Error, HttpBackend, RequestError, ReqwestBackend, RetryBackend, RetryOutcome, RetryPolicy,
+    RetryWait, TokenFuture,
 };
 
 const TOKEN: &str = "let-me-in";
@@ -27,6 +30,13 @@ const TOKEN: &str = "let-me-in";
 /// How many times the flaky route has been hit; it fails transiently (503) on the first attempt,
 /// then serves 200 — so a retrying client succeeds where a plain one would surface the 503.
 static FLAKY_HITS: AtomicU32 = AtomicU32::new(0);
+
+/// How many requests the mock has read a request line for, so a scenario can assert that a
+/// pre-send failure put nothing on the wire.
+static MOCK_REQUESTS: AtomicU32 = AtomicU32::new(0);
+
+/// How many times the token provider has been asked for a token.
+static PROVIDER_CALLS: AtomicU32 = AtomicU32::new(0);
 
 /// A bring-your-own retry policy: retry transient outcomes with exponential backoff, up to a cap.
 /// The wait is built from the caller's own async timer (`tokio::time::sleep`) — the spargen runtime
@@ -130,6 +140,56 @@ async fn main() {
         other => panic!("expected a typed 404, got {other:?}"),
     }
 
+    // RFC 9457 problems. The description narrows `createPet`'s `409` problem `type` to
+    // `…/name-taken`, and the server answers with `…/name-reserved`, a type it added after the
+    // description was written. `build.rs` turns on `open_narrowing`, so the response is still the
+    // typed `409` body rather than a decode failure, and the unlisted type is kept.
+    let reserved = client
+        .create_pet(&types::NewPet {
+            name: "Taken".to_owned(),
+            tag: None,
+        })
+        .await;
+    match &reserved {
+        Err(Error::Api(response)) => {
+            assert_eq!(response.status(), 409);
+            let CreatePetError::Status409(problem) = response.inner() else {
+                panic!("expected the typed 409 problem, got {response:?}");
+            };
+            assert_eq!(
+                problem.r#type.to_string(),
+                "https://petstore.example/problems/name-reserved"
+            );
+            println!("typed 409 with an unlisted problem type: {}", problem.r#type);
+        }
+        other => panic!("expected a typed 409, got {other:?}"),
+    }
+    // One reader, generic over every operation: `createPet` and `deletePet` document different
+    // problem bodies, and `Error::problem` reads `type` and `detail` from either.
+    fn describe<E: ApiErrorProblem>(error: &Error<E>) -> String {
+        let problem = error.problem().expect("a problem body");
+        format!(
+            "{}: {}",
+            problem.problem_type_or_blank(),
+            problem.detail.as_deref().unwrap_or_default()
+        )
+    }
+    let Err(reserved) = reserved else {
+        unreachable!("matched as an error above");
+    };
+    assert_eq!(
+        describe(&reserved),
+        "https://petstore.example/problems/name-reserved: `Taken` is held for a sold pet."
+    );
+    let Err(has_orders) = client.delete_pet("3").await else {
+        panic!("deleting pet 3 must fail with its documented 409");
+    };
+    assert_eq!(
+        describe(&has_orders),
+        "https://petstore.example/problems/pet-has-orders: pet 3 has an open order."
+    );
+    println!("read two operations' problems with one generic reader");
+
     // A multipart body with an Encoding Object: each part is sent with the Content-Type the spec
     // declares for it — `image/png` for the binary photo, `application/json` for the metadata
     // object — rather than one blanket type for the whole form.
@@ -187,6 +247,70 @@ async fn main() {
         }
         other => panic!("expected a missing-credential error, got {other:?}"),
     }
+
+    // A rotating token from an async provider. The closure is awaited on tokio's real executor, and
+    // it genuinely suspends (a timer, standing in for a round trip to an identity provider) before
+    // yielding, so the request build is held across a pending poll rather than a ready one. The
+    // mock accepts only `Bearer let-me-in`, so a 200 proves the provider's token is what travelled.
+    // It is asked once per request, not once per client: two calls, two refreshes.
+    let rotating = Client::new(&base_url).unwrap().with_credential(
+        "bearerAuth",
+        Credential::Provider(Arc::new(|| -> TokenFuture {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                PROVIDER_CALLS.fetch_add(1, Ordering::SeqCst);
+                Ok(SecretString::from(TOKEN))
+            })
+        })),
+    );
+    for _ in 0..2 {
+        let pet = rotating
+            .get_pet("1")
+            .await
+            .expect("a provider-supplied token authenticates");
+        assert_eq!(pet.status(), 200);
+    }
+    assert_eq!(PROVIDER_CALLS.load(Ordering::SeqCst), 2);
+    println!("token provider awaited on a real executor, once per request");
+
+    // A provider that fails is the client's "unauthenticated" state: typed, naming the scheme, with
+    // the provider's own `AuthError` as the cause — and raised before anything is sent, so the mock
+    // sees no request for it.
+    let failing = Client::new(&base_url).unwrap().with_credential(
+        "bearerAuth",
+        Credential::Provider(Arc::new(|| -> TokenFuture {
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                Err(AuthError::new("identity provider unavailable"))
+            })
+        })),
+    );
+    let requests_before = MOCK_REQUESTS.load(Ordering::SeqCst);
+    let error = failing
+        .get_pet("1")
+        .await
+        .expect_err("a failing provider must fail the call");
+    let Error::RequestConstruction(RequestError::CredentialProvider { scheme, source }) = &error
+    else {
+        panic!("expected a credential-provider error, got {error:?}");
+    };
+    assert_eq!(*scheme, "bearerAuth");
+    assert_eq!(source.to_string(), "identity provider unavailable");
+    assert!(!error.is_transient());
+    // The chain a generic error reporter walks: the request error, then the provider's own.
+    let cause = std::error::Error::source(&error).expect("the request error");
+    assert_eq!(
+        cause.to_string(),
+        "the token provider registered for security scheme `bearerAuth` failed"
+    );
+    let provider = std::error::Error::source(cause).expect("the provider's error");
+    assert!(provider.downcast_ref::<AuthError>().is_some());
+    println!("failed token provider surfaced as a typed error for `{scheme}`");
+    assert_eq!(
+        MOCK_REQUESTS.load(Ordering::SeqCst),
+        requests_before,
+        "a failed provider must fail before the request is sent"
+    );
 
     // A wrong token draws the server's (undocumented) 401: preserved raw, and not retry-worthy.
     let wrong = Client::new(&base_url)
@@ -265,6 +389,7 @@ fn handle(mut stream: TcpStream) {
     if reader.read_line(&mut request_line).is_err() {
         return;
     }
+    MOCK_REQUESTS.fetch_add(1, Ordering::SeqCst);
     let mut parts = request_line.split_whitespace();
     let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
         return;
@@ -346,10 +471,19 @@ fn handle(mut stream: TcpStream) {
             ("POST", "/pets") => {
                 let new: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
                 let name = new["name"].as_str().unwrap_or("unnamed");
-                (
-                    "201 Created",
-                    format!(r#"{{"id":"2","name":"{name}","status":"available"}}"#),
-                )
+                if name == "Taken" {
+                    // A problem type the description does not list.
+                    (
+                        "409 Conflict",
+                        r#"{"type":"https://petstore.example/problems/name-reserved","title":"Name reserved","status":409,"detail":"`Taken` is held for a sold pet."}"#
+                            .to_owned(),
+                    )
+                } else {
+                    (
+                        "201 Created",
+                        format!(r#"{{"id":"2","name":"{name}","status":"available"}}"#),
+                    )
+                }
             }
             ("GET", "/pets/1") => (
                 "200 OK",
@@ -372,6 +506,11 @@ fn handle(mut stream: TcpStream) {
             }
             ("GET", _) => ("404 Not Found", r#"{"message":"no such pet"}"#.to_owned()),
             ("DELETE", "/pets/1") => ("204 No Content", String::new()),
+            ("DELETE", "/pets/3") => (
+                "409 Conflict",
+                r#"{"type":"https://petstore.example/problems/pet-has-orders","title":"Pet has orders","detail":"pet 3 has an open order."}"#
+                    .to_owned(),
+            ),
             // Pet 1 echoes the stored pet; pet 2 acknowledges with an empty 204.
             ("PUT", "/pets/1") => {
                 let new: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();

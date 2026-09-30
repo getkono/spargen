@@ -141,52 +141,71 @@ pub async fn attach_auth(
     requirements: &[&[AuthScheme]],
 ) -> Result<RequestBuilder, Error<Infallible>> {
     // No requirement means "attach nothing", not "unauthenticated". Without this, an empty slice
-    // would fall into the `find` below, which returns `None` for it, and the call would fail as
+    // would fall through the loop below without choosing anything, and the call would fail as
     // `MissingCredential` naming no schemes at all. Generated output never produces an empty slice
     // — `emit.rs` omits the call entirely for an operation with no `security` — but this function
     // is public in the runtime crate and reachable from sibling code in whichever module `include!`s
-    // a generated client, so this is a contract, not dead code, and
-    // `no_requirement_attaches_nothing` holds it to that.
+    // a generated client, so this is a contract, not dead code, and spargen's own runtime tests
+    // (which are not embedded) hold it to that.
     if requirements.is_empty() {
         return Ok(request);
     }
-    let Some(alternative) = requirements.iter().find(|alternative| {
-        alternative.iter().all(|scheme| {
-            // `mutualTLS` is satisfied by the transport's client certificate, so it never needs a
-            // registered credential and never blocks an alternative from being chosen.
-            matches!(scheme.kind, AuthKind::MutualTls) || core.credential(scheme.name).is_some()
-        })
-    }) else {
-        // Nothing was satisfied, so every alternative names at least one unregistered scheme.
-        let alternatives: Vec<Vec<&'static str>> = requirements
-            .iter()
-            .map(|alternative| {
-                alternative
-                    .iter()
-                    .filter(|scheme| {
-                        !matches!(scheme.kind, AuthKind::MutualTls)
-                            && core.credential(scheme.name).is_none()
-                    })
-                    .map(|scheme| scheme.name)
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-        return Err(Error::RequestConstruction(
-            RequestError::MissingCredential { alternatives },
-        ));
-    };
-    let mut request = request;
-    for scheme in *alternative {
-        if matches!(scheme.kind, AuthKind::MutualTls) {
-            continue;
+    // Selection and reporting are one computation: an alternative is chosen exactly when the list
+    // of its unregistered schemes is empty, and that same list is what `MissingCredential`
+    // reports for it. So every reported inner list is non-empty by construction, and the outer
+    // list is non-empty because `requirements` is.
+    let mut alternatives: Vec<Vec<&'static str>> = Vec::with_capacity(requirements.len());
+    for alternative in requirements {
+        let mut missing = Vec::new();
+        let mut registered = Vec::with_capacity(alternative.len());
+        for scheme in *alternative {
+            match resolve(core, scheme) {
+                Resolution::Transport => {}
+                Resolution::Registered(credential) => registered.push((scheme, credential)),
+                Resolution::Missing => missing.push(scheme.name),
+            }
         }
-        // Present by construction: the alternative was selected because every scheme resolves.
-        let Some(credential) = core.credential(scheme.name) else {
-            continue;
-        };
-        request = apply_credential(request, scheme, credential).await?;
+        if missing.is_empty() {
+            let mut request = request;
+            for (scheme, credential) in registered {
+                request = apply_credential(request, scheme, credential).await?;
+            }
+            return Ok(request);
+        }
+        alternatives.push(missing);
     }
-    Ok(request)
+    Err(Error::RequestConstruction(
+        RequestError::MissingCredential { alternatives },
+    ))
+}
+
+/// How one scheme of a security alternative is satisfied, if at all.
+enum Resolution<'a> {
+    /// Satisfied by the transport itself; nothing is attached to the request.
+    Transport,
+    /// Satisfied by the credential registered under the scheme's name.
+    Registered(&'a Credential),
+    /// Not satisfied: the caller still has to register a credential for it.
+    Missing,
+}
+
+/// The single answer to "does this scheme block its alternative?", read by both the selection
+/// and the `MissingCredential` report in [`attach_auth`]. The match is exhaustive over
+/// [`AuthKind`], so a new kind has to state how it is satisfied before it compiles.
+fn resolve<'a>(core: &'a ClientCore, scheme: &AuthScheme) -> Resolution<'a> {
+    match scheme.kind {
+        // `mutualTLS` is satisfied by the transport's client certificate, so it never needs a
+        // registered credential and never blocks an alternative from being chosen.
+        AuthKind::MutualTls => Resolution::Transport,
+        AuthKind::Bearer
+        | AuthKind::Basic
+        | AuthKind::ApiKeyHeader(_)
+        | AuthKind::ApiKeyQuery(_)
+        | AuthKind::ApiKeyCookie(_) => match core.credential(scheme.name) {
+            Some(credential) => Resolution::Registered(credential),
+            None => Resolution::Missing,
+        },
+    }
 }
 
 async fn apply_credential(
@@ -217,19 +236,19 @@ async fn apply_credential(
             Credential::Basic { username, password } => {
                 Ok(request.basic_auth(username, Some(password.expose_secret())))
             }
-            _ => Err(credential_mismatch(scheme.name, "http basic")),
+            _ => Err(credential_mismatch(scheme.name, "http basic", credential)),
         },
         AuthKind::Bearer => match token {
             Some(token) => Ok(request.bearer_auth(token.expose_secret())),
-            None => Err(credential_mismatch(scheme.name, "bearer")),
+            None => Err(credential_mismatch(scheme.name, "bearer", credential)),
         },
         AuthKind::ApiKeyHeader(name) => match token {
             Some(token) => Ok(request.header(name, sensitive_value(token.expose_secret())?)),
-            None => Err(credential_mismatch(scheme.name, "apiKey")),
+            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
         },
         AuthKind::ApiKeyQuery(name) => match token {
             Some(token) => Ok(request.query(&[(name, token.expose_secret())])),
-            None => Err(credential_mismatch(scheme.name, "apiKey")),
+            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
         },
         // Satisfied by the transport; `attach_auth` never reaches this arm.
         AuthKind::MutualTls => Ok(request),
@@ -238,7 +257,7 @@ async fn apply_credential(
                 let cookie = format!("{name}={}", token.expose_secret());
                 Ok(request.header(reqwest::header::COOKIE, sensitive_value(&cookie)?))
             }
-            None => Err(credential_mismatch(scheme.name, "apiKey")),
+            None => Err(credential_mismatch(scheme.name, "apiKey", credential)),
         },
     }
 }
@@ -249,10 +268,22 @@ fn sensitive_value(secret: &str) -> Result<HeaderValue, Error<Infallible>> {
     Ok(value)
 }
 
-fn credential_mismatch(scheme: &str, kind: &str) -> Error<Infallible> {
-    Error::request_message(format!(
-        "the credential registered for security scheme `{scheme}` cannot satisfy its `{kind}` type"
-    ))
+fn credential_mismatch(
+    scheme: &'static str,
+    required: &'static str,
+    credential: &Credential,
+) -> Error<Infallible> {
+    let registered = match credential {
+        Credential::Bearer(_) => "Bearer",
+        Credential::Basic { .. } => "Basic",
+        Credential::ApiKey(_) => "ApiKey",
+        Credential::Provider(_) => "Provider",
+    };
+    Error::RequestConstruction(RequestError::CredentialMismatch {
+        scheme,
+        required,
+        registered,
+    })
 }
 
 /// Send a prepared request through the core's transport [`crate::HttpBackend`], mapping
@@ -289,6 +320,7 @@ where
             let (body, truncated) = cap_body(body, core.config().max_error_body);
             Err(Error::Decode {
                 status,
+                headers,
                 path: error.to_string(),
                 body,
                 truncated,
@@ -318,6 +350,7 @@ where
             let (body, truncated) = cap_body(body, core.config().max_error_body);
             Err(Error::Decode {
                 status,
+                headers,
                 path,
                 body,
                 truncated,
@@ -347,13 +380,9 @@ pub async fn decode_success_bytes(
 /// features off), and so do an untyped schema's `Value` and a string enum with an empty variant; a
 /// string enum without one, `uuid::Uuid`, and the RFC 3339 `DateTime` / `Date` newtypes reject it
 /// with a decode failure. This is unlike the JSON and XML codecs, where an empty body is not a
-/// document and always fails. A documented bodyless status is a unit variant of the response enum
-/// on the success side and on an error side with several documented bodies, and is not decoded
-/// there. On an error side with one documented body it is
-/// `Error::UnexpectedStatus`, unless that body is documented under a range (`4XX`) or `default`
-/// that also covers the bodyless status: the status then matches the range or `default` entry, so
-/// [`classify_error_text`] decodes its body here, and an empty one yields `Error::Api("")` for
-/// `String` (#204 tracks the bodyless-error-beside-one-body shape).
+/// document and always fails. A documented bodyless status beside a documented body is a unit
+/// variant of the response enum, on the success side and the error side alike, and is not decoded
+/// here.
 pub fn decode_text_body<T>(body: &[u8]) -> Result<T, String>
 where
     T: DeserializeOwned,
@@ -435,6 +464,7 @@ where
                     Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
                     Err(error) => Error::Decode {
                         status,
+                        headers,
                         path: error.to_string(),
                         body,
                         truncated,
@@ -470,6 +500,7 @@ where
                     Ok(value) => Error::Api(ResponseValue::new(status, headers, value)),
                     Err(path) => Error::Decode {
                         status,
+                        headers,
                         path,
                         body,
                         truncated,
@@ -756,9 +787,9 @@ mod tests {
     }
 
     /// No requirement at all is distinct from a requirement nothing satisfies: it attaches nothing
-    /// and succeeds. Without the early return an empty slice reaches `find`, which answers `None`
-    /// for it, and the call would fail as `MissingCredential` naming no schemes — the degenerate
-    /// rendering `Display` was made total for. Generated output cannot reach this (`emit.rs` omits
+    /// and succeeds. Without the early return an empty slice falls through the selection loop
+    /// without choosing anything, and the call would fail as `MissingCredential` naming no
+    /// schemes — the degenerate rendering `Display` was made total for. Generated output cannot reach this (`emit.rs` omits
     /// the call when an operation declares no `security`), but the function is public.
     #[test]
     fn no_requirement_attaches_nothing() {
@@ -848,6 +879,137 @@ mod tests {
         );
     }
 
+    /// One scheme of every `AuthKind`, each under its own name, and a credential of the kind that
+    /// scheme accepts.
+    fn every_kind() -> [(AuthScheme, Credential); 6] {
+        let key = || Credential::ApiKey(SecretString::from("k3y"));
+        [
+            (
+                AuthScheme {
+                    name: "bearer",
+                    kind: AuthKind::Bearer,
+                },
+                key(),
+            ),
+            (
+                AuthScheme {
+                    name: "basic",
+                    kind: AuthKind::Basic,
+                },
+                Credential::Basic {
+                    username: "u".to_owned(),
+                    password: SecretString::from("p"),
+                },
+            ),
+            (
+                AuthScheme {
+                    name: "header",
+                    kind: AuthKind::ApiKeyHeader("x-key"),
+                },
+                key(),
+            ),
+            (
+                AuthScheme {
+                    name: "query",
+                    kind: AuthKind::ApiKeyQuery("key"),
+                },
+                key(),
+            ),
+            (
+                AuthScheme {
+                    name: "cookie",
+                    kind: AuthKind::ApiKeyCookie("key"),
+                },
+                key(),
+            ),
+            (
+                AuthScheme {
+                    name: "mtls",
+                    kind: AuthKind::MutualTls,
+                },
+                key(),
+            ),
+        ]
+    }
+
+    /// The schemes of `alternative` a caller still has to register under `registered`: every
+    /// scheme but a registered one or `mutualTLS`, in declaration order. Written independently of
+    /// `attach_auth` so the two can disagree.
+    fn expected_missing(alternative: &[AuthScheme], registered: &[&str]) -> Vec<&'static str> {
+        alternative
+            .iter()
+            .filter(|scheme| {
+                !matches!(scheme.kind, AuthKind::MutualTls) && !registered.contains(&scheme.name)
+            })
+            .map(|scheme| scheme.name)
+            .collect()
+    }
+
+    /// Selection and the `MissingCredential` report agree over every `AuthKind`, every
+    /// registration subset, and every non-empty combination of schemes as an alternative: the
+    /// call succeeds exactly when some alternative has nothing missing, and otherwise reports,
+    /// per alternative in order, exactly what is missing — so neither list is ever empty (#205).
+    #[test]
+    fn selection_and_the_missing_credential_report_agree_over_every_kind_and_registration() {
+        let kinds = every_kind();
+        let subsets = |mask: usize| -> Vec<AuthScheme> {
+            kinds
+                .iter()
+                .enumerate()
+                .filter(|(bit, _)| mask & (1 << bit) != 0)
+                .map(|(_, (scheme, _))| *scheme)
+                .collect()
+        };
+        let all = (1usize << kinds.len()) - 1;
+        let alternatives: Vec<Vec<AuthScheme>> = (1..=all).map(subsets).collect();
+        let check = |core: &ClientCore, registered: &[&str], requirements: &[&[AuthScheme]]| {
+            let expected: Vec<Vec<&'static str>> = requirements
+                .iter()
+                .map(|alternative| expected_missing(alternative, registered))
+                .collect();
+            let satisfiable = expected.iter().any(Vec::is_empty);
+            match poll_ready(attach_auth(core, get(core), requirements)) {
+                Ok(_) => assert!(satisfiable, "{registered:?} {requirements:?}"),
+                Err(Error::RequestConstruction(RequestError::MissingCredential {
+                    alternatives,
+                })) => {
+                    assert!(!satisfiable, "{registered:?} {requirements:?}");
+                    assert_eq!(alternatives, expected, "{registered:?} {requirements:?}");
+                    assert!(!alternatives.is_empty());
+                    assert!(alternatives.iter().all(|missing| !missing.is_empty()));
+                }
+                Err(error) => panic!("{registered:?} {requirements:?}: {error:?}"),
+            }
+        };
+        for registration in 0..=all {
+            let mut core = core();
+            let mut registered = Vec::new();
+            for (bit, (scheme, credential)) in kinds.iter().enumerate() {
+                if registration & (1 << bit) != 0 {
+                    core.set_credential(scheme.name, credential.clone());
+                    registered.push(scheme.name);
+                }
+            }
+            // Each combination alone, then every combination at once as alternatives of one
+            // requirement, and again without the ones `mutualTLS` alone satisfies.
+            for alternative in &alternatives {
+                check(&core, &registered, &[alternative]);
+            }
+            let every: Vec<&[AuthScheme]> = alternatives.iter().map(Vec::as_slice).collect();
+            check(&core, &registered, &every);
+            let blocking: Vec<&[AuthScheme]> = every
+                .iter()
+                .copied()
+                .filter(|alternative| {
+                    alternative
+                        .iter()
+                        .any(|scheme| !matches!(scheme.kind, AuthKind::MutualTls))
+                })
+                .collect();
+            check(&core, &registered, &blocking);
+        }
+    }
+
     /// A client that registers a token provider always has a credential registered, so a failed
     /// refresh is its "unauthenticated" state — typed, with the provider's error as the cause.
     #[test]
@@ -888,12 +1050,9 @@ mod tests {
     /// what changes for a consumer is that the round trip to the identity provider is gone and the
     /// cause no longer downcasts to `AuthError`.
     ///
-    /// Nothing typed replaces it. `credential_mismatch` goes through `Error::request_message`,
-    /// which boxes its text as a private `MessageError` — declared without `pub` in `error.rs`, and
-    /// named by none of the four lists that re-export the runtime into generated output — so the
-    /// cause has **no public type a consumer can name**, and `to_string()` matching is the only
-    /// recourse left. That is the same observable the typed missing-credential cause exists to
-    /// remove; this path still has it, tracked separately as #192.
+    /// What replaces it is typed: `RequestError::CredentialMismatch`, naming the scheme, the kind
+    /// it carries, and the kind registered, and ending the chain, so a consumer routes it without
+    /// matching on text.
     #[test]
     fn a_token_provider_under_a_basic_scheme_is_a_mismatch_without_calling_it() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -918,18 +1077,19 @@ mod tests {
         ))
         .unwrap_err();
         assert!(
-            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+            matches!(
+                error,
+                Error::RequestConstruction(RequestError::CredentialMismatch {
+                    scheme: "login",
+                    required: "http basic",
+                    registered: "Provider",
+                })
+            ),
             "{error:?}"
         );
+        // The payload is the whole cause: nothing below it, so nothing downcasts to `AuthError`.
         let source = std::error::Error::source(&error).unwrap();
-        assert!(source.to_string().contains("http basic"), "{source}");
-        // The break 0adccc5's footer declares, asserted at the level master's `AuthError` occupied:
-        // the cause is still reachable, and it is no longer that type.
-        assert!(
-            std::error::Error::source(source)
-                .is_some_and(|cause| cause.downcast_ref::<AuthError>().is_none()),
-            "the mismatch cause must be reachable and must not downcast to `AuthError`"
-        );
+        assert!(std::error::Error::source(source).is_none(), "{source}");
         assert!(!called.load(Ordering::SeqCst), "the provider was called");
     }
 
@@ -995,12 +1155,11 @@ mod tests {
             FIRST_THEN_FALLBACK,
         ))
         .unwrap_err();
-        assert!(
-            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
-            "expected the selected alternative's mismatch, got {error:?}"
-        );
-        let source = std::error::Error::source(&error).unwrap();
-        assert!(source.to_string().contains("`primary`"), "{source}");
+        let Error::RequestConstruction(RequestError::CredentialMismatch { scheme, .. }) = &error
+        else {
+            panic!("expected the selected alternative's mismatch, got {error:?}");
+        };
+        assert_eq!(*scheme, "primary");
     }
 
     /// The remedy for the test above: with no fall-through, the caller reaches the later
@@ -1043,27 +1202,6 @@ mod tests {
     }
 
     #[test]
-    fn mismatched_credential_kind_fails() {
-        let mut core = core();
-        core.set_credential(
-            "token",
-            Credential::Basic {
-                username: "u".to_owned(),
-                password: SecretString::from("p"),
-            },
-        );
-        let error = poll_ready(attach_auth(&core, get(&core), &[BEARER])).unwrap_err();
-        // A mismatch is a misconfiguration at `with_credential`, not a state an application routes
-        // on, so it deliberately stays untyped.
-        assert!(
-            matches!(error, Error::RequestConstruction(RequestError::Other(_))),
-            "{error:?}"
-        );
-        let source = std::error::Error::source(&error).unwrap();
-        assert!(source.to_string().contains("bearer"), "{source}");
-    }
-
-    #[test]
     fn api_key_header_is_sensitive() {
         let mut core = core();
         core.set_credential("key", Credential::ApiKey(SecretString::from("k3y")));
@@ -1081,6 +1219,64 @@ mod tests {
         let value = &request.headers()["X-Api-Key"];
         assert_eq!(value, "k3y");
         assert!(value.is_sensitive());
+    }
+
+    /// `Credential`'s shipped documentation states which variant each kind of scheme accepts: both
+    /// static token variants under every token-carrying kind, and neither under `http basic`. The
+    /// provider's half of that table is pinned by the provider tests; this pins the static half,
+    /// so the documented rule and the attach code cannot drift apart unseen.
+    #[test]
+    fn both_static_token_variants_attach_under_every_token_kind_and_neither_under_basic() {
+        for (credential, registered) in [
+            (Credential::Bearer(SecretString::from("t0k")), "Bearer"),
+            (Credential::ApiKey(SecretString::from("t0k")), "ApiKey"),
+        ] {
+            let mut core = core();
+            core.set_credential("s", credential);
+            let attach = |kind| {
+                poll_ready(attach_auth(
+                    &core,
+                    get(&core),
+                    &[&[AuthScheme { name: "s", kind }]],
+                ))
+            };
+
+            let bearer = attach(AuthKind::Bearer).unwrap().build().unwrap();
+            assert_eq!(
+                bearer.headers()[reqwest::header::AUTHORIZATION],
+                "Bearer t0k",
+                "{registered}"
+            );
+            let header = attach(AuthKind::ApiKeyHeader("X-Api-Key"))
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(header.headers()["X-Api-Key"], "t0k", "{registered}");
+            let query = attach(AuthKind::ApiKeyQuery("api_key"))
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(query.url().query(), Some("api_key=t0k"), "{registered}");
+            let cookie = attach(AuthKind::ApiKeyCookie("SESSION"))
+                .unwrap()
+                .build()
+                .unwrap();
+            assert_eq!(
+                cookie.headers()[reqwest::header::COOKIE],
+                "SESSION=t0k",
+                "{registered}"
+            );
+
+            let error = attach(AuthKind::Basic).unwrap_err();
+            match error {
+                Error::RequestConstruction(RequestError::CredentialMismatch {
+                    scheme: "s",
+                    required: "http basic",
+                    registered: reported,
+                }) => assert_eq!(reported, registered),
+                other => panic!("expected CredentialMismatch for {registered}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1125,8 +1321,59 @@ mod tests {
             }]],
         ))
         .unwrap_err();
-        let source = std::error::Error::source(&error).unwrap();
-        assert!(source.to_string().contains("http basic"), "{source}");
+        assert!(
+            matches!(
+                error,
+                Error::RequestConstruction(RequestError::CredentialMismatch {
+                    scheme: "login",
+                    required: "http basic",
+                    registered: "Bearer",
+                })
+            ),
+            "{error:?}"
+        );
+    }
+
+    /// The other direction: a static basic credential under a scheme that carries a token. It
+    /// yields no token, so every token-carrying kind reports the mismatch with its own name.
+    #[test]
+    fn a_basic_credential_does_not_satisfy_a_token_scheme() {
+        let mut core = core();
+        core.set_credential(
+            "login",
+            Credential::Basic {
+                username: "aladdin".to_owned(),
+                password: SecretString::from("open sesame"),
+            },
+        );
+        for (kind, required) in [
+            (AuthKind::Bearer, "bearer"),
+            (AuthKind::ApiKeyHeader("X-Api-Key"), "apiKey"),
+            (AuthKind::ApiKeyQuery("api_key"), "apiKey"),
+            (AuthKind::ApiKeyCookie("SESSION"), "apiKey"),
+        ] {
+            let error = poll_ready(attach_auth(
+                &core,
+                get(&core),
+                &[&[AuthScheme {
+                    name: "login",
+                    kind,
+                }]],
+            ))
+            .unwrap_err();
+            match error {
+                Error::RequestConstruction(RequestError::CredentialMismatch {
+                    scheme,
+                    required: reported,
+                    registered,
+                }) => {
+                    assert_eq!(scheme, "login");
+                    assert_eq!(reported, required, "{kind:?}");
+                    assert_eq!(registered, "Basic");
+                }
+                other => panic!("expected CredentialMismatch for {kind:?}, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1418,11 +1665,9 @@ mod tests {
     /// An empty body under a status that documents a textual body is the zero-length text, so
     /// `String` decodes it to `""` on purpose (#126) — while a typed text value (a string enum or
     /// format) that has no empty member still fails with `Decode`, because the codec decodes the
-    /// empty text rather than special-casing it. A documented bodyless status reaches this codec
-    /// only on an error side with one documented body, when that body sits under a range (`4XX`)
-    /// or `default` covering the bodyless status; `classify_error_text` then yields `Api("")` for
-    /// `String` (see `decode_text_body`). Elsewhere it is a unit variant of the response enum
-    /// (#121) or `Error::UnexpectedStatus`.
+    /// empty text rather than special-casing it. A documented bodyless status never reaches this
+    /// codec: beside a documented body it is a unit variant of the response enum (#121, #204), and
+    /// otherwise `()` on the success side or `Error::UnexpectedStatus` on the error side.
     #[test]
     fn textual_codec_reads_an_empty_body_as_the_empty_string() {
         assert_eq!(decode_text_body::<String>(b"").unwrap(), "");
@@ -1488,16 +1733,37 @@ mod tests {
         assert_eq!(&body[..], br#"{"ok":true}"#);
     }
 
-    /// Every runtime helper that raises `Decode` keeps the status of the response it failed to
-    /// decode, so `Error::status()` answers it. Each response carries a status other than `200`,
-    /// so a hard-coded status cannot pass.
+    /// Every runtime helper that raises `Decode` keeps the status and headers of the response it
+    /// failed to decode, so `Error::status()` answers it and a caller can still read, say, the
+    /// `Retry-After` of a documented `429` whose body a proxy replaced with HTML (#268). Each
+    /// response carries a status other than `200` and a header value of its own, so neither a
+    /// hard-coded status nor an empty or shared header map can pass.
     #[test]
-    fn every_decode_helper_keeps_the_response_status() {
+    fn every_decode_helper_keeps_the_response_status_and_headers() {
         use reqwest::StatusCode;
 
-        fn assert_decode_status<E: std::fmt::Debug>(error: Error<E>, expected: u16) {
+        fn response(status: u16, retry_after: &'static str, body: &str) -> reqwest::Response {
+            reqwest::Response::from(
+                http::Response::builder()
+                    .status(status)
+                    .header("retry-after", retry_after)
+                    .body(body.to_owned())
+                    .expect("valid synthetic response"),
+            )
+        }
+
+        fn assert_decode<E: std::fmt::Debug>(error: Error<E>, expected: u16, retry_after: &str) {
             match &error {
-                Error::Decode { status, .. } => assert_eq!(status.as_u16(), expected),
+                Error::Decode {
+                    status, headers, ..
+                } => {
+                    assert_eq!(status.as_u16(), expected);
+                    assert_eq!(
+                        headers.get("retry-after").map(|value| value.as_bytes()),
+                        Some(retry_after.as_bytes()),
+                        "the Decode error for {expected} lost its response headers"
+                    );
+                }
                 other => panic!("expected a Decode error, got {other:?}"),
             }
             assert_eq!(error.status(), StatusCode::from_u16(expected).ok());
@@ -1505,30 +1771,30 @@ mod tests {
 
         let success = poll_ready(super::decode_success::<Created>(
             &core(),
-            json_response(203, "not json"),
+            response(203, "1", "not json"),
         ));
-        assert_decode_status(success.unwrap_err(), 203);
+        assert_decode(success.unwrap_err(), 203, "1");
 
         let text = poll_ready(decode_success_text::<TextChoice>(
             &core(),
-            json_response(206, "not a choice"),
+            response(206, "2", "not a choice"),
         ));
-        assert_decode_status(text.unwrap_err(), 206);
+        assert_decode(text.unwrap_err(), 206, "2");
 
-        let documented = [StatusSpec::Exact(422)];
+        let documented = [StatusSpec::Exact(429)];
         let error = poll_ready(super::classify_error::<Created>(
             &core(),
-            json_response(422, "not json"),
+            response(429, "3", "<html>rate limited</html>"),
             &documented,
         ));
-        assert_decode_status(error, 422);
+        assert_decode(error, 429, "3");
 
         let error = poll_ready(classify_error_text::<TextChoice>(
             &core(),
-            json_response(422, "not a choice"),
+            response(429, "4", "not a choice"),
             &documented,
         ));
-        assert_decode_status(error, 422);
+        assert_decode(error, 429, "4");
     }
 
     #[test]
@@ -1571,13 +1837,18 @@ mod tests {
     ) -> Result<ResponseValue<SuccessEnum>, Error<Infallible>> {
         let (status, headers, body) = poll_ready(read_success_body(response))?;
         if StatusSpec::Exact(200).matches(status) {
-            let value =
-                serde_json::from_slice::<Created>(&body).map_err(|error| Error::Decode {
-                    status,
-                    path: error.to_string(),
-                    body: body.clone(),
-                    truncated: false,
-                })?;
+            let value = match serde_json::from_slice::<Created>(&body) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(Error::Decode {
+                        status,
+                        headers,
+                        path: error.to_string(),
+                        body,
+                        truncated: false,
+                    })
+                }
+            };
             return Ok(ResponseValue::new(
                 status,
                 headers,
@@ -1585,13 +1856,18 @@ mod tests {
             ));
         }
         if StatusSpec::Exact(202).matches(status) {
-            let value =
-                serde_json::from_slice::<Accepted>(&body).map_err(|error| Error::Decode {
-                    status,
-                    path: error.to_string(),
-                    body: body.clone(),
-                    truncated: false,
-                })?;
+            let value = match serde_json::from_slice::<Accepted>(&body) {
+                Ok(value) => value,
+                Err(error) => {
+                    return Err(Error::Decode {
+                        status,
+                        headers,
+                        path: error.to_string(),
+                        body,
+                        truncated: false,
+                    })
+                }
+            };
             return Ok(ResponseValue::new(
                 status,
                 headers,
@@ -1671,6 +1947,7 @@ mod tests {
                 )),
                 Err(error) => Error::Decode {
                     status,
+                    headers,
                     path: error.to_string(),
                     body,
                     truncated,
@@ -1686,6 +1963,7 @@ mod tests {
                 )),
                 Err(error) => Error::Decode {
                     status,
+                    headers,
                     path: error.to_string(),
                     body,
                     truncated,
@@ -1968,6 +2246,7 @@ mod tests {
         match result {
             Err(Error::Decode {
                 status: got,
+                headers: _,
                 path,
                 body,
                 truncated,

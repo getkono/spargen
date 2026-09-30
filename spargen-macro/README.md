@@ -18,6 +18,7 @@ spargen_macro::generate_api!(
     no_uuid,
     no_time,
     carve,
+    open_narrowing,
     error_body_cap = 65536,
     batch_cap = 100,
     omit { operations { post "/legacy"; } }

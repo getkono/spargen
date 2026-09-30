@@ -19,6 +19,7 @@ pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) ->
         .types
         .iter()
         .map(|(id, def)| emit_type_def(id, def, api, names, options));
+    let decode_present = format_ident!("{DECODE_PRESENT}");
     // The RFC 3339 newtypes live beside `types`, so bring them into scope under the same bare names
     // `prim_tokens` emits; at the generated root the prelude re-export supplies them instead.
     let datetime_import = (options.feature_time && api.uses_time()).then(|| {
@@ -31,6 +32,17 @@ pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) ->
             use serde::{Deserialize, Serialize};
             use std::collections::BTreeMap;
             #datetime_import
+
+            /// The `deserialize_with` of every optional, non-nullable field. It is reached only when
+            /// the field is present, and decodes the value — `null` included — as the field's own
+            /// type, so a `null` the schema does not admit is rejected rather than read as absence.
+            fn #decode_present<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+                T: serde::Deserialize<'de>,
+            {
+                T::deserialize(deserializer).map(Some)
+            }
 
             #(#items)*
         }
@@ -151,9 +163,17 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
                 &self.core
             }
 
-            /// Register a credential for a named security scheme. Operations whose `security`
-            /// requirement cannot be satisfied by the registered credentials fail with a
-            /// request-construction error before anything is sent.
+            /// Register a credential for a named security scheme (a `securitySchemes` key).
+            ///
+            /// Registration checks nothing; each operation matches its `security` requirement
+            /// against the registered credentials when it is called, and fails before anything is
+            /// sent, as `support::Error::RequestConstruction`, when no alternative has every scheme
+            /// registered (`RequestError::MissingCredential`), when the selected alternative has a
+            /// credential its scheme cannot carry (`RequestError::CredentialMismatch` — for
+            /// instance a `Credential::Provider` under an `http basic` scheme, which accepts only
+            /// `Credential::Basic`), or when its token provider fails
+            /// (`RequestError::CredentialProvider`). `support::Credential`'s documentation lists
+            /// which variant each kind of scheme accepts.
             #(#scheme_docs)*
             #[must_use]
             pub fn with_credential(
@@ -536,22 +556,17 @@ pub(crate) fn emit_operation(
         ErrorShape::None => quote! {
             Err(support::unexpected_status::<#error_ty>(&self.core, response).await)
         },
-        // A single documented error body: classify against the documented status table into the
-        // aliased `E` (or `Error::UnexpectedStatus` for an undocumented status).
+        // A single documented error body, the operation's only error entry: classify against its
+        // one-entry status table into the aliased `E` (or `Error::UnexpectedStatus` for any other
+        // status). A bodyless entry beside it makes the shape an enum, so the filters below keep
+        // exactly that entry.
         ErrorShape::Single(body_ty) => {
             let mut documented = operation
                 .responses
                 .by_status
                 .iter()
                 .filter(|(status, response)| !status.is_success() && response.body.is_some())
-                .map(|(status, _)| match status {
-                    crate::ir::StatusSpec::Exact(code) => {
-                        quote! { support::StatusSpec::Exact(#code) }
-                    }
-                    crate::ir::StatusSpec::Range(prefix) => {
-                        quote! { support::StatusSpec::Range(#prefix) }
-                    }
-                })
+                .map(|(status, _)| runtime_status_spec(*status))
                 .collect::<Vec<_>>();
             if operation
                 .responses
@@ -605,7 +620,8 @@ pub(crate) fn emit_operation(
                 Err(#classify)
             }
         }
-        // Multiple documented error bodies: read the capped body once, then dispatch by status in
+        // Several documented error entries, at least one bodied (several bodies, or one beside a
+        // bodyless entry): read the capped body once, then dispatch by status in
         // precedence order (exact before range before default) into the matching enum variant →
         // `Error::Api`; a parse failure → `Error::Decode`; an undocumented status →
         // `Error::UnexpectedStatus` (capped body preserved either way).
@@ -618,12 +634,15 @@ pub(crate) fn emit_operation(
                     Some(ty) => {
                         let body_ty = *ty;
                         let ty = response_payload_ty_tokens(body_ty, names, options, true);
+                        let media = response_media_for_spec(&operation.responses, *spec);
                         let decode = if is_bytes_ty(api, body_ty) {
                             quote! { Ok::<#ty, String>(Box::new(body.clone())) }
-                        } else if response_media_for_spec(&operation.responses, *spec)
-                            == Some(MediaType::Text)
-                        {
+                        } else if media == Some(MediaType::Text) {
                             quote! { support::decode_text_body::<#ty>(&body) }
+                        } else if media == Some(MediaType::Xml) {
+                            // Only as the lone body beside bodyless error entries: a second bodied
+                            // error beside an XML one is rejected (`xml_in_multi_status`).
+                            quote! { support::decode_xml_body::<#ty>(&body) }
                         } else {
                             quote! {
                                 serde_json::from_slice::<#ty>(&body)
@@ -640,6 +659,7 @@ pub(crate) fn emit_operation(
                                     )),
                                     Err(path) => support::Error::Decode {
                                         status,
+                                        headers,
                                         path,
                                         body,
                                         truncated,
@@ -731,13 +751,21 @@ pub(crate) fn emit_operation(
                         };
                         quote! {
                             if #spec_tokens.matches(status) {
-                                let value = #decode
-                                    .map_err(|path| support::Error::<#error_ty>::Decode {
-                                        status,
-                                        path,
-                                        body: body.clone(),
-                                        truncated: false,
-                                    })?;
+                                // A `match`, not `map_err`: the failure moves the headers into
+                                // `Decode`, which a closure capturing them would also do on the
+                                // success path that still needs them.
+                                let value = match #decode {
+                                    Ok(value) => value,
+                                    Err(path) => {
+                                        return Err(support::Error::<#error_ty>::Decode {
+                                            status,
+                                            headers,
+                                            path,
+                                            body,
+                                            truncated: false,
+                                        });
+                                    }
+                                };
                                 return Ok(support::ResponseValue::new(
                                     status,
                                     headers,
@@ -1238,14 +1266,13 @@ fn emit_response_headers(
         .responses
         .by_status
         .iter()
-        .map(|(spec, response)| (crate::name::status_label(Some(*spec)), response))
-        .chain(
-            operation
-                .responses
-                .default
-                .as_ref()
-                .map(|response| (crate::name::status_label(None), response)),
-        );
+        .map(|(spec, response)| (crate::name::status_label(*spec), response))
+        .chain(operation.responses.default.as_ref().map(|response| {
+            (
+                crate::name::status_label(crate::ir::StatusSpec::Default),
+                response,
+            )
+        }));
     let structs = responses.filter_map(|(label, response)| {
         if response.headers.is_empty() {
             return None;
@@ -1623,6 +1650,11 @@ fn emit_multipart_body(
                     Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => quote! {
                         let mut part = reqwest::multipart::Part::text(#receiver.to_string());
                     },
+                    // Codegen sees only a checked `Api`; JSON-encoding a reservation would pick a
+                    // part shape for a body nobody lowered.
+                    Some(TypeKind::Reserved) => unreachable!(
+                        "a reservation reached codegen; `check_invariants` should have rejected it"
+                    ),
                     // Any composite property → a JSON-encoded text part.
                     _ => quote! {
                         let mut part = reqwest::multipart::Part::text(
@@ -2176,13 +2208,14 @@ fn response_variant_def(
 fn status_label(spec: crate::ir::StatusSpec) -> String {
     match spec {
         crate::ir::StatusSpec::Exact(code) => code.to_string(),
-        crate::ir::StatusSpec::Range(0) => "default".to_owned(),
         crate::ir::StatusSpec::Range(prefix) => format!("{prefix}XX"),
+        crate::ir::StatusSpec::Default => "default".to_owned(),
     }
 }
 
 /// Emit an operation's typed error type: a payload-carrying enum for several documented error
-/// bodies, a transparent newtype for one, and the uninhabited alias for none.
+/// entries of which at least one is bodied (several bodies, or one body beside a bodyless status),
+/// a transparent newtype for a lone bodied entry, and the uninhabited alias for no error body.
 pub(crate) fn emit_error_enum(
     operation: &Operation,
     api: &Api,
@@ -2197,7 +2230,7 @@ pub(crate) fn emit_error_enum(
     let shape = operation.responses.error();
     let api_error_body = shape.api_error_body(&api.types);
     match shape {
-        // Multiple documented error bodies → a payload-carrying enum, one variant per status. The
+        // Several documented error entries → a payload-carrying enum, one variant per status. The
         // variant is chosen by HTTP status at classification time, so it derives no whole-enum
         // `Deserialize` (and never `serde(untagged)`); each variant's body is decoded on its own.
         ErrorShape::Enum(entries) => {
@@ -2264,6 +2297,23 @@ pub(crate) fn emit_error_enum(
                     }
                 }
             });
+            // Every enum reads its problem-details members, whichever body type each status
+            // carries: `Error::problem` is the reader generic over operations, and the only one an
+            // enum whose statuses carry different body types has.
+            let problem_arms = entries.iter().map(|(spec, ty)| {
+                let variant_ident = status_variant_ident(*spec);
+                match ty {
+                    // A raw-bytes body has no JSON members, and serializing `Bytes` would demand
+                    // the `bytes/serde` feature a top-level bytes body is decoded without.
+                    Some(ty) if is_bytes_ty(api, *ty) => {
+                        quote! { #error_ident::#variant_ident(_) => None, }
+                    }
+                    Some(_) => quote! {
+                        #error_ident::#variant_ident(body) => support::ProblemDetails::of(body),
+                    },
+                    None => quote! { #error_ident::#variant_ident => None, },
+                }
+            });
             quote! {
                 #[allow(dead_code)]
                 #[derive(Debug, Clone)]
@@ -2280,6 +2330,14 @@ pub(crate) fn emit_error_enum(
                 }
 
                 impl std::error::Error for #error_ident {}
+
+                impl support::ApiErrorProblem for #error_ident {
+                    fn problem(&self) -> Option<support::ProblemDetails> {
+                        match self {
+                            #(#problem_arms)*
+                        }
+                    }
+                }
 
                 #accessor
             }
@@ -2324,6 +2382,12 @@ pub(crate) fn emit_error_enum(
             // one the error branch in `emit_operation` dispatches on, so the two cannot drift.
             let deserialize = (!is_bytes_ty(api, body_ty))
                 .then(|| quote! { #[derive(serde::Deserialize)] #[serde(transparent)] });
+            // As on the enum shape: a raw-bytes body has no JSON members to read.
+            let problem_expr = if is_bytes_ty(api, body_ty) {
+                quote! { None }
+            } else {
+                quote! { support::ProblemDetails::of(&self.0) }
+            };
             let doc = format!(
                 "The documented error body of this operation, wrapped so `Error<{error_ident}>` \
                  is a `std::error::Error`. Derefs and converts to the inner type."
@@ -2386,6 +2450,12 @@ pub(crate) fn emit_error_enum(
                         #body_expr
                     }
                 }
+
+                impl support::ApiErrorProblem for #error_ident {
+                    fn problem(&self) -> Option<support::ProblemDetails> {
+                        #problem_expr
+                    }
+                }
             }
         }
         // No documented error body: every non-success status is Error::UnexpectedStatus, and the
@@ -2443,7 +2513,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
     // `time` mapping enabled; only then does the audit require `time` of the consumer.
     let datetime_module = uses_time.then(|| embed(&crate::support::datetime_runtime_file()));
     let datetime_reexport = uses_time.then(|| {
-        quote! { pub use datetime::{Date, DateTime, ParseError}; }
+        quote! { pub use datetime::{Date, DateParseError, DateTime}; }
     });
     // The blocking facade (`BlockingRuntime`) is embedded unconditionally but gated on the
     // `blocking` feature AND `not(target_arch = "wasm32")` at the module level: the tokio-dependent
@@ -2476,7 +2546,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
             pub use dispatch::{attach_auth, build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
-            pub use error::{ApiErrorBody, Error, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError};
+            pub use error::{ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use header::{parse_header, require_header, HeaderError, HeaderShape};
             pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
@@ -2489,6 +2559,97 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
             #xml_reexport
             #datetime_reexport
             #blocking_reexport
+        }
+    }
+}
+
+/// Emit an open string enum (`open_narrowing`): one unit variant per listed value, as the closed
+/// enum has, plus a variant holding any other string. It cannot derive serde with a catch-all and
+/// stay a plain string on the wire, so `Serialize` writes `as_str()` and `Deserialize` reads a
+/// string and matches it, reaching the catch-all only for a value no unit variant lists.
+///
+/// `display_arms` are the closed enum's `Display` arms, which map each unit variant to its value.
+fn emit_open_string_enum(
+    id: crate::ir::TypeId,
+    ident: &crate::name::Ident,
+    enumeration: &crate::ir::ScalarEnum,
+    names: &Names,
+    docs: TokenStream,
+    deprecated: Option<TokenStream>,
+    display_arms: Vec<TokenStream>,
+) -> TokenStream {
+    let other = names
+        .open_variants
+        .get(&id)
+        .expect("open variant name allocated");
+    let listed: Vec<(&String, &crate::name::Ident)> = enumeration
+        .variants
+        .iter()
+        .map(|variant| {
+            let ScalarValue::String(value) = variant else {
+                unreachable!("an open enum is a string enum");
+            };
+            let variant_ident = names
+                .variants
+                .get(&(id, value.clone()))
+                .expect("variant name allocated");
+            (value, variant_ident)
+        })
+        .collect();
+    let variants = listed
+        .iter()
+        .map(|(_, variant_ident)| quote! { #variant_ident, });
+    let decode_arms = listed.iter().map(|(value, variant_ident)| {
+        quote! { #value => #ident::#variant_ident, }
+    });
+    let other_doc = "A value the description does not list here. Decoding produces it only for a \
+                     string no other variant names.";
+    quote! {
+        #docs
+        #deprecated
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub enum #ident {
+            #(#variants)*
+            #[doc = #other_doc]
+            #other(String),
+        }
+
+        impl #ident {
+            /// The wire value.
+            pub fn as_str(&self) -> &str {
+                match self {
+                    #(#display_arms)*
+                    #ident::#other(value) => value.as_str(),
+                }
+            }
+        }
+
+        impl std::fmt::Display for #ident {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl serde::Serialize for #ident {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for #ident {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Ok(match value.as_str() {
+                    #(#decode_arms)*
+                    _ => #ident::#other(value),
+                })
+            }
         }
     }
 }
@@ -2561,6 +2722,17 @@ fn emit_type_def(
                     .expect("variant name allocated");
                 quote! { #ident::#variant_ident => #value, }
             });
+            if enumeration.open {
+                return emit_open_string_enum(
+                    id,
+                    ident,
+                    enumeration,
+                    names,
+                    docs,
+                    deprecated,
+                    display_arms.collect(),
+                );
+            }
             quote! {
                 #docs
                 #deprecated
@@ -2971,6 +3143,13 @@ fn emit_type_def(
                 }
             }
         }
+        // Named here rather than left to the alias arm: `type_kind_tokens` refuses it too, but a
+        // reservation is not an alias and must not read as one at this site either.
+        TypeKind::Reserved => {
+            unreachable!(
+                "a reservation reached codegen; `check_invariants` should have rejected it"
+            )
+        }
         _ => {
             let ty = type_kind_tokens(&def.kind, api, names, options);
             quote! { #docs pub type #ident = #ty; }
@@ -3019,6 +3198,16 @@ fn emit_field(
     } else {
         quote! { default, skip_serializing_if = "Option::is_none", }
     };
+    // The `Option` wrapping an optional non-nullable field stands for absence only, yet serde's
+    // `Option<T>` maps a JSON `null` to `None` without ever calling `T::deserialize`, so
+    // `{"x": null}` would decode as absent (and re-serialise as `{}`) although the schema admits no
+    // `null` there. Route every *present* value, `null` included, to `T`'s own deserializer, which
+    // rejects it wherever `T` does (an uninhabited `T` rejects every value); an absent field still
+    // takes `default`. A nullable one keeps plain `Option`, since there `null` is an admitted value.
+    let decode_present = (!field.required && !field.ty.nullable).then(|| {
+        let path = DECODE_PRESENT;
+        quote! { deserialize_with = #path, }
+    });
     let mut notes: Vec<String> = Vec::new();
     if field.deprecated {
         notes.push("Deprecated per the spec.".to_owned());
@@ -3038,10 +3227,16 @@ fn emit_field(
         .map(|note| quote! { #[doc = #note] });
     quote! {
         #(#notes)*
-        #[serde(rename = #wire, #serde_default)]
+        #[serde(rename = #wire, #serde_default #decode_present)]
         pub #ident: #ty,
     }
 }
+
+/// The name of the private function `types` carries for every optional, non-nullable field: a
+/// `deserialize_with` target that decodes a present value, `null` included, as the field's own
+/// type. Snake case, so it cannot collide with a `PascalCase` type, and not of the
+/// `default_<id>_<field>` shape a default provider takes.
+const DECODE_PRESENT: &str = "decode_present";
 
 /// The deterministic identifier of a field's generated serde default-provider function. Derived
 /// from the owning type's dense id plus the field's Rust identifier, so it is stable across runs
@@ -3213,47 +3408,44 @@ fn success_enum_ident(method_ident: &crate::name::Ident) -> proc_macro2::Ident {
 }
 
 /// The `PascalCase` variant identifier for a documented status selector: `Status200` for an exact
-/// code, `Status2xx` for a range, and `Default` for the `default` response (carried as the
-/// `Range(0)` sentinel by [`Responses::error`](crate::ir::Responses::error)). Deterministic and,
-/// within one enum, unique by
-/// construction (each selector appears once). Routed through the `name` escaper for validity.
+/// code, `Status2xx` for a range, and `Default` for [`StatusSpec::Default`](crate::ir::StatusSpec)
+/// — the label [`crate::name::status_label`] gives the same selector's header struct.
+/// Deterministic and, within one enum, unique by construction (each selector appears once).
+/// Routed through the `name` escaper for validity.
 fn status_variant_ident(spec: crate::ir::StatusSpec) -> proc_macro2::Ident {
-    let raw = match spec {
-        crate::ir::StatusSpec::Exact(code) => format!("Status{code}"),
-        crate::ir::StatusSpec::Range(0) => "Default".to_owned(),
-        crate::ir::StatusSpec::Range(prefix) => format!("Status{prefix}xx"),
-    };
+    let raw = crate::name::status_label(spec);
     format_ident!(
         "{}",
         crate::name::escape(&raw, crate::name::IdentRole::Variant).as_str()
     )
 }
 
-/// The runtime `support::StatusSpec` tokens for a documented status selector. The `default`
-/// sentinel (`Range(0)`) maps to `Any`, matching how the single-error-body path builds its table.
+/// The runtime `support::StatusSpec` tokens for a documented status selector. `default` maps to
+/// `Any`: it is classified last, so it matches exactly the statuses no other entry claimed.
 fn runtime_status_spec(spec: crate::ir::StatusSpec) -> TokenStream {
     match spec {
         crate::ir::StatusSpec::Exact(code) => quote! { support::StatusSpec::Exact(#code) },
-        crate::ir::StatusSpec::Range(0) => quote! { support::StatusSpec::Any },
         crate::ir::StatusSpec::Range(prefix) => quote! { support::StatusSpec::Range(#prefix) },
+        crate::ir::StatusSpec::Default => quote! { support::StatusSpec::Any },
     }
 }
 
+/// The chosen media type of the response a shape entry was built from: the `default` response for
+/// [`StatusSpec::Default`](crate::ir::StatusSpec), otherwise the `by_status` entry with exactly
+/// that selector.
 fn response_media_for_spec(
     responses: &crate::ir::Responses,
     spec: crate::ir::StatusSpec,
 ) -> Option<MediaType> {
-    if spec == crate::ir::StatusSpec::Range(0) {
-        return responses
-            .default
-            .as_ref()
-            .and_then(|response| response.media);
-    }
-    responses
-        .by_status
-        .iter()
-        .find(|(candidate, _)| *candidate == spec)
-        .and_then(|(_, response)| response.media)
+    let response = match spec {
+        crate::ir::StatusSpec::Default => responses.default.as_ref(),
+        crate::ir::StatusSpec::Exact(_) | crate::ir::StatusSpec::Range(_) => responses
+            .by_status
+            .iter()
+            .find(|(candidate, _)| *candidate == spec)
+            .map(|(_, response)| response),
+    };
+    response.and_then(|response| response.media)
 }
 
 /// Whether a body is decoded by the raw byte codec, which yields `bytes::Bytes` itself. It reads
@@ -3302,13 +3494,15 @@ fn reqwest_method(method: &crate::ir::Method) -> TokenStream {
 /// Anything short of that leaves a generated signature a caller can call but cannot write down.
 /// `ApiErrorBody` is the bound `Error::api_body` needs, implemented by the uniform-body error enum,
 /// the single-body newtype, and the uninhabited shape (an enum whose bodies are different generated
-/// types gets none).
+/// types gets none). `ApiErrorProblem` is the bound `Error::problem` needs, implemented by every
+/// error shape, and `ProblemDetails` is what that reader returns.
 ///
 /// `generate` emits the root `pub use` from these lists and [`error_type_ident`] steers clear of
 /// them, so the two read one source. `spargen/tests/reexport_lists.rs` holds each name to the
 /// embedded `support` module's own re-exports, and pins the emitted root surface as a golden file.
 pub(super) const ROOT_REEXPORTS: &[&str] = &[
     "ApiErrorBody",
+    "ApiErrorProblem",
     "AuthError",
     "ClientConfig",
     "ClientCore",
@@ -3323,6 +3517,7 @@ pub(super) const ROOT_REEXPORTS: &[&str] = &[
     "Middleware",
     "MiddlewareBackend",
     "Next",
+    "ProblemDetails",
     "ProtocolError",
     "RedirectError",
     "RequestCause",
@@ -3352,8 +3547,9 @@ pub(super) const STREAM_ROOT_REEXPORTS: &[&str] = &[
 ];
 
 /// The root re-exports emitted only when a date-typed primitive survives lowering with the `time`
-/// mapping on.
-pub(super) const DATETIME_ROOT_REEXPORTS: &[&str] = &["Date", "DateTime"];
+/// mapping on. `DateParseError` is the `FromStr` error of the other two, so `"…".parse::<Date>()`
+/// yields a `Result` whose error type a caller can write down.
+pub(super) const DATETIME_ROOT_REEXPORTS: &[&str] = &["Date", "DateParseError", "DateTime"];
 
 /// The name of an operation's error type: `{Operation}Error`, widened to
 /// `{Operation}OperationError` when the first form would shadow a runtime re-export.
@@ -3394,7 +3590,8 @@ mod tests {
     use crate::diag::{Diagnostics, JsonPointer, Provenance};
     use crate::ir::{
         Api, Docs, Info, MediaType, Method, Operation, OperationId, PathSegment, PathTemplate,
-        Prim, Response, Responses, StatusSpec, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+        Prim, Response, Responses, Server, StatusSpec, Ty, TypeDef, TypeGraph, TypeId, TypeKind,
+        UrlSegment,
     };
 
     /// The error type emitted for `get /message`, whose only documented error is a `400` carrying
@@ -3406,6 +3603,7 @@ mod tests {
             kind: TypeKind::Primitive(Prim::String),
             docs: Docs::default(),
             provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
         });
         let operation = Operation {
             id: OperationId("getMessage".to_owned()),
@@ -3470,6 +3668,426 @@ mod tests {
             assert!(unboxed.contains("ApiErrorBody"), "{unboxed}");
             assert_eq!(boxed, unboxed, "boxing changed the emitted error type");
             assert!(!boxed.contains("Box"), "{boxed}");
+        }
+    }
+
+    /// Issue #233: `default` was once the selector `Range(0)`, so a `0XX` entry decoded under the
+    /// `default` response's codec (or the fallback, with no `default`), and its variant and
+    /// runtime selector collided with `default`'s. Each selector now reads only its own response.
+    #[test]
+    fn each_status_selector_reads_its_own_response_media_and_label() {
+        let response = |media| Response {
+            body: Some(Ty {
+                id: TypeId(0),
+                nullable: false,
+                boxed: false,
+            }),
+            media: Some(media),
+            stream: None,
+            headers: Vec::new(),
+        };
+        let with_default = Responses {
+            by_status: vec![
+                (StatusSpec::Range(0), response(MediaType::Xml)),
+                (StatusSpec::Exact(404), response(MediaType::Json)),
+            ],
+            default: Some(response(MediaType::Text)),
+        };
+        let media = |responses: &Responses, spec| super::response_media_for_spec(responses, spec);
+        assert_eq!(
+            media(&with_default, StatusSpec::Default),
+            Some(MediaType::Text)
+        );
+        assert_eq!(
+            media(&with_default, StatusSpec::Range(0)),
+            Some(MediaType::Xml)
+        );
+        assert_eq!(
+            media(&with_default, StatusSpec::Exact(404)),
+            Some(MediaType::Json)
+        );
+        let without_default = Responses {
+            default: None,
+            ..with_default
+        };
+        assert_eq!(media(&without_default, StatusSpec::Default), None);
+        assert_eq!(
+            media(&without_default, StatusSpec::Range(0)),
+            Some(MediaType::Xml)
+        );
+
+        assert_eq!(
+            super::status_variant_ident(StatusSpec::Default).to_string(),
+            "Default"
+        );
+        assert_eq!(
+            super::status_variant_ident(StatusSpec::Range(0)).to_string(),
+            "Status0xx"
+        );
+        assert_eq!(super::status_label(StatusSpec::Default), "default");
+        assert_eq!(super::status_label(StatusSpec::Range(0)), "0XX");
+        assert_eq!(
+            super::runtime_status_spec(StatusSpec::Default).to_string(),
+            quote::quote! { support::StatusSpec::Any }.to_string()
+        );
+        assert_ne!(
+            super::runtime_status_spec(StatusSpec::Range(0)).to_string(),
+            super::runtime_status_spec(StatusSpec::Default).to_string()
+        );
+    }
+
+    /// The name of every `fn` in each inherent `impl <self_ty>` block among `items`, nested modules
+    /// included, appended to `into`.
+    fn inherent_methods(items: &[syn::Item], self_ty: &str, into: &mut Vec<String>) {
+        for item in items {
+            match item {
+                syn::Item::Impl(block) if block.trait_.is_none() => {
+                    let syn::Type::Path(path) = &*block.self_ty else {
+                        continue;
+                    };
+                    if !path.path.is_ident(self_ty) {
+                        continue;
+                    }
+                    into.extend(block.items.iter().filter_map(|item| match item {
+                        syn::ImplItem::Fn(method) => Some(method.sig.ident.to_string()),
+                        _ => None,
+                    }));
+                }
+                syn::Item::Mod(module) => {
+                    if let Some((_, items)) = &module.content {
+                        inherent_methods(items, self_ty, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Issue #286: operation methods share `impl Client` and `impl BlockingClient` with the fixed
+    /// constructors and accessors, so `name::CLIENT_METHODS` must be exactly the fixed methods
+    /// emitted there, and an operation spelling each of them must yield rather than duplicate it.
+    /// The API declares a server so `with_default_server` is emitted.
+    #[test]
+    fn client_methods_are_exactly_the_fixed_methods_and_operations_yield_to_them() {
+        let operation = |id: &str| Operation {
+            id: OperationId(id.to_owned()),
+            method: Method::Get,
+            path: PathTemplate {
+                raw: format!("/{id}"),
+                segments: vec![PathSegment::Literal(format!("/{id}"))],
+            },
+            params: Vec::new(),
+            request_body: None,
+            responses: Responses {
+                by_status: vec![(
+                    StatusSpec::Exact(204),
+                    Response {
+                        body: None,
+                        media: None,
+                        stream: None,
+                        headers: Vec::new(),
+                    },
+                )],
+                default: None,
+            },
+            security: Vec::new(),
+            deprecated: false,
+            docs: Docs::default(),
+            server: None,
+            provenance: Provenance::new(JsonPointer::root().push(id), None),
+        };
+        let api = Api {
+            info: Info {
+                title: "T".to_owned(),
+                version: "1".to_owned(),
+                description: None,
+            },
+            servers: vec![Server {
+                name: None,
+                url: "https://api.example.com".to_owned(),
+                segments: vec![UrlSegment::Literal("https://api.example.com".to_owned())],
+                variables: IndexMap::new(),
+                description: None,
+            }],
+            operations: crate::name::CLIENT_METHODS
+                .iter()
+                .map(|method| operation(method))
+                .collect(),
+            types: TypeGraph::default(),
+            security_schemes: IndexMap::new(),
+        };
+        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let options = CodegenOptions::default();
+        let client: syn::File = syn::parse2(super::emit_client(&api, &names, &options))
+            .expect("the emitted client parses");
+        let blocking: syn::File = syn::parse2(super::emit_blocking_client(&api, &names, &options))
+            .expect("the emitted blocking client parses");
+
+        let operation_methods: std::collections::BTreeSet<String> = names
+            .operations
+            .values()
+            .map(|ident| ident.as_str().to_owned())
+            .collect();
+        let mut fixed = std::collections::BTreeSet::new();
+        for (file, self_ty) in [(&client, "Client"), (&blocking, "BlockingClient")] {
+            let mut methods = Vec::new();
+            inherent_methods(&file.items, self_ty, &mut methods);
+            let unique: std::collections::BTreeSet<&String> = methods.iter().collect();
+            assert_eq!(
+                unique.len(),
+                methods.len(),
+                "`impl {self_ty}` defines a method twice: {methods:?}"
+            );
+            for method in &operation_methods {
+                assert!(
+                    methods.contains(method),
+                    "`impl {self_ty}` lacks operation method `{method}`: {methods:?}"
+                );
+            }
+            fixed.extend(
+                methods
+                    .into_iter()
+                    .filter(|method| !operation_methods.contains(method)),
+            );
+        }
+        let reserved: std::collections::BTreeSet<String> = crate::name::CLIENT_METHODS
+            .iter()
+            .map(|method| (*method).to_owned())
+            .collect();
+        assert_eq!(
+            fixed, reserved,
+            "`name::CLIENT_METHODS` must list exactly the fixed methods of `Client` and \
+             `BlockingClient`"
+        );
+        for method in crate::name::CLIENT_METHODS {
+            assert!(
+                !operation_methods.contains(*method),
+                "operation `{method}` kept the bare spelling of a fixed client method"
+            );
+        }
+    }
+
+    /// Every capitalised identifier in `tokens` that is written bare — not after `::` or `.`, and
+    /// not inside an attribute — appended to `into`.
+    fn bare_capitalised_idents(tokens: proc_macro2::TokenStream, into: &mut Vec<String>) {
+        use proc_macro2::TokenTree;
+        let mut previous: Option<TokenTree> = None;
+        let mut before_previous: Option<TokenTree> = None;
+        for token in tokens {
+            match &token {
+                TokenTree::Group(group) => {
+                    let in_attribute = matches!(&previous, Some(TokenTree::Punct(p)) if p.as_char() == '#')
+                        && group.delimiter() == proc_macro2::Delimiter::Bracket;
+                    if !in_attribute {
+                        bare_capitalised_idents(group.stream(), into);
+                    }
+                }
+                TokenTree::Ident(ident) => {
+                    let name = ident.to_string();
+                    let after_path_separator = matches!(
+                        (&before_previous, &previous),
+                        (Some(TokenTree::Punct(a)), Some(TokenTree::Punct(b)))
+                            if a.as_char() == ':' && b.as_char() == ':'
+                    );
+                    let after_dot =
+                        matches!(&previous, Some(TokenTree::Punct(p)) if p.as_char() == '.');
+                    if name.starts_with(|c: char| c.is_ascii_uppercase())
+                        && !after_path_separator
+                        && !after_dot
+                    {
+                        into.push(name);
+                    }
+                }
+                TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+            }
+            before_previous = previous.replace(token);
+        }
+    }
+
+    /// The name every leaf of `tree` brings into scope, appended to `into`.
+    fn use_leaves(tree: &syn::UseTree, into: &mut Vec<String>) {
+        match tree {
+            syn::UseTree::Path(path) => use_leaves(&path.tree, into),
+            syn::UseTree::Name(name) => into.push(name.ident.to_string()),
+            syn::UseTree::Rename(rename) => into.push(rename.rename.to_string()),
+            syn::UseTree::Group(group) => {
+                group.items.iter().for_each(|tree| use_leaves(tree, into))
+            }
+            syn::UseTree::Glob(_) => panic!("a glob import brings in names no list can reserve"),
+        }
+    }
+
+    /// What the `types` module emitted for one alias per `(hint, kind)` beside a `Text` string
+    /// definition: the names its `use` items bring in, the capitalised names it writes bare (the
+    /// emitted functions' own type parameters excluded), and the names it defines.
+    struct TypesModuleNames {
+        imported: Vec<String>,
+        written: Vec<String>,
+        defined: std::collections::BTreeSet<String>,
+    }
+
+    /// The alias kinds [`types_module_names`] can emit: a date, a date-time, or a nullable boxed
+    /// array of the `Text` definition, which writes `Vec`, `Box`, `Option`, and `String` bare.
+    #[derive(Clone, Copy)]
+    enum AliasKind {
+        Date,
+        DateTime,
+        List,
+    }
+
+    fn types_module_names(aliases: &[(&str, AliasKind)]) -> TypesModuleNames {
+        use quote::ToTokens;
+
+        let mut types = TypeGraph::default();
+        let mut define = |name: &str, kind| {
+            types.insert(TypeDef {
+                name_hint: name.to_owned(),
+                kind,
+                docs: Docs::default(),
+                provenance: Provenance::new(JsonPointer::root().push(name), None),
+                document: String::new(),
+            })
+        };
+        let text = define("Text", TypeKind::Primitive(Prim::String));
+        for (name, kind) in aliases {
+            let kind = match kind {
+                AliasKind::Date => TypeKind::Primitive(Prim::Date),
+                AliasKind::DateTime => TypeKind::Primitive(Prim::DateTime),
+                AliasKind::List => TypeKind::Array(Box::new(Ty {
+                    id: text,
+                    nullable: true,
+                    boxed: true,
+                })),
+            };
+            define(name, kind);
+        }
+        let api = Api {
+            info: Info {
+                title: "T".to_owned(),
+                version: "1".to_owned(),
+                description: None,
+            },
+            servers: Vec::new(),
+            operations: Vec::new(),
+            types,
+            security_schemes: IndexMap::new(),
+        };
+        let names = crate::name::allocate(&api, &mut Diagnostics::default());
+        let file: syn::File =
+            syn::parse2(super::emit_models(&api, &names, &CodegenOptions::default()))
+                .expect("the emitted types module parses");
+        let [syn::Item::Mod(module)] = file.items.as_slice() else {
+            panic!("the models are emitted as one module");
+        };
+        let (_, items) = module.content.as_ref().expect("the module is inline");
+
+        let mut imported = Vec::new();
+        let mut written = Vec::new();
+        let mut defined = std::collections::BTreeSet::new();
+        for item in items {
+            match item {
+                syn::Item::Use(import) => use_leaves(&import.tree, &mut imported),
+                syn::Item::Type(alias) => {
+                    defined.insert(alias.ident.to_string());
+                    bare_capitalised_idents(alias.ty.to_token_stream(), &mut written);
+                }
+                syn::Item::Fn(function) => {
+                    let generics: Vec<String> = function
+                        .sig
+                        .generics
+                        .type_params()
+                        .map(|param| param.ident.to_string())
+                        .collect();
+                    let mut idents = Vec::new();
+                    bare_capitalised_idents(function.to_token_stream(), &mut idents);
+                    written.extend(idents.into_iter().filter(|ident| !generics.contains(ident)));
+                }
+                other => panic!(
+                    "an unexpected item in the types module: {}",
+                    other.to_token_stream()
+                ),
+            }
+        }
+        TypesModuleNames {
+            imported,
+            written,
+            defined,
+        }
+    }
+
+    /// Issue #356: a model is emitted into the `types` module beside that module's own imports and
+    /// the prelude types it writes bare, so a schema hinted `Date` redefined the runtime `Date` the
+    /// module imports (`E0255`). `name::TYPES_MODULE_NAMES` must hold every name the module brings
+    /// in by `use` and every capitalised type-namespace name it writes bare. The first module's
+    /// definitions spell none of those names, so every such use is one the list must reserve; both
+    /// date types are used, so the date import is emitted.
+    #[test]
+    fn types_module_names_cover_every_name_the_types_module_uses() {
+        let used = types_module_names(&[
+            ("Day", AliasKind::Date),
+            ("Moment", AliasKind::DateTime),
+            ("Texts", AliasKind::List),
+        ]);
+        for date in ["Date", "DateTime"] {
+            assert!(
+                used.imported.iter().any(|name| name == date),
+                "the fixture must make the `types` module import `{date}`: {:?}",
+                used.imported
+            );
+        }
+        for bare in ["Box", "Option", "Result", "String", "Vec"] {
+            assert!(
+                used.written.iter().any(|name| name == bare),
+                "the walk must see the bare `{bare}` the fixture emits: {:?}",
+                used.written
+            );
+        }
+        // Enum variants of the prelude live in the value namespace, which no emitted model occupies.
+        let prelude_variants = ["Some", "None", "Ok", "Err", "Self"];
+        for name in used
+            .imported
+            .iter()
+            .chain(used.written.iter().filter(|name| {
+                !prelude_variants.contains(&name.as_str()) && !used.defined.contains(*name)
+            }))
+        {
+            assert!(
+                crate::name::TYPES_MODULE_NAMES.contains(&name.as_str()),
+                "the `types` module uses `{name}`, which `name::TYPES_MODULE_NAMES` does not reserve"
+            );
+        }
+    }
+
+    /// A definition whose hint spells a name the `types` module uses yields it, whichever of the
+    /// shapes the definition has, and the module still imports the date types it needs.
+    #[test]
+    fn a_definition_spelling_a_types_module_name_yields_it() {
+        let aliases: Vec<(&str, AliasKind)> = crate::name::TYPES_MODULE_NAMES
+            .iter()
+            .map(|name| {
+                let kind = match *name {
+                    "Date" => AliasKind::Date,
+                    "DateTime" => AliasKind::DateTime,
+                    _ => AliasKind::List,
+                };
+                (*name, kind)
+            })
+            .collect();
+        let used = types_module_names(&aliases);
+        assert_eq!(
+            used.defined.len(),
+            aliases.len() + 1,
+            "every alias and `Text` must be defined once: {:?}",
+            used.defined
+        );
+        for name in crate::name::TYPES_MODULE_NAMES {
+            assert!(
+                !used.defined.contains(*name),
+                "a definition kept the bare spelling `{name}` the `types` module already uses"
+            );
+        }
+        for date in ["Date", "DateTime"] {
+            assert!(used.imported.iter().any(|name| name == date));
         }
     }
 }

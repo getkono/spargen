@@ -39,6 +39,9 @@ pub(crate) fn resolve(path: Utf8PathBuf, args: &SpecArgs) -> Result<Spec, Config
     if let Some(cap) = args.batch_cap {
         spec = spec.batch_cap(cap);
     }
+    if args.open_narrowing {
+        spec = spec.open_narrowing(true);
+    }
     for path in &args.omit_path {
         spec = spec.omit_rule(OmitRule::path(path.clone()));
     }
