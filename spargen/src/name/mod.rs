@@ -47,6 +47,10 @@ pub(crate) struct Names {
     pub(crate) struct_overflow: HashMap<TypeId, Ident>,
     /// Variant name per `(type, wire variant value)`.
     pub(crate) variants: HashMap<(TypeId, String), Ident>,
+    /// The variant holding any unlisted string, per open string enum. Allocated in the enum's
+    /// variant scope after every listed value, so a listed value keeps the name it has in the
+    /// closed enum, and one spelled `other` pushes this one to a disambiguated name instead.
+    pub(crate) open_variants: HashMap<TypeId, Ident>,
     /// Builder type name per declared server, by index.
     pub(crate) servers: Vec<Ident>,
     /// Enum type name per `(server index, variable name)`, for a variable with a closed `enum`.
@@ -333,6 +337,12 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                     names.variants.insert(
                         (id, value.clone()),
                         scope.alloc(&value, IdentRole::Variant, &def.provenance.pointer),
+                    );
+                }
+                if enumeration.open {
+                    names.open_variants.insert(
+                        id,
+                        scope.alloc("Other", IdentRole::Variant, &def.provenance.pointer),
                     );
                 }
             }

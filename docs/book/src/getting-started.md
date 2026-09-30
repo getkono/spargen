@@ -23,8 +23,8 @@ only `generate` takes a `Build`; `check`, `diff`, `requirements`, and `vendor` t
 never ask for an output path they would not use. Both types have private fields and chained
 setters, so a new knob is additive rather than breaking.
 
-`Spec`'s knobs are `uuid`, `time`, `omit`/`omit_rule`, `error_body_cap`, `batch_cap`, and
-`carve`. They can equally be read from a `spargen.toml` (`Spec::config_file`,
+`Spec`'s knobs are `uuid`, `time`, `omit`/`omit_rule`, `error_body_cap`, `batch_cap`, `carve`,
+and `open_narrowing` (see [problem details](./runtime.md#problem-details)). They can equally be read from a `spargen.toml` (`Spec::config_file`,
 `Spec::discover_config_file`) — the same file the CLI and the macro read, parsed by the library
 so the three cannot drift. Setters called afterwards still win, so build code stays
 authoritative.
@@ -129,7 +129,8 @@ mod api {
 ```
 
 It accepts a positional schema path or `spec = "..."`, plus the same controls as `Spec`:
-`no_uuid`, `no_time`, `carve`, `error_body_cap = N`, `batch_cap = N`, and an `omit { ... }`
+`no_uuid`, `no_time`, `carve`, `open_narrowing`, `error_body_cap = N`, `batch_cap = N`, and an
+`omit { ... }`
 profile. Cargo and rustc track the root schema, every transitive source file, and
 `spargen.lock` through the expansion. See the
 [`spargen-macro` README](https://github.com/getkono/spargen/tree/master/spargen-macro).

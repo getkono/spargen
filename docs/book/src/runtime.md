@@ -91,6 +91,15 @@ A member is `Some` only with the type RFC 9457 gives it (a string, or an integer
 The reader asserts nothing about whether the server meant the body as problem details: an object
 body answers with whichever of those member names it carries. Extension members are not read.
 
+A description that narrows the problem `type` per status (`allOf: [$ref: Problem, {properties:
+{type: {const: …}}}]`) makes an unlisted `type` a decode failure by default, so it reaches the raw
+path above. The opt-in `open_narrowing` (`Spec::open_narrowing(true)`, `open_narrowing = true` in
+`spargen.toml`, `--open-narrowing`, or `open_narrowing` in `generate_api!`) lowers that narrowing,
+in a response body's own schema, to an open enum instead: each listed value keeps its variant, one
+more (`Other(String)`) holds any other string, and the response decodes into `Error::Api`, where
+`problem()` reads it like any other. The [support matrix](./support-matrix.md)'s Responses row
+states exactly which positions it opens.
+
 ## Middleware
 
 `MiddlewareBackend` wraps an inner backend with an ordered chain of `Middleware`. Each middleware

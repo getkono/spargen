@@ -75,13 +75,23 @@ fn base() -> String {
 
 /// Diff two inline specs, asserting both lowered successfully, and return the report.
 fn diff(old_spec: &str, new_spec: &str) -> DiffReport {
+    diff_configured(old_spec, new_spec, |spec| spec, |spec| spec)
+}
+
+/// [`diff`] with each side's `Spec` passed through its own `configure` first.
+fn diff_configured(
+    old_spec: &str,
+    new_spec: &str,
+    configure_old: impl FnOnce(Spec) -> Spec,
+    configure_new: impl FnOnce(Spec) -> Spec,
+) -> DiffReport {
     let temp = tempfile::tempdir().unwrap();
     let old_path = temp.path().join("old.yaml");
     let new_path = temp.path().join("new.yaml");
     std::fs::write(&old_path, old_spec).unwrap();
     std::fs::write(&new_path, new_spec).unwrap();
-    let old = Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap());
-    let new = Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap());
+    let old = configure_old(Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap()));
+    let new = configure_new(Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap()));
     spargen::diff(&old, &new).expect("both specs should lower")
 }
 
@@ -1004,4 +1014,96 @@ fn renaming_a_keyword_named_operation_and_field_is_still_major() {
         "{}",
         renamed.detail
     );
+}
+
+/// `get /pets` whose documented `404` narrows the `Problem` component's `type` to `values`.
+fn narrowed_problem(values: &str) -> String {
+    full(
+        &format!(
+            "  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+        '404':
+          description: missing
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/Problem'
+                  - properties: {{ type: {{ enum: [{values}] }} }}
+"
+        ),
+        "    Problem:
+      type: object
+      required: [type]
+      properties:
+        type: { type: string }
+",
+    )
+}
+
+/// The open set's catch-all is surface: an open enum carries it as a variant, and a listed value
+/// that takes its name moves it, which is a rename a consumer's `match` sees.
+#[test]
+fn an_open_enums_catch_all_is_a_variant_of_its_surface() {
+    let open = |spec: Spec| spec.open_narrowing(true);
+
+    // A new listed value is the additive rule's variant, as on a closed enum.
+    let added = diff_configured(
+        &narrowed_problem("a, b"),
+        &narrowed_problem("a, b, c"),
+        open,
+        open,
+    );
+    assert_eq!(kinds(&added), vec![ChangeKind::VariantAdded], "{added:?}");
+    assert_eq!(added.bump, Impact::Minor);
+
+    // A new listed value spelled `other` takes the catch-all's name, so the catch-all is renamed.
+    let renamed = diff_configured(
+        &narrowed_problem("a, b"),
+        &narrowed_problem("a, b, other"),
+        open,
+        open,
+    );
+    let details: Vec<&str> = renamed
+        .changes
+        .iter()
+        .map(|change| change.detail.as_str())
+        .collect();
+    assert!(
+        details.contains(&"variant removed: `Other(String)`, which held any unlisted value"),
+        "{details:?}"
+    );
+    assert!(details.contains(&"variant added: `other`"), "{details:?}");
+    assert_eq!(renamed.bump, Impact::Major);
+
+    // Turning the option on opens the same type in place: it gains the catch-all, which is the
+    // additive rule again, and turning it off removes it.
+    let opened = diff_configured(
+        &narrowed_problem("a, b"),
+        &narrowed_problem("a, b"),
+        |spec| spec,
+        open,
+    );
+    assert_eq!(kinds(&opened), vec![ChangeKind::VariantAdded], "{opened:?}");
+    assert_eq!(
+        opened.changes[0].detail,
+        "variant added: `Other(String)`, holding any unlisted value"
+    );
+    assert_eq!(opened.bump, Impact::Minor);
+    let closed = diff_configured(
+        &narrowed_problem("a, b"),
+        &narrowed_problem("a, b"),
+        open,
+        |spec| spec,
+    );
+    assert_eq!(
+        kinds(&closed),
+        vec![ChangeKind::VariantRemoved],
+        "{closed:?}"
+    );
+    assert_eq!(closed.bump, Impact::Major);
 }

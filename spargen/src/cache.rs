@@ -64,6 +64,7 @@ impl InputSnapshot {
         );
         append(&mut fingerprint, &(spec.batch_cap as u64).to_be_bytes());
         append(&mut fingerprint, &[u8::from(spec.carve)]);
+        append(&mut fingerprint, &[u8::from(spec.open_narrowing)]);
         for rule in &spec.omit.rules {
             match rule {
                 OmitRule::Path { path } => {
@@ -552,7 +553,7 @@ components:
         );
     }
 
-    /// CLAUDE.md calls the fingerprint "complete". `Spec` has seven fields and every one of them
+    /// CLAUDE.md calls the fingerprint "complete". `Spec` has eight fields and every one of them
     /// changes what is generated, so every one must move the digest — otherwise a config change
     /// leaves a stale module in place with nothing to tell the consumer. Three were covered.
     #[test]
@@ -567,6 +568,10 @@ components:
             ("error_body_cap", base.clone().error_body_cap(1)),
             ("batch_cap", base.clone().batch_cap(7)),
             ("carve", base.clone().carve(!base.carve)),
+            (
+                "open_narrowing",
+                base.clone().open_narrowing(!base.open_narrowing),
+            ),
             (
                 "omit",
                 base.clone().omit_rule(OmitRule::Path {
@@ -584,7 +589,7 @@ components:
             );
         }
 
-        // `path` is the seventh. Byte-identical content at a different path is still a different
+        // `path` is the eighth. Byte-identical content at a different path is still a different
         // build input, because the provenance header records the path.
         let moved = temp.path().join("elsewhere.yaml");
         std::fs::copy(base.path(), &moved).unwrap();

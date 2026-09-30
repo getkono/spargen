@@ -2545,6 +2545,97 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
     }
 }
 
+/// Emit an open string enum (`open_narrowing`): one unit variant per listed value, as the closed
+/// enum has, plus a variant holding any other string. It cannot derive serde with a catch-all and
+/// stay a plain string on the wire, so `Serialize` writes `as_str()` and `Deserialize` reads a
+/// string and matches it, reaching the catch-all only for a value no unit variant lists.
+///
+/// `display_arms` are the closed enum's `Display` arms, which map each unit variant to its value.
+fn emit_open_string_enum(
+    id: crate::ir::TypeId,
+    ident: &crate::name::Ident,
+    enumeration: &crate::ir::ScalarEnum,
+    names: &Names,
+    docs: TokenStream,
+    deprecated: Option<TokenStream>,
+    display_arms: Vec<TokenStream>,
+) -> TokenStream {
+    let other = names
+        .open_variants
+        .get(&id)
+        .expect("open variant name allocated");
+    let listed: Vec<(&String, &crate::name::Ident)> = enumeration
+        .variants
+        .iter()
+        .map(|variant| {
+            let ScalarValue::String(value) = variant else {
+                unreachable!("an open enum is a string enum");
+            };
+            let variant_ident = names
+                .variants
+                .get(&(id, value.clone()))
+                .expect("variant name allocated");
+            (value, variant_ident)
+        })
+        .collect();
+    let variants = listed
+        .iter()
+        .map(|(_, variant_ident)| quote! { #variant_ident, });
+    let decode_arms = listed.iter().map(|(value, variant_ident)| {
+        quote! { #value => #ident::#variant_ident, }
+    });
+    let other_doc = "A value the description does not list here. Decoding produces it only for a \
+                     string no other variant names.";
+    quote! {
+        #docs
+        #deprecated
+        #[derive(Debug, Clone, PartialEq, Eq)]
+        pub enum #ident {
+            #(#variants)*
+            #[doc = #other_doc]
+            #other(String),
+        }
+
+        impl #ident {
+            /// The wire value.
+            pub fn as_str(&self) -> &str {
+                match self {
+                    #(#display_arms)*
+                    #ident::#other(value) => value.as_str(),
+                }
+            }
+        }
+
+        impl std::fmt::Display for #ident {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl serde::Serialize for #ident {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                serializer.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for #ident {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let value = <String as serde::Deserialize>::deserialize(deserializer)?;
+                Ok(match value.as_str() {
+                    #(#decode_arms)*
+                    _ => #ident::#other(value),
+                })
+            }
+        }
+    }
+}
+
 fn emit_type_def(
     id: crate::ir::TypeId,
     def: &TypeDef,
@@ -2613,6 +2704,17 @@ fn emit_type_def(
                     .expect("variant name allocated");
                 quote! { #ident::#variant_ident => #value, }
             });
+            if enumeration.open {
+                return emit_open_string_enum(
+                    id,
+                    ident,
+                    enumeration,
+                    names,
+                    docs,
+                    deprecated,
+                    display_arms.collect(),
+                );
+            }
             quote! {
                 #docs
                 #deprecated
