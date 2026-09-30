@@ -7,12 +7,17 @@
 //!   the unsupported islands, reporting each via `W009`, reaching a fixpoint (no infinite loop),
 //!   and staying byte-for-byte deterministic.
 //!
+//! `env!("CARGO_BIN_EXE_spargen")` expands to a path even when the `cli` feature is off and the
+//! binary is not built, so the one test that spawns it and its `spargen` helper carry
+//! `#[cfg(feature = "cli")]`; everything else drives the library and runs under any feature set.
 use std::path::Path;
+#[cfg(feature = "cli")]
 use std::process::{Command, Output};
 
 use camino::Utf8PathBuf;
 use spargen::{Build, CargoIntegration, Code, Outcome, Report, Spec};
 
+#[cfg(feature = "cli")]
 fn spargen(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_spargen"))
         .current_dir(dir)
@@ -493,6 +498,7 @@ fn carve_is_a_noop_on_a_spec_with_no_rejections() {
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn check_command_supports_carve() {
     // `spargen check --carve` audits the carved subset clean (it runs the full frontend), reporting

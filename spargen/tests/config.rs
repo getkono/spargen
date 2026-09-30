@@ -1,7 +1,13 @@
 //! Integration coverage for `spargen check` config-file and omit-profile plumbing. The CLI is an
 //! analysis surface only; generation configuration belongs in Rust build code.
+//!
+//! `env!("CARGO_BIN_EXE_spargen")` expands to a path even when the `cli` feature is off and the
+//! binary is not built, so every test that spawns it, and each helper only those tests use,
+//! carries `#[cfg(feature = "cli")]`. The library-only tests at the end run under any feature set.
 
+#[cfg(feature = "cli")]
 use std::path::Path;
+#[cfg(feature = "cli")]
 use std::process::{Command, Output};
 
 const SPEC: &str = r##"
@@ -20,6 +26,7 @@ paths:
       responses: { "204": { description: OK } }
 "##;
 
+#[cfg(feature = "cli")]
 fn workspace() -> (tempfile::TempDir, std::path::PathBuf) {
     let temp = tempfile::tempdir().unwrap();
     let spec = temp.path().join("openapi.yaml");
@@ -27,6 +34,7 @@ fn workspace() -> (tempfile::TempDir, std::path::PathBuf) {
     (temp, spec)
 }
 
+#[cfg(feature = "cli")]
 fn check(dir: &Path, spec: &Path, extra: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_spargen"))
         .current_dir(dir)
@@ -37,6 +45,7 @@ fn check(dir: &Path, spec: &Path, extra: &[&str]) -> Output {
         .unwrap()
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn auto_discovered_config_applies_omit_rules() {
     let (temp, spec) = workspace();
@@ -50,6 +59,7 @@ fn auto_discovered_config_applies_omit_rules() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("W009"));
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn cli_omit_flags_apply_to_analysis() {
     let (temp, spec) = workspace();
@@ -62,6 +72,7 @@ fn cli_omit_flags_apply_to_analysis() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("W009"));
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn explicit_config_path_is_used() {
     let (temp, spec) = workspace();
@@ -77,6 +88,7 @@ fn explicit_config_path_is_used() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("W009"));
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn malformed_or_missing_config_errors_cleanly() {
     let (temp, spec) = workspace();
@@ -94,6 +106,7 @@ fn malformed_or_missing_config_errors_cleanly() {
     assert_eq!(missing.status.code(), Some(3), "{missing:?}");
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn bad_omit_flag_syntax_errors_cleanly() {
     let (temp, spec) = workspace();
@@ -102,6 +115,7 @@ fn bad_omit_flag_syntax_errors_cleanly() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("--omit-operation"));
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn the_removed_features_table_names_the_migration() {
     // 0.2 nested these keys under `[features]`. `deny_unknown_fields` alone would only say
@@ -118,6 +132,7 @@ fn the_removed_features_table_names_the_migration() {
     assert!(stderr.contains("move its keys"), "{stderr}");
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn config_file_knobs_reach_the_library() {
     // `carve` in the file must have the same effect as `--carve`: the unsupported operation is
@@ -142,10 +157,12 @@ fn config_file_knobs_reach_the_library() {
 
 /// A JSON-pointer needle that matches the whole pointer value, so `/paths/~1pets` cannot be
 /// satisfied by an occurrence of `/paths/~1pets~1{id}`.
+#[cfg(feature = "cli")]
 fn omits_pointer(stdout: &str, pointer: &str) -> bool {
     stdout.contains(&format!("\"pointer\":\"{pointer}\""))
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn an_explicit_config_replaces_the_discovered_one_rather_than_merging_with_it() {
     let (temp, spec) = workspace();
@@ -177,6 +194,7 @@ fn an_explicit_config_replaces_the_discovered_one_rather_than_merging_with_it() 
     );
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn a_cli_omit_flag_is_unioned_with_the_config_file_rules() {
     // Flags are applied last so they win on scalar knobs, but omit rules accumulate — a flag adds
@@ -206,6 +224,7 @@ fn a_cli_omit_flag_is_unioned_with_the_config_file_rules() {
     );
 }
 
+#[cfg(feature = "cli")]
 const TWO_WARNINGS: &str = r##"
 openapi: 3.1.0
 info: { title: Batch, version: 1.0.0 }
@@ -216,6 +235,7 @@ components:
     Second: { type: string, maxLength: 9 }
 "##;
 
+#[cfg(feature = "cli")]
 #[test]
 fn batch_cap_from_the_config_file_truncates_the_reported_batch() {
     // `config_file_knobs_reach_the_library` sets four knobs and asserts only that the process
@@ -250,6 +270,7 @@ fn batch_cap_from_the_config_file_truncates_the_reported_batch() {
     );
 }
 
+#[cfg(feature = "cli")]
 fn deps(dir: &Path, spec: &Path, extra: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_spargen"))
         .current_dir(dir)
@@ -260,6 +281,7 @@ fn deps(dir: &Path, spec: &Path, extra: &[&str]) -> Output {
         .unwrap()
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn deps_prints_a_pasteable_dependency_block() {
     let (temp, spec) = workspace();
@@ -286,6 +308,7 @@ fn deps_prints_a_pasteable_dependency_block() {
     }
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn deps_follows_the_spec_knobs() {
     let temp = tempfile::tempdir().unwrap();
@@ -319,6 +342,7 @@ paths:
     assert!(!String::from_utf8_lossy(&untyped.stdout).contains("uuid = {"));
 }
 
+#[cfg(feature = "cli")]
 #[test]
 fn deps_reports_a_rejection_instead_of_a_block() {
     let temp = tempfile::tempdir().unwrap();
