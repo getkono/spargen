@@ -15287,6 +15287,129 @@ fn a_multipart_part_keeps_a_declared_content_type_its_bytes_agree_with() {
     }
 }
 
+/// An `application/x-www-form-urlencoded` body with one property `part` of the given schema, whose
+/// Encoding Object declares the given `contentType`.
+fn form_field_declaring(schema: &str, content_type: &str) -> String {
+    multipart_part_declaring(schema, content_type)
+        .replace("multipart/form-data:", "application/x-www-form-urlencoded:")
+}
+
+#[test]
+fn e009_a_form_urlencoded_json_rendered_field_declaring_a_non_json_content_type() {
+    // #321: a form field has no header, but its `contentType` is the syntax its value is
+    // serialized in, and spargen serializes a non-scalar field only as JSON. Before this,
+    // `application/xml` over an object fell back to that JSON with nothing reported, and
+    // `text/plain` was honoured as `FormMode::Text`, which refuses a nested value and so failed
+    // every call of the generated operation. Both are refused, as on multipart, naming the sent
+    // (first) element of a list.
+    let object = "{ type: object, properties: { id: { type: integer } } }";
+    let cases = [
+        (object, "application/xml", "application/xml"),
+        (object, "text/plain", "text/plain"),
+        (object, "Text/Plain", "Text/Plain"),
+        (object, "application/yaml", "application/yaml"),
+        (
+            object,
+            "application/octet-stream",
+            "application/octet-stream",
+        ),
+        (object, "text/plain, application/json", "text/plain"),
+        (
+            "{ type: array, items: { type: string } }",
+            "text/plain",
+            "text/plain",
+        ),
+        (
+            "{ oneOf: [ { type: string }, { type: object } ] }",
+            "text/plain",
+            "text/plain",
+        ),
+        ("{}", "application/xml", "application/xml"),
+    ];
+    for (schema, declared, sent) in cases {
+        let spec = form_field_declaring(schema, declared);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{schema} / {declared}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::UnsupportedMediaType
+                        && d.message.contains("`part`")
+                        && d.message.contains(&format!("`contentType: {sent}`"))
+                        && d.message.contains("form field only as JSON")
+                }),
+                "{schema} / {declared}: {report:#?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_form_urlencoded_field_keeps_a_declared_content_type_it_is_serialized_in() {
+    // The boundary of the rejection above: a non-scalar field declaring JSON, in any letter case
+    // or as a `+json` type, is serialized as the JSON it declares; a scalar field declaring
+    // `text/plain` (or a syntax with no codec, whose text is the value itself) is sent as text,
+    // and one declaring JSON as a JSON value; and RFC 6570 serialization of an object makes its
+    // `contentType` inert, so the rule does not reach it.
+    let object = "{ type: object, properties: { id: { type: integer } } }";
+    let cases = [
+        (object, "application/json", "FormMode::Json"),
+        (object, "Application/JSON", "FormMode::Json"),
+        (object, "application/vnd.api+json", "FormMode::Json"),
+        (
+            "{ type: array, items: { type: integer } }",
+            "application/json",
+            "FormMode::Json",
+        ),
+        ("{ type: string }", "text/plain", "FormMode::Text"),
+        ("{ type: string }", "application/xml", "FormMode::Text"),
+        ("{ type: integer }", "application/json", "FormMode::Json"),
+    ];
+    for (schema, declared, rendering) in cases {
+        let spec = form_field_declaring(schema, declared);
+        assert_ne!(
+            check(&spec).outcome(),
+            Outcome::Rejected,
+            "{schema} / {declared}"
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{schema} / {declared}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{schema} / {declared}: {report:#?}"
+        );
+        // The emitted property literal, not the bare variant path, which the embedded runtime's
+        // own source also spells; whitespace is collapsed, since the emitter wraps the literal.
+        let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+        let property = format!("name: \"part\", mode: support::{rendering}");
+        assert!(flat.contains(&property), "{schema} / {declared}: {code}");
+    }
+    let styled = form_field_declaring(object, "text/plain").replace(
+        "part: { contentType: \"text/plain\" }",
+        "part: { contentType: \"text/plain\", style: deepObject }",
+    );
+    assert!(styled.contains("style: deepObject"), "{styled}");
+    let (report, code) = generate_with_code(&styled);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        !has_code(&report, Code::UnsupportedMediaType),
+        "{report:#?}"
+    );
+    let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("name: \"part\", mode: support::FormMode::Style")
+            && flat.contains("support::FormStyle::DeepObject"),
+        "{code}"
+    );
+}
+
 #[test]
 fn w011_a_response_header_with_binary_family_content_is_acknowledged() {
     // A response header's `content` keyed `image/png` now classifies (as opaque octets) instead of

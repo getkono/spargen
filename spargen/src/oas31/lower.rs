@@ -4579,9 +4579,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Apply the Encoding Object's mode switch for one property.
     ///
     /// In media mode a part's bytes come from the property's lowered type and its declared
-    /// `contentType` rides on it as the header. A multipart declaration is refused (`E009`) where
-    /// the two cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose
-    /// declared type is not JSON.
+    /// `contentType` rides on it as the header. A declaration is refused (`E009`) where the two
+    /// cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose declared
+    /// type is not JSON, on multipart (the part's header) and on form-urlencoded (the field's
+    /// serialization syntax) alike.
     fn encoding_mode(
         &mut self,
         declared: Option<&EncodingObject>,
@@ -4794,7 +4795,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // a header naming another syntax — bytes no reader of the document predicts. Refused.
         // Media types are case-insensitive (RFC 9110 § 8.3.1), and the classifier's JSON arms are
         // spelled in lowercase, so `Application/JSON` is judged as the JSON it is.
-        if media == MediaType::Multipart
+        //
+        // A form-urlencoded field has no header, so the argument there is not the same one, but it
+        // reaches the same rule: its `contentType` is the only statement of the syntax the field's
+        // value is serialized in before percent-encoding (the specification's form examples), so
+        // it is what a server decodes the field by. Spargen serializes a non-scalar field only as
+        // JSON (`FormMode::Json`); XML or any other syntax has no field codec, and `text/plain`
+        // over an object or array has no defined rendering (the runtime's `FormMode::Text` refuses
+        // a nested value, failing every call). Either way the declaration cannot be honoured, so
+        // it is refused rather than sent as JSON or generated to fail.
+        if matches!(media, MediaType::Multipart | MediaType::FormUrlEncoded)
             && explicit.is_some()
             && self.natural_codec(field_ty) == MediaType::Json
             && classify_media(&media_essence(&content_type).to_ascii_lowercase())
@@ -4807,15 +4817,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|encoding| encoding.provenance.clone())
                     .unwrap_or_else(|| at.clone()),
             )
-            .message(format!(
-                "property `{name}` declares `contentType: {content_type}`, but it is not a scalar \
-                 or binary value, so spargen can send it only as JSON; the part's bytes would \
-                 contradict its header"
-            ))
-            .remedy(
+            .message(if media == MediaType::Multipart {
+                format!(
+                    "property `{name}` declares `contentType: {content_type}`, but it is not a \
+                     scalar or binary value, so spargen can send it only as JSON; the part's bytes \
+                     would contradict its header"
+                )
+            } else {
+                format!(
+                    "property `{name}` declares `contentType: {content_type}`, but it is not a \
+                     scalar value, so spargen can serialize it into a form field only as JSON; the \
+                     field would not be in the syntax the document declares"
+                )
+            })
+            .remedy(if media == MediaType::Multipart {
                 "declare `application/json` (or a `+json` type), make the property a string or \
-                 binary value, or omit this API segment with spargen::omit!",
-            )
+                 binary value, or omit this API segment with spargen::omit!"
+            } else {
+                "declare `application/json` (or a `+json` type), select RFC 6570 serialization \
+                 with `style`/`explode`, make the property a scalar, or omit this API segment with \
+                 spargen::omit!"
+            })
             .emit(self.diags);
             return None;
         }
