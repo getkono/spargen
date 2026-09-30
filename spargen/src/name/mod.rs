@@ -78,6 +78,30 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
     "inner",
 ];
 
+/// The type-namespace names codegen's `types` module already uses when a model is emitted into
+/// it: the items it brings in with `use` (`serde`'s derives, `BTreeMap`, and the runtime `Date` and
+/// `DateTime`) and the prelude types it writes bare. Model type names are allocated after these are
+/// reserved, so a schema spelling one of them (a path parameter `date` whose inline schema is
+/// hinted `Date`, a component named `String`) is disambiguated instead of redefining an imported
+/// name (`E0255`) or shadowing the prelude type every other model refers to.
+///
+/// `Date` and `DateTime` are imported only when the API uses a date type with the `time` mapping
+/// on; they are reserved unconditionally, so a model's name does not change when an unrelated
+/// part of the spec starts using dates. `codegen`'s tests hold this list to every such name the
+/// emitted module uses.
+pub(crate) const TYPES_MODULE_NAMES: &[&str] = &[
+    "BTreeMap",
+    "Box",
+    "Date",
+    "DateTime",
+    "Deserialize",
+    "Option",
+    "Result",
+    "Serialize",
+    "String",
+    "Vec",
+];
+
 /// Generator-owned bindings emitted inside one operation method.
 #[derive(Debug)]
 pub(crate) struct OperationBindings {
@@ -152,8 +176,12 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     // and reordering a mapping changes no schema. The contest is decided on each definition's own
     // `(document, pointer)` identity instead. A definition carrying none (the root document's own
     // pointer, which synthesized types fall back to) ranks after every definition that has one, so
-    // it can never take a name from a declared schema.
+    // it can never take a name from a declared schema. The names the `types` module itself uses are
+    // taken before any definition asks for one.
     let mut type_scope = Scope::default();
+    for name in TYPES_MODULE_NAMES {
+        type_scope.reserve(name, IdentRole::Type);
+    }
     let definitions: Vec<_> = api.types.iter().collect();
     let requests: Vec<_> = definitions
         .iter()
