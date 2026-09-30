@@ -329,10 +329,7 @@ fn idents(tokens: proc_macro2::TokenStream, out: &mut BTreeSet<String>) {
 
 /// Runtime types a root re-export mentions that the root does not yet re-export, each with the
 /// issue that decides it. An entry that stops being needed fails the test, so this only shrinks.
-const UNNAMEABLE_TRACKED: &[(&str, &str)] = &[
-    // `EventStream::new` and `::new_reconnectable` take a `Framing`.
-    ("Framing (through EventStream)", "#374"),
-];
+const UNNAMEABLE_TRACKED: &[(&str, &str)] = &[];
 
 #[test]
 fn every_runtime_type_a_root_reexport_names_is_nameable_at_the_root() {
