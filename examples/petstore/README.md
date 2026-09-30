@@ -27,9 +27,17 @@ What it exercises:
 - **Typed response headers** — the documented `X-Total-Count` is read through a generated
   accessor, as an explicit second step that cannot turn a successful call into a failure.
 - **Auth** — a bearer credential registered with `with_credential`; a missing credential fails
-  before the request is sent.
+  before the request is sent. A `Credential::Provider` is awaited on tokio's executor once per
+  request and its token is what the mock authenticates; a provider that fails surfaces as
+  `RequestError::CredentialProvider`, naming the scheme with the provider's `AuthError` as its
+  `source()`, and nothing reaches the mock.
 - **Error taxonomy** — a documented `404` arrives as the operation's typed error body; an
   undocumented `401` is preserved as `Error::UnexpectedStatus` and classified non-transient.
+- **Problem details** — `createPet` and `deletePet` document RFC 9457 problems whose `type` each
+  status narrows to one value. `build.rs` turns on `open_narrowing`, so when the mock answers with
+  a problem type the description does not list, the call still fails as the typed `409` body
+  (without the option it would be `Error::Decode`), and one `Error::problem()` reader, generic over
+  the operation, reads `type` and `detail` from both operations' problems.
 
 To review and commit the generated client, change the `build.rs` output to `src/petstore.rs` and
 include it as a normal module. Generation remains a compilation-time step.

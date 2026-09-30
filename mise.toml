@@ -5,8 +5,10 @@
 hk = "1.50.0"                               # git hook manager (aqua:jdx/hk)
 "cargo:convco" = "0.7.1"                    # Conventional Commit checker
 "aqua:EmbarkStudios/cargo-deny" = "0.20.2"  # supply-chain audit
+"aqua:rustsec/rustsec/cargo-audit" = "0.22.2"  # advisory + yank audit of every lockfile entry
 "cargo:cargo-hack" = "0.6.39"               # feature-combination builds
 "cargo:mdbook" = "0.5.4"                    # documentation site builder
+"aqua:release-plz/release-plz" = "0.3.160"  # the changelog/version oracle release-plz.yml runs
 
 [tasks.fmt]
 description = "Format the whole workspace"
@@ -37,10 +39,18 @@ description = "Build every feature combination, not just --all-features"
 # Every other gate runs `--all-features`, so a combination such as `xml` on and `time` off was
 # never compiled — and those are exactly the subsets the generator embeds per spec. `--each-feature`
 # adds the none/all ends; the powerset covers the middle for the runtime, where the conditional
-# modules live.
+# modules live. The first two lines build without dev-dependencies, so a feature they unify in
+# (serde's `derive`) cannot mask a missing one: each package at the ends, then the runtime's lib at
+# every combination. Neither compiles `#[cfg(test)]` code, and plain `cargo check` sets `cfg(test)`
+# for no target but a test one, so the last two lines pass `--all-targets`: test modules,
+# integration tests, and benches at each feature set they visit, which `test` (only
+# `--all-features`) cannot reach (#237). `--all-targets` unifies dev-dependency features into the
+# lib too, so it cannot replace the `--no-dev-deps` powerset. Doctests are not compiled here.
 run = [
   "cargo hack check --workspace --each-feature --no-dev-deps",
-  "cargo hack check -p support-runtime --feature-powerset",
+  "cargo hack check -p support-runtime --no-dev-deps --feature-powerset",
+  "cargo hack check --workspace --exclude support-runtime --each-feature --all-targets",
+  "cargo hack check -p support-runtime --all-targets --feature-powerset",
 ]
 
 [tasks.deny]
@@ -51,9 +61,101 @@ run = [
 # `--locked` audits the committed `Cargo.lock`: without it a skewed lockfile was silently rewritten,
 # and a missing one written, and the rewrite was what got audited (#146).
 # `the_deny_gate_states_the_feature_scope_it_audits` holds the command to both flags, to a bare
-# `check`, and to no graph-narrowing flag.
-description = "Supply-chain audit (licenses, advisories, bans)"
-run = "cargo deny --all-features --locked check"
+# `check`, and to no flag outside an allow-list of ones that cannot narrow the graph (#238).
+# The three example workspaces are resolved and compiled by their own gates, and their lockfiles
+# carry crates the root resolve never reaches (the wasm-bindgen family among them), so each is
+# audited too, under the same `deny.toml` (#184). They take no `--locked`, like every gate that
+# compiles them: release-plz bumps the workspace version without refreshing their lockfiles, so
+# the `spargen` path-package stamp in them goes stale on every release, and `--locked` would turn
+# each release red. What they audit is therefore exactly what those gates compile. The same test
+# holds every example workspace to an audit here, with `--config deny.toml`, `--all-features`, and
+# a bare `check`.
+# cargo-deny audits the graph it activates, not the lockfile: an entry no feature activates (Cargo
+# locks the target of a weak `dep?/feature` without enabling it, which is how reqwest puts quinn,
+# and through it `rand 0.10` and `chacha20`, into the root `Cargo.lock`) is filtered out and never
+# checked, at any feature scope, so a yanked `chacha20 0.10.1` sat in the lockfile under `yanked =
+# "deny"` with this audit green (#187). `cargo audit` reads every entry of the file it is given,
+# so it runs over each committed lockfile, denying every warning kind (yanked, unmaintained,
+# unsound), as `deny.toml`'s `[advisories]` does. It runs over the RustSec checkout cargo-deny
+# just fetched into `deny.toml`'s `db-path`, without fetching, after the command that prints that
+# checkout's commit: the log of every run names the database revision its advisory verdict was
+# reached against. (The `cargo deny check`s after it fetch again, so theirs is that revision or a
+# later one.) `the_lockfile_audit_reads_every_committed_lockfile` pins this shape.
+description = "Supply-chain audit (licenses, advisories, bans, sources) of every committed lockfile"
+run = [
+  "cargo deny fetch db",
+  "git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file Cargo.lock",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/github-api/Cargo.lock",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore/Cargo.lock",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore-macro/Cargo.lock",
+  "cargo deny --all-features --locked check",
+  "cargo deny --manifest-path examples/github-api/Cargo.toml --config deny.toml --all-features check",
+  "cargo deny --manifest-path examples/petstore/Cargo.toml --config deny.toml --all-features check",
+  "cargo deny --manifest-path examples/petstore-macro/Cargo.toml --config deny.toml --all-features check",
+]
+
+[tasks.deny-published]
+# `spargen` has a `[[bin]]`, so its `.crate` ships a `Cargo.lock`, and `cargo install spargen
+# --features cli --locked` installs exactly that lockfile's pins. `deny` audits the committed
+# lockfile; this audits the published one, which a fix on `master` reaches only when a release
+# carries it (#178). The audited release is crates.io's `max_stable_version`, the one a bare
+# `cargo install --locked` picks. It is extracted under `target/`, inside this workspace, so the
+# empty `[workspace]` appended to its manifest keeps cargo from reading it as a member; that table
+# changes no resolution, and `--locked` fails the audit if the shipped lockfile would be rewritten
+# (or is missing). CI's `deny-published` job in `deny.yml` runs these commands byte for byte, only
+# on the schedule and on `workflow_dispatch`: a pull request cannot change a published artefact, so
+# failing one on it would only block the release that carries the fix.
+# `the_published_lockfile_audit_covers_every_shipped_binary` pins its shape. As in `deny`, cargo-deny
+# checks only the activated graph, so `cargo audit` also reads every entry of the shipped lockfile
+# (`cargo install --locked` warns on a yanked one), against the printed database revision (#187).
+description = "Advisory audit of the Cargo.lock the latest spargen release ships on crates.io"
+run = [
+  '''
+rm -rf target/deny-published
+mkdir -p target/deny-published/spargen
+curl -sSf -A 'getkono/spargen deny-published (https://github.com/getkono/spargen)' -o target/deny-published/crate.json https://crates.io/api/v1/crates/spargen
+version=$(jq -er .crate.max_stable_version target/deny-published/crate.json)
+curl -sSfL -o target/deny-published/spargen.crate "https://static.crates.io/crates/spargen/spargen-$version.crate"
+tar -xzf target/deny-published/spargen.crate -C target/deny-published/spargen --strip-components=1
+printf '\n[workspace]\n' >> target/deny-published/spargen/Cargo.toml
+echo "auditing the Cargo.lock published in spargen $version"
+''',
+  "cargo deny fetch db",
+  "git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file target/deny-published/spargen/Cargo.lock",
+  "cargo deny --manifest-path target/deny-published/spargen/Cargo.toml --config deny.toml --all-features --locked check advisories",
+]
+
+[tasks.release-preview]
+# `spargen/CHANGELOG.md` ships inside the published `.crate`, and release-plz's embedded git-cliff
+# writes it: which commits it lists is decided by the tool, not by anything committed here (#190).
+# This runs that tool, at the version release-plz.yml's action is pinned to run
+# (`ci_installs_exactly_the_tool_versions_mise_pins`), and prints what the next release pull
+# request would change: the version bumps and the changelog section, so a change's changelog
+# impact is read off the log instead of argued. `release-plz update` has no dry-run mode and
+# rewrites the tree it runs in, so it runs in a clone under `target/`, which also means it reads
+# committed history only (uncommitted edits are not in the preview). The clone's `origin` is a
+# local path, so `--repo-url` restores the compare and pull-request links the real run writes.
+# release-plz refuses a detached HEAD (`cannot determine current branch`), and a clone of CI's
+# pull-request merge ref, which matches no branch, is detached, so the clone is put on a fresh
+# local branch with no upstream (release-plz then assumes `origin`) whatever the source was on.
+# LFS content is skipped: no packaged file is an LFS object. It is skipped for `release-plz update`
+# too, not only for the clone: release-plz checks out other revisions in copies under the system
+# temp directory and then this branch again, and that checkout smudges every LFS file that differs
+# between them, fetching it from the clone's `origin` — this checkout, which in CI holds no LFS
+# objects — so a change that adds or edits a corpus file fails without it. Like `deny`, the verdict is not
+# hermetic: release-plz compares against the crates.io release and dates the section today. CI's
+# `release-preview` job runs these commands byte for byte, so a `release-plz.toml` or commit
+# history the release job would choke on fails a pull request rather than `master`.
+description = "Preview the version bumps and CHANGELOG section the next release pull request writes"
+run = [
+  "rm -rf target/release-preview",
+  "GIT_LFS_SKIP_SMUDGE=1 git clone --quiet --no-local . target/release-preview",
+  "git -C target/release-preview switch --quiet --create release-preview",
+  "cd target/release-preview && GIT_LFS_SKIP_SMUDGE=1 release-plz update --repo-url https://github.com/getkono/spargen",
+  "git -C target/release-preview --no-pager diff",
+]
 
 [tasks.bench]
 description = "Run the generation benchmarks (criterion). CI uploads these as a release artifact."
@@ -123,6 +225,9 @@ run = [
   # the official 3.1 document schema before lowering.
   "cargo run -q -p spargen --features cli -- check corpus/meilisearch/open-api.json --format json > target/corpus-smoke/meili.json || test $? -eq 1",
   "grep -q E011 target/corpus-smoke/meili.json",
+  # Mastodon is 3.1.0 and generates: its recursive-nullable `$ref`s and `$ref`-with-`type`
+  # siblings must keep clearing lowering, so check must succeed with no rejection.
+  "cargo run -q -p spargen --features cli -- check corpus/mastodon-openapi/schema.json --format json",
 ]
 
 [tasks.github-api]

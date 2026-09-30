@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -7,7 +7,9 @@ use indexmap::IndexMap;
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance};
 
 use super::lock::{Lock, LOCK_FILE_NAME, VENDOR_DIR};
-use super::remote::{classify_ref, collect_refs, resolve_ref_url, split_fragment, RefTarget};
+use super::remote::{
+    classify_ref, collect_refs, enters_extension, resolve_ref_url, split_fragment, RefTarget,
+};
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
 
@@ -47,6 +49,11 @@ pub(crate) struct InputBundle {
     lock: Option<Lock>,
     /// Directory holding vendored remote documents (`.spargen/vendor/` next to the spec).
     vendor_dir: Utf8PathBuf,
+    /// The working directory at load time, against which a relative local path is made absolute
+    /// for [`local_identity`](Self::local_identity). Captured once, so identity is a pure function
+    /// of the path for the bundle's whole life. `None` when it is unreadable or not UTF-8, and then
+    /// relative paths are compared relative.
+    working_dir: Option<Utf8PathBuf>,
 }
 
 impl InputBundle {
@@ -54,8 +61,17 @@ impl InputBundle {
     /// remote `$ref`s from the vendored, hash-pinned copies recorded in `spargen.lock` (looked up
     /// next to `root`). No network access occurs. The parse format is chosen by extension
     /// (`.json` vs `.yaml`/`.yml`). Diagnostics flow through `diags`.
+    ///
+    /// A reference inside a specification extension is not followed, so a file it names is not
+    /// read, unless a reference that is followed addresses the extension's contents: then that
+    /// target is walked like a document of its own (see [`collect_refs`]).
     pub(crate) fn load(root: &Utf8Path, diags: &mut Diagnostics) -> Result<InputBundle, Aborted> {
-        let mut bundle = InputBundle::default();
+        let mut bundle = InputBundle {
+            working_dir: std::env::current_dir()
+                .ok()
+                .and_then(|dir| Utf8PathBuf::from_path_buf(dir).ok()),
+            ..InputBundle::default()
+        };
 
         let spec_dir = root.parent().unwrap_or_else(|| Utf8Path::new(""));
         bundle.vendor_dir = spec_dir.join(VENDOR_DIR);
@@ -64,15 +80,22 @@ impl InputBundle {
         let root_id = bundle.load_file(root.to_path_buf(), diags)?;
         bundle.root = Some(root_id);
 
-        let mut queue = VecDeque::from([root_id]);
-        while let Some(file) = queue.pop_front() {
+        // Each entry is a value to walk: a loaded document's root, or a reference target inside a
+        // specification extension, which the walk of its document skipped (`enters_extension`).
+        let mut queue = VecDeque::from([(root_id, JsonPointer::root())]);
+        let mut walked_targets = HashSet::new();
+        while let Some((file, pointer)) = queue.pop_front() {
             let remote_base = match bundle.origins.get(&file) {
                 Some(Origin::Remote(url)) => Some(url.clone()),
                 _ => None,
             };
-            let refs = collect_refs(bundle.value_at(file));
-            for reference in refs {
-                match classify_ref(&reference, remote_base.as_deref()) {
+            // A dangling target is the resolver's to report, where a site interprets it (`E004`).
+            let Some(value) = bundle.value_at(file).pointer(&pointer) else {
+                continue;
+            };
+            let refs = collect_refs(value);
+            for reference in &refs {
+                match classify_ref(reference, remote_base.as_deref()) {
                     RefTarget::InDocument => {}
                     RefTarget::LocalRelative(path) => {
                         // Only a *local* document produces a local-relative target: a relative ref
@@ -80,7 +103,7 @@ impl InputBundle {
                         let resolved = bundle.resolve_path(file, &path);
                         if bundle.file_id_by_path(&resolved).is_none() {
                             let loaded = bundle.load_file(resolved, diags)?;
-                            queue.push_back(loaded);
+                            queue.push_back((loaded, JsonPointer::root()));
                         }
                     }
                     RefTarget::UnsupportedRemote(url) if bundle.url_to_file.contains_key(&url) => {}
@@ -90,8 +113,16 @@ impl InputBundle {
                             continue;
                         }
                         if let Some(loaded) = bundle.load_remote(&url, file, diags)? {
-                            queue.push_back(loaded);
+                            queue.push_back((loaded, JsonPointer::root()));
                         }
+                    }
+                }
+            }
+            // Every document a reference names is loaded by now, so its target can be found.
+            for reference in refs.iter().filter(|reference| enters_extension(reference)) {
+                if let Some(target) = bundle.reference_target(reference, file) {
+                    if walked_targets.insert(target.clone()) {
+                        queue.push_back(target);
                     }
                 }
             }
@@ -190,17 +221,54 @@ impl InputBundle {
             .map(|file| (file.path.as_path(), file.bytes.as_ref()))
     }
 
-    /// Find a loaded file by its stored path, exact first and suffix second for ergonomic
-    /// file-local omit rules.
+    /// Find a loaded file by its stored path: exact first, then relative to the root document's
+    /// directory, and suffix last for ergonomic file-local omit rules.
+    ///
+    /// The relative step comes before the suffix one because a suffix is ambiguous — `lib.yaml` is
+    /// a suffix of `xlib.yaml` — and the first match in load order would win. A path
+    /// [`Self::root_relative_path`] produced always resolves at the relative step, to its own file.
     pub(crate) fn file_id_for_path(&self, path: &str) -> Option<FileId> {
+        let relative = self.root_dir().join(path);
         self.files
             .iter()
             .find_map(|(id, file)| (file.path.as_str() == path).then_some(*id))
             .or_else(|| {
                 self.files
                     .iter()
+                    .find_map(|(id, file)| (file.path == relative).then_some(*id))
+            })
+            .or_else(|| {
+                self.files
+                    .iter()
                     .find_map(|(id, file)| file.path.as_str().ends_with(path).then_some(*id))
             })
+    }
+
+    /// The path a file-scoped omit rule names `file` by: its stored path relative to the root
+    /// document's directory, or the stored path itself when it lies outside that directory. Either
+    /// resolves back to `file` through [`Self::file_id_for_path`].
+    ///
+    /// Relative, so a rule auto-carve derives — and the omit fingerprint stamped into generated
+    /// output — does not depend on where the checkout lives. The one exception is a file reached by
+    /// an absolute-path `$ref`, whose location the description itself fixes.
+    pub(crate) fn root_relative_path(&self, file: FileId) -> Option<&str> {
+        let path = &self.file(file)?.path;
+        Some(
+            path.strip_prefix(self.root_dir())
+                .map_or(path.as_str(), Utf8Path::as_str),
+        )
+    }
+
+    /// Every loaded document's id, in load order (root first).
+    pub(crate) fn file_ids(&self) -> impl Iterator<Item = FileId> + '_ {
+        self.values.keys().copied()
+    }
+
+    /// The directory the root document was loaded from, against which relative paths resolve.
+    fn root_dir(&self) -> &Utf8Path {
+        self.file(self.root_id())
+            .and_then(|root| root.path.parent())
+            .unwrap_or_else(|| Utf8Path::new(""))
     }
 }
 
@@ -326,16 +394,35 @@ impl InputBundle {
         .emit(diags);
     }
 
+    /// The loaded local document `path` denotes, compared by [`Self::local_identity`] rather than
+    /// by spelling: `openapi.yaml`, `./openapi.yaml`, `sub/../openapi.yaml` and the absolute path
+    /// are one document, so a `$ref` naming the root by any of them reaches the root instead of
+    /// loading it a second time (#220). The stored path is matched first, then a local `$self`
+    /// identity.
     fn file_id_by_path(&self, path: &Utf8Path) -> Option<FileId> {
+        let wanted = self.local_identity(path);
         self.files
             .iter()
-            .find_map(|(id, file)| (file.path == path).then_some(*id))
+            .find_map(|(id, file)| (self.local_identity(&file.path) == wanted).then_some(*id))
             .or_else(|| {
                 self.origins.iter().find_map(|(id, origin)| match origin {
-                    Origin::Local(identity) if identity == path => Some(*id),
+                    Origin::Local(identity) if self.local_identity(identity) == wanted => Some(*id),
                     Origin::Local(_) | Origin::Remote(_) => None,
                 })
             })
+    }
+
+    /// The document identity of a local `path`: absolute against the load-time working directory,
+    /// with `.` and `..` segments removed lexically — what RFC 3986 §5.2.4 does to a relative
+    /// reference resolved against its base URI, which is how a `$ref` names a document. Lexical
+    /// rather than `canonicalize`: it reads nothing from the filesystem, so it is deterministic and
+    /// usable where the bundle promises no I/O, and it identifies documents the way references do,
+    /// by URI, so a symlink is not followed.
+    fn local_identity(&self, path: &Utf8Path) -> Utf8PathBuf {
+        match &self.working_dir {
+            Some(dir) if path.is_relative() => normalize_lexically(&dir.join(path)),
+            _ => normalize_lexically(path),
+        }
     }
 
     fn resolve_path(&self, base: FileId, path: &str) -> Utf8PathBuf {
@@ -396,6 +483,33 @@ fn parse_by_name(
     }
 }
 
+/// `path` with every `.` segment dropped and every `..` segment cancelling the normal segment
+/// before it. A `..` with nothing to cancel is kept on a relative path (`../a.yaml` names a file
+/// outside the base) and dropped at a root (`/..` is `/`), as RFC 3986 §5.2.4 does.
+fn normalize_lexically(path: &Utf8Path) -> Utf8PathBuf {
+    use camino::Utf8Component;
+
+    let mut normal: Vec<Utf8Component<'_>> = Vec::new();
+    for component in path.components() {
+        match component {
+            Utf8Component::CurDir => {}
+            Utf8Component::ParentDir => match normal.last() {
+                Some(Utf8Component::Normal(_)) => {
+                    normal.pop();
+                }
+                Some(Utf8Component::RootDir | Utf8Component::Prefix(_)) => {}
+                Some(Utf8Component::ParentDir | Utf8Component::CurDir) | None => {
+                    normal.push(component);
+                }
+            },
+            Utf8Component::Prefix(_) | Utf8Component::RootDir | Utf8Component::Normal(_) => {
+                normal.push(component);
+            }
+        }
+    }
+    normal.into_iter().collect()
+}
+
 /// Read and parse the lock next to the spec, if present. A missing lock is fine (no remote refs, or
 /// they will be reported as unpinned); a malformed lock is a hard error.
 fn load_lock(path: &Utf8Path, diags: &mut Diagnostics) -> Result<Option<Lock>, Aborted> {
@@ -422,6 +536,127 @@ fn load_lock(path: &Utf8Path, diags: &mut Diagnostics) -> Result<Option<Lock>, A
             .message(format!("invalid {LOCK_FILE_NAME}: {error}"))
             .emit(diags);
             Err(Aborted)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A root whose one schema reaches itself through the file, spelled `reference`.
+    fn self_referring_root(reference: &str) -> String {
+        format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    Node:\n      oneOf:\n        - $ref: '{reference}#/components/schemas/Node'\n        \
+             - type: 'null'\n"
+        )
+    }
+
+    fn load(root: &Utf8Path) -> InputBundle {
+        let mut diags = Diagnostics::default();
+        InputBundle::load(root, &mut diags).expect("the bundle loads")
+    }
+
+    /// Every spelling of the root's own path is the root: one document, one `FileId`, and the
+    /// reference resolves to it. A second load is what duplicated every component and made the
+    /// shadow check report the root as shadowing itself (#220).
+    #[test]
+    fn a_reference_to_the_root_by_any_spelling_resolves_to_the_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let absolute = dir.join("openapi.yaml");
+        for reference in [
+            "./openapi.yaml".to_owned(),
+            "openapi.yaml".to_owned(),
+            "sub/../openapi.yaml".to_owned(),
+            "./sub/.././openapi.yaml".to_owned(),
+            absolute.to_string(),
+        ] {
+            std::fs::write(&absolute, self_referring_root(&reference)).unwrap();
+            for root in [
+                absolute.clone(),
+                dir.join("sub/../openapi.yaml"),
+                dir.join("./openapi.yaml"),
+            ] {
+                let bundle = load(&root);
+                assert_eq!(
+                    bundle.file_ids().count(),
+                    1,
+                    "root `{root}`, ref `{reference}`: the root was loaded again: {:?}",
+                    bundle.source_paths().collect::<Vec<_>>()
+                );
+                let target = bundle.reference_target(
+                    &format!("{reference}#/components/schemas/Node"),
+                    bundle.root_id(),
+                );
+                assert_eq!(
+                    target.map(|(file, _)| file),
+                    Some(bundle.root_id()),
+                    "root `{root}`, ref `{reference}`"
+                );
+                // The root keeps the spelling it was given: build invalidation and the paths omit
+                // rules name files by read it.
+                assert_eq!(bundle.source_paths().next(), Some(root.as_path()));
+            }
+        }
+    }
+
+    /// Normalisation joins spellings of one file; it never joins two files. Two spellings of a
+    /// sub-file load it once, and a sibling of the same name in another directory stays its own
+    /// document.
+    #[test]
+    fn spellings_of_one_sub_file_load_it_once_and_distinct_files_stay_distinct() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        let schema = "components:\n  schemas:\n    Leaf: { type: string }\n";
+        std::fs::write(dir.join("lib.yaml"), schema).unwrap();
+        std::fs::write(dir.join("sub/lib.yaml"), schema).unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  \
+             schemas:\n    A: { $ref: './lib.yaml#/components/schemas/Leaf' }\n    \
+             B: { $ref: 'sub/../lib.yaml#/components/schemas/Leaf' }\n    \
+             C: { $ref: 'sub/lib.yaml#/components/schemas/Leaf' }\n    \
+             D: { $ref: './sub/./lib.yaml#/components/schemas/Leaf' }\n",
+        )
+        .unwrap();
+        let bundle = load(&dir.join("openapi.yaml"));
+        assert_eq!(
+            bundle.file_ids().count(),
+            3,
+            "{:?}",
+            bundle.source_paths().collect::<Vec<_>>()
+        );
+        let file = |reference: &str| {
+            bundle
+                .reference_target(reference, bundle.root_id())
+                .map(|(file, _)| file)
+        };
+        assert_eq!(file("./lib.yaml#/x"), file("sub/../lib.yaml#/x"));
+        assert_eq!(file("sub/lib.yaml#/x"), file("./sub/./lib.yaml#/x"));
+        assert_ne!(file("./lib.yaml#/x"), file("sub/lib.yaml#/x"));
+        assert_ne!(file("./lib.yaml#/x"), Some(bundle.root_id()));
+    }
+
+    #[test]
+    fn lexical_normalisation_removes_dot_segments_and_keeps_leading_parents() {
+        for (path, normal) in [
+            ("a/./b/../c.yaml", "a/c.yaml"),
+            ("./a.yaml", "a.yaml"),
+            ("../../a.yaml", "../../a.yaml"),
+            ("a/../../b.yaml", "../b.yaml"),
+            ("/a/../../b.yaml", "/b.yaml"),
+            ("/a/b/./../c.yaml", "/a/c.yaml"),
+            (".", ""),
+        ] {
+            assert_eq!(
+                normalize_lexically(Utf8Path::new(path)),
+                Utf8PathBuf::from(normal),
+                "{path}"
+            );
         }
     }
 }

@@ -1,9 +1,19 @@
 # cargo-deny configuration — supply-chain gate run on every PR.
 # Licenses, security advisories, and duplicate/banned dependencies.
+#
+# One policy for every committed lockfile: `mise run deny` audits the root workspace and, with
+# `--config deny.toml`, each example workspace under `examples/` (#184). The examples are
+# compiled by gating jobs (for `wasm32-unknown-unknown` too), and their resolves carry crates the
+# root one never reaches, so a sibling policy per example would be a second copy that can drift.
 
 [advisories]
 version = 2
 yanked = "deny"
+# The RustSec checkout, inside the workspace's gitignored `target/` (relative to the working
+# directory, which is the root for every gate). `mise run deny` prints its commit, and runs
+# `cargo audit` over that same checkout without fetching, so a verdict names the database revision
+# it was reached against (#187). cargo-deny clones into `advisory-db-<hash of the URL>` below it.
+db-path = "target/advisory-dbs"
 
 [licenses]
 version = 2
@@ -30,6 +40,19 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# A path dependency without a `version` is a wildcard, and every example reaches `spargen` (or
+# `spargen-macro`) that way on purpose: it builds against this checkout's generator. This exempts
+# path dependencies of `publish = false` crates only; a published crate's still fails, as `cargo
+# publish` would.
+allow-wildcard-paths = true
+# Advisory floors. Each mirrors a direct requirement at the same release in `spargen/Cargo.toml`,
+# which is what the resolver enforces here and in every consumer's resolve; this entry names the
+# advisory and still fails once the database stops carrying it. Use the `name` + `version` form:
+# cargo-deny reads `crate = "name@<X"` as the exact release `X`. `advisory_floors_are_manifest_requirements`
+# in `spargen/tests/corpus_manifest.rs` holds both.
+deny = [
+    { name = "rustls", version = "<0.23.45", reason = "RUSTSEC-2026-0285" },
+]
 
 [sources]
 unknown-registry = "deny"

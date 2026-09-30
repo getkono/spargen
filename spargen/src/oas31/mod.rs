@@ -28,7 +28,7 @@ pub(crate) use document::{
     ResponseObject, ResponsesObject, SecurityRequirement, SecuritySchemeObject, Server,
     ServerVariable, Tag,
 };
-pub(crate) use lower::lower;
+pub(crate) use lower::{lower, LowerOptions};
 pub(crate) use metaschema::MetaSchemaValidator;
 pub(crate) use resolve::Resolver;
 pub(crate) use schema::{

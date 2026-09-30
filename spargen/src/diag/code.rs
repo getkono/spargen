@@ -25,6 +25,9 @@ pub enum Code {
     /// A vendored remote `$ref` document drifted from its `spargen.lock` pin (sha256 mismatch, or
     /// the vendored copy is missing) — the lock is the source of truth, so it is refused.
     VendoredRefDrift,
+    /// `spargen lock` could not fetch a remote `$ref` it had to vendor: the request failed in
+    /// transport (DNS, refused connection, TLS, timeout) or the server answered an error status.
+    RemoteFetchFailed,
     /// A validation-only keyword (`pattern`, `minimum`, …) was ignored (W-class).
     ValidationKeywordIgnored,
     /// `patternProperties` cannot be represented as a typed overflow map — heterogeneous value
@@ -109,6 +112,7 @@ impl Code {
             Code::AbsoluteRefUnsupported => "E003",
             Code::UnresolvedRef => "E004",
             Code::VendoredRefDrift => "E021",
+            Code::RemoteFetchFailed => "E025",
             Code::ValidationKeywordIgnored => "W001",
             Code::PatternPropertiesRejected => "E005",
             Code::DynamicRefRejected => "E006",
@@ -156,6 +160,7 @@ impl Code {
             Code::AbsoluteRefUnsupported => "remote $ref not pinned",
             Code::UnresolvedRef => "unresolved $ref",
             Code::VendoredRefDrift => "vendored remote $ref drifted from lock",
+            Code::RemoteFetchFailed => "remote $ref fetch failed",
             Code::ValidationKeywordIgnored => "validation-only keyword ignored",
             Code::PatternPropertiesRejected => "patternProperties not representable as a typed map",
             Code::DynamicRefRejected => "dynamic reference unsupported",
@@ -187,6 +192,24 @@ impl Code {
     }
 
     /// Extended documentation shown by `spargen explain E###` and on the published errors index.
+    ///
+    /// Every body is published, user-facing text, but not every body is held to the code by a
+    /// test, and a contributor editing one should know which kind they are editing:
+    ///
+    /// - A body that **enumerates the cases reaching its code** is listed in this module's
+    ///   `ENUMERATED_CASES` test table. Each case names a phrase the body must contain, and every
+    ///   emission site of the code carries a `// E### case: <case>` (or `// W### case: <case>`)
+    ///   marker naming the cases it
+    ///   reports, so an emission site outside the enumeration, a case with no emission site, or a
+    ///   case deleted from the body fails `every_emission_site_falls_into_a_case_its_explain_text_lists`.
+    ///   A case may also reserve a message wording, which its sites must use and no other site of
+    ///   the code may. Adding an enumerating body means adding it to that table.
+    /// - `E023`'s body is pinned byte-for-byte, clause by clause, by
+    ///   `runtime_contract::tests::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`.
+    ///   Its consumer-obligation clauses, which that test does not cite fixtures for, are tied to
+    ///   the fixtures that enforce them by this module's `EXPLAIN_CLAUSES_OWNED_ELSEWHERE` table.
+    /// - Every other body is prose held only to being non-empty. A body that grows a list of the
+    ///   cases reaching its code has become the first kind, and belongs in the table.
     pub fn explain(self) -> &'static str {
         match self {
             Code::UnsupportedOpenApiVersion => {
@@ -204,6 +227,9 @@ impl Code {
             Code::VendoredRefDrift => {
                 "A remote `$ref` is pinned in `spargen.lock`, but its vendored copy under `.spargen/vendor/` is missing or its bytes no longer match the pinned sha256. The lock is the source of truth, so the drifted content is refused rather than used silently. Re-run `spargen lock <spec>` to re-vendor and re-pin, or restore the vendored file to its pinned bytes."
             }
+            Code::RemoteFetchFailed => {
+                "`spargen lock` is the only step that touches the network, and this error means it could not fetch a remote (`http`/`https`) `$ref` it had to vendor: the request failed in transport (the name did not resolve, the connection was refused or timed out, a proxy or the TLS handshake rejected it), or the server answered with an error status. The message names the URL and carries the underlying error. It says nothing about the document itself — the `$ref` is well-formed and is what `spargen lock` exists to pin — so the fix is on the network side: check the URL and the status or transport error the message reports, then re-run `spargen lock <spec>`. The failed URL is neither vendored nor pinned, and the run is rejected. If the document cannot be reached from where the lock step runs, vendor it by hand and reference it with a relative file path. `generate` and `check` never fetch, so they never report this code."
+            }
             Code::ValidationKeywordIgnored => {
                 "The keyword affects runtime validation but not the static Rust shape. Spargen records a warning and generates the shape. OpenAPI 3.2 `contentMediaType`/`contentSchema` are consumed without this warning only on the string `data` property of a sequential `text/event-stream` item envelope, where they define the JSON payload type."
             }
@@ -214,13 +240,13 @@ impl Code {
                 "`$dynamicRef` and `$dynamicAnchor` require dynamic schema-scope evaluation and are rejected."
             }
             Code::NonDisjointUnion => {
-                "`oneOf`/`anyOf` unions are lowered to typed Rust enums with custom `Deserialize`/`Serialize` — never `serde(untagged)` and never degraded to `serde_json::Value`. Fast paths dispatch by discriminator tag, a unique non-object JSON category, or a proven disjoint category/required key. Overlapping variants use typed trial matching over one buffered value: `oneOf` requires exactly one successful variant; `anyOf` deterministically selects the most specific successful variant (enum before broad scalar, integer before number, more-required object before broader object, recursive array specificity, then source order), and serialization revalidates the same rule. Shape constraints adjacent to the union are intersected into every branch; a branch they exclude is dropped with `W011` while the rest of the enum stands. This error is reported for a union that cannot be turned into a generated enum, which happens in three ways. One is an applicator combination that is not yet representable, such as declaring both `oneOf` and `anyOf` on the same schema node, or OpenAPI 3.2 `discriminator.defaultMapping` without a generated fallback branch, or a `discriminator.mapping` value that names none of the union's members by component name — a pointer into a component written in the root document (`#/components/schemas/Envelope/properties/payload`; the same spelling inside a referenced sub-file names its member by the pointer text and matches it), a file reference (a slash-free one such as `cat.yaml` is also a legal component name and is read as one, as the specification recommends), or a component that is not a member — which no member can be matched to, so the tag it declares would not be the one on the wire. The other is a union that resolves to *itself*: a member that is a `$ref` back to the very union being lowered, or a union that is a schema's whole body whose only non-null member is a `$ref` closing a cycle onto that same schema. Neither describes a value a decoder can terminate on — the generated `Deserialize` would re-enter itself on the same input with no base case — so they are refused rather than emitted. A *mutually* recursive nullable alias is not this and is supported: `B: {oneOf: [{$ref: A}, {type: \"null\"}]}` where `A` refers back to `B` is `Option<Box<A>>`, the same type the direct `{$ref: A}` spelling produces, whichever way the two are spelled or which files they live in. The third is sibling keywords that leave the union with no branch at all, because every branch — or the sole one, when the union has a single non-null member it collapses to — has an empty or unrepresentable intersection with the enclosing schema's own sibling keywords: `type: object` beside a lone `{type: string}` member, say. Split the applicators, make every discriminator branch explicit, break the self-reference, reconcile the sibling keywords with the members, or omit this API segment with `spargen::omit!`."
+                "`oneOf`/`anyOf` unions are lowered to typed Rust enums with custom `Deserialize`/`Serialize` — never `serde(untagged)` and never degraded to `serde_json::Value`. Fast paths dispatch by discriminator tag, a unique non-object JSON category, or a proven disjoint category/required key. Overlapping variants use typed trial matching over one buffered value: `oneOf` requires exactly one successful variant; `anyOf` deterministically selects the most specific successful variant (enum before broad scalar, integer before number, more-required object before broader object, recursive array specificity, then source order), and serialization revalidates the same rule. Shape constraints adjacent to the union are intersected into every branch; a branch they exclude is dropped with `W011` while the rest of the enum stands. This error is reported for a union that cannot be turned into a generated enum, which happens in three ways. One is an applicator combination that is not yet representable, such as declaring both `oneOf` and `anyOf` on the same schema node, or OpenAPI 3.2 `discriminator.defaultMapping` without a generated fallback branch, or a `discriminator.mapping` value that names none of the union's members by component name — a pointer into a component written in the root document (`#/components/schemas/Envelope/properties/payload`; the same spelling inside a referenced sub-file names its member by the pointer text and matches it), a file reference (a slash-free one such as `cat.yaml` is also a legal component name and is read as one, as the specification recommends), or a component that is not a member — which no member can be matched to, so the tag it declares would not be the one on the wire. The second is a union that resolves to *itself*: a member that is a `$ref` back to the very union being lowered, or a union that is a schema's whole body whose only non-null member is a `$ref` closing a cycle onto that same schema. Neither describes a value a decoder can terminate on — the generated `Deserialize` would re-enter itself on the same input with no base case — so they are refused rather than emitted. A *mutually* recursive nullable alias is not this and is supported: `B: {oneOf: [{$ref: A}, {type: \"null\"}]}` where `A` refers back to `B` is `Option<Box<A>>`, the same type the direct `{$ref: A}` spelling produces, whichever way the two are spelled or which files they live in. The third is sibling keywords that leave the union with no branch at all, because every branch — or the sole one, when the union has a single non-null member it collapses to — has an empty or unrepresentable intersection with the enclosing schema's own sibling keywords: `type: object` beside a lone `{type: string}` member, say. Split the applicators, make every discriminator branch explicit, break the self-reference, reconcile the sibling keywords with the members, or omit this API segment with `spargen::omit!`."
             }
             Code::NonScalarEnum => {
                 "Enums and const values must be homogeneous scalar sets. A `null` member (or `\"null\"` in the schema's type array) is allowed: it is stripped and makes a remaining scalar enum nullable (`Option<Enum>`), while a value set of only `null` lowers to the exact JSON null type (`()`). Sets that mix distinct non-null scalar kinds (e.g. a string with an integer) or that contain object/array members are rejected."
             }
             Code::UnsupportedMediaType => {
-                "JSON (`application/json` and `application/*+json`), XML (`application/xml` and `text/xml`), raw binary (`application/octet-stream`), raw UTF-8 text (`text/*` and GitHub's `application/octocat-stream`), form-urlencoded requests, and multipart requests are generated. Text is decoded through a JSON string value so string enums/formats remain typed; binary responses remain `bytes::Bytes`; single- and multi-status success/error dispatch use the selected response's codec. Raw text requires a string-like/binary schema. Octet-stream requires a binary schema, or the OpenAPI 3.1 spelling of one: JSON Schema 2020-12 alignment removed `format: binary`, so an empty (always-true) Schema Object — or no `schema` at all — says \"any octets\" and lowers to `bytes::Bytes` like any other binary body. A raw body cannot admit `null` — a `oneOf`/`anyOf` with `{ type: 'null' }`, or `type: [string, 'null']` — where it is sent or read verbatim: a request body under raw text, a `bytes::Bytes` request body under any media, and a `bytes::Bytes` response body, since raw content has no wire representation of `null` (a request body that may be omitted is `required: false`). A nullable raw text *response* decodes through serde and is generated as `Option<..>`. Media *ranges* are permitted `content` keys and name a family rather than a type: `text/*` is raw UTF-8 and every other family (`video/*`, `audio/*`, `*/*`, …) is opaque octets, ranked below every codec spargen has, so a concrete sibling outranks a family range. The structured-suffix ranges `application/*+json` and `application/*+json-seq` are read instead through the codec their suffix names and rank level with it, so on a response `application/*+json` ties `application/json` and source order decides between them (both decode as JSON); no other suffix range gets a suffix codec (`text/*+json` is raw text like any `text/` key, and `application/*+xml` is unsupported). A request body withholds a suffix range that classifies from the choice whenever a sibling it could send instead exists (a key that classifies, is no range, and is not streaming media) and reports it as the alternative not generated (`W014`). A concrete member of the `image`, `audio`, or `video` family (`image/jpeg`, `audio/mpeg`, `video/mp4`) is opaque octets as well, under the same schema gate, and on a response is ranked below every other key spargen can classify, ranges included, so it is generated only when it is the sole classifiable key — the shape where it was previously rejected; a request body naming one is sent with that exact `Content-Type`, and is preferred there to a range, which a request cannot send. The family rule reaches Encoding Objects too: a form-urlencoded property declaring such a `contentType` is binary and is rejected, as `application/octet-stream` is there, while on multipart it stays a part carrying that header. A concrete type outside those families and `text/*` — `application/pdf`, `application/sdp`, `font/woff2` — names no codec spargen has and is rejected: `image/*` and `image/jpeg` are accepted where `application/pdf` is not, because the family is what says \"opaque octets\". A family member whose subtype carries a structured-syntax suffix (`image/svg+xml`) is still rejected: the suffix names a text syntax, so bytes would be the silently-wrong reading. A family range (`type/*` or `*/*`) is rejected as a *request* body media type when no concrete key beside it classifies, and a structured-suffix range when nothing beside it can be sent: `Content-Type` requires a concrete type/subtype, and a generated request sends its media key verbatim. XML uses the feature-gated quick-xml codec and is currently limited to an operation's single success or error body. Multipart requires an object request schema; form-urlencoded and multipart response bodies are rejected. Sequential responses with `itemSchema` (`text/event-stream`, JSON Lines/NDJSON, and JSON Text Sequences) generate a typed standard `EventStream<T>` when the stream is the operation's single bodied success response; an SSE envelope's JSON `data.contentSchema` becomes `T` directly. A bodied stream anywhere else — an error status, a `default` response (which documents error statuses too, even when it is the only response), or beside a second bodied success status — is rejected, since each of those positions decodes one whole body. Media Type Object `encoding` is implemented for `multipart/form-data` and `application/x-www-form-urlencoded`, with the specification's mode switch: any explicit `style`/`explode`/`allowReserved` selects RFC 6570 serialization (making `contentType` inert), otherwise the property is rendered by its `contentType`. Rejected are streaming requests, a complete-sequence `schema` without `itemSchema`, `prefixEncoding`/`itemEncoding` (which describe positional parts of an array-shaped multipart body, where spargen generates from an object schema), and the RFC 6570 combinations the specification leaves undefined — `deepObject` or an object-valued property on multipart, and `spaceDelimited`/`pipeDelimited` with `explode: true`."
+                "JSON (`application/json` and `application/*+json`), XML (`application/xml` and `text/xml`), raw binary (`application/octet-stream`), raw UTF-8 text (`text/*` and GitHub's `application/octocat-stream`), form-urlencoded requests, and multipart requests are generated. Text is decoded through a JSON string value so string enums/formats remain typed; binary responses remain `bytes::Bytes`; single- and multi-status success/error dispatch use the selected response's codec. Raw text requires a string-like/binary schema. Octet-stream requires a binary schema, or the OpenAPI 3.1 spelling of one: JSON Schema 2020-12 alignment removed `format: binary`, so an empty (always-true) Schema Object — or no `schema` at all — says \"any octets\" and lowers to `bytes::Bytes` like any other binary body. A raw body cannot admit `null` — a `oneOf`/`anyOf` with `{ type: 'null' }`, or `type: [string, 'null']` — where it is sent or read verbatim: a request body under raw text, a `bytes::Bytes` request body under any media, and a `bytes::Bytes` response body, since raw content has no wire representation of `null` (a request body that may be omitted is `required: false`). A nullable raw text *response* decodes through serde and is generated as `Option<..>`. Media *ranges* are permitted `content` keys and name a family rather than a type: `text/*` is raw UTF-8 and every other family (`video/*`, `audio/*`, `*/*`, …) is opaque octets, ranked below every codec spargen has, so a concrete sibling outranks a family range. The structured-suffix ranges `application/*+json` and `application/*+json-seq` are read instead through the codec their suffix names and rank level with it, so on a response `application/*+json` ties `application/json` and source order decides between them (both decode as JSON); no other suffix range gets a suffix codec (`text/*+json` is raw text like any `text/` key, and `application/*+xml` is unsupported). A request body withholds a suffix range that classifies from the choice whenever a sibling it could send instead exists (a key that classifies, is no range, and is not streaming media) and reports it as the alternative not generated (`W014`). A concrete member of the `image`, `audio`, or `video` family (`image/jpeg`, `audio/mpeg`, `video/mp4`) is opaque octets as well, under the same schema gate, and on a response is ranked below every other key spargen can classify, ranges included, so it is generated only when it is the sole classifiable key — the shape where it was previously rejected; a request body naming one is sent with that exact `Content-Type`, and is preferred there to a range, which a request cannot send. The family rule reaches Encoding Objects too: a form-urlencoded property declaring such a `contentType` is binary and is rejected, as `application/octet-stream` is there, while on multipart a scalar or binary property stays a part carrying that header (any other property is rendered as JSON, so there the declaration is rejected, as below). A concrete type outside those families and `text/*` — `application/pdf`, `application/sdp`, `font/woff2` — names no codec spargen has and is rejected: `image/*` and `image/jpeg` are accepted where `application/pdf` is not, because the family is what says \"opaque octets\". A family member whose subtype carries a structured-syntax suffix (`image/svg+xml`) is still rejected: the suffix names a text syntax, so bytes would be the silently-wrong reading. A family range (`type/*` or `*/*`) is rejected as a *request* body media type when no concrete key beside it classifies, and a structured-suffix range when nothing beside it can be sent: `Content-Type` requires a concrete type/subtype, and a generated request sends its media key verbatim. XML uses the feature-gated quick-xml codec and is currently limited to an operation's single success or error body. Multipart requires an object request schema; form-urlencoded and multipart response bodies are rejected. Sequential responses with `itemSchema` (`text/event-stream`, JSON Lines/NDJSON, and JSON Text Sequences) generate a typed standard `EventStream<T>` when the stream is the operation's single bodied success response; an SSE envelope's JSON `data.contentSchema` becomes `T` directly. A bodied stream anywhere else — an error status, a `default` response (which documents error statuses too, even when it is the only response), or beside a second bodied success status — is rejected, since each of those positions decodes one whole body. Media Type Object `encoding` is implemented for `multipart/form-data` and `application/x-www-form-urlencoded`, with the specification's mode switch: any explicit `style`/`explode`/`allowReserved` selects RFC 6570 serialization (making `contentType` inert), otherwise the property is rendered by its `contentType`. Rejected are streaming requests, an explicit non-JSON `contentType` (`application/xml`, `text/csv`, or a type with no codec such as `application/yaml`) on a multipart property that is neither a scalar nor binary — an object, array, tuple, union, or `{}` — because such a part is always rendered as JSON and its bytes would contradict its header, a complete-sequence `schema` without `itemSchema`, `prefixEncoding`/`itemEncoding` (which describe positional parts of an array-shaped multipart body, where spargen generates from an object schema), and the RFC 6570 combinations the specification leaves undefined — `deepObject` or an object-valued property on multipart, and `spaceDelimited`/`pipeDelimited` with `explode: true`."
             }
             Code::UnsupportedParameterStyle => {
                 "Path/header parameters support simple style and query/cookie parameters support form style, including the OpenAPI explode defaults and explicit explode overrides. OpenAPI 3.2 cookie style is emitted without percent encoding, and a single whole-query-string parameter supports JSON or application/x-www-form-urlencoded content. JSON content-typed parameters are generated. `deepObject`, `spaceDelimited`, and `pipeDelimited` query parameters and `allowReserved: true` are all supported. What is rejected is a style the parameter's location does not permit, `spaceDelimited`/`pipeDelimited` with `explode: true` (which the specification's own serialization table leaves undefined), a nested array or object inside a `simple`/`form` value, an object property whose value no schema constrains (such as a `required` name no `properties` entry declares, on an object with no `additionalProperties` schema), and a `querystring` parameter without exactly one JSON or form-urlencoded content entry with a schema — none of which could be serialized with defined wire semantics."
@@ -238,7 +264,7 @@ impl Code {
                 "Every scheme named in a `security` requirement must be declared under `components.securitySchemes` as `http` bearer/basic, `apiKey`, `oauth2`, or `openIdConnect` so credentials can be attached at the right location."
             }
             Code::AllOfIrreconcilable => {
-                "Two constructs intersect schemas into one type and report this code when the result is empty or unrepresentable: the members of an `allOf`, and — because `$ref` is an applicator in JSON Schema 2020-12 rather than a replacement — a `$ref` together with its own shape-bearing sibling keywords, which are intersected with the referenced schema instead of being discarded. A sibling bears a shape of its own through `type`, `properties`, `patternProperties`, `required`, `additionalProperties`, `items`, `prefixItems`, `enum`, `const`, `contentEncoding`, `format: binary`, or `allOf`. With no `type` beside them, the object keywords (`properties`, `patternProperties`, `required`, `additionalProperties`) establish an object and the array keywords (`items`, `prefixItems`) an array, and neither says anything about `null`, so the target's nullability stands: `required: [a]` beside a `$ref` to an object makes `a` required, and beside a `$ref` to a string it is an empty intersection — to a nullable string too, since sharing only `null` does not reconcile the categories. Beside a `$ref` to a union, such a sibling is rejected when some branch lacks its category, because intersecting would drop that branch and reject values the union accepts. A sibling carrying both kinds with no `type` to choose between them is rejected, because no single type represents what it constrains. A `required` name no `properties` entry declares is still a requirement, carried as a required field typed by the object's `additionalProperties` schema, and unconstrained when there is none; `additionalProperties: false` closes the object to the fields the generated type declares, that one included. A `$ref` whose siblings bear no shape is simply its target. Either way, object members flatten into a single struct (union of properties; a property required by any member is required; repeated properties recursively retain their narrower compatible intersection; `additionalProperties` is intersected conservatively), while scalar members narrow compatible primitives, enums, arrays, objects, unions, and nullability. Examples include integer within number, enum within its scalar type, and a detailed object within a broader object; an empty array-item intersection becomes an uninhabited item type so the valid empty array remains representable. It is rejected only when the overall intersection is empty or cannot be represented faithfully: incompatible scalar categories (`{$ref: '#/components/schemas/Name', type: integer}` where `Name` is a string accepts no value at all), conflicting property/additional-value constraints, an object/scalar mix, or a `$ref` that closes a reference cycle back to the schema enclosing it — an `allOf` member, a `$ref` carrying shape-bearing siblings, or either of those written as a `oneOf`/`anyOf` member — whose target's own definition depends on the result being computed, so it can be composed neither against itself nor by discarding it. For a `$ref` carrying shape-bearing siblings, and for a union member, that is a property of the document: the cycle is traced through every file, however each reference is spelled, so neither the order `components.schemas` is declared in nor the schema lowering happens to reach first can change the verdict. An `allOf` member is still refused only when its target is mid-lowering, so under mutual recursion its verdict can follow which schema lowering reaches first; where it generates, the target was complete and the merge is exact. Restructure the composition — or make the `$ref` target and its siblings agree — or omit this API segment with `spargen::omit!`."
+                "Two constructs intersect schemas into one type and report this code when the result is empty or unrepresentable: the members of an `allOf`, and — because `$ref` is an applicator in JSON Schema 2020-12 rather than a replacement — a `$ref` together with its own shape-bearing sibling keywords, which are intersected with the referenced schema instead of being discarded. A sibling bears a shape of its own through `type`, `properties`, `patternProperties`, `required`, `additionalProperties`, `items`, `prefixItems`, `enum`, `const`, `contentEncoding`, `format: binary`, or `allOf`. With no `type` beside them, the object keywords (`properties`, `patternProperties`, `required`, `additionalProperties`) establish an object and the array keywords (`items`, `prefixItems`) an array, and neither says anything about `null`, so the target's nullability stands: `required: [a]` beside a `$ref` to an object makes `a` required, and beside a `$ref` to a string it is an empty intersection — to a nullable string too, since sharing only `null` does not reconcile the categories. Beside a `$ref` to a union, such a sibling is rejected when some branch lacks its category, because intersecting would drop that branch and reject values the union accepts. A sibling carrying both kinds with no `type` to choose between them is rejected, because no single type represents what it constrains. A `required` name no `properties` entry declares is still a requirement, carried as a required field typed by the object's `additionalProperties` schema, and unconstrained when there is none; `additionalProperties: false` closes the object to the fields the generated type declares, that one included. In a composition such a field is no declaration of the property: where another side declares it, that declaration supplies its type, as it would with the `required` absent, and otherwise every side's `additionalProperties` schema constrains it, so `{$ref: Labels, required: [a]}` with a string-valued `Labels` makes `a` a string. A `$ref` whose siblings bear no shape is simply its target. Either way, object members flatten into a single struct (union of properties; a property required by any member is required; repeated properties recursively retain their narrower compatible intersection; `additionalProperties` is intersected conservatively), while scalar members narrow compatible primitives, enums, arrays, objects, unions, and nullability. Examples include integer within number, enum within its scalar type, and a detailed object within a broader object; array items whose types share no value — disjoint JSON types, or scalar enums with no common member — become an uninhabited item type so the valid empty array remains representable, and in the same way a repeated property whose types share no value becomes an uninhabited field when no member requires it — whether the members are `allOf` entries or a `$ref` and its siblings — so the objects that omit it remain representable. Two sides that share values no single Rust type represents (a `uuid` string against a `contentEncoding: base64` one, both annotations on a string) are never typed uninhabited, collapsed to `null`, or dropped as a union branch: wherever they meet — array items, a property no member requires, a union branch, or a branch of a referenced union — they are rejected, because an uninhabited stand-in would refuse valid instances. It is rejected only when the overall intersection is empty or cannot be represented faithfully: scalar members with no common value or no single type, such as incompatible scalar categories (`{$ref: '#/components/schemas/Name', type: integer}` where `Name` is a string accepts no value at all) or two enums that share no member; conflicting constraints on a property some member requires; conflicting additional-value constraints; an object/scalar mix; an `allOf` member that is the boolean schema `false`, which admits no value; or a `$ref` that closes a reference cycle back to the schema enclosing it — an `allOf` member, a `$ref` carrying shape-bearing siblings, either of those written as a `oneOf`/`anyOf` member, or the schema of a property or of `additionalProperties` that two `allOf` members both constrain — whose target's own definition depends on the result being computed, so it can be composed neither against itself nor by discarding it. For a `$ref` carrying shape-bearing siblings, and for a union member, that is a property of the document: the cycle is traced through every file, however each reference is spelled, so neither the order `components.schemas` is declared in nor the schema lowering happens to reach first can change the verdict. An `allOf` member, and a property or `additionalProperties` value two members both constrain, is still refused only when its target is mid-lowering, so under mutual recursion its verdict can follow which schema lowering reaches first; where it generates, the target was complete and the merge is exact. Restructure the composition — or make the `$ref` target and its siblings agree — or omit this API segment with `spargen::omit!`."
             }
             Code::InvalidOmitRule => {
                 "A compatibility omit rule must match at least one exact path, operation, component, pointer, or file-local pointer and cannot omit the document root."
@@ -262,7 +288,7 @@ impl Code {
                 "Lowering a schema into a Rust type is recursive: each nested object property, array item, `allOf`/`oneOf`/`anyOf` member, and `$ref` target descends one level. Spargen caps that descent so a pathologically deep composition — a very long chain of components that each `$ref` the next, or a deeply nested inline schema — is rejected with this error instead of being allowed to exhaust the call stack and abort the process. A genuine API surface never approaches the limit; hitting it almost always means the spec was machine-generated or adversarial. Flatten the offending chain, or omit that API segment with `spargen::omit!`."
             }
             Code::RuntimeDependencyContract => {
-                "The generated module is freestanding, so its consuming Cargo package must declare the crates and dependency features referenced by that specific API. Spargen derives the exact requirement set after lowering and audits Cargo.toml during build.rs and proc-macro generation. Use the documented tested lower bounds (or a higher semver-compatible caret floor), keep reqwest default features disabled, and enable only the reqwest/bytes/XML/UUID/time capabilities named by the diagnostic. A dependency declared `workspace = true` is followed to the workspace root's `[workspace.dependencies]` — the consumer manifest itself when it declares `[workspace]`, otherwise the root `package.workspace` names, otherwise the nearest ancestor manifest that parses and declares `[workspace]` — taking the version from there, the union of both feature lists, and default features on when the root leaves them on or the member sets `default-features = true` (a member's `default-features = false` cannot turn off defaults the root leaves on, so disable them in `[workspace.dependencies]` and leave the member's `default-features` unset or `false`), while `optional` is read from the member, as Cargo does. Inheriting a required crate therefore satisfies the audit; when a root is found but cannot be read, or declares no such entry, the diagnostic says which of those happened rather than reporting the crate as missing, and when no root is found at all it names the nearest ancestor manifest that failed to read, if there was one, and reports it as the workspace manifest in the same words — distinguished by the reason for the failure, which that message appends to itself after a colon because nothing else is going to print it, whereas a root reached through `package.workspace` is read and reported in its own right, so its inheritance message carries no such suffix and a read-failure diagnostic naming the same file stands above it. An inheritance message that carries its own reason inline is therefore the no-root case, in which an unrelated broken `Cargo.toml` above the project takes that place. Cargo resolves the declared range; Rust compilation then verifies the selected crates expose the APIs and traits used by the generated client."
+                "The generated module is freestanding, so its consuming Cargo package must declare the crates and dependency features referenced by that specific API. Spargen derives the exact requirement set after lowering and audits Cargo.toml during build.rs and proc-macro generation. Use the documented tested lower bounds (or a higher semver-compatible caret floor), keep reqwest default features disabled, and enable only the capabilities the diagnostic names. A dependency declared `workspace = true` is followed to the workspace root's `[workspace.dependencies]` — the consumer manifest itself when it declares `[workspace]`, otherwise the root `package.workspace` names, otherwise the nearest ancestor manifest that parses and declares `[workspace]` — taking the version from there, the union of both feature lists, and default features on when the root leaves them on or the member sets `default-features = true` (a member's `default-features = false` cannot turn off defaults the root leaves on, so disable them in `[workspace.dependencies]` and leave the member's `default-features` unset or `false`), while `optional` is read from the member, as Cargo does. Inheriting a required crate therefore satisfies the audit; when a root is found but cannot be read, or declares no such entry, the diagnostic says which of those happened rather than reporting the crate as missing, and when no root is found at all it says that no workspace manifest was found, then names the nearest ancestor manifest that failed to read, if there was one, only as a possible root together with the reason it could not be read — never as the workspace manifest, because an unrelated broken `Cargo.toml` above the project can be that file. A root reached through `package.workspace` is read and reported in its own right, so its inheritance message carries no reason of its own and a read-failure diagnostic naming the same file stands above it. Cargo resolves the declared range; Rust compilation then verifies the selected crates expose the APIs and traits used by the generated client."
             }
             Code::SpecUndefinedBehavior => {
                 "The OpenAPI Specification marks some constructs' behavior as *undefined* rather than leaving them merely unsupported. Currently this fires for a Path Item `$ref` declared alongside structural fields (operations, `parameters`, `servers`): the specification says that when a field appears both in the referring Path Item and the referenced one, the behavior is undefined. Unlike a Reference Object, which requires adjacent properties to be ignored, there is no rule to follow — so either choice (the local fields winning, or the referenced ones) silently discards operations the author wrote, and produces a client that calls a different set of endpoints than the document describes. `summary` and `description` are exempt because they are documentation and cannot change the wire. Move the sibling fields into the referenced Path Item, or drop the `$ref` and declare the item inline."
@@ -271,7 +297,7 @@ impl Code {
                 "In JSON Schema 2020-12 `prefixItems` fixes the leading positions of an array and `items` describes every position after them. Spargen lowers `prefixItems` to a Rust tuple, which is fixed-length, so a schema that also allows a typed remainder describes a value no single Rust type expresses: a tuple cannot grow, and a `Vec` cannot hold the distinct per-position types. `items: false` closes the array at the prefix and is fully supported — that is exactly a tuple. To send a variable-length remainder, drop `prefixItems` and describe the whole array with `items`, split the fixed head into its own object properties, or omit this API segment with `spargen::omit!`."
             }
             Code::DeclarationHasNoEffect => {
-                "The document declared something the specification permits here, but which cannot change any byte spargen generates or sends, so it is acknowledged rather than dropped in silence. It fires for: `allowReserved` on a parameter that is never percent-encoded (an `in: header` parameter, or `style: cookie`, both of which the specification sends verbatim); `encoding`, `prefixEncoding`, or `itemEncoding` on a media type that is neither `multipart` nor `application/x-www-form-urlencoded`, where the specification says those fields SHALL be ignored; an `encoding` entry naming a property the body schema does not declare; `encoding.headers` on a non-`multipart` media type; an `encoding.headers` Header Object that pins no `const`/`default` value, leaving a client nothing to send; `allowEmptyValue`, which is deprecated and cannot change what a typed client omits; a `mutualTLS` security scheme, which is satisfied by the transport's client certificate rather than by anything the client attaches; a response header named `Content-Type`, which the specification says SHALL be ignored; a response header whose `content` media type spargen cannot decode, or whose textual `content` schema is not a single value, or which declares `content` with no schema at all, none of which yields a typed accessor; a `servers` entry past the first on a path item or operation, where the specification defines no client selection rule; a union branch that the enclosing schema's own constraints have already made unsatisfiable; and a schema component declared inside a referenced sub-file whose name the root document also declares. That last one is a fact about the *document* rather than about one keyword: a JSON Pointer fragment addresses the file it is written in, so a sub-file's own `#/components/schemas/<name>` asks for that file's declaration — but spargen consults the root document's component map first, so where both declare the name the root's wins and the sub-file's is never read. The warning names both namespaces and fires once per reference site, because the site is what has to be found; address the file-local declaration explicitly with a relative-file reference, or rename one of the two, if the root's is not the one you meant. None of these is an error: the document is valid, and the construct simply has no reachable effect on this client."
+                "The document declared something the specification permits here, but which cannot change any byte spargen generates or sends, so it is acknowledged rather than dropped in silence. It fires for: an `in: header` parameter named `Accept`, `Content-Type`, or `Authorization`, which the specification says SHALL be ignored because the protocol layer owns those headers; `allowReserved` on a parameter that is never percent-encoded (an `in: header` parameter, or `style: cookie`, both of which the specification sends verbatim); `allowReserved` on a `multipart` Encoding Object, whose part values are never percent-encoded; `encoding`, `prefixEncoding`, or `itemEncoding` on a media type that is neither `multipart` nor `application/x-www-form-urlencoded`, where the specification says those fields SHALL be ignored; `prefixEncoding` or `itemEncoding` on `application/x-www-form-urlencoded`, which the specification scopes to `multipart` alone; an `encoding` entry naming a property the body schema does not declare; `encoding.headers` on a non-`multipart` media type; an `encoding.headers` Header Object that pins no `const`/`default` value, leaving a client nothing to send; `allowEmptyValue`, which is deprecated and cannot change what a typed client omits; a `mutualTLS` security scheme, which is satisfied by the transport's client certificate rather than by anything the client attaches; a response header named `Content-Type`, which the specification says SHALL be ignored; a response header whose `schema` has a shape `simple` serialization cannot express, or whose `content` media type spargen cannot decode, or whose textual `content` schema is not a single value, or which declares `content` with no schema at all, none of which yields a typed accessor; a `summary` or `description` on a Reference Object, which documents one use site of a component that every use site shares as one generated item, so the override has nowhere to land; a server variable that its server's `url` never uses; a `servers` entry past the first on a path item or operation, where the specification defines no client selection rule; a union branch that the enclosing schema's own constraints have already made unsatisfiable; and a schema component declared inside a referenced sub-file whose name the root document also declares. That last one is a fact about the *document* rather than about one keyword: a JSON Pointer fragment addresses the file it is written in, so a sub-file's own `#/components/schemas/<name>` asks for that file's declaration — but spargen consults the root document's component map first, so where both declare the name the root's wins and the sub-file's is never read. The warning names both namespaces and fires once per reference site, because the site is what has to be found; address the file-local declaration explicitly with a relative-file reference, or rename one of the two, if the root's is not the one you meant. None of these is an error: the document is valid, and the construct simply has no reachable effect on this client."
             }
             Code::RuntimeAuditSkipped => {
                 "Generated output is freestanding: the consuming package must itself declare the crates and dependency features that specific API needs. Spargen audits the consumer's `Cargo.toml` for that contract and reports any gap as `E023` — but only when it can find the manifest, which in practice means a real `build.rs` process, where Cargo puts the package in the environment. Generating from a test, a wrapper binary, or a script leaves nothing to audit, so the contract is unverified and a missing dependency surfaces later as a compile error in the generated module instead of a spargen diagnostic. Run `spargen deps <spec>` to print the exact `[dependencies]` block that spec requires, or generate from a build script so the audit runs automatically. Set `CargoIntegration::Off` if this generation is deliberately not part of a Cargo build."
@@ -306,6 +332,7 @@ impl Code {
             Code::AbsoluteRefUnsupported,
             Code::UnresolvedRef,
             Code::VendoredRefDrift,
+            Code::RemoteFetchFailed,
             Code::DuplicateObjectKey,
             Code::PatternPropertiesRejected,
             Code::DynamicRefRejected,
@@ -388,13 +415,14 @@ mod tests {
     /// `docs/errors.md` are the same contract — and without this the two drift silently.
     #[test]
     fn the_published_index_lists_exactly_the_declared_codes() {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../docs/errors.md");
-        let Ok(index) = std::fs::read_to_string(path) else {
-            // Absent when the crate is tested from a packaged `.crate`, which carries no docs
-            // directory. In the repository — where the invariant matters — it is always there.
-            eprintln!("skipping: {path} is not present");
+        // A packaged `.crate` carries no docs directory, so the check is skipped there — gated on
+        // the workspace marker, not on the file, so that inside the repository a missing or
+        // renamed index fails instead of passing with a line on stderr nobody reads.
+        let Some(root) = repo_root() else {
+            eprintln!("skipping: not tested from the workspace");
             return;
         };
+        let index = read_repo_document(&root, "docs/errors.md");
         let rows: Vec<(String, String)> = index
             .lines()
             .filter(|line| line.starts_with("| `E") || line.starts_with("| `W"))
@@ -472,18 +500,23 @@ mod tests {
     /// checkable in general, but the code tokens in it are: every one must name a real code, every
     /// declared code must be placed somewhere in the matrix, and a code must not be filed under a
     /// column that disagrees with its own severity.
+    ///
+    /// That is all it holds. The prose of a cell is constrained by nothing here: a row rewritten
+    /// to say the opposite of what the generator does keeps every assertion green, so the prose is
+    /// reviewed by hand, as `docs/support-matrix.md` itself says. Where an `explain()` body is
+    /// pinned (see its rustdoc), the matrix row defers to `spargen explain` rather than restating
+    /// the body in words no test compares with it; the clauses `E023`'s row does quote are held
+    /// verbatim by `the_e023_matrix_row_quotes_its_pinned_explain_text_verbatim`.
     #[test]
     fn the_support_documents_cite_the_codes_that_exist_where_they_belong() {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
-        let matrix_path = format!("{root}/docs/support-matrix.md");
-        let scope_path = format!("{root}/docs/openapi-3.2.md");
-        let (Ok(matrix), Ok(scope)) = (
-            std::fs::read_to_string(&matrix_path),
-            std::fs::read_to_string(&scope_path),
-        ) else {
-            eprintln!("skipping: {matrix_path} is not present");
+        // Skipped only from a packaged `.crate`, which carries no docs directory. In the
+        // repository a missing or renamed support document fails rather than skipping the check.
+        let Some(root) = repo_root() else {
+            eprintln!("skipping: not tested from the workspace");
             return;
         };
+        let matrix = read_repo_document(&root, "docs/support-matrix.md");
+        let scope = read_repo_document(&root, "docs/openapi-3.2.md");
 
         let matrix_cited = cited_codes(&matrix);
         for (cited, _) in matrix_cited.iter().chain(cited_codes(&scope).iter()) {
@@ -527,6 +560,81 @@ mod tests {
         }
     }
 
+    /// The words that mark a matrix clause as stating how `E023`'s audit reads workspace
+    /// inheritance: the subject the pinned explain body owns. Matched case-insensitively.
+    const E023_INHERITANCE_VOCABULARY: &[&str] = &["workspace", "inherit", "default-features"];
+
+    /// `E023`'s explain body is pinned byte for byte, so the matrix row citing `E023` defers to it
+    /// rather than restating it — but the row still states a few inheritance rules for a reader
+    /// scanning the table, and a paraphrase of a pinned body is a second copy no test compares
+    /// with the first. That copy drifted twice while every suite stayed green (#218). So every
+    /// clause of that row which touches workspace inheritance must be a **verbatim excerpt** of
+    /// the explain body, and the row must name `spargen explain E023` as where the rest lives.
+    ///
+    /// A clause is a piece of a cell split on `. ` and `; `. The clause naming
+    /// `spargen explain E023` is the deferral itself and is exempt. What this cannot see: a
+    /// paraphrase that avoids every word in [`E023_INHERITANCE_VOCABULARY`].
+    #[test]
+    fn the_e023_matrix_row_quotes_its_pinned_explain_text_verbatim() {
+        let Some(root) = repo_root() else {
+            eprintln!("skipping: not tested from the workspace");
+            return;
+        };
+        let matrix = read_repo_document(&root, "docs/support-matrix.md");
+        let explain = Code::RuntimeDependencyContract.explain();
+        let code = Code::RuntimeDependencyContract.as_str();
+
+        let rows: Vec<&str> = matrix
+            .lines()
+            .filter(|line| {
+                line.starts_with("| ")
+                    && cited_codes(line)
+                        .iter()
+                        .any(|(cited, column)| cited == code && *column == 4)
+            })
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly one docs/support-matrix.md row must reject with {code}, found {rows:#?}"
+        );
+        let row = rows[0];
+
+        let deferral = format!("`spargen explain {code}`");
+        assert!(
+            row.contains(&deferral),
+            "the {code} row must defer to {deferral} for the inheritance rules it does not quote"
+        );
+
+        let mut quoted = 0;
+        for cell in row.split('|') {
+            for clause in cell.split(". ").flat_map(|sentence| sentence.split("; ")) {
+                let clause = clause.trim().trim_end_matches('.');
+                let lower = clause.to_lowercase();
+                if clause.contains(&deferral)
+                    || !E023_INHERITANCE_VOCABULARY
+                        .iter()
+                        .any(|word| lower.contains(word))
+                {
+                    continue;
+                }
+                assert!(
+                    explain.contains(clause),
+                    "docs/support-matrix.md's {code} row states workspace inheritance in words \
+                     `spargen explain {code}` does not use:\n\n  {clause}\n\nQuote the explain \
+                     text verbatim, or leave the clause to it."
+                );
+                quoted += 1;
+            }
+        }
+        // Without this, a vocabulary that stopped matching anything would pass vacuously.
+        assert!(
+            quoted > 0,
+            "no clause of the {code} row matched {E023_INHERITANCE_VOCABULARY:?}; if the row no \
+             longer quotes the explain text at all, retire this test with it"
+        );
+    }
+
     #[test]
     fn all_codes_round_trip_from_stable_strings() {
         for code in Code::all() {
@@ -548,6 +656,7 @@ mod tests {
             Code::AbsoluteRefUnsupported => "AbsoluteRefUnsupported",
             Code::UnresolvedRef => "UnresolvedRef",
             Code::VendoredRefDrift => "VendoredRefDrift",
+            Code::RemoteFetchFailed => "RemoteFetchFailed",
             Code::DuplicateObjectKey => "DuplicateObjectKey",
             Code::PatternPropertiesRejected => "PatternPropertiesRejected",
             Code::DynamicRefRejected => "DynamicRefRejected",
@@ -601,13 +710,21 @@ mod tests {
         manifest.contains("[workspace]").then_some(root)
     }
 
+    /// Read a document the repository must carry, failing — never skipping — when it is absent.
+    /// Only call this under [`repo_root`], which is what decides whether the file must exist.
+    fn read_repo_document(root: &std::path::Path, relative: &str) -> String {
+        std::fs::read_to_string(root.join(relative)).unwrap_or_else(|error| {
+            panic!("{relative} must exist in the repository, and reading it failed: {error}")
+        })
+    }
+
     /// `all()` is a hand-written `const ALL`, and every docs/behavior test iterates it — so a
     /// variant added to the enum but forgotten there would be invisible to all of them. Adding a
     /// variant first fails to compile in `variant_name`; once named, `DECLARED` no longer matches
     /// and this fails until `all()` lists it too.
     #[test]
     fn all_lists_every_declared_variant() {
-        const DECLARED: usize = 32;
+        const DECLARED: usize = 33;
 
         assert_eq!(
             Code::all().len(),
@@ -651,10 +768,403 @@ mod tests {
         }
     }
 
+    /// One case an enumerating explain body lists: the marker tag its emission sites carry, the
+    /// phrase of the body that states it, and — where the case has one — the message wording that
+    /// is reserved to it: every site of the case says it, and no other site of the code does.
+    struct Case {
+        tag: &'static str,
+        stated_as: &'static str,
+        reserved_wording: Option<&'static str>,
+    }
+
+    /// The codes whose explain body enumerates the cases that reach them. See [`Code::explain`].
+    const ENUMERATED_CASES: &[(Code, &[Case])] = &[
+        (
+            Code::UnresolvedRef,
+            &[
+                Case {
+                    tag: "absent-target",
+                    stated_as: "the target is absent from the loaded input bundle",
+                    reserved_wording: Some("not found in the input bundle"),
+                },
+                Case {
+                    tag: "undeclared-component",
+                    stated_as: "a local component reference names an entry the document does not \
+                            declare",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "cycle",
+                    stated_as: "a chain of reference hops closes into a cycle",
+                    reserved_wording: Some("cycle"),
+                },
+                Case {
+                    tag: "declined-hop",
+                    stated_as: "a hop resolves but spargen declines to follow it",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "resource-scope",
+                    stated_as: "static `$id`/`$anchor` schema resource scopes",
+                    reserved_wording: Some("`$id`/`$anchor`"),
+                },
+                Case {
+                    tag: "unsupported-or-unresolved",
+                    stated_as:
+                        "a reference reported as `unsupported or unresolved` is one spargen \
+                            could not resolve *and* could not tell an absent target from a \
+                            fragment form it declines to follow",
+                    reserved_wording: Some("unsupported or unresolved"),
+                },
+            ],
+        ),
+        (
+            Code::NonDisjointUnion,
+            &[
+                Case {
+                    tag: "unrepresentable-applicators",
+                    stated_as: "an applicator combination that is not yet representable",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "resolves-to-itself",
+                    stated_as: "a union that resolves to *itself*",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "no-branch-left",
+                    stated_as: "sibling keywords that leave the union with no branch at all",
+                    reserved_wording: None,
+                },
+            ],
+        ),
+        (
+            Code::AllOfIrreconcilable,
+            &[
+                Case {
+                    tag: "scalar-members",
+                    stated_as: "scalar members with no common value or no single type",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "required-property",
+                    stated_as: "conflicting constraints on a property some member requires",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "additional-values",
+                    stated_as: "conflicting additional-value constraints",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "object-scalar-mix",
+                    stated_as: "an object/scalar mix",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "unrepresentable-meet",
+                    stated_as: "Two sides that share values no single Rust type represents",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "false-member",
+                    stated_as: "an `allOf` member that is the boolean schema `false`",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "inferred-category",
+                    stated_as: "With no `type` beside them, the object keywords",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "cycle",
+                    stated_as: "a `$ref` that closes a reference cycle back to the schema \
+                                enclosing it",
+                    reserved_wording: None,
+                },
+            ],
+        ),
+        (
+            Code::SpecUndefinedBehavior,
+            &[Case {
+                tag: "path-item-ref-siblings",
+                stated_as: "a Path Item `$ref` declared alongside structural fields",
+                reserved_wording: None,
+            }],
+        ),
+        (
+            Code::DeclarationHasNoEffect,
+            &[
+                Case {
+                    tag: "reserved-header-parameter",
+                    stated_as: "an `in: header` parameter named `Accept`, `Content-Type`, or \
+                                `Authorization`",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "allow-reserved-parameter",
+                    stated_as: "`allowReserved` on a parameter that is never percent-encoded",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "allow-reserved-multipart",
+                    stated_as: "`allowReserved` on a `multipart` Encoding Object",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "encoding-on-other-media",
+                    stated_as: "`encoding`, `prefixEncoding`, or `itemEncoding` on a media type \
+                                that is neither `multipart` nor \
+                                `application/x-www-form-urlencoded`",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "positional-encoding-form",
+                    stated_as: "`prefixEncoding` or `itemEncoding` on \
+                                `application/x-www-form-urlencoded`",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "encoding-unknown-property",
+                    stated_as: "an `encoding` entry naming a property the body schema does not \
+                                declare",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "encoding-headers-non-multipart",
+                    stated_as: "`encoding.headers` on a non-`multipart` media type",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "encoding-header-no-value",
+                    stated_as:
+                        "an `encoding.headers` Header Object that pins no `const`/`default` \
+                                value",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "allow-empty-value",
+                    stated_as: "`allowEmptyValue`, which is deprecated",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "mutual-tls",
+                    stated_as: "a `mutualTLS` security scheme",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "response-content-type",
+                    stated_as: "a response header named `Content-Type`",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "response-header-untyped",
+                    stated_as: "none of which yields a typed accessor",
+                    reserved_wording: Some("typed accessor"),
+                },
+                Case {
+                    tag: "reference-docs",
+                    stated_as: "a `summary` or `description` on a Reference Object",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "unused-server-variable",
+                    stated_as: "a server variable that its server's `url` never uses",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "extra-servers",
+                    stated_as: "a `servers` entry past the first on a path item or operation",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "excluded-union-branch",
+                    stated_as: "a union branch that the enclosing schema's own constraints have \
+                                already made unsatisfiable",
+                    reserved_wording: None,
+                },
+                Case {
+                    tag: "shadowed-component",
+                    stated_as: "a schema component declared inside a referenced sub-file whose \
+                                name the root document also declares",
+                    reserved_wording: None,
+                },
+            ],
+        ),
+    ];
+
+    /// How far above a `Code::<Variant>` line its case marker may sit: far enough for a
+    /// `Diagnostic::error(` that rustfmt breaks before its first argument, near enough that a
+    /// marker cannot drift onto an unrelated site.
+    const MARKER_REACH: usize = 3;
+
+    /// The `(code, tags)` a `// E### case: a, b` marker line declares, if it is one.
+    fn case_marker(line: &str) -> Option<(&str, Vec<&str>)> {
+        let rest = line.trim().strip_prefix("// ")?;
+        let (code, tags) = rest.split_once(" case: ")?;
+        let is_code = code.len() == 4
+            && matches!(code.as_bytes()[0], b'E' | b'W')
+            && code[1..].bytes().all(|byte| byte.is_ascii_digit());
+        is_code.then(|| (code, tags.split(',').map(str::trim).collect()))
+    }
+
+    /// Every `.rs` file under `dir`, recursively, in a stable order.
+    fn rust_sources(dir: &std::path::Path, into: &mut Vec<std::path::PathBuf>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("{} must be readable: {error}", dir.display()))
+            .map(|entry| entry.expect("directory entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                rust_sources(&path, into);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                into.push(path);
+            }
+        }
+    }
+
+    /// `spargen explain` prints an explain body verbatim, and a body that lists the cases reaching
+    /// its code makes a claim about the generator a test can check: that the list is exhaustive.
+    /// `E004`'s once was not — a security scheme alias miss and a chained Path Item `$ref` reached
+    /// the code while the body listed neither — and the only assertion on it was `!is_empty()`.
+    ///
+    /// So every occurrence of such a code in the crate's sources (outside `diag`, which declares
+    /// it) must carry a case marker within [`MARKER_REACH`] lines above it, every tag a marker
+    /// names must be a case of that code, every case must have a site and be stated in the body,
+    /// and a case's reserved wording must appear in exactly its own sites — from the marker to the
+    /// `.emit(` that ends the diagnostic. A new emission site fails until someone decides which
+    /// listed case it is, or extends the list; a case deleted from the body fails too.
+    #[test]
+    fn every_emission_site_falls_into_a_case_its_explain_text_lists() {
+        let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let mut files = Vec::new();
+        rust_sources(src, &mut files);
+        let diag = src.join("diag");
+
+        let mut failures = Vec::new();
+        let mut sites: std::collections::BTreeMap<(&str, &str), usize> = Default::default();
+        for path in files.iter().filter(|path| !path.starts_with(&diag)) {
+            let text = std::fs::read_to_string(path)
+                .unwrap_or_else(|error| panic!("{} must be readable: {error}", path.display()));
+            let lines: Vec<&str> = text.lines().collect();
+            let shown = path.strip_prefix(src).unwrap_or(path).display().to_string();
+
+            // Every marker must name an enumerating code and sit above a site of it.
+            for (at, line) in lines.iter().enumerate() {
+                let Some((code, tags)) = case_marker(line) else {
+                    continue;
+                };
+                let Some((declared, cases)) = ENUMERATED_CASES
+                    .iter()
+                    .find(|(declared, _)| declared.as_str() == code)
+                else {
+                    failures.push(format!(
+                        "src/{shown}:{}: a `{code} case:` marker, but {code} is not in \
+                         ENUMERATED_CASES",
+                        at + 1
+                    ));
+                    continue;
+                };
+                let variant = variant_name(*declared);
+                let attached = lines[at + 1..]
+                    .iter()
+                    .take(MARKER_REACH)
+                    .any(|below| mentions_variant(below, variant));
+                if !attached {
+                    failures.push(format!(
+                        "src/{shown}:{}: a `{code} case:` marker with no `Code::{variant}` in the \
+                         {MARKER_REACH} lines below it",
+                        at + 1
+                    ));
+                }
+                let region: String = lines[at..]
+                    .iter()
+                    .take_while({
+                        let mut done = false;
+                        move |line| !std::mem::replace(&mut done, line.contains(".emit("))
+                    })
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for tag in &tags {
+                    match cases.iter().find(|case| case.tag == *tag) {
+                        Some(case) => *sites.entry((declared.as_str(), case.tag)).or_default() += 1,
+                        None => failures.push(format!(
+                            "src/{shown}:{}: {code} has no case `{tag}`; its explain text lists \
+                             {:?}",
+                            at + 1,
+                            cases.iter().map(|case| case.tag).collect::<Vec<_>>()
+                        )),
+                    }
+                }
+                for case in cases.iter() {
+                    let Some(wording) = case.reserved_wording else {
+                        continue;
+                    };
+                    let tagged = tags.contains(&case.tag);
+                    let says = region.contains(wording);
+                    if tagged != says {
+                        failures.push(format!(
+                            "src/{shown}:{}: a {code} site {} `{}` but {} {wording:?}, the wording \
+                             reserved to that case",
+                            at + 1,
+                            if tagged { "tagged" } else { "not tagged" },
+                            case.tag,
+                            if says { "says" } else { "does not say" },
+                        ));
+                    }
+                }
+            }
+
+            // Every site of an enumerating code must carry a marker for it.
+            for (code, _) in ENUMERATED_CASES {
+                let variant = variant_name(*code);
+                for (at, line) in lines.iter().enumerate() {
+                    if !mentions_variant(line, variant) {
+                        continue;
+                    }
+                    let marked = lines[at.saturating_sub(MARKER_REACH)..at]
+                        .iter()
+                        .any(|above| case_marker(above).is_some_and(|(c, _)| c == code.as_str()));
+                    if !marked {
+                        failures.push(format!(
+                            "src/{shown}:{}: `Code::{variant}` with no `// {code} case: <case>` \
+                             marker in the {MARKER_REACH} lines above it — decide which case of \
+                             `spargen explain {code}` this site is, or add one to the explain text \
+                             and to ENUMERATED_CASES",
+                            at + 1
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (code, cases) in ENUMERATED_CASES {
+            for case in cases.iter() {
+                if !code.explain().contains(case.stated_as) {
+                    failures.push(format!(
+                        "`spargen explain {code}` no longer states case `{}`: {:?}",
+                        case.tag, case.stated_as
+                    ));
+                }
+                if !sites.contains_key(&(code.as_str(), case.tag)) {
+                    failures.push(format!(
+                        "{code} case `{}` has no emission site; drop it from the explain text and \
+                         from ENUMERATED_CASES, or mark the site that reports it",
+                        case.tag
+                    ));
+                }
+            }
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// CLAUDE.md: every code gets "a fixture in `spargen/tests/frontend.rs`", enforced by tests
-    /// rather than convention. Frontend codes are asserted there; the seven the frontend cannot
-    /// produce — the `compat` omit rules and the facade's own Cargo-integration and
-    /// runtime-audit diagnostics — are asserted in the suite that *can* produce them, and each
+    /// rather than convention. Frontend codes are asserted there; the eight the frontend cannot
+    /// produce — the `compat` omit rules, the facade's own Cargo-integration and runtime-audit
+    /// diagnostics, and `spargen lock`'s fetch failure — are asserted in the suite that *can* produce them, and each
     /// must say so here. A new code that lands in neither place fails, which is the point.
     #[test]
     fn every_code_is_asserted_by_the_suite_that_owns_it() {
@@ -670,6 +1180,9 @@ mod tests {
             // spec; `frontend.rs` deliberately runs every fixture with the integration off.
             ("CargoIntegrationDegraded", "config.rs"),
             ("CargoIntegrationRequired", "config.rs"),
+            // `spargen lock`'s fetch failure: `check`/`generate` never fetch, so only a vendor
+            // run over the real fetcher can produce it.
+            ("RemoteFetchFailed", "vendor_remote.rs"),
         ];
 
         let Some(root) = repo_root() else {
@@ -715,6 +1228,161 @@ mod tests {
                     .iter()
                     .any(|code| variant_name(*code) == *variant),
                 "OWNED_ELSEWHERE names `{variant}`, which is not a declared Code variant"
+            );
+        }
+    }
+
+    /// A clause of an `explain()` body whose **behaviour** is enforced by fixtures in another
+    /// module, recorded so that the connection between the prose and those fixtures is written
+    /// down and checkable, rather than re-derived by whoever notices the clause is unasserted.
+    struct ExplainClauseOwner {
+        code: Code,
+        /// Verbatim text of the body; it must occur there exactly once.
+        clause: &'static str,
+        /// The module whose `#[test]`s enforce the clause, and its source.
+        module: (&'static str, &'static str),
+        /// Names of `#[test]` functions in `module` that fail when the behaviour breaks. Where they
+        /// establish less than the clause says, a comment on the row states the gap.
+        fixtures: &'static [&'static str],
+    }
+
+    const RUNTIME_CONTRACT: (&str, &str) = (
+        "runtime_contract.rs",
+        include_str!("../runtime_contract.rs"),
+    );
+
+    /// The sibling of `OWNED_ELSEWHERE` for explain **prose**. `OWNED_ELSEWHERE` records which
+    /// suite asserts that a code is *emitted*; this records which fixtures enforce what a body
+    /// *says*, for clauses no test asserts as text.
+    ///
+    /// `E023`'s body is pinned byte for byte by
+    /// `runtime_contract::tests::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`,
+    /// which additionally cites a fixture for each sentence stating what the resolver does, and by
+    /// its own rule does not cite fixtures for sentences that give advice. The consumer-obligations
+    /// clauses below fall outside that rule — most read as advice — yet each is enforced by an
+    /// existing fixture, and one (reqwest's default features) is a named `E023` trigger in the
+    /// support matrix's rejected column, not advice at all. This table is where that ownership is
+    /// recorded, so the byte-for-byte test's rule need not change.
+    ///
+    /// What the check is worth, precisely: it catches a clause edited or deleted from the body and
+    /// a fixture renamed or removed. It does not verify that a cited fixture has anything to do
+    /// with the clause citing it; that is a reviewer's reading, and holding prose to behaviour in
+    /// general is #137.
+    const EXPLAIN_CLAUSES_OWNED_ELSEWHERE: &[ExplainClauseOwner] = &[
+        ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause: "its consuming Cargo package must declare the crates and dependency features \
+                     referenced by that specific API",
+            module: RUNTIME_CONTRACT,
+            fixtures: &[
+                // Each missing crate or feature is reported, and only when the API uses it.
+                "conditional_dependencies_and_features_are_required_only_when_used",
+                "reqwest_defaults_and_blocking_wiring_are_part_of_the_contract",
+            ],
+        },
+        ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause: "Use the documented tested lower bounds",
+            module: RUNTIME_CONTRACT,
+            fixtures: &["a_requirement_that_admits_a_version_below_the_floor_is_rejected"],
+        },
+        ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause: "(or a higher semver-compatible caret floor)",
+            module: RUNTIME_CONTRACT,
+            fixtures: &["exact_floors_and_higher_compatible_caret_requirements_are_supported"],
+        },
+        ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause: "keep reqwest default features disabled",
+            module: RUNTIME_CONTRACT,
+            fixtures: &["reqwest_defaults_and_blocking_wiring_are_part_of_the_contract"],
+        },
+        ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            // A rule, not a list: the body once enumerated "reqwest/bytes/XML/UUID/time" and so
+            // omitted `futures-core` and tokio's `rt`, which the diagnostic also names (#172).
+            // Whatever the requirement table demands, the diagnostic names, so this cannot go
+            // stale as the table grows.
+            clause: "enable only the capabilities the diagnostic names",
+            module: RUNTIME_CONTRACT,
+            // Not covered: these pin that the diagnostic names exactly the capabilities the API
+            // uses, including `futures-core` for streams and tokio for `blocking` (and never
+            // `serde` on `time`). The audit does not reject a capability enabled beyond that set,
+            // so "only" is advice, and no fixture enforces it.
+            fixtures: &[
+                "conditional_dependencies_and_features_are_required_only_when_used",
+                "reqwest_defaults_and_blocking_wiring_are_part_of_the_contract",
+                "the_time_requirement_never_asks_for_serde",
+            ],
+        },
+    ];
+
+    /// Every way `owner` has gone stale: its clause no longer occurs exactly once in the body, it
+    /// cites no fixture, or a fixture it cites is not a `#[test]` in its module.
+    fn explain_clause_owner_failures(owner: &ExplainClauseOwner) -> Vec<String> {
+        let mut failures = Vec::new();
+        let code = owner.code;
+        let occurrences = code.explain().matches(owner.clause).count();
+        if occurrences != 1 {
+            failures.push(format!(
+                "`spargen explain {code}` says {:?} {occurrences} times, expected exactly once; \
+                 bring EXPLAIN_CLAUSES_OWNED_ELSEWHERE in line with the body",
+                owner.clause
+            ));
+        }
+        if owner.fixtures.is_empty() {
+            failures.push(format!("no fixture cited for {code}'s {:?}", owner.clause));
+        }
+        let (module, source) = owner.module;
+        for fixture in owner.fixtures {
+            if !crate::diag::is_test_fn(source, fixture) {
+                failures.push(format!(
+                    "{code}'s {:?} names `{fixture}` as a fixture that enforces it, and no \
+                     `#[test]` of that name exists in {module}",
+                    owner.clause
+                ));
+            }
+        }
+        failures
+    }
+
+    #[test]
+    fn explain_clauses_owned_elsewhere_resolve_to_fixtures_that_exist() {
+        let failures: Vec<String> = EXPLAIN_CLAUSES_OWNED_ELSEWHERE
+            .iter()
+            .flat_map(explain_clause_owner_failures)
+            .collect();
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    /// The check's own falsifiers: a row whose clause is not in the body, whose fixture is a
+    /// helper rather than a `#[test]`, whose fixture does not exist, or that cites nothing, must
+    /// each be refused.
+    #[test]
+    fn the_explain_ownership_check_refuses_a_stale_clause_or_fixture() {
+        let row = |clause, fixtures| ExplainClauseOwner {
+            code: Code::RuntimeDependencyContract,
+            clause,
+            module: RUNTIME_CONTRACT,
+            fixtures,
+        };
+        const LIVE: &[&str] = &["reqwest_defaults_and_blocking_wiring_are_part_of_the_contract"];
+        let clause = "keep reqwest default features disabled";
+
+        assert!(explain_clause_owner_failures(&row(clause, LIVE)).is_empty());
+        for stale in [
+            row("keep reqwest default features enabled", LIVE),
+            row(clause, &["replace_once"]),
+            row(clause, &["no_such_fixture_exists"]),
+            row(clause, &[]),
+        ] {
+            assert_eq!(
+                explain_clause_owner_failures(&stale).len(),
+                1,
+                "{:?} citing {:?}",
+                stale.clause,
+                stale.fixtures
             );
         }
     }

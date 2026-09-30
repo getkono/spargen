@@ -55,6 +55,10 @@ pub(crate) struct SpecArgs {
     /// Max diagnostics collected before batching stops (default 100).
     #[arg(long, value_name = "COUNT")]
     pub(crate) batch_cap: Option<usize>,
+    /// Lower a response body's own string `enum`/`const` narrowings of a plain `string` as open
+    /// enums, so a value the description does not list still decodes.
+    #[arg(long)]
+    pub(crate) open_narrowing: bool,
     /// Omit a path item and every operation under it (repeatable), e.g. `--omit-path /pets/{id}`.
     #[arg(long = "omit-path", value_name = "PATH")]
     pub(crate) omit_path: Vec<String>,

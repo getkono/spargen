@@ -18,6 +18,7 @@
 //!     no_uuid,
 //!     no_time,
 //!     carve,
+//!     open_narrowing,
 //!     error_body_cap = 65536,
 //!     batch_cap = 100,
 //!     omit {
@@ -109,6 +110,7 @@ struct Args {
     no_uuid: bool,
     no_time: bool,
     carve: bool,
+    open_narrowing: bool,
     error_body_cap: Option<usize>,
     batch_cap: Option<usize>,
     omit: spargen::Omit,
@@ -120,6 +122,7 @@ impl Parse for Args {
         let mut no_uuid = false;
         let mut no_time = false;
         let mut carve = false;
+        let mut open_narrowing = false;
         let mut error_body_cap = None;
         let mut batch_cap = None;
         let mut omit = spargen::Omit::default();
@@ -151,6 +154,7 @@ impl Parse for Args {
                     "no_uuid" => no_uuid = true,
                     "no_time" => no_time = true,
                     "carve" => carve = true,
+                    "open_narrowing" => open_narrowing = true,
                     "error_body_cap" => {
                         input.parse::<Token![=]>()?;
                         error_body_cap = Some(parse_usize(input)?);
@@ -165,7 +169,8 @@ impl Parse for Args {
                             key.span(),
                             format!(
                                 "unknown argument `{other}`; expected a spec path or one of: \
-                                 no_uuid, no_time, carve, error_body_cap, batch_cap, omit"
+                                 no_uuid, no_time, carve, open_narrowing, error_body_cap, batch_cap, \
+                                 omit"
                             ),
                         ));
                     }
@@ -186,6 +191,7 @@ impl Parse for Args {
             no_uuid,
             no_time,
             carve,
+            open_narrowing,
             error_body_cap,
             batch_cap,
             omit,
@@ -195,7 +201,12 @@ impl Parse for Args {
 
 fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
     let raw = args.spec.value();
-    let spec_path = resolve_spec_path(&raw);
+    let consumer = Consumer::locate(
+        std::env::var_os("CARGO_MANIFEST_PATH"),
+        std::env::var_os("CARGO_MANIFEST_DIR"),
+    )
+    .map_err(|message| syn::Error::new(args.spec.span(), message))?;
+    let spec_path = consumer.resolve_spec_path(&raw);
 
     // The config file is discovered beside the spec, then macro arguments override it — the same
     // precedence the CLI and `build.rs` use.
@@ -212,6 +223,9 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
     if args.carve {
         config = config.carve(true);
     }
+    if args.open_narrowing {
+        config = config.open_narrowing(true);
+    }
     for rule in &args.omit.rules {
         config = config.omit_rule(rule.clone());
     }
@@ -224,16 +238,7 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
 
     // Keep spargen's codegen (and the tokenization below) off the compiler bridge; restored on drop.
     let _fallback = FallbackGuard::force();
-    let manifest = std::env::var("CARGO_MANIFEST_PATH")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
-            std::path::Path::new(
-                &std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned()),
-            )
-            .join("Cargo.toml")
-        });
-    let manifest = manifest.to_string_lossy();
-    let preview = spargen::__private::preview_for_macro(&config, &manifest);
+    let preview = spargen::__private::preview_for_macro(&config, &consumer.manifest);
 
     let errors: Vec<&spargen::Diagnostic> = preview
         .report
@@ -400,27 +405,168 @@ fn parse_pointers(
     Ok(())
 }
 
-/// Resolve a spec path relative to the **consumer crate's** manifest directory (as `build.rs` and
-/// build scripts do from that crate root), so `generate_api!("openapi.yaml")` finds a spec beside the
-/// caller's `Cargo.toml`. Absolute paths pass through unchanged.
-fn resolve_spec_path(raw: &str) -> String {
-    let path = std::path::Path::new(raw);
-    if path.is_absolute() {
-        return raw.to_owned();
+/// The crate `generate_api!` is expanding for, as the build driver names it.
+///
+/// Both the spec path and the manifest the runtime-dependency audit (`E023`) reads come from here,
+/// and neither ever falls back to the working directory. Under a Cargo workspace build the working
+/// directory is the **workspace root**, whose `Cargo.toml` is usually virtual: auditing it reports
+/// every runtime dependency missing at spargen's floor version, a confident, specific, wrong
+/// diagnostic about a file the consumer never pointed at. Not knowing the crate is an error.
+#[derive(Debug, PartialEq, Eq)]
+struct Consumer {
+    /// The directory a relative spec path resolves against.
+    dir: String,
+    /// The manifest the audit reads.
+    manifest: String,
+}
+
+impl Consumer {
+    /// Locate the consumer from `CARGO_MANIFEST_PATH` and `CARGO_MANIFEST_DIR`, passed in rather
+    /// than read here so the decision is testable without mutating the process environment.
+    ///
+    /// `CARGO_MANIFEST_PATH` names the manifest when set; otherwise it is `Cargo.toml` inside
+    /// `CARGO_MANIFEST_DIR`. The spec directory is `CARGO_MANIFEST_DIR`, or the manifest's parent
+    /// when only the path is set. An empty value is treated as unset, since joining onto it would
+    /// reproduce the working-directory guess. Paths must be UTF-8: a lossy conversion would name
+    /// a different file.
+    fn locate(
+        manifest_path: Option<std::ffi::OsString>,
+        manifest_dir: Option<std::ffi::OsString>,
+    ) -> Result<Self, String> {
+        let utf8 =
+            |name: &str, value: Option<std::ffi::OsString>| -> Result<Option<String>, String> {
+                match value {
+                    None => Ok(None),
+                    Some(value) if value.is_empty() => Ok(None),
+                    Some(value) => value.into_string().map(Some).map_err(|value| {
+                        format!(
+                        "spargen cannot locate the consuming crate: `{name}` is not valid UTF-8 \
+                         ({})",
+                        std::path::Path::new(&value).display()
+                    )
+                    }),
+                }
+            };
+        let manifest_path = utf8("CARGO_MANIFEST_PATH", manifest_path)?;
+        let manifest_dir = utf8("CARGO_MANIFEST_DIR", manifest_dir)?;
+        match (manifest_path, manifest_dir) {
+            (Some(manifest), Some(dir)) => Ok(Consumer { dir, manifest }),
+            (Some(manifest), None) => {
+                let dir = match std::path::Path::new(&manifest).parent() {
+                    Some(parent) if !parent.as_os_str().is_empty() => {
+                        parent.to_string_lossy().into_owned()
+                    }
+                    _ => ".".to_owned(),
+                };
+                Ok(Consumer { dir, manifest })
+            }
+            (None, Some(dir)) => {
+                let manifest = std::path::Path::new(&dir)
+                    .join("Cargo.toml")
+                    .to_string_lossy()
+                    .into_owned();
+                Ok(Consumer { dir, manifest })
+            }
+            (None, None) => Err("spargen cannot locate the consuming crate: neither \
+                 `CARGO_MANIFEST_PATH` nor `CARGO_MANIFEST_DIR` is set, so there is no \
+                 `Cargo.toml` to resolve the spec against or to audit runtime dependencies in. \
+                 Expand `generate_api!` under Cargo, or have the build driver set \
+                 `CARGO_MANIFEST_DIR` to the consuming crate's directory."
+                .to_owned()),
+        }
     }
-    match std::env::var("CARGO_MANIFEST_DIR") {
-        Ok(dir) => std::path::Path::new(&dir)
+
+    /// Resolve a spec path relative to the consumer crate's directory (as `build.rs` does from
+    /// that crate root), so `generate_api!("openapi.yaml")` finds a spec beside the caller's
+    /// `Cargo.toml`. Absolute paths pass through unchanged.
+    fn resolve_spec_path(&self, raw: &str) -> String {
+        let path = std::path::Path::new(raw);
+        if path.is_absolute() {
+            return raw.to_owned();
+        }
+        std::path::Path::new(&self.dir)
             .join(path)
             .to_string_lossy()
-            .into_owned(),
-        Err(_) => raw.to_owned(),
+            .into_owned()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::{Args, Consumer};
     use spargen::{ComponentKind, OmitMethod, OmitRule};
+
+    fn os(value: &str) -> Option<std::ffi::OsString> {
+        Some(value.into())
+    }
+
+    #[test]
+    fn an_unnamed_consumer_is_an_error_not_the_working_directory() {
+        // #195: with neither variable set, the macro used to audit `./Cargo.toml` — under a
+        // workspace build, the (usually virtual) workspace root — and report every runtime
+        // dependency missing at spargen's floor version. Not knowing the crate must be an error.
+        let error = Consumer::locate(None, None).unwrap_err();
+        assert!(
+            error.contains("CARGO_MANIFEST_PATH") && error.contains("CARGO_MANIFEST_DIR"),
+            "{error}"
+        );
+        // An empty value joined onto would reproduce the same working-directory guess.
+        assert_eq!(Consumer::locate(os(""), os("")).unwrap_err(), error);
+    }
+
+    #[test]
+    fn the_consumer_comes_from_whichever_variable_cargo_set() {
+        let dir = "/work/member";
+        let manifest = "/work/member/Cargo.toml";
+        let expected = Consumer {
+            dir: dir.to_owned(),
+            manifest: manifest.to_owned(),
+        };
+        assert_eq!(Consumer::locate(os(manifest), os(dir)).unwrap(), expected);
+        assert_eq!(Consumer::locate(None, os(dir)).unwrap(), expected);
+        assert_eq!(Consumer::locate(os(manifest), None).unwrap(), expected);
+        // An empty variable beside a set one is ignored, not joined onto.
+        assert_eq!(Consumer::locate(os(""), os(dir)).unwrap(), expected);
+        assert_eq!(Consumer::locate(os(manifest), os("")).unwrap(), expected);
+
+        let consumer = Consumer::locate(None, os(dir)).unwrap();
+        assert_eq!(
+            consumer.resolve_spec_path("openapi.yaml"),
+            std::path::Path::new(dir)
+                .join("openapi.yaml")
+                .to_string_lossy()
+        );
+        assert_eq!(consumer.resolve_spec_path(manifest), manifest);
+
+        // A bare relative manifest path has an empty parent; the spec directory is then the one
+        // that path is relative to, spelled `.`, never an empty prefix.
+        let bare = Consumer::locate(os("Cargo.toml"), None).unwrap();
+        assert_eq!(
+            bare,
+            Consumer {
+                dir: ".".to_owned(),
+                manifest: "Cargo.toml".to_owned(),
+            }
+        );
+        assert_eq!(
+            bare.resolve_spec_path("openapi.yaml"),
+            std::path::Path::new(".")
+                .join("openapi.yaml")
+                .to_string_lossy()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_location_is_an_error_not_a_lossy_path() {
+        use std::os::unix::ffi::OsStringExt;
+        let invalid = std::ffi::OsString::from_vec(b"/work/\xFF/Cargo.toml".to_vec());
+        let error = Consumer::locate(Some(invalid), None).unwrap_err();
+        assert!(
+            error.contains("`CARGO_MANIFEST_PATH` is not valid UTF-8"),
+            "{error}"
+        );
+    }
 
     #[test]
     fn parses_every_build_configuration_control() {
