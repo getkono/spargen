@@ -33,6 +33,11 @@ What it exercises:
   `source()`, and nothing reaches the mock.
 - **Error taxonomy** — a documented `404` arrives as the operation's typed error body; an
   undocumented `401` is preserved as `Error::UnexpectedStatus` and classified non-transient.
+- **Problem details** — `createPet` and `deletePet` document RFC 9457 problems whose `type` each
+  status narrows to one value. `build.rs` turns on `open_narrowing`, so when the mock answers with
+  a problem type the description does not list, the call still fails as the typed `409` body
+  (without the option it would be `Error::Decode`), and one `Error::problem()` reader, generic over
+  the operation, reads `type` and `detail` from both operations' problems.
 
 To review and commit the generated client, change the `build.rs` output to `src/petstore.rs` and
 include it as a normal module. Generation remains a compilation-time step.

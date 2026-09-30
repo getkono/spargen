@@ -86,11 +86,12 @@ pub(crate) fn lower(
     document: &Document,
     resolver: &Resolver,
     diags: &mut Diagnostics,
+    options: LowerOptions,
 ) -> Result<Api, Aborted> {
     let mut settled = HashMap::new();
     loop {
         let mut pass = diags.clone();
-        let (api, revisions) = lower_pass(document, resolver, &mut pass, &settled);
+        let (api, revisions) = lower_pass(document, resolver, &mut pass, &settled, options);
         let mut changed = false;
         for (reservation, nullable) in revisions {
             if let std::collections::hash_map::Entry::Vacant(entry) = settled.entry(reservation) {
@@ -122,6 +123,7 @@ fn lower_pass(
     resolver: &Resolver,
     diags: &mut Diagnostics,
     settled: &HashMap<Reservation, bool>,
+    options: LowerOptions,
 ) -> (Result<Api, Aborted>, Vec<(Reservation, bool)>) {
     let mut security_schemes = lower_security_schemes(document, diags);
     // OpenAPI 3.2 lets a security requirement name a Security Scheme Object by URI instead of by
@@ -150,6 +152,9 @@ fn lower_pass(
         guessed: HashSet::new(),
         revisions: Vec::new(),
         depth: 0,
+        open_narrowing: options.open_narrowing,
+        narrowing_opens: false,
+        open_candidates: HashSet::new(),
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -564,6 +569,26 @@ struct LowerCtx<'a, 'doc> {
     /// decremented on exit. A `$ref`/allOf/array/object chain that pushes this past
     /// [`MAX_SCHEMA_DEPTH`] is rejected (`E014`) rather than allowed to overflow the stack.
     depth: u32,
+    /// The `open_narrowing` option: whether a string `enum`/`const` narrowing a plain `string`
+    /// is lowered as an open set where [`Self::narrowing_opens`] allows it.
+    open_narrowing: bool,
+    /// Whether the schema being lowered right now is one `open_narrowing` applies to: set by
+    /// [`Self::lower_chosen_response_body`] for a response body's own schema, and cleared by
+    /// [`Self::closed_narrowing`] for every `$ref` target and every `oneOf`/`anyOf` lowered inside
+    /// it. Always `false` while the option is off.
+    narrowing_opens: bool,
+    /// The string sets [`Self::lower_enum`] lowered while [`Self::narrowing_opens`] held: each is
+    /// the type of one inline `enum`/`const` in a position `open_narrowing` applies to, and no
+    /// `$ref` target, memo, or union reaches it, so [`Self::narrowed_string`] opens it in place
+    /// rather than leaving it beside an open copy as an unused public type.
+    open_candidates: HashSet<TypeId>,
+}
+
+/// The options that change what lowering produces.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LowerOptions {
+    /// `Spec::open_narrowing`: lower a response body's own string narrowings as open sets.
+    pub(crate) open_narrowing: bool,
 }
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -591,6 +616,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// memos do not compete for one target: a resolved reference that lands on a root component
     /// comes straight back here by name, so `components` stays the single identity for those.
     fn ensure_component(
+        &mut self,
+        name: &str,
+        reference: Option<&str>,
+        at: &crate::diag::Provenance,
+    ) -> Option<Ty> {
+        self.closed_narrowing(|ctx| ctx.ensure_component_closed(name, reference, at))
+    }
+
+    /// [`Self::ensure_component`]'s body, run with `open_narrowing` out of effect: a component is
+    /// a `$ref` target, lowered once and shared by every use, whichever position first reached it.
+    fn ensure_component_closed(
         &mut self,
         name: &str,
         reference: Option<&str>,
@@ -1059,6 +1095,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// schema — returns a boxed back-edge against the reserved root id, so recursion terminates and
     /// generates a finite (boxed) type instead of overflowing the stack.
     fn ensure_remote(&mut self, reference: &str) -> Option<Ty> {
+        self.closed_narrowing(|ctx| ctx.ensure_remote_closed(reference))
+    }
+
+    /// [`Self::ensure_remote`]'s body, run with `open_narrowing` out of effect, as for a component.
+    fn ensure_remote_closed(&mut self, reference: &str) -> Option<Ty> {
         if let Some(&(id, nullable)) = self.remote_components.get(reference) {
             return Some(Ty {
                 id,
@@ -1186,6 +1227,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// removed types were artefacts of lowering the same schema repeatedly — but it is a breaking
     /// change to the generated API and is released as one.
     fn ensure_resolved(&mut self, reference: &str, at: &Provenance, hint: &str) -> Option<Ty> {
+        self.closed_narrowing(|ctx| ctx.ensure_resolved_closed(reference, at, hint))
+    }
+
+    /// [`Self::ensure_resolved`]'s body, run with `open_narrowing` out of effect, as for a
+    /// component.
+    fn ensure_resolved_closed(
+        &mut self,
+        reference: &str,
+        at: &Provenance,
+        hint: &str,
+    ) -> Option<Ty> {
         let resolved = self.resolver.resolve(reference, at, self.diags).ok()?;
         let schema = resolved.schema.into_owned();
         let Some(key) = resolved_identity(&schema.provenance) else {
@@ -1664,6 +1716,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// graph insert — preserving the [`Self::ensure_component`] last-insert invariant when the union
     /// is a component body.
     fn lower_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        self.closed_narrowing(|ctx| ctx.lower_union_closed(schema, hint))
+    }
+
+    /// [`Self::lower_union`]'s body, run with `open_narrowing` out of effect. A union tells its
+    /// variants apart by what each one refuses — a `Trial` `oneOf` requires exactly one to match —
+    /// so an open set inside a variant could make two variants accept the same value and fail a
+    /// value the closed union decodes.
+    fn lower_union_closed(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let (members, mode): (Vec<&SchemaOr>, UnionMode) =
             match (schema.one_of.is_empty(), schema.any_of.is_empty()) {
                 (false, true) => (schema.one_of.iter().collect(), UnionMode::OneOf),
@@ -2967,6 +3027,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
+        // The target's contribution is memoised and replayed at every later use of it, so what it
+        // lowers must not depend on the position that first reached it: it is a `$ref` target,
+        // and `open_narrowing` is out of effect there. The merge of its fields with the enclosing
+        // members' still happens at the use site.
+        self.closed_narrowing(|ctx| ctx.gather_resolved_target_closed(target, hint, out))
+    }
+
+    /// [`Self::gather_resolved_target`]'s body, run with `open_narrowing` out of effect.
+    fn gather_resolved_target_closed(
+        &mut self,
+        target: Schema,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
         if self.depth >= MAX_SCHEMA_DEPTH {
             return self.reject_too_deep(&target.provenance);
         }
@@ -3493,6 +3567,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ))
                 }
             }
+            // A set's variants are the values the description lists, open or not: `open` says only
+            // that the lowering also holds an unlisted string, because a plain `string` was met
+            // (`narrowed_string`). So two sets meet in the values both list, open when either is.
+            // Both parts are order-independent (an intersection and a disjunction), so an `allOf`
+            // lowers to the same set whichever order its members are written in; keeping the
+            // closed side whole instead would admit values the open side's description forbids.
+            // Where `open_narrowing` is out of effect (inside a union, which `intersect_union`
+            // reaches with a set the response already opened) the meet is closed: two variants
+            // that each held an unlisted string would both match it, and the trial union would
+            // refuse every value.
             (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
                 let variants: Vec<ScalarValue> = left
                     .variants
@@ -3500,19 +3584,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .filter(|value| right.variants.contains(value))
                     .cloned()
                     .collect();
+                let open = self.narrowing_opens && (left.open || right.open);
                 if variants.is_empty() {
                     // Both value sets are finite and listed in full, so sharing no value is proof.
                     Err(NoMeet::Empty)
-                } else if variants == left.variants {
+                } else if variants == left.variants && open == left.open {
                     Ok(non_nullable(a))
-                } else if variants == right.variants {
+                } else if variants == right.variants && open == right.open {
                     Ok(non_nullable(b))
+                } else if open && variants == left.variants {
+                    Ok(self.opened_set(a, left))
+                } else if open && variants == right.variants {
+                    Ok(self.opened_set(b, right))
                 } else {
                     Ok(self.insert_type(
                         hint,
                         TypeKind::Enum(ScalarEnum {
                             repr: left.repr,
                             variants,
+                            open,
                         }),
                         Docs::default(),
                         None,
@@ -3522,12 +3612,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (TypeKind::Enum(enumeration), TypeKind::Primitive(primitive))
                 if enum_matches_primitive(enumeration.repr, *primitive) =>
             {
-                Ok(non_nullable(a))
+                Ok(self.narrowed_string(a, enumeration, *primitive, hint))
             }
             (TypeKind::Primitive(primitive), TypeKind::Enum(enumeration))
                 if enum_matches_primitive(enumeration.repr, *primitive) =>
             {
-                Ok(non_nullable(b))
+                Ok(self.narrowed_string(b, enumeration, *primitive, hint))
             }
             (TypeKind::Array(left), TypeKind::Array(right)) => {
                 let item_hint = format!("{hint}Item");
@@ -3585,8 +3675,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (TypeKind::Struct(left), TypeKind::Struct(right)) => {
                 self.intersect_structs(left, right, hint)
             }
-            (TypeKind::Union(union), _) => self.intersect_union(a, union, b, hint),
-            (_, TypeKind::Union(union)) => self.intersect_union(b, union, a, hint),
+            // A union's variants stay closed for the reason `lower_union_closed` gives; a union
+            // that narrows to one branch is no union, and `intersect_union` meets that branch where
+            // the enclosing position's answer holds.
+            (TypeKind::Union(union), _) => {
+                let enclosing = self.narrowing_opens;
+                self.closed_narrowing(|ctx| ctx.intersect_union(a, union, b, hint, enclosing))
+            }
+            (_, TypeKind::Union(union)) => {
+                let enclosing = self.narrowing_opens;
+                self.closed_narrowing(|ctx| ctx.intersect_union(b, union, a, hint, enclosing))
+            }
             (TypeKind::Bytes, TypeKind::Bytes) => Ok(non_nullable(a)),
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
             // string conjoined with it is the binary content: `{$ref: Data, format: binary}` over a
@@ -3597,6 +3696,98 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (TypeKind::Primitive(Prim::String), TypeKind::Bytes) => Ok(non_nullable(b)),
             _ => Err(no_meet(a_kind, b_kind)),
         }
+    }
+
+    /// The meet of the scalar set `set` (whose type is `enum_ty`) with the primitive `primitive` it
+    /// is a set of: the set itself, or — for a closed string set narrowing a plain `string` where
+    /// [`Self::narrowing_opens`] holds — an open set listing the same values, whose domain is the
+    /// `string` it narrowed. That is the set itself, opened, when it is one of
+    /// [`Self::open_candidates`], and a new open copy otherwise (a set that came from a `$ref`
+    /// target, or from another intersection, may be reached from where it must stay closed).
+    ///
+    /// Only a plain `string` widens it: `uuid` and the date formats have a decoded representation
+    /// of their own that an arbitrary string is not.
+    ///
+    /// A set the response already opened, met where [`Self::narrowing_opens`] does not hold (a
+    /// union variant `intersect_union` meets it with), is a new closed copy under `hint`, for the
+    /// reason the enum-meet arm of [`Self::intersect_non_null`] gives.
+    fn narrowed_string(
+        &mut self,
+        enum_ty: Ty,
+        set: &ScalarEnum,
+        primitive: Prim,
+        hint: &str,
+    ) -> Ty {
+        if set.open && !self.narrowing_opens {
+            return self.insert_type(
+                hint,
+                TypeKind::Enum(ScalarEnum {
+                    open: false,
+                    ..set.clone()
+                }),
+                Docs::default(),
+                None,
+            );
+        }
+        let opens = self.narrowing_opens
+            && set.repr == ScalarRepr::String
+            && !set.open
+            && primitive == Prim::String;
+        if !opens {
+            return non_nullable(enum_ty);
+        }
+        self.opened_set(enum_ty, set)
+    }
+
+    /// The closed set `set` (whose type is `enum_ty`), opened: in place when it is one of
+    /// [`Self::open_candidates`], and as a new open copy otherwise, as [`Self::narrowed_string`]
+    /// describes.
+    fn opened_set(&mut self, enum_ty: Ty, set: &ScalarEnum) -> Ty {
+        if self.open_candidates.contains(&enum_ty.id) {
+            if let Some(TypeKind::Enum(own)) =
+                self.graph.get_mut(enum_ty.id).map(|def| &mut def.kind)
+            {
+                own.open = true;
+                return non_nullable(enum_ty);
+            }
+        }
+        // Named for the closed set it opens, which stays in the graph where it came from.
+        let (name_hint, docs, provenance) = match self.graph.get(enum_ty.id) {
+            Some(def) => (
+                format!("{}Open", def.name_hint),
+                def.docs.clone(),
+                Some(def.provenance.clone()),
+            ),
+            None => return non_nullable(enum_ty),
+        };
+        self.insert_type(
+            &name_hint,
+            TypeKind::Enum(ScalarEnum {
+                repr: ScalarRepr::String,
+                variants: set.variants.clone(),
+                open: true,
+            }),
+            docs,
+            provenance,
+        )
+    }
+
+    /// Run `lower` with `open_narrowing` out of effect, restoring the enclosing position's answer
+    /// afterwards. Every `$ref` target and every union is lowered through this.
+    fn closed_narrowing<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> T {
+        let enclosing = std::mem::replace(&mut self.narrowing_opens, false);
+        let lowered = lower(self);
+        self.narrowing_opens = enclosing;
+        lowered
+    }
+
+    /// Run `lower` over a response body's own schema: with `open_narrowing` in effect when the
+    /// option is on, restoring the enclosing answer afterwards.
+    fn response_narrowing<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> T {
+        let enclosing = std::mem::replace(&mut self.narrowing_opens, self.open_narrowing);
+        let lowered = lower(self);
+        self.narrowing_opens = enclosing;
+        lowered
     }
 
     /// The intersection of a homogeneous array whose items are `item` with the tuple `tuple`, whose
@@ -3712,12 +3903,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ))
     }
 
+    /// The meet of the union `union` (whose type is `union_ty`) with `other`, branch by branch.
+    /// Called with `open_narrowing` out of effect, so every retained branch is closed.
+    /// `enclosing_opens` is [`Self::narrowing_opens`] where the meet was asked for: when exactly one
+    /// branch survives, the result is no union, and that branch is met again under that answer, so
+    /// the meet is the same set whichever order the `allOf` writes the union and the `string` in
+    /// (written first, the union narrows to that branch before the `string` opens it).
     fn intersect_union(
         &mut self,
         union_ty: Ty,
         union: &Union,
         other: Ty,
         hint: &str,
+        enclosing_opens: bool,
     ) -> Result<Ty, NoMeet> {
         let mut variants = Vec::new();
         let mut retained = Vec::new();
@@ -3739,6 +3937,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
         if variants.len() == 1 {
+            if enclosing_opens {
+                let branch = union.variants[retained[0]].ty;
+                return self.response_narrowing(|ctx| ctx.intersect_types(branch, other, hint));
+            }
             return Ok(variants.remove(0).ty);
         }
         if variants.is_empty() {
@@ -3980,14 +4182,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate that
         // preserves the component-root last-insert invariant asserted in `ensure_component`.
+        let repr = repr.unwrap_or(ScalarRepr::String);
         let mut ty = self.insert_schema_type(
             schema,
             hint,
             TypeKind::Enum(ScalarEnum {
-                repr: repr.unwrap_or(ScalarRepr::String),
+                repr,
                 variants,
+                open: false,
             }),
         );
+        if self.narrowing_opens && repr == ScalarRepr::String {
+            self.open_candidates.insert(ty.id);
+        }
         ty.nullable = has_null;
         Some(ty)
     }
@@ -5028,7 +5235,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                  value: object,
                  narrowing,
              }| {
-                let lowered = self.lower_chosen_response_body(response, media_name, object)?;
+                let lowered = self.response_narrowing(|ctx| {
+                    ctx.lower_chosen_response_body(response, media_name, object)
+                })?;
                 // `W014` is emitted only once the gates in `lower_chosen_response_body` have
                 // accepted the selection; a refused one is reported by its `E009` alone.
                 if let Some(narrowing) = narrowing {

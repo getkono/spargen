@@ -286,6 +286,122 @@ impl<E: ApiErrorBody> Error<E> {
     }
 }
 
+/// The RFC 9457 problem-details members of an error response body, read by name.
+///
+/// Each member is `Some` only when the body is a JSON object that carries it with the type RFC 9457
+/// gives it: a string for `type`, `title`, `detail`, and `instance`, and an integer in the HTTP
+/// status range for `status`. A member that is absent, or present with another type, is `None`;
+/// the RFC's own rule for such a member is to ignore it. Nothing here asserts that the server meant
+/// the body as problem details: an object body that is not one still answers with whichever of
+/// these member names it happens to carry. Extension members are not read; the typed body, or the
+/// raw one, still has them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProblemDetails {
+    /// The `type` member: a URI reference naming the problem type. RFC 9457 reads an absent one
+    /// as `about:blank`, which [`ProblemDetails::problem_type_or_blank`] applies.
+    pub problem_type: Option<String>,
+    /// The `title` member: a short summary of the problem type.
+    pub title: Option<String>,
+    /// The `status` member: the status code the origin server generated for this occurrence.
+    pub status: Option<u16>,
+    /// The `detail` member: an explanation specific to this occurrence.
+    pub detail: Option<String>,
+    /// The `instance` member: a URI reference naming this occurrence.
+    pub instance: Option<String>,
+}
+
+impl ProblemDetails {
+    /// The members of `body` as it serializes to JSON: `None` when it does not serialize to a JSON
+    /// object (a string, an array, `null`, or a failed serialization).
+    pub fn of<T: serde::Serialize + ?Sized>(body: &T) -> Option<Self> {
+        Self::from_value(&serde_json::to_value(body).ok()?)
+    }
+
+    /// The members of a raw JSON body: `None` when the bytes are not a JSON object, which includes
+    /// a body truncated by the error-body cap.
+    pub fn from_json(body: &[u8]) -> Option<Self> {
+        Self::from_value(&serde_json::from_slice(body).ok()?)
+    }
+
+    fn from_value(value: &serde_json::Value) -> Option<Self> {
+        let object = value.as_object()?;
+        let text = |name: &str| {
+            object
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+        };
+        Some(Self {
+            problem_type: text("type"),
+            title: text("title"),
+            status: object
+                .get("status")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|status| u16::try_from(status).ok())
+                .filter(|status| (100..=599).contains(status)),
+            detail: text("detail"),
+            instance: text("instance"),
+        })
+    }
+
+    /// The problem type, with RFC 9457's default applied: `about:blank` when the body carries no
+    /// string `type` member.
+    pub fn problem_type_or_blank(&self) -> &str {
+        self.problem_type.as_deref().unwrap_or("about:blank")
+    }
+}
+
+/// Implemented by every generated operation error type, so code generic over operations can read
+/// the RFC 9457 members of whichever documented error body a failure carried, without naming each
+/// status's body type.
+///
+/// Every shape implements it: the multi-status enum answers from the variant's body (and `None`
+/// for a documented bodyless status), the single-body newtype from its one body, and the
+/// uninhabited `Infallible` shape never answers. A body read as raw bytes (`bytes::Bytes`) answers
+/// `None`. [`Error::problem`] is the reader to call; this trait is its bound.
+pub trait ApiErrorProblem {
+    /// The problem-details members of the documented body this value carries, if its status
+    /// documents one that serializes to a JSON object.
+    fn problem(&self) -> Option<ProblemDetails>;
+}
+
+impl ApiErrorProblem for std::convert::Infallible {
+    fn problem(&self) -> Option<ProblemDetails> {
+        match *self {}
+    }
+}
+
+impl<E: ApiErrorProblem> Error<E> {
+    /// The RFC 9457 problem-details members of the failed call's error response body, from
+    /// whichever class carried one.
+    ///
+    /// - [`Error::Api`]: the documented body, read through `E`'s [`ApiErrorProblem`], so it works
+    ///   the same across every status of every operation, whatever body type each one decoded to.
+    /// - [`Error::Decode`] and [`Error::UnexpectedStatus`] with a `4xx` or `5xx` status: the raw
+    ///   body, parsed as JSON. This is how a documented error status whose body did not match its
+    ///   schema — a problem `type` the description does not list — still yields its `type` and
+    ///   `detail`. A success status is not read: its body was never an error response.
+    /// - Every other class produced no response body, and answers `None`.
+    pub fn problem(&self) -> Option<ProblemDetails> {
+        match self {
+            Error::Api(value) => value.inner().problem(),
+            Error::UnexpectedStatus { status, body, .. } | Error::Decode { status, body, .. } => {
+                if status.is_client_error() || status.is_server_error() {
+                    ProblemDetails::from_json(body)
+                } else {
+                    None
+                }
+            }
+            Error::RequestConstruction(_)
+            | Error::Transport(_)
+            | Error::Timeout(_)
+            | Error::Protocol(_)
+            | Error::Redirect(_)
+            | Error::InterruptedBody(_) => None,
+        }
+    }
+}
+
 impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -1730,5 +1846,156 @@ mod tests {
     fn an_uninhabited_error_body_is_never_present() {
         let error = Error::<std::convert::Infallible>::Timeout(TimeoutKind::Total);
         assert!(error.api_body().is_none());
+        assert!(error.problem().is_none());
+    }
+
+    /// `ApiBody` stands in for a generated error type whose documented body is a problem object:
+    /// it answers with a fixed problem, so the test can tell the typed path from the raw one.
+    impl super::ApiErrorProblem for ApiBody {
+        fn problem(&self) -> Option<super::ProblemDetails> {
+            Some(super::ProblemDetails {
+                detail: Some(self.0.to_owned()),
+                ..super::ProblemDetails::default()
+            })
+        }
+    }
+
+    /// `problem` answers from the typed body on `Api`, from the raw body on the two classes that
+    /// retain one (only for an error status), and `None` everywhere else.
+    #[test]
+    fn problem_is_read_exactly_where_an_error_body_was_received() {
+        for error in every_variant() {
+            let problem = error.problem();
+            match &error {
+                Error::Api(_) => {
+                    assert_eq!(
+                        problem.and_then(|problem| problem.detail).as_deref(),
+                        Some("bad request"),
+                        "the typed body answers on Api"
+                    );
+                }
+                // `every_variant`'s undocumented `418` carries an empty body, and its `Decode` a
+                // `200` success status: neither is a problem object.
+                Error::UnexpectedStatus { .. } | Error::Decode { .. } => {
+                    assert!(problem.is_none(), "{error}");
+                }
+                Error::RequestConstruction(_)
+                | Error::Transport(_)
+                | Error::Timeout(_)
+                | Error::Protocol(_)
+                | Error::Redirect(_)
+                | Error::InterruptedBody(_) => assert!(problem.is_none(), "{error}"),
+            }
+        }
+    }
+
+    const PROBLEM: &[u8] = br#"{"type":"https://example.com/probs/out-of-credit","title":"Out of credit","status":403,"detail":"Your balance is 30.","instance":"/account/12345/msgs/abc","balance":30}"#;
+
+    /// A documented error status whose body failed to decode — a problem `type` the description
+    /// does not list — still yields its members, which is what #268 needed of a generic reader.
+    #[test]
+    fn a_decode_failure_on_an_error_status_reads_the_raw_problem() {
+        let error = Error::<ApiBody>::Decode {
+            status: StatusCode::FORBIDDEN,
+            headers: HeaderMap::new(),
+            path: "type".to_owned(),
+            body: Bytes::from_static(PROBLEM),
+            truncated: false,
+        };
+        assert_eq!(
+            error.problem(),
+            Some(super::ProblemDetails {
+                problem_type: Some("https://example.com/probs/out-of-credit".to_owned()),
+                title: Some("Out of credit".to_owned()),
+                status: Some(403),
+                detail: Some("Your balance is 30.".to_owned()),
+                instance: Some("/account/12345/msgs/abc".to_owned()),
+            })
+        );
+        let undocumented = Error::<ApiBody>::UnexpectedStatus {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(PROBLEM),
+        };
+        assert_eq!(
+            undocumented
+                .problem()
+                .and_then(|problem| problem.problem_type),
+            Some("https://example.com/probs/out-of-credit".to_owned())
+        );
+    }
+
+    /// A success status is never read, even when its body looks like a problem object: an
+    /// undecodable `200` is a success body that did not match, not an error response.
+    #[test]
+    fn a_success_status_is_never_read_as_a_problem() {
+        for status in [StatusCode::OK, StatusCode::NOT_MODIFIED] {
+            let decode = Error::<ApiBody>::Decode {
+                status,
+                headers: HeaderMap::new(),
+                path: String::new(),
+                body: Bytes::from_static(PROBLEM),
+                truncated: false,
+            };
+            assert!(decode.problem().is_none(), "{status}");
+            let unexpected = Error::<ApiBody>::UnexpectedStatus {
+                status,
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(PROBLEM),
+            };
+            assert!(unexpected.problem().is_none(), "{status}");
+        }
+    }
+
+    /// Members are read by their RFC 9457 type: a wrongly-typed member is `None` without costing
+    /// the others, a non-object body answers `None` as a whole, and so does a truncated one.
+    #[test]
+    fn problem_members_are_read_only_with_their_rfc_types() {
+        let mixed = super::ProblemDetails::from_json(
+            br#"{"type":7,"title":"t","status":"403","detail":null,"instance":"/i"}"#,
+        )
+        .expect("an object body");
+        assert_eq!(
+            mixed,
+            super::ProblemDetails {
+                problem_type: None,
+                title: Some("t".to_owned()),
+                status: None,
+                detail: None,
+                instance: Some("/i".to_owned()),
+            }
+        );
+        assert_eq!(mixed.problem_type_or_blank(), "about:blank");
+        for status in ["99", "600", "70000", "-1", "403.5"] {
+            let body = format!(r#"{{"status":{status}}}"#);
+            let read = super::ProblemDetails::from_json(body.as_bytes()).expect("an object");
+            assert_eq!(
+                read.status, None,
+                "status {status} is outside the HTTP range"
+            );
+        }
+        for body in [
+            &b"[]"[..],
+            b"\"text\"",
+            b"null",
+            b"<html>",
+            b"",
+            &PROBLEM[..40],
+        ] {
+            assert!(super::ProblemDetails::from_json(body).is_none());
+        }
+    }
+
+    /// `of` reads a typed value through its serialization, so it agrees with `from_json` over the
+    /// bytes that value would put on the wire.
+    #[test]
+    fn a_typed_body_reads_as_its_serialization() {
+        let value: serde_json::Value = serde_json::from_slice(PROBLEM).unwrap();
+        assert_eq!(
+            super::ProblemDetails::of(&value),
+            super::ProblemDetails::from_json(PROBLEM)
+        );
+        assert_eq!(super::ProblemDetails::of("not an object"), None);
+        assert_eq!(super::ProblemDetails::of(&Option::<u8>::None), None);
     }
 }

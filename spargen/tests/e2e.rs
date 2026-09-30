@@ -134,6 +134,18 @@ fn generate_fixture_crate_in_edition(
     name: &str,
     edition: &str,
 ) -> spargen::Report {
+    generate_configured_fixture_crate(spec, out, name, edition, |spec| spec)
+}
+
+/// [`generate_fixture_crate_in_edition`] with the `Spec` passed through `configure` first, for a
+/// fixture that needs a generation option set.
+fn generate_configured_fixture_crate(
+    spec: &std::path::Path,
+    out: &std::path::Path,
+    name: &str,
+    edition: &str,
+    configure: impl FnOnce(Spec) -> Spec,
+) -> spargen::Report {
     std::fs::create_dir_all(out.join("src")).unwrap();
     std::fs::write(
         out.join("Cargo.toml"),
@@ -164,11 +176,13 @@ tokio = {{ version = "1.53.1", features = ["rt"], optional = true }}
     )
     .unwrap();
     spargen::generate(
-        &Spec::new(Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap())
-            .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
-            // This test process is not a build script; the fixture crate below is compiled by a
-            // real `cargo build`, which is where the manifest audit belongs.
-            .cargo(CargoIntegration::Off),
+        &configure(Spec::new(
+            Utf8PathBuf::from_path_buf(spec.to_path_buf()).unwrap(),
+        ))
+        .build(Utf8PathBuf::from_path_buf(out.join("src/lib.rs")).unwrap())
+        // This test process is not a build script; the fixture crate below is compiled by a
+        // real `cargo build`, which is where the manifest audit belongs.
+        .cargo(CargoIntegration::Off),
     )
 }
 
@@ -2831,6 +2845,45 @@ fn every_error_shape_implements_api_error_body() {
         error.api_body().is_none()
     }
     assert!(never(&basic_client::Error::request_message("x")));
+}
+
+// `Error::problem` is generic over every operation, including an enum whose statuses carry
+// DIFFERENT body types (`getMulti`), which has no `ApiErrorBody` and so no `api_body`.
+#[test]
+fn the_problem_reader_is_generic_over_every_error_shape() {
+    fn detail<E: basic_client::ApiErrorProblem>(error: &basic_client::Error<E>) -> Option<String> {
+        error.problem().and_then(|problem| problem.detail)
+    }
+    fn api<E>(status: reqwest::StatusCode, body: E) -> basic_client::Error<E> {
+        basic_client::Error::Api(basic_client::ResponseValue::new(status, Default::default(), body))
+    }
+    // The uniform-body enum.
+    let shared = basic_client::GetSharedError::Status409(Box::new(basic_client::types::Problem {
+        title: "conflict".to_owned(),
+        detail: "dup".to_owned(),
+    }));
+    assert_eq!(detail(&api(reqwest::StatusCode::CONFLICT, shared)), Some("dup".to_owned()));
+    // The heterogeneous enum: a body with no `detail` member answers with the members it has.
+    let multi = basic_client::GetMultiError::Status404(Box::new(
+        basic_client::types::NotFoundError { reason: "gone".to_owned() },
+    ));
+    let problem = api(reqwest::StatusCode::NOT_FOUND, multi).problem().expect("an object body");
+    assert_eq!(problem, basic_client::ProblemDetails::default());
+    // A documented bodyless status, a textual body, and a raw-bytes body have no members.
+    let unit = api(reqwest::StatusCode::UNAUTHORIZED, basic_client::GetSharedError::Status401);
+    assert!(unit.problem().is_none());
+    let text = basic_client::GetRawMultiError::Status400(Box::new("bad".to_owned()));
+    assert!(api(reqwest::StatusCode::BAD_REQUEST, text).problem().is_none());
+    let raw = basic_client::GetRawMultiError::Status409(Box::new(bytes::Bytes::from_static(
+        br#"{"detail":"never read"}"#,
+    )));
+    assert!(api(reqwest::StatusCode::CONFLICT, raw).problem().is_none());
+    // The single-body newtype and the uninhabited shape.
+    let wrapped = basic_client::GetTextErrorError("nope".to_owned());
+    assert!(api(reqwest::StatusCode::BAD_REQUEST, wrapped).problem().is_none());
+    let never: basic_client::Error<std::convert::Infallible> =
+        basic_client::Error::request_message("x");
+    assert!(never.problem().is_none());
 }
 
 #[test]
@@ -7040,4 +7093,372 @@ fn a_gen_named_spec_compiles_under_edition_2024() {
         "a spec naming things `gen` must compile for an edition-2024 consumer:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+/// The RFC 9457 shape from #268: each documented error status narrows the shared `Problem`'s
+/// `type` with a `const`, spelled as an `allOf` member (`404`) and as `$ref` siblings (`409`). The
+/// positions `open_narrowing` leaves closed sit beside them: a union of narrowed problems (`400`),
+/// a narrowing inside a component (`410`), and a request body.
+const OPEN_NARROWING_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: Problems, version: 1.0.0 }
+paths:
+  /problems:
+    post:
+      operationId: postProblems
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - $ref: "#/components/schemas/Problem"
+                - properties: { type: { const: "https://example.com/probs/request" } }
+      responses:
+        "200":
+          description: a narrowed success body opens too
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties: { type: { const: "https://example.com/probs/none" } }
+        "400":
+          description: a union of narrowed problems stays closed
+          content:
+            application/problem+json:
+              schema:
+                oneOf:
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties: { type: { const: "https://example.com/probs/a" } }
+                  - allOf:
+                      - $ref: "#/components/schemas/Problem"
+                      - properties: { type: { const: "https://example.com/probs/b" } }
+        "403":
+          description: the narrowing value is itself a component, which stays closed
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties: { type: { $ref: "#/components/schemas/ForbiddenType" } }
+        "404":
+          description: not found
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties: { type: { const: "https://example.com/probs/not-found" } }
+        "409":
+          description: conflict, narrowed beside the `$ref`, with a value spelled `other`
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/Problem"
+                properties: { type: { enum: ["https://example.com/probs/conflict", "other"] } }
+        "410":
+          description: a component's narrowing stays closed
+          content:
+            application/problem+json:
+              schema: { $ref: "#/components/schemas/GoneProblem" }
+        "422":
+          description: a response's own set met by a union, the union last, keeps its variants closed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ const: a }, { const: b }]
+        "423":
+          description: the same set with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ const: a }, { const: b }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+        "424":
+          description: a union that narrows to its one string branch, the union last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ type: string }, { type: integer }]
+        "425":
+          description: the same union with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ type: string }, { type: integer }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+        "426":
+          description: a union keeping a plain string branch beside another, the union last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ const: a }, { type: string }]
+        "427":
+          description: the same union with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ const: a }, { type: string }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+components:
+  schemas:
+    Problem:
+      type: object
+      required: [type, title]
+      properties:
+        type: { type: string }
+        title: { type: string }
+        detail: { type: string }
+    GoneProblem:
+      allOf:
+        - $ref: "#/components/schemas/Problem"
+        - properties: { type: { const: "https://example.com/probs/gone" } }
+    ForbiddenType:
+      const: "https://example.com/probs/forbidden"
+"##;
+
+#[test]
+fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("problems.yaml");
+    std::fs::write(&spec, OPEN_NARROWING_SPEC).unwrap();
+
+    // The option off: the narrowing is exact, as before.
+    let closed = temp.path().join("closed");
+    let report = generate_fixture_crate(&spec, &closed, "closed_problems");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let generated = std::fs::read_to_string(closed.join("src/lib.rs")).unwrap();
+    assert!(
+        !generated.contains("Other(String)"),
+        "without the option no set is open:\n{generated}"
+    );
+
+    let out = temp.path().join("client");
+    let report = generate_configured_fixture_crate(&spec, &out, "open_problems", "2021", |spec| {
+        spec.open_narrowing(true)
+    });
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert!(
+        report.diagnostics().is_empty(),
+        "the option reports nothing: {report:#?}"
+    );
+    // Exactly the positions it applies to open: the `200`, `403`, `404`, and `409` bodies, and the
+    // `424`/`425` `kind`, whose union narrows to one branch. The `{enum: [a, b, c]}` members of
+    // `422`, `423`, `426`, and `427` open in place too, as intermediates no field uses: a union
+    // that keeps two branches meets them into closed branch sets (`tests/open.rs` decodes both).
+    // Only an open enum emits `as_str`.
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    assert_eq!(
+        generated.matches("pub fn as_str(&self) -> &str").count(),
+        10,
+        "{generated}"
+    );
+
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the open enums must pass clippy -D warnings"
+    );
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/open.rs"),
+        r##"use open_problems::{Error, PostProblemsError, ResponseValue};
+
+/// Decode `json` as the body type the variant constructor `_variant` carries, without naming the
+/// generated (hash-disambiguated) type.
+fn decode<T: serde::de::DeserializeOwned, E>(
+    _variant: fn(Box<T>) -> E,
+    json: &str,
+) -> Result<T, serde_json::Error> {
+    serde_json::from_str(json)
+}
+
+#[test]
+fn a_listed_value_is_its_own_variant_and_an_unlisted_one_is_kept() {
+    let listed = decode(
+        PostProblemsError::Status404,
+        r#"{"type":"https://example.com/probs/not-found","title":"t"}"#,
+    )
+    .expect("a listed type decodes");
+    assert_eq!(format!("{:?}", listed.r#type), "HttpsExampleComProbsNotFound");
+    assert_eq!(listed.r#type.as_str(), "https://example.com/probs/not-found");
+
+    // A problem type the description does not list: it decodes, and keeps its value.
+    let unlisted = decode(
+        PostProblemsError::Status404,
+        r#"{"type":"https://example.com/probs/moved","title":"t","detail":"d"}"#,
+    )
+    .expect("an unlisted type still decodes");
+    assert_eq!(
+        format!("{:?}", unlisted.r#type),
+        r#"Other("https://example.com/probs/moved")"#
+    );
+    assert_eq!(unlisted.r#type.to_string(), "https://example.com/probs/moved");
+    // It is still a string on the wire, both ways.
+    let wire = serde_json::to_value(&unlisted).unwrap();
+    assert_eq!(wire["type"], "https://example.com/probs/moved");
+    // A non-string is refused: the open set's domain is the `string` it narrowed.
+    assert!(decode(PostProblemsError::Status404, r#"{"type":7,"title":"t"}"#).is_err());
+}
+
+#[test]
+fn the_ref_sibling_spelling_opens_and_a_value_spelled_other_keeps_its_name() {
+    let other = decode(PostProblemsError::Status409, r#"{"type":"other","title":"t"}"#).unwrap();
+    // The listed `other` keeps `Other`; the catch-all takes the next name.
+    assert_eq!(format!("{:?}", other.r#type), "Other");
+    let unlisted =
+        decode(PostProblemsError::Status409, r#"{"type":"elsewhere","title":"t"}"#).unwrap();
+    assert!(
+        format!("{:?}", unlisted.r#type).ends_with(r#"("elsewhere")"#),
+        "{unlisted:?}"
+    );
+}
+
+#[test]
+fn a_union_and_a_component_stay_closed() {
+    // Each union variant still refuses the other's type, so exactly one matches...
+    assert!(decode(
+        PostProblemsError::Status400,
+        r#"{"type":"https://example.com/probs/b","title":"t"}"#,
+    )
+    .is_ok());
+    // ...and a type neither lists matches neither.
+    assert!(decode(
+        PostProblemsError::Status400,
+        r#"{"type":"https://example.com/probs/c","title":"t"}"#,
+    )
+    .is_err());
+    assert!(decode(
+        PostProblemsError::Status410,
+        r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
+    )
+    .is_err());
+    // A narrowing through a `$ref`'d value opens a copy in the response and leaves the component
+    // closed for its other uses.
+    let copy = decode(
+        PostProblemsError::Status403,
+        r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
+    )
+    .expect("the response's own copy is open");
+    assert_eq!(copy.r#type.as_str(), "https://example.com/probs/moved");
+    assert!(serde_json::from_str::<open_problems::types::ForbiddenType>(
+        r#""https://example.com/probs/moved""#
+    )
+    .is_err());
+    // A request body is never opened.
+    assert!(serde_json::from_str::<open_problems::types::RequestBody>(
+        r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
+    )
+    .is_err());
+}
+
+#[test]
+fn a_union_meeting_an_open_set_decodes_in_either_member_order() {
+    // `422` writes the union last, after the set has opened; `423` writes it first. Either way
+    // each variant stays closed, so a listed value matches exactly one of them.
+    for (order, decoded) in [
+        ("union last", decode(PostProblemsError::Status422, r#"{"kind":"a"}"#).map(|_| ())),
+        ("union last", decode(PostProblemsError::Status422, r#"{"kind":"b"}"#).map(|_| ())),
+        ("union first", decode(PostProblemsError::Status423, r#"{"kind":"a"}"#).map(|_| ())),
+        ("union first", decode(PostProblemsError::Status423, r#"{"kind":"b"}"#).map(|_| ())),
+    ] {
+        decoded.unwrap_or_else(|error| panic!("{order}: a value one variant lists: {error}"));
+    }
+    // A value the set lists but no variant does, and one nothing lists, match no variant.
+    for kind in ["c", "z"] {
+        let json = format!(r#"{{"kind":"{kind}"}}"#);
+        assert!(decode(PostProblemsError::Status422, &json).is_err(), "union last: {kind}");
+        assert!(decode(PostProblemsError::Status423, &json).is_err(), "union first: {kind}");
+    }
+    // A union that narrows to one branch is no union: in either order the result is the response's
+    // own open set, so an unlisted value is kept.
+    for kind in ["a", "z"] {
+        let json = format!(r#"{{"kind":"{kind}"}}"#);
+        let last = decode(PostProblemsError::Status424, &json).expect("union last");
+        let first = decode(PostProblemsError::Status425, &json).expect("union first");
+        assert_eq!(last.kind.as_str(), kind);
+        assert_eq!(first.kind.as_str(), kind);
+    }
+    // A plain `string` branch kept beside another stays closed in either order: `b` matches it
+    // alone, `a` matches both branches (which `oneOf` forbids), and `z` matches neither.
+    macro_rules! closed_beside_another {
+        ($status:expr, $order:literal) => {
+            decode($status, r#"{"kind":"b"}"#).unwrap_or_else(|error| panic!("{}: {error}", $order));
+            assert!(decode($status, r#"{"kind":"a"}"#).is_err(), "{}: a", $order);
+            assert!(decode($status, r#"{"kind":"z"}"#).is_err(), "{}: z", $order);
+        };
+    }
+    closed_beside_another!(PostProblemsError::Status426, "union last");
+    closed_beside_another!(PostProblemsError::Status427, "union first");
+}
+
+#[test]
+fn the_problem_reader_reads_the_opened_type() {
+    let body = decode(
+        PostProblemsError::Status404,
+        r#"{"type":"https://example.com/probs/moved","title":"t","detail":"d"}"#,
+    )
+    .unwrap();
+    let error = Error::Api(ResponseValue::new(
+        reqwest::StatusCode::NOT_FOUND,
+        Default::default(),
+        PostProblemsError::Status404(Box::new(body)),
+    ));
+    let problem = error.problem().expect("an object body");
+    assert_eq!(problem.problem_type.as_deref(), Some("https://example.com/probs/moved"));
+    assert_eq!(problem.detail.as_deref(), Some("d"));
+}
+"##,
+    )
+    .unwrap();
+    let status = fixture_cargo(&out)
+        .args(["test", "--test", "open"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the open enums must decode as documented");
 }

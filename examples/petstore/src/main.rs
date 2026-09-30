@@ -1,6 +1,7 @@
 //! Drives the generated petstore client end to end against a local mock server: typed models,
 //! query/header/path parameters, JSON bodies, bearer auth (a static token and an async token
-//! provider, succeeding and failing), typed API errors, undocumented-status
+//! provider, succeeding and failing), typed API errors, RFC 9457 problems read generically (one
+//! with a problem type the description does not list), undocumented-status
 //! handling, a refused connection, the transient-failure classifier, and the bring-your-own-policy retry adapter.
 //! Everything runs on 127.0.0.1 — no external API, no real credentials.
 
@@ -19,8 +20,9 @@ mod petstore {
 }
 
 use petstore::{
-    exponential_backoff, types, AuthError, Client, Credential, Error, HttpBackend, RequestError,
-    ReqwestBackend, RetryBackend, RetryOutcome, RetryPolicy, RetryWait, TokenFuture,
+    exponential_backoff, types, ApiErrorProblem, AuthError, Client, CreatePetError, Credential,
+    Error, HttpBackend, RequestError, ReqwestBackend, RetryBackend, RetryOutcome, RetryPolicy,
+    RetryWait, TokenFuture,
 };
 
 const TOKEN: &str = "let-me-in";
@@ -137,6 +139,56 @@ async fn main() {
         }
         other => panic!("expected a typed 404, got {other:?}"),
     }
+
+    // RFC 9457 problems. The description narrows `createPet`'s `409` problem `type` to
+    // `…/name-taken`, and the server answers with `…/name-reserved`, a type it added after the
+    // description was written. `build.rs` turns on `open_narrowing`, so the response is still the
+    // typed `409` body rather than a decode failure, and the unlisted type is kept.
+    let reserved = client
+        .create_pet(&types::NewPet {
+            name: "Taken".to_owned(),
+            tag: None,
+        })
+        .await;
+    match &reserved {
+        Err(Error::Api(response)) => {
+            assert_eq!(response.status(), 409);
+            let CreatePetError::Status409(problem) = response.inner() else {
+                panic!("expected the typed 409 problem, got {response:?}");
+            };
+            assert_eq!(
+                problem.r#type.to_string(),
+                "https://petstore.example/problems/name-reserved"
+            );
+            println!("typed 409 with an unlisted problem type: {}", problem.r#type);
+        }
+        other => panic!("expected a typed 409, got {other:?}"),
+    }
+    // One reader, generic over every operation: `createPet` and `deletePet` document different
+    // problem bodies, and `Error::problem` reads `type` and `detail` from either.
+    fn describe<E: ApiErrorProblem>(error: &Error<E>) -> String {
+        let problem = error.problem().expect("a problem body");
+        format!(
+            "{}: {}",
+            problem.problem_type_or_blank(),
+            problem.detail.as_deref().unwrap_or_default()
+        )
+    }
+    let Err(reserved) = reserved else {
+        unreachable!("matched as an error above");
+    };
+    assert_eq!(
+        describe(&reserved),
+        "https://petstore.example/problems/name-reserved: `Taken` is held for a sold pet."
+    );
+    let Err(has_orders) = client.delete_pet("3").await else {
+        panic!("deleting pet 3 must fail with its documented 409");
+    };
+    assert_eq!(
+        describe(&has_orders),
+        "https://petstore.example/problems/pet-has-orders: pet 3 has an open order."
+    );
+    println!("read two operations' problems with one generic reader");
 
     // A multipart body with an Encoding Object: each part is sent with the Content-Type the spec
     // declares for it — `image/png` for the binary photo, `application/json` for the metadata
@@ -419,10 +471,19 @@ fn handle(mut stream: TcpStream) {
             ("POST", "/pets") => {
                 let new: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
                 let name = new["name"].as_str().unwrap_or("unnamed");
-                (
-                    "201 Created",
-                    format!(r#"{{"id":"2","name":"{name}","status":"available"}}"#),
-                )
+                if name == "Taken" {
+                    // A problem type the description does not list.
+                    (
+                        "409 Conflict",
+                        r#"{"type":"https://petstore.example/problems/name-reserved","title":"Name reserved","status":409,"detail":"`Taken` is held for a sold pet."}"#
+                            .to_owned(),
+                    )
+                } else {
+                    (
+                        "201 Created",
+                        format!(r#"{{"id":"2","name":"{name}","status":"available"}}"#),
+                    )
+                }
             }
             ("GET", "/pets/1") => (
                 "200 OK",
@@ -445,6 +506,11 @@ fn handle(mut stream: TcpStream) {
             }
             ("GET", _) => ("404 Not Found", r#"{"message":"no such pet"}"#.to_owned()),
             ("DELETE", "/pets/1") => ("204 No Content", String::new()),
+            ("DELETE", "/pets/3") => (
+                "409 Conflict",
+                r#"{"type":"https://petstore.example/problems/pet-has-orders","title":"Pet has orders","detail":"pet 3 has an open order."}"#
+                    .to_owned(),
+            ),
             // Pet 1 echoes the stored pet; pet 2 acknowledges with an empty 204.
             ("PUT", "/pets/1") => {
                 let new: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();

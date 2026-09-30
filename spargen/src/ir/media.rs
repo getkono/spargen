@@ -1500,6 +1500,7 @@ mod tests {
         TypeKind::Enum(ScalarEnum {
             repr: ScalarRepr::Int,
             variants: vec![ScalarValue::Int(1)],
+            open: false,
         })
     }
 

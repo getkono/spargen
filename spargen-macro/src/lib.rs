@@ -18,6 +18,7 @@
 //!     no_uuid,
 //!     no_time,
 //!     carve,
+//!     open_narrowing,
 //!     error_body_cap = 65536,
 //!     batch_cap = 100,
 //!     omit {
@@ -109,6 +110,7 @@ struct Args {
     no_uuid: bool,
     no_time: bool,
     carve: bool,
+    open_narrowing: bool,
     error_body_cap: Option<usize>,
     batch_cap: Option<usize>,
     omit: spargen::Omit,
@@ -120,6 +122,7 @@ impl Parse for Args {
         let mut no_uuid = false;
         let mut no_time = false;
         let mut carve = false;
+        let mut open_narrowing = false;
         let mut error_body_cap = None;
         let mut batch_cap = None;
         let mut omit = spargen::Omit::default();
@@ -151,6 +154,7 @@ impl Parse for Args {
                     "no_uuid" => no_uuid = true,
                     "no_time" => no_time = true,
                     "carve" => carve = true,
+                    "open_narrowing" => open_narrowing = true,
                     "error_body_cap" => {
                         input.parse::<Token![=]>()?;
                         error_body_cap = Some(parse_usize(input)?);
@@ -165,7 +169,8 @@ impl Parse for Args {
                             key.span(),
                             format!(
                                 "unknown argument `{other}`; expected a spec path or one of: \
-                                 no_uuid, no_time, carve, error_body_cap, batch_cap, omit"
+                                 no_uuid, no_time, carve, open_narrowing, error_body_cap, batch_cap, \
+                                 omit"
                             ),
                         ));
                     }
@@ -186,6 +191,7 @@ impl Parse for Args {
             no_uuid,
             no_time,
             carve,
+            open_narrowing,
             error_body_cap,
             batch_cap,
             omit,
@@ -216,6 +222,9 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
     }
     if args.carve {
         config = config.carve(true);
+    }
+    if args.open_narrowing {
+        config = config.open_narrowing(true);
     }
     for rule in &args.omit.rules {
         config = config.omit_rule(rule.clone());

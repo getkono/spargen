@@ -556,6 +556,14 @@ pub(crate) struct ScalarEnum {
     pub(crate) repr: ScalarRepr,
     /// The variant wire values, in declared order.
     pub(crate) variants: Vec<ScalarValue>,
+    /// Whether the set is **open**: a string enum whose values name the members the description
+    /// lists, beside one more variant that holds any other string. Only `open_narrowing` produces
+    /// one, for a string `enum`/`const` that narrows a property another `allOf` member (or the
+    /// `$ref` it sits beside) declares as a plain `string`, inside a response body's own schema.
+    /// The open set's domain is that wider declaration's, so it is still exactly what the
+    /// description admits there, minus the narrowing. Always `false` for an integer or boolean
+    /// set.
+    pub(crate) open: bool,
 }
 
 /// The scalar kind backing a [`ScalarEnum`].

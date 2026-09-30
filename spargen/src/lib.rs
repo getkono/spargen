@@ -854,7 +854,7 @@ fn lower_frontend(
     diags: &mut diag::Diagnostics,
 ) -> Result<(ir::Api, name::Names), ()> {
     let bundle = load_bundle(spec, diags)?;
-    lower_bundle(&bundle, diags)
+    lower_bundle(spec, &bundle, diags)
 }
 
 /// The input bundle `spec` names, with its omit profile applied: the first half of
@@ -869,8 +869,10 @@ fn load_bundle(spec: &Spec, diags: &mut diag::Diagnostics) -> Result<source::Inp
     Ok(bundle)
 }
 
-/// The rest of [`lower_frontend`]: validate, parse, audit, lower, and allocate names over `bundle`.
+/// The rest of [`lower_frontend`]: validate, parse, audit, lower, and allocate names over `bundle`,
+/// with the lowering options `spec` sets.
 fn lower_bundle(
+    spec: &Spec,
     bundle: &source::InputBundle,
     diags: &mut diag::Diagnostics,
 ) -> Result<(ir::Api, name::Names), ()> {
@@ -890,7 +892,10 @@ fn lower_bundle(
 
     // `check` runs the full frontend — lowering, IR invariants, and name allocation — so it fires
     // exactly the diagnostics `generate` would, just without emitting code.
-    let api = oas31::lower(&document, &resolver, diags).map_err(|_| ())?;
+    let options = oas31::LowerOptions {
+        open_narrowing: spec.open_narrowing,
+    };
+    let api = oas31::lower(&document, &resolver, diags, options).map_err(|_| ())?;
     ir::check_invariants(&api, diags);
     if diags.has_errors() {
         return Err(());
@@ -1014,7 +1019,7 @@ fn run_carve(spec: &Spec, mode: PipelineMode) -> PipelineResult {
         let bundle = load_bundle(&probe, &mut diags).ok();
         let lowered = bundle
             .as_ref()
-            .is_some_and(|bundle| lower_bundle(bundle, &mut diags).is_ok());
+            .is_some_and(|bundle| lower_bundle(&probe, bundle, &mut diags).is_ok());
         if lowered {
             // Converged: generate/preview/check for real with the carved omit set.
             let resolved = Spec {

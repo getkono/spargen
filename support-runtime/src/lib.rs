@@ -69,8 +69,8 @@ pub use dispatch::{
     read_success_body, send, unexpected_status, StatusSpec,
 };
 pub use error::{
-    ApiErrorBody, Error, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind,
-    TransportError,
+    ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError,
+    RequestCause, RequestError, TimeoutKind, TransportError,
 };
 pub use header::{parse_header, require_header, HeaderError, HeaderShape};
 pub use middleware::{Middleware, MiddlewareBackend, Next};

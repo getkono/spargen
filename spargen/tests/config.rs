@@ -147,6 +147,22 @@ fn config_file_knobs_reach_the_library() {
     assert!(output.status.success(), "{output:?}");
 }
 
+#[cfg(feature = "cli")]
+#[test]
+fn open_narrowing_is_a_flag_and_a_config_key() {
+    // What it changes is pinned by `open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed`
+    // in `e2e.rs`; here, only that both spellings reach the library.
+    let (temp, spec) = workspace();
+    let flag = check(temp.path(), &spec, &["--open-narrowing"]);
+    assert!(flag.status.success(), "{flag:?}");
+    std::fs::write(temp.path().join("spargen.toml"), "open_narrowing = true\n").unwrap();
+    let key = check(temp.path(), &spec, &[]);
+    assert!(key.status.success(), "{key:?}");
+    std::fs::write(temp.path().join("spargen.toml"), "open_narrowing = 1\n").unwrap();
+    let mistyped = check(temp.path(), &spec, &[]);
+    assert_eq!(mistyped.status.code(), Some(3), "{mistyped:?}");
+}
+
 // --- Precedence ---------------------------------------------------------------------------------
 //
 // `spargen/src/cli/config.rs` states the contract: "defaults < `spargen.toml` < CLI flags", an

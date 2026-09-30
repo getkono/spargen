@@ -38,7 +38,8 @@ Commands:
 ```
 
 `check`, `deps`, `lock`, and `diff` share one spec-options group — `--config`, `--carve`,
-`--no-uuid`, `--no-time`, `--error-body-cap`, `--batch-cap`, and the repeatable `--omit-path`,
+`--no-uuid`, `--no-time`, `--error-body-cap`, `--batch-cap`, `--open-narrowing`, and the
+repeatable `--omit-path`,
 `--omit-operation`, `--omit-component`, `--omit-pointer` — which is exactly the setter list on
 `spargen::Spec`, so the CLI, `build.rs`, `generate_api!`, and `spargen.toml` cannot drift.
 
