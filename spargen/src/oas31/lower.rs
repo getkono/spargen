@@ -3573,6 +3573,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Both parts are order-independent (an intersection and a disjunction), so an `allOf`
             // lowers to the same set whichever order its members are written in; keeping the
             // closed side whole instead would admit values the open side's description forbids.
+            // Where `open_narrowing` is out of effect (inside a union, which `intersect_union`
+            // reaches with a set the response already opened) the meet is closed: two variants
+            // that each held an unlisted string would both match it, and the trial union would
+            // refuse every value.
             (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
                 let variants: Vec<ScalarValue> = left
                     .variants
@@ -3580,7 +3584,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .filter(|value| right.variants.contains(value))
                     .cloned()
                     .collect();
-                let open = left.open || right.open;
+                let open = self.narrowing_opens && (left.open || right.open);
                 if variants.is_empty() {
                     // Both value sets are finite and listed in full, so sharing no value is proof.
                     Err(NoMeet::Empty)
@@ -3588,9 +3592,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     Ok(non_nullable(a))
                 } else if variants == right.variants && open == right.open {
                     Ok(non_nullable(b))
-                } else if variants == left.variants {
+                } else if open && variants == left.variants {
                     Ok(self.opened_set(a, left))
-                } else if variants == right.variants {
+                } else if open && variants == right.variants {
                     Ok(self.opened_set(b, right))
                 } else {
                     Ok(self.insert_type(
@@ -3608,12 +3612,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (TypeKind::Enum(enumeration), TypeKind::Primitive(primitive))
                 if enum_matches_primitive(enumeration.repr, *primitive) =>
             {
-                Ok(self.narrowed_string(a, enumeration, *primitive))
+                Ok(self.narrowed_string(a, enumeration, *primitive, hint))
             }
             (TypeKind::Primitive(primitive), TypeKind::Enum(enumeration))
                 if enum_matches_primitive(enumeration.repr, *primitive) =>
             {
-                Ok(self.narrowed_string(b, enumeration, *primitive))
+                Ok(self.narrowed_string(b, enumeration, *primitive, hint))
             }
             (TypeKind::Array(left), TypeKind::Array(right)) => {
                 let item_hint = format!("{hint}Item");
@@ -3671,12 +3675,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (TypeKind::Struct(left), TypeKind::Struct(right)) => {
                 self.intersect_structs(left, right, hint)
             }
-            // A union's variants stay closed for the reason `lower_union_closed` gives.
+            // A union's variants stay closed for the reason `lower_union_closed` gives; a union
+            // that narrows to one branch is no union, and `intersect_union` meets that branch where
+            // the enclosing position's answer holds.
             (TypeKind::Union(union), _) => {
-                self.closed_narrowing(|ctx| ctx.intersect_union(a, union, b, hint))
+                let enclosing = self.narrowing_opens;
+                self.closed_narrowing(|ctx| ctx.intersect_union(a, union, b, hint, enclosing))
             }
             (_, TypeKind::Union(union)) => {
-                self.closed_narrowing(|ctx| ctx.intersect_union(b, union, a, hint))
+                let enclosing = self.narrowing_opens;
+                self.closed_narrowing(|ctx| ctx.intersect_union(b, union, a, hint, enclosing))
             }
             (TypeKind::Bytes, TypeKind::Bytes) => Ok(non_nullable(a)),
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
@@ -3699,7 +3707,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     ///
     /// Only a plain `string` widens it: `uuid` and the date formats have a decoded representation
     /// of their own that an arbitrary string is not.
-    fn narrowed_string(&mut self, enum_ty: Ty, set: &ScalarEnum, primitive: Prim) -> Ty {
+    ///
+    /// A set the response already opened, met where [`Self::narrowing_opens`] does not hold (a
+    /// union variant `intersect_union` meets it with), is a new closed copy under `hint`, for the
+    /// reason the enum-meet arm of [`Self::intersect_non_null`] gives.
+    fn narrowed_string(
+        &mut self,
+        enum_ty: Ty,
+        set: &ScalarEnum,
+        primitive: Prim,
+        hint: &str,
+    ) -> Ty {
+        if set.open && !self.narrowing_opens {
+            return self.insert_type(
+                hint,
+                TypeKind::Enum(ScalarEnum {
+                    open: false,
+                    ..set.clone()
+                }),
+                Docs::default(),
+                None,
+            );
+        }
         let opens = self.narrowing_opens
             && set.repr == ScalarRepr::String
             && !set.open
@@ -3874,12 +3903,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ))
     }
 
+    /// The meet of the union `union` (whose type is `union_ty`) with `other`, branch by branch.
+    /// Called with `open_narrowing` out of effect, so every retained branch is closed.
+    /// `enclosing_opens` is [`Self::narrowing_opens`] where the meet was asked for: when exactly one
+    /// branch survives, the result is no union, and that branch is met again under that answer, so
+    /// the meet is the same set whichever order the `allOf` writes the union and the `string` in
+    /// (written first, the union narrows to that branch before the `string` opens it).
     fn intersect_union(
         &mut self,
         union_ty: Ty,
         union: &Union,
         other: Ty,
         hint: &str,
+        enclosing_opens: bool,
     ) -> Result<Ty, NoMeet> {
         let mut variants = Vec::new();
         let mut retained = Vec::new();
@@ -3901,6 +3937,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
         if variants.len() == 1 {
+            if enclosing_opens {
+                let branch = union.variants[retained[0]].ty;
+                return self.response_narrowing(|ctx| ctx.intersect_types(branch, other, hint));
+            }
             return Ok(variants.remove(0).ty);
         }
         if variants.is_empty() {

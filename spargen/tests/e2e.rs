@@ -7163,6 +7163,84 @@ paths:
           content:
             application/problem+json:
               schema: { $ref: "#/components/schemas/GoneProblem" }
+        "422":
+          description: a response's own set met by a union, the union last, keeps its variants closed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ const: a }, { const: b }]
+        "423":
+          description: the same set with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ const: a }, { const: b }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+        "424":
+          description: a union that narrows to its one string branch, the union last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ type: string }, { type: integer }]
+        "425":
+          description: the same union with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ type: string }, { type: integer }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
+        "426":
+          description: a union keeping a plain string branch beside another, the union last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: [a, b, c] }
+                      - oneOf: [{ const: a }, { type: string }]
+        "427":
+          description: the same union with the union first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - oneOf: [{ const: a }, { type: string }]
+                      - { enum: [a, b, c] }
+                      - { type: string }
 components:
   schemas:
     Problem:
@@ -7205,12 +7283,15 @@ fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
         report.diagnostics().is_empty(),
         "the option reports nothing: {report:#?}"
     );
-    // Exactly the four response positions it applies to open (the `200`, `403`, `404`, and `409`
-    // bodies); only an open enum emits `as_str`.
+    // Exactly the positions it applies to open: the `200`, `403`, `404`, and `409` bodies, and the
+    // `424`/`425` `kind`, whose union narrows to one branch. The `{enum: [a, b, c]}` members of
+    // `422`, `423`, `426`, and `427` open in place too, as intermediates no field uses: a union
+    // that keeps two branches meets them into closed branch sets (`tests/open.rs` decodes both).
+    // Only an open enum emits `as_str`.
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
     assert_eq!(
         generated.matches("pub fn as_str(&self) -> &str").count(),
-        4,
+        10,
         "{generated}"
     );
 
@@ -7314,6 +7395,46 @@ fn a_union_and_a_component_stay_closed() {
         r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
     )
     .is_err());
+}
+
+#[test]
+fn a_union_meeting_an_open_set_decodes_in_either_member_order() {
+    // `422` writes the union last, after the set has opened; `423` writes it first. Either way
+    // each variant stays closed, so a listed value matches exactly one of them.
+    for (order, decoded) in [
+        ("union last", decode(PostProblemsError::Status422, r#"{"kind":"a"}"#).map(|_| ())),
+        ("union last", decode(PostProblemsError::Status422, r#"{"kind":"b"}"#).map(|_| ())),
+        ("union first", decode(PostProblemsError::Status423, r#"{"kind":"a"}"#).map(|_| ())),
+        ("union first", decode(PostProblemsError::Status423, r#"{"kind":"b"}"#).map(|_| ())),
+    ] {
+        decoded.unwrap_or_else(|error| panic!("{order}: a value one variant lists: {error}"));
+    }
+    // A value the set lists but no variant does, and one nothing lists, match no variant.
+    for kind in ["c", "z"] {
+        let json = format!(r#"{{"kind":"{kind}"}}"#);
+        assert!(decode(PostProblemsError::Status422, &json).is_err(), "union last: {kind}");
+        assert!(decode(PostProblemsError::Status423, &json).is_err(), "union first: {kind}");
+    }
+    // A union that narrows to one branch is no union: in either order the result is the response's
+    // own open set, so an unlisted value is kept.
+    for kind in ["a", "z"] {
+        let json = format!(r#"{{"kind":"{kind}"}}"#);
+        let last = decode(PostProblemsError::Status424, &json).expect("union last");
+        let first = decode(PostProblemsError::Status425, &json).expect("union first");
+        assert_eq!(last.kind.as_str(), kind);
+        assert_eq!(first.kind.as_str(), kind);
+    }
+    // A plain `string` branch kept beside another stays closed in either order: `b` matches it
+    // alone, `a` matches both branches (which `oneOf` forbids), and `z` matches neither.
+    macro_rules! closed_beside_another {
+        ($status:expr, $order:literal) => {
+            decode($status, r#"{"kind":"b"}"#).unwrap_or_else(|error| panic!("{}: {error}", $order));
+            assert!(decode($status, r#"{"kind":"a"}"#).is_err(), "{}: a", $order);
+            assert!(decode($status, r#"{"kind":"z"}"#).is_err(), "{}: z", $order);
+        };
+    }
+    closed_beside_another!(PostProblemsError::Status426, "union last");
+    closed_beside_another!(PostProblemsError::Status427, "union first");
 }
 
 #[test]
