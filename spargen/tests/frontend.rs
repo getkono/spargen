@@ -11495,6 +11495,33 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
         }
     }
 
+    // The exemption from the rule above: a target that is itself exactly `null`. There the
+    // intersection's `null` is the target's whole type, not a remnant of a contradiction, and the
+    // untyped applicators are vacuously satisfied by `null`, so the sibling keeps the target's type
+    // rather than rejecting.
+    let spec = format!(
+        "{HEAD}    Target: {{ type: 'null' }}\n    Sibling:\n      $ref: \
+         '#/components/schemas/Target'\n      required: [q]\n{holder}"
+    );
+    for report in [generate(&spec), check(&spec)] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "an untyped `required` sibling on a `$ref` to an exactly-`null` target rejected: \
+             {report:#?}"
+        );
+        assert!(
+            messages_for(&report, Code::AllOfIrreconcilable).is_empty(),
+            "{report:#?}"
+        );
+    }
+    let (_, code) = generate_with_code(&spec);
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub type Sibling = ();"),
+        "an untyped `required` sibling changed an exactly-`null` target's type:\n{types}"
+    );
+
     // A union target whose branches do not all share the inferred category. Intersecting branch by
     // branch drops every branch of another category (the string one here), so `Sibling` would
     // become a struct that rejects the strings `Target` accepts, with no diagnostic. Whether an
