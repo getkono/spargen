@@ -1521,13 +1521,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // exactly-one check fails on every value, so the position takes that one type and
                 // the ignored branch distinctions are reported, not dropped in silence.
                 Some(mut common) => {
-                    // `null` is valid where the union itself admits it (a `null` member). Beyond
-                    // that it depends on the keyword, since every branch is `common` and so either
-                    // all of them accept `null` or none does. An `anyOf` needs one branch to match,
-                    // so a nullable `common` keeps `null`. A `oneOf` needs exactly one, and a `null`
-                    // that matches all of them fails it, so only the union's own `null` counts.
-                    common.nullable =
-                        intersection.nullable || (schema.one_of.is_empty() && common.nullable);
+                    // Every branch is `common`, so either all of them accept `null` or none does,
+                    // and `intersection.nullable` says whether the union's own `null` member
+                    // survived the meet with the target. An `anyOf` needs one match, so `null` is
+                    // valid when either admits it. A `oneOf` needs exactly one: a nullable
+                    // `common` puts `null` in two or more branches, which fails it whatever the
+                    // `null` member does, so `null` is valid only through that member and only
+                    // when `common` rejects it.
+                    common.nullable = if schema.one_of.is_empty() {
+                        intersection.nullable || common.nullable
+                    } else {
+                        intersection.nullable && !common.nullable
+                    };
                     Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
                         .message(
                             "this `$ref` and its `oneOf`/`anyOf` sibling intersect to a union whose \

@@ -534,10 +534,19 @@ components:
 /// (`NB: type: [object, "null"]`), each required-only branch admits `null`, since `required` binds
 /// objects only. An `anyOf` needs just one branch to match, so `null` stays valid and the position
 /// is `Option<_>`. A `oneOf` needs exactly one, and `null` matches both, so `null` is invalid and
-/// the position is required and non-nullable.
+/// the position is required and non-nullable. A `{type: 'null'}` member does not change either
+/// answer: under `oneOf`, `null` then matches that member *and* both required-only branches, so it
+/// still fails the exactly-one rule, while under `anyOf` it was already valid.
 #[test]
 fn a_collapsed_union_sibling_beside_a_nullable_target_keeps_its_keywords_nullability() {
-    for (keyword, nullable) in [("anyOf", true), ("oneOf", false)] {
+    for (union_keyword, null_member, nullable) in [
+        ("anyOf", "", true),
+        ("oneOf", "", false),
+        ("anyOf", ", { type: 'null' }", true),
+        ("oneOf", ", { type: 'null' }", false),
+    ] {
+        // The case label every assertion message carries.
+        let keyword = format!("{union_keyword}[required a, required b{null_member}]");
         let spec = format!(
             r##"
 openapi: 3.1.0
@@ -564,7 +573,7 @@ components:
       properties:
         x:
           $ref: '#/components/schemas/NB'
-          {keyword}: [ {{ required: [a] }}, {{ required: [b] }} ]
+          {union_keyword}: [ {{ required: [a] }}, {{ required: [b] }}{null_member} ]
       required: [x]
 "##
         );
