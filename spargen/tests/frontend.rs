@@ -530,6 +530,71 @@ components:
     }
 }
 
+/// A collapsed union keeps the nullability its keyword gives it. Beside a nullable target
+/// (`NB: type: [object, "null"]`), each required-only branch admits `null`, since `required` binds
+/// objects only. An `anyOf` needs just one branch to match, so `null` stays valid and the position
+/// is `Option<_>`. A `oneOf` needs exactly one, and `null` matches both, so `null` is invalid and
+/// the position is required and non-nullable.
+#[test]
+fn a_collapsed_union_sibling_beside_a_nullable_target_keeps_its_keywords_nullability() {
+    for (keyword, nullable) in [("anyOf", true), ("oneOf", false)] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    NB:
+      type: [object, 'null']
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Holder:
+      type: object
+      properties:
+        x:
+          $ref: '#/components/schemas/NB'
+          {keyword}: [ {{ required: [a] }}, {{ required: [b] }} ]
+      required: [x]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{keyword} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+                }),
+                "{keyword} via {entry}: the collapse must still warn: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        let x = field_type(&types, "pub x")
+            .unwrap_or_else(|| panic!("{keyword}: no `x` field: {types}"));
+        assert_eq!(
+            x.starts_with("Option<"),
+            nullable,
+            "{keyword}: `x` is `{x}`, but `null` is {} here: {types}",
+            if nullable { "valid" } else { "invalid" }
+        );
+    }
+}
+
 /// The collapse above is reserved for a `$ref` whose own sibling is a `oneOf`/`anyOf`. A `$ref` to a
 /// union component beside a non-union sibling (`U: anyOf[...]`, `P: {$ref: U, const: x}`) is an
 /// intersection this change does not touch: its branches may intersect to one type, but it must
