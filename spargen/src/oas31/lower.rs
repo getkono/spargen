@@ -3567,42 +3567,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ))
                 }
             }
-            // An open set's domain is every string (see `ScalarEnum::open`), so a closed set meets it
-            // in the closed set itself, and two open sets meet in an open set listing both.
-            (TypeKind::Enum(left), TypeKind::Enum(right))
-                if left.repr == right.repr && (left.open || right.open) =>
-            {
-                match (left.open, right.open) {
-                    (true, false) => Ok(non_nullable(b)),
-                    (false, true) => Ok(non_nullable(a)),
-                    _ => {
-                        let mut variants = left.variants.clone();
-                        variants.extend(
-                            right
-                                .variants
-                                .iter()
-                                .filter(|value| !left.variants.contains(value))
-                                .cloned(),
-                        );
-                        if variants == left.variants {
-                            Ok(non_nullable(a))
-                        } else if variants == right.variants {
-                            Ok(non_nullable(b))
-                        } else {
-                            Ok(self.insert_type(
-                                hint,
-                                TypeKind::Enum(ScalarEnum {
-                                    repr: left.repr,
-                                    variants,
-                                    open: true,
-                                }),
-                                Docs::default(),
-                                None,
-                            ))
-                        }
-                    }
-                }
-            }
+            // A set's variants are the values the description lists, open or not: `open` says only
+            // that the lowering also holds an unlisted string, because a plain `string` was met
+            // (`narrowed_string`). So two sets meet in the values both list, open when either is.
+            // Both parts are order-independent (an intersection and a disjunction), so an `allOf`
+            // lowers to the same set whichever order its members are written in; keeping the
+            // closed side whole instead would admit values the open side's description forbids.
             (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
                 let variants: Vec<ScalarValue> = left
                     .variants
@@ -3610,20 +3580,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .filter(|value| right.variants.contains(value))
                     .cloned()
                     .collect();
+                let open = left.open || right.open;
                 if variants.is_empty() {
                     // Both value sets are finite and listed in full, so sharing no value is proof.
                     Err(NoMeet::Empty)
-                } else if variants == left.variants {
+                } else if variants == left.variants && open == left.open {
                     Ok(non_nullable(a))
-                } else if variants == right.variants {
+                } else if variants == right.variants && open == right.open {
                     Ok(non_nullable(b))
+                } else if variants == left.variants {
+                    Ok(self.opened_set(a, left))
+                } else if variants == right.variants {
+                    Ok(self.opened_set(b, right))
                 } else {
                     Ok(self.insert_type(
                         hint,
                         TypeKind::Enum(ScalarEnum {
                             repr: left.repr,
                             variants,
-                            open: false,
+                            open,
                         }),
                         Docs::default(),
                         None,
@@ -3732,6 +3707,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if !opens {
             return non_nullable(enum_ty);
         }
+        self.opened_set(enum_ty, set)
+    }
+
+    /// The closed set `set` (whose type is `enum_ty`), opened: in place when it is one of
+    /// [`Self::open_candidates`], and as a new open copy otherwise, as [`Self::narrowed_string`]
+    /// describes.
+    fn opened_set(&mut self, enum_ty: Ty, set: &ScalarEnum) -> Ty {
         if self.open_candidates.contains(&enum_ty.id) {
             if let Some(TypeKind::Enum(own)) =
                 self.graph.get_mut(enum_ty.id).map(|def| &mut def.kind)

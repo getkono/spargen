@@ -1107,3 +1107,145 @@ fn an_open_enums_catch_all_is_a_variant_of_its_surface() {
     );
     assert_eq!(closed.bump, Impact::Major);
 }
+
+/// A `404` body whose required `kind` property is the `allOf` of `members`, one member per entry,
+/// beside a `Listed` component that is the closed set `[x, listed-only]`.
+fn kind_meeting(members: &[&str]) -> String {
+    let members: String = members
+        .iter()
+        .map(|member| format!("                      - {member}\n"))
+        .collect();
+    full(
+        &format!(
+            "  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+        '404':
+          description: missing
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+{members}"
+        ),
+        "    Listed:
+      type: string
+      enum: [x, listed-only]
+",
+    )
+}
+
+/// The enum `kind` lowers to under `open_narrowing`: its variant lines, in order.
+fn open_kind_variants(spec_text: &str) -> Vec<String> {
+    let temp = tempfile::tempdir().unwrap();
+    let spec_path = temp.path().join("spec.yaml");
+    std::fs::write(&spec_path, spec_text).unwrap();
+    let out = Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap();
+    let report = spargen::generate(
+        &Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap())
+            .open_narrowing(true)
+            .build(out.clone())
+            .cargo(spargen::CargoIntegration::Off),
+    );
+    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
+    let source = std::fs::read_to_string(&out).unwrap();
+    // The embedded runtime's `AuthScheme` has a `kind` field of its own.
+    let ty = source
+        .split("pub kind: ")
+        .skip(1)
+        .map(|field| field[..field.find(',').unwrap()].trim())
+        .find(|ty| *ty != "AuthKind")
+        .unwrap_or_else(|| panic!("no `kind` field:\n{source}"));
+    let body = source
+        .split(&format!("pub enum {ty} {{"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("`kind` is `{ty}`, which is not an enum:\n{source}"));
+    // No variant carries braces, so the first one closes the enum.
+    body[..body.find('}').unwrap()]
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with("//"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The `(kind, location)` of every major change in a report.
+fn major_changes(report: &DiffReport) -> Vec<(ChangeKind, String)> {
+    report
+        .changes
+        .iter()
+        .filter(|change| change.impact == Impact::Major)
+        .map(|change| (change.kind, change.location.clone()))
+        .collect()
+}
+
+/// Under `open_narrowing`, an `allOf`'s members meet in the same set whatever order they are
+/// written in: the values every member lists, open when a member meeting a plain `string` opened
+/// it. An open set meeting a closed one keeps only their shared values (the description forbids
+/// the rest), and two open sets meet in the values both list. Reordering the members is then no
+/// more breaking with the option on than with it off: an inline member's type is named for its
+/// position either way, so moving the member the field's type comes from renames that type.
+#[test]
+fn open_narrowing_meets_the_same_set_in_every_member_order() {
+    let open = |spec: Spec| spec.open_narrowing(true);
+    let string = "{ type: string }";
+    let x = "{ const: x }";
+    let listed = "{ $ref: '#/components/schemas/Listed' }";
+    let expected = ["X,", "Other(String),"];
+
+    // An open set meeting a closed one, in all six orders: `string ∩ {x}` opens `{x}` before it
+    // meets the closed `Listed`, `string ∩ Listed` opens a copy of `Listed` before it meets the
+    // closed `{x}`, or the two closed sets meet before either meets `string`.
+    let orders = [
+        [string, x, listed],
+        [string, listed, x],
+        [x, string, listed],
+        [x, listed, string],
+        [listed, string, x],
+        [listed, x, string],
+    ];
+    let first = kind_meeting(&orders[0]);
+    for order in &orders {
+        let spec = kind_meeting(order);
+        assert_eq!(open_kind_variants(&spec), expected, "order {order:?}");
+        let off = diff_configured(&first, &spec, |spec| spec, |spec| spec);
+        let on = diff_configured(&first, &spec, open, open);
+        assert_eq!(
+            major_changes(&on),
+            major_changes(&off),
+            "reordering to {order:?} breaks more with the option on: {:?}",
+            on.changes
+        );
+    }
+
+    // Two open sets meeting, in both orders: each nested `allOf` narrows a plain `string`.
+    let open_x = "{ allOf: [{ type: string }, { const: x }] }";
+    let open_xy = "{ allOf: [{ type: string }, { enum: [x, y] }] }";
+    for order in [[open_x, open_xy], [open_xy, open_x]] {
+        assert_eq!(
+            open_kind_variants(&kind_meeting(&order)),
+            expected,
+            "order {order:?}"
+        );
+    }
+    let (forward, backward) = (
+        kind_meeting(&[open_x, open_xy]),
+        kind_meeting(&[open_xy, open_x]),
+    );
+    assert_eq!(
+        major_changes(&diff_configured(&forward, &backward, open, open)),
+        major_changes(&diff_configured(
+            &forward,
+            &backward,
+            |spec| spec,
+            |spec| spec
+        )),
+    );
+}
