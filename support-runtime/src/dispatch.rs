@@ -130,13 +130,11 @@ pub fn build_url_with_query_string_on(
 /// credentials the caller's registration did not select, silently, on a call they had expressed a
 /// different intent for; an error they can see is the better failure.
 ///
-/// A caller who wants the *other* alternative cannot get there by adjusting registrations on a
-/// built client. Registration is insert-only: [`ClientCore::set_credential`] is the only writer,
-/// there is no remove, clear, or replace-with-nothing operation at any layer, and [`Credential`]
-/// has no variant meaning "none" — so a credential cannot be withdrawn once registered. Nor does
-/// registering the fallback as well help, because selection stops at the first satisfiable
-/// alternative and the first one stays satisfied. The way to reach a later alternative is to
-/// build a client that is not registered for the earlier one.
+/// A caller who wants the *other* alternative unregisters a scheme of the earlier one with
+/// [`ClientCore::remove_credential`] (the generated client's `without_credential`); selection then
+/// passes over the earlier alternative and reaches the later one on the next call. Registering the
+/// fallback as well is not enough on its own, because selection stops at the first satisfiable
+/// alternative and the earlier one stays satisfied until one of its schemes is removed.
 pub async fn attach_auth(
     core: &ClientCore,
     request: RequestBuilder,
@@ -1095,6 +1093,19 @@ mod tests {
         assert!(!called.load(Ordering::SeqCst), "the provider was called");
     }
 
+    /// A bearer alternative, then an apiKey-in-query fallback: the requirement both
+    /// fall-through tests below select over.
+    const FIRST_THEN_FALLBACK: &[&[AuthScheme]] = &[
+        &[AuthScheme {
+            name: "primary",
+            kind: AuthKind::Bearer,
+        }],
+        &[AuthScheme {
+            name: "fallback",
+            kind: AuthKind::ApiKeyQuery("api_key"),
+        }],
+    ];
+
     /// Selection is on registration, not on success, and there is no fall-through: once an
     /// alternative is chosen, a failure while attaching it fails the call even though a later
     /// alternative is fully registered and would have succeeded. Both ways of failing after
@@ -1102,17 +1113,6 @@ mod tests {
     /// a 200 carrying credentials their registration did not select, with nothing to observe.
     #[test]
     fn a_failure_after_selection_does_not_fall_through_to_a_later_alternative() {
-        const FIRST_THEN_FALLBACK: &[&[AuthScheme]] = &[
-            &[AuthScheme {
-                name: "primary",
-                kind: AuthKind::Bearer,
-            }],
-            &[AuthScheme {
-                name: "fallback",
-                kind: AuthKind::ApiKeyQuery("api_key"),
-            }],
-        ];
-
         // A registered fallback that would satisfy the second alternative outright.
         let register_fallback = |core: &mut ClientCore| {
             core.set_credential("fallback", Credential::ApiKey(SecretString::from("k3y")));
@@ -1160,6 +1160,45 @@ mod tests {
             panic!("expected the selected alternative's mismatch, got {error:?}");
         };
         assert_eq!(*scheme, "primary");
+    }
+
+    /// The remedy for the test above: with no fall-through, the caller reaches the later
+    /// alternative by unregistering the earlier one. The same client that failed on its selected
+    /// alternative then attaches the fallback — and only the fallback, since the removed scheme's
+    /// credential must not ride along.
+    #[test]
+    fn removing_the_selected_credential_falls_through_to_a_later_alternative() {
+        let mut core = core();
+        core.set_credential(
+            "primary",
+            Credential::Provider(Arc::new(|| {
+                Box::pin(async { Err(AuthError::new("refresh rejected")) }) as TokenFuture
+            })),
+        );
+        core.set_credential("fallback", Credential::ApiKey(SecretString::from("k3y")));
+        // Before removal the failing primary is selected, as the test above pins.
+        assert!(poll_ready(attach_auth(&core, get(&core), FIRST_THEN_FALLBACK)).is_err());
+
+        assert!(matches!(
+            core.remove_credential("primary"),
+            Some(Credential::Provider(_))
+        ));
+        let request = poll_ready(attach_auth(&core, get(&core), FIRST_THEN_FALLBACK))
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(request.url().query(), Some("api_key=k3y"));
+        assert!(request.headers().get("authorization").is_none());
+
+        // Removing every alternative's scheme leaves nothing satisfiable: the call fails as
+        // `MissingCredential`, never by sending without credentials.
+        core.remove_credential("fallback");
+        let error = poll_ready(attach_auth(&core, get(&core), FIRST_THEN_FALLBACK)).unwrap_err();
+        let Error::RequestConstruction(RequestError::MissingCredential { alternatives }) = error
+        else {
+            panic!("expected MissingCredential, got {error:?}");
+        };
+        assert_eq!(alternatives, [vec!["primary"], vec!["fallback"]]);
     }
 
     #[test]
@@ -2326,122 +2365,5 @@ mod tests {
             )),
             200,
         );
-    }
-
-    /// The part of a runtime source that is embedded into generated output: everything above the
-    /// test-module marker, which is where the embed splits. The marker is assembled here rather
-    /// than written out, because a runtime source may carry it literally only once.
-    fn embedded(source: &'static str) -> &'static str {
-        source
-            .split_once(concat!("#[cfg", "(test)]"))
-            .map_or(source, |(embedded, _)| embedded)
-    }
-
-    /// Code lines only: a line whose first token is a comment is prose, not an operation.
-    fn code_lines(source: &str) -> impl Iterator<Item = &str> {
-        source
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with("//"))
-    }
-
-    /// `attach_auth`'s rustdoc — shipped verbatim into every generated client — says registration is
-    /// insert-only: `ClientCore::set_credential` is the only writer, nothing removes, clears, or
-    /// replaces a credential with nothing, and `Credential` has no variant meaning "none". That is a
-    /// claim about the *absence* of a capability, which nothing else observes, so this test holds
-    /// the three facts it rests on and fails the moment any of them stops being true (#193). When
-    /// it fails because an unregister or replace operation was added (#142), the fix is to rewrite
-    /// that paragraph — the advice to build a new client is then no longer the only remedy — and
-    /// to delete this test with it, not to widen the allow-lists below. The first assertion ties
-    /// the test to the sentence, so neither can outlive the other unnoticed.
-    #[test]
-    fn the_shipped_insert_only_credential_claim_still_holds() {
-        let dispatch = embedded(include_str!("dispatch.rs"));
-        let prose: String = dispatch
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("///"))
-            .map(str::trim)
-            .collect::<Vec<_>>()
-            .join(" ");
-        for sentence in [
-            "Registration is insert-only: [`ClientCore::set_credential`] is the only writer, there \
-             is no remove, clear, or replace-with-nothing operation at any layer, and \
-             [`Credential`] has no variant meaning \"none\"",
-            "The way to reach a later alternative is to build a client that is not registered for \
-             the earlier one.",
-        ] {
-            assert!(
-                prose.contains(sentence),
-                "`attach_auth`'s rustdoc no longer states {sentence:?}; if the claim was withdrawn, \
-                 delete this test with it",
-            );
-        }
-
-        // 1. The map is a private field of `ClientCore`, so only `client.rs` can reach it, and
-        //    there it is created empty, inserted into by `set_credential`, and read by
-        //    `credential` — nothing else. Any removal, clear, `mem::take`, destructuring, second
-        //    constructor, or `&mut` hand-out names the field and lands here.
-        let client = embedded(include_str!("client.rs"));
-        let mut touches: Vec<&str> = code_lines(client)
-            .filter(|line| {
-                line.match_indices("credentials").any(|(at, word)| {
-                    let before = line[..at].chars().next_back();
-                    let after = line[at + word.len()..].chars().next();
-                    let ident =
-                        |c: Option<char>| c.is_some_and(|c| c.is_alphanumeric() || c == '_');
-                    !ident(before) && !ident(after)
-                })
-            })
-            .collect();
-        touches.sort_unstable();
-        assert_eq!(
-            touches,
-            [
-                "credentials: HashMap::new(),",
-                "credentials: HashMap<String, Credential>,",
-                "self.credentials.get(scheme)",
-                "self.credentials.insert(scheme.to_owned(), credential);",
-            ],
-            "the credential map gained an access path; if it removes or replaces a registration, \
-             `attach_auth`'s insert-only paragraph is now false",
-        );
-
-        // 2. No method rebuilds the core out from under its credentials without naming the field
-        //    (`*self = Self::new(..)`, or a by-value `self` returning a fresh core): every receiver
-        //    other than `&self` belongs to one of the two known writers, and neither touches the
-        //    map except through the insert above.
-        let code: String = code_lines(client).collect::<Vec<_>>().join(" ");
-        let mut writers: Vec<&str> = code
-            .match_indices("fn ")
-            .filter_map(|(at, _)| {
-                let rest = &code[at + 3..];
-                let name_end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
-                let params = rest[name_end..].split_once('(')?.1;
-                let receiver = params.split([',', ')']).next()?.trim();
-                let mutating = receiver.ends_with("self") && receiver != "&self";
-                mutating.then(|| &rest[..name_end])
-            })
-            .collect();
-        writers.sort_unstable();
-        assert_eq!(
-            writers,
-            ["config_mut", "set_credential"],
-            "`ClientCore` gained a method that mutates or consumes it; if it can drop a \
-             registration, `attach_auth`'s insert-only paragraph is now false",
-        );
-
-        // 3. No variant means "none": every `Credential` carries something to attach, so an
-        //    overwrite through `set_credential` always leaves the scheme registered. A new variant
-        //    stops this match compiling; decide whether it can stand for "no credential" before
-        //    adding its arm.
-        let carries_something = |credential: &Credential| match credential {
-            Credential::Bearer(_)
-            | Credential::Basic { .. }
-            | Credential::ApiKey(_)
-            | Credential::Provider(_) => true,
-        };
-        assert!(carries_something(&Credential::Bearer(SecretString::from(
-            "t0k"
-        ))));
     }
 }

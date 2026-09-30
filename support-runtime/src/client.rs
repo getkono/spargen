@@ -125,9 +125,19 @@ impl ClientCore {
         &self.backend
     }
 
-    /// Register a credential for a named security scheme.
+    /// Register a credential for a named security scheme, replacing any already registered for it.
     pub fn set_credential(&mut self, scheme: &str, credential: Credential) {
         self.credentials.insert(scheme.to_owned(), credential);
+    }
+
+    /// Unregister the credential for a named security scheme, returning it if one was registered.
+    ///
+    /// This is how a caller reaches a later security alternative: selection picks the first
+    /// alternative whose schemes are all registered and never falls through past it (see
+    /// [`crate::attach_auth`]), so an alternative stops being chosen only once one of its schemes
+    /// is unregistered. Removing a scheme that was never registered is a no-op returning `None`.
+    pub fn remove_credential(&mut self, scheme: &str) -> Option<Credential> {
+        self.credentials.remove(scheme)
     }
 
     /// Retrieve a registered credential by scheme name.
@@ -202,6 +212,30 @@ mod tests {
             Some(Credential::Basic { .. })
         ));
         assert!(core.credential("other").is_none());
+    }
+
+    #[test]
+    fn a_removed_credential_is_returned_and_no_longer_registered() {
+        let mut core = ClientCore::new("https://example.com").unwrap();
+        core.set_credential("token", Credential::Bearer(SecretString::from("t0k")));
+        core.set_credential("key", Credential::ApiKey(SecretString::from("k3y")));
+
+        assert!(matches!(
+            core.remove_credential("token"),
+            Some(Credential::Bearer(_))
+        ));
+        assert!(core.credential("token").is_none());
+        // Removal is keyed by scheme name: the other registration is untouched.
+        assert!(matches!(
+            core.credential("key"),
+            Some(Credential::ApiKey(_))
+        ));
+        // Removing again, or removing a scheme never registered, is a no-op rather than a panic.
+        assert!(core.remove_credential("token").is_none());
+        assert!(core.remove_credential("never").is_none());
+        // A removed scheme can be registered again.
+        core.set_credential("token", Credential::Bearer(SecretString::from("t1k")));
+        assert!(core.credential("token").is_some());
     }
 
     #[test]

@@ -79,6 +79,7 @@ pub(crate) const CLIENT_METHODS: &[&str] = &[
     "with_backend",
     "core",
     "with_credential",
+    "without_credential",
     "inner",
 ];
 
