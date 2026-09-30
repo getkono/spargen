@@ -903,8 +903,9 @@ fn mask(source: &str) -> Masked {
 }
 
 /// The offset of every `env!("CARGO_BIN_EXE_spargen")` or `option_env!` of it in the code, raw
-/// literals and whitespace inside the invocation included. A comment or a string that only cites
-/// the invocation is blanked by [`mask`], so it names no site.
+/// literals, whitespace inside the invocation, and each macro delimiter (`(`, `[`, `{`) included.
+/// A comment or a string that only cites the invocation is blanked by [`mask`], so it names no
+/// site.
 fn spawn_sites(masked: &Masked) -> Vec<usize> {
     fn trim_end(code: &[u8]) -> &[u8] {
         let kept = code
@@ -918,7 +919,11 @@ fn spawn_sites(masked: &Masked) -> Vec<usize> {
         .iter()
         .filter(|(_, contents)| contents == SPAWN_VARIABLE)
         .filter_map(|&(at, _)| {
-            let before = trim_end(trim_end(&masked.code[..at]).strip_suffix(b"(")?);
+            let (&open, before) = trim_end(&masked.code[..at]).split_last()?;
+            if !matches!(open, b'(' | b'[' | b'{') {
+                return None;
+            }
+            let before = trim_end(before);
             let before = trim_end(before.strip_suffix(b"!")?);
             let name_start = before
                 .iter()
@@ -1116,8 +1121,22 @@ mod nested {
 fn a_predicate_is_not_the_gate() {
     let _ = env!("CARGO_BIN_EXE_spargen");
 }
+
+#[test]
+fn ungated_brackets() {
+    let _ = env!["CARGO_BIN_EXE_spargen"];
+    let _ = option_env! [ "CARGO_BIN_EXE_spargen" ];
+}
+
+#[test]
+fn ungated_braces() {
+    let _ = env! { "CARGO_BIN_EXE_spargen" };
+}
+
+const A_TUPLE: (&str,) = ("CARGO_BIN_EXE_spargen",);
+const AN_ARRAY: [&str; 1] = ["CARGO_BIN_EXE_spargen"];
 "##;
-    assert_eq!(ungated_spawns(source), [18, 23, 33, 39]);
+    assert_eq!(ungated_spawns(source), [18, 23, 33, 39, 44, 45, 50]);
 }
 
 #[test]
@@ -1144,6 +1163,12 @@ mod spawning {
 #[test]
 fn spawns() {
     let _ = env!("CARGO_BIN_EXE_spargen");
+}
+
+#[cfg(feature = "cli")]
+fn spawns_through_other_delimiters() {
+    let _ = env!["CARGO_BIN_EXE_spargen"];
+    let _ = option_env! { "CARGO_BIN_EXE_spargen" };
 }
 "#;
     assert_eq!(ungated_spawns(item_gated), Vec::<usize>::new());
