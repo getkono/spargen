@@ -143,7 +143,8 @@ struct ReconnectContext {
 impl<T> EventStream<T> {
     /// Wrap a streaming response with the framing mode chosen for its media type. The response is
     /// consumed lazily — no bytes are read until the first [`Self::next`] call.
-    pub fn new(response: Response, framing: Framing) -> Self {
+    /// Crate-visible, like [`Self::new_reconnectable`], which builds on it.
+    pub(crate) fn new(response: Response, framing: Framing) -> Self {
         Self {
             status: response.status(),
             headers: response.headers().clone(),
@@ -159,7 +160,11 @@ impl<T> EventStream<T> {
 
     /// Build a stream that can opt into reconnecting the prepared request. Generated operation
     /// methods use this constructor; ordinary callers use [`Self::with_reconnect`] to enable it.
-    pub fn new_reconnectable(
+    /// Crate-visible: the generated operation methods share the consumer's crate with the
+    /// embedded runtime, so they reach it while the [`Framing`] it takes stays outside the
+    /// generated public API. The `allow` is for this crate's own build: its caller is generated code.
+    #[allow(dead_code)]
+    pub(crate) fn new_reconnectable(
         response: Response,
         framing: Framing,
         core: ClientCore,
@@ -173,20 +178,14 @@ impl<T> EventStream<T> {
                 .map(str::to_owned)
         });
         Self {
-            status: response.status(),
-            headers: response.headers().clone(),
-            state: StreamState::Body(Box::pin(response.bytes_stream())),
-            buffer: Vec::new(),
-            framing,
             last_event_id,
-            reconnect_delay: None,
             reconnect: request.map(|request| ReconnectContext {
                 core,
                 request,
                 policy: None,
                 attempt: 0,
             }),
-            _marker: PhantomData,
+            ..Self::new(response, framing)
         }
     }
 
