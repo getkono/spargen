@@ -547,7 +547,10 @@ struct LowerCtx<'a, 'doc> {
     /// with whether its body is a bare `$ref` alias. A target is flattened through its own `$ref`
     /// and `allOf` rather than lowered to a reserved type, so nothing else notices when that
     /// expansion reaches a target already on this stack; [`Self::gather_ref_target`] does, and
-    /// rejects the loop instead of recursing through it.
+    /// rejects the loop instead of recursing through it. The stack belongs to the type being
+    /// lowered: [`Self::lower_reserved_body`] empties it for each reserved body, so it never spans a
+    /// reservation, and a target reached through one sits on the stack of the type it was
+    /// reached from only.
     resolved_member_stack: Vec<(String, bool)>,
     /// The nullability earlier passes' bodies decided for reservations whose back-edges read a
     /// wrong reserve-time guess; consulted before [`schema_is_nullable`] when a reservation opens.
@@ -736,7 +739,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let root_id = self.graph.reserve();
         self.in_progress
             .insert(name.to_owned(), (root_id, provisional_nullable));
-        let lowered = self.lower_schema(schema, name);
+        let lowered = self.lower_reserved_body(schema, name);
         self.in_progress.remove(name);
         self.settle_reservation(
             reservation,
@@ -1112,7 +1115,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let root_id = self.graph.reserve();
         self.remote_in_progress
             .insert(reference.to_owned(), (root_id, provisional_nullable));
-        let lowered = self.lower_schema(&schema, reference);
+        let lowered = self.lower_reserved_body(&schema, reference);
         self.remote_in_progress.remove(reference);
         self.settle_reservation(
             reservation,
@@ -1267,7 +1270,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let root_id = self.graph.reserve();
         self.resolved_in_progress
             .insert(key.clone(), (root_id, provisional_nullable));
-        let lowered = self.lower_schema(&schema, &hint);
+        let lowered = self.lower_reserved_body(&schema, &hint);
         self.resolved_in_progress.remove(&key);
         self.settle_reservation(
             reservation,
@@ -1318,6 +1321,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let result = self.lower_schema_inner(schema, hint);
         self.depth -= 1;
         result
+    }
+
+    /// Lower the body of a type whose root id `ensure_component`, `ensure_remote` or
+    /// `ensure_resolved` has just reserved, with [`Self::resolved_member_stack`] empty for the
+    /// duration and restored after.
+    ///
+    /// The stack answers "is this expansion inside itself", and a reservation starts a new type:
+    /// a member target flattened by an enclosing expansion and met again inside this body is a
+    /// recursive *field* of the new type, which the reservation boxes, not a loop of the enclosing
+    /// expansion. Re-entering the reserved type itself is refused by its `*_in_progress` entry, so
+    /// every loop that crosses this boundary is still caught, as the root document catches it.
+    fn lower_reserved_body(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        let enclosing = std::mem::take(&mut self.resolved_member_stack);
+        let lowered = self.lower_schema(schema, hint);
+        self.resolved_member_stack = enclosing;
+        lowered
     }
 
     /// The `E014` rejection [`Self::lower_schema`] reports at [`MAX_SCHEMA_DEPTH`], shared with the

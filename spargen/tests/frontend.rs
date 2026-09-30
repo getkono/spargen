@@ -3561,6 +3561,26 @@ components:
 "##,
             Code::AllOfIrreconcilable,
         ),
+        // The same loop with the alias spelled as the sub-file's own bare component name. That
+        // link reaches `B` through the component arm, which lowers `B` to a reserved type rather
+        // than flattening it, so the loop still passes through `B`'s body and is `E013`, not an
+        // alias cycle.
+        (
+            "bare alias into an allOf of the alias",
+            r##"
+components:
+  schemas:
+    Holder:
+      allOf:
+        - $ref: './lib.yaml#/components/schemas/A'
+    A: { $ref: '#/components/schemas/B' }
+    B:
+      allOf:
+        - { type: object, properties: { x: { type: string } } }
+        - $ref: './lib.yaml#/components/schemas/A'
+"##,
+            Code::AllOfIrreconcilable,
+        ),
     ];
     for (shape, lib, expected) in cases {
         let (generated, checked, _) = split("./lib.yaml#/components/schemas/Holder", lib);
@@ -3579,7 +3599,85 @@ components:
                 !has_code(report, Code::SchemaNestingTooDeep),
                 "{shape}/{entry}: a loop is a cycle, not a deep chain: {report:#?}"
             );
+            if expected != Code::UnresolvedRef {
+                assert!(
+                    !has_code(report, Code::UnresolvedRef),
+                    "{shape}/{entry}: a loop through a body is not an alias cycle: {report:#?}"
+                );
+            }
         }
+    }
+}
+
+/// A file-referenced `allOf` member whose expansion lowers a property that refers back to that
+/// member is an ordinary recursive type, not a member recursive through its own composition.
+///
+/// `Holder`'s member `Node` flattens `NodeBase`, whose `children` items refer to `Node`. Lowering
+/// those items gives `Node` a type of its own, with its own reservation, and that lowering flattens
+/// `NodeBase` again. It is a new type, so re-entering `NodeBase` there is not a loop of the outer
+/// expansion. The root-document spelling of the same shape always generated, and every spelling is
+/// held to it here.
+#[test]
+fn a_file_referenced_all_of_member_with_a_property_back_edge_generates() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Holder:
+      allOf:
+        - $ref: 'PREFIX#/components/schemas/Node'
+    Node:
+      allOf:
+        - $ref: 'PREFIX#/components/schemas/NodeBase'
+    NodeBase:
+      type: object
+      properties:
+        children:
+          type: array
+          items: { $ref: 'PREFIX#/components/schemas/Node' }
+"##;
+    let mut runs = Vec::new();
+    for (spelling, prefix) in [("explicit", "./lib.yaml"), ("bare", "")] {
+        let (generated, checked, code) = split(
+            "./lib.yaml#/components/schemas/Holder",
+            &LIB.replace("PREFIX", prefix),
+        );
+        runs.push((spelling, generated, checked, code));
+    }
+    let root = format!(
+        "openapi: 3.1.0\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\n\
+         paths:\n  \
+         /u:\n    \
+         get:\n      \
+         operationId: getU\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json:\n              \
+         schema: {{ $ref: '#/components/schemas/Holder' }}\n{}",
+        LIB.replace("PREFIX", "").trim_start_matches('\n')
+    );
+    let (generated, code) = generate_with_code(&root);
+    runs.push(("root", generated, check(&root), code));
+    for (spelling, generated, checked, code) in &runs {
+        for (entry, report) in [("generate", generated), ("check", checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: a property back-edge is recursion a type boxes: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::AllOfIrreconcilable),
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+        assert_eq!(
+            declared_fields(&types_module(code), "Holder"),
+            ["children"],
+            "{spelling}: `Holder` carries `NodeBase`'s property: {code}"
+        );
     }
 }
 
