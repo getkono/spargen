@@ -604,6 +604,149 @@ components:
     }
 }
 
+/// `{$ref: Base, oneOf: [...]}` and `allOf: [{$ref: Base}, {oneOf: [...]}]` are one conjunction,
+/// so they must reach one outcome: the same verdict, the same diagnostics at the same pointer, and
+/// the same generated shape. An object target and a union member used to split them, the `$ref`
+/// spelling intersecting the union with the target while the `allOf` spelling rejected every such
+/// document as an object/scalar mix. Three cases, each through `generate` and `check`, for `oneOf`
+/// and `anyOf`: branches that collapse to the target (`W001`, `Base`'s shape), branches that narrow
+/// it (a union of two structs, each carrying `Base`'s fields and its own), and branches the target
+/// excludes entirely (`E013`).
+#[test]
+fn a_ref_with_a_union_sibling_and_its_all_of_spelling_reach_the_same_outcome() {
+    enum Expect {
+        Collapsed,
+        Narrowed,
+        Rejected,
+    }
+    let cases = [
+        ("[ { required: [a] }, { required: [b] } ]", Expect::Collapsed),
+        (
+            "[ { properties: { c: { type: integer } } }, { properties: { d: { type: boolean } } } ]",
+            Expect::Narrowed,
+        ),
+        ("[ { type: string }, { type: integer } ]", Expect::Rejected),
+    ];
+    for keyword in ["oneOf", "anyOf"] {
+        for (branches, expect) in &cases {
+            let spellings = [
+                format!("{{ $ref: '#/components/schemas/Base', {keyword}: {branches} }}"),
+                format!(
+                    "{{ allOf: [ {{ $ref: '#/components/schemas/Base' }}, {{ {keyword}: {branches} \
+                     }} ] }}"
+                ),
+            ];
+            let mut outcomes = Vec::new();
+            for pick in &spellings {
+                let spec = format!(
+                    r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Pick' }} }}
+components:
+  schemas:
+    Base:
+      type: object
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Pick: {pick}
+"##
+                );
+                let (report, code) = generate_with_code(&spec);
+                let observed = |report: &Report| {
+                    let mut diagnostics: Vec<(String, String)> = report
+                        .diagnostics()
+                        .iter()
+                        .map(|d| (d.code.to_string(), d.pointer.as_str().to_owned()))
+                        .collect();
+                    diagnostics.sort();
+                    (report.outcome(), diagnostics)
+                };
+                let generated = observed(&report);
+                // `check` reports `Clean` where `generate` reports `Generated`, so only the
+                // rejection verdict and the diagnostics are compared across the entry points.
+                let checked = observed(&check(&spec));
+                assert_eq!(
+                    (generated.0 == Outcome::Rejected, &generated.1),
+                    (checked.0 == Outcome::Rejected, &checked.1),
+                    "`{pick}`: `generate` and `check` must agree"
+                );
+                let pick_warned = ("W001".to_owned(), "/components/schemas/Pick".to_owned());
+                let types = types_module(&code);
+                match expect {
+                    Expect::Collapsed => {
+                        assert_ne!(generated.0, Outcome::Rejected, "`{pick}`: {report:#?}");
+                        assert!(
+                            generated.1.contains(&pick_warned),
+                            "`{pick}`: W001 must point at `Pick`: {report:#?}"
+                        );
+                        assert_eq!(
+                            declared_fields(&types, "Pick"),
+                            ["a", "b"],
+                            "`{pick}`: `Pick` must keep `Base`'s shape: {types}"
+                        );
+                    }
+                    Expect::Narrowed => {
+                        assert_ne!(generated.0, Outcome::Rejected, "`{pick}`: {report:#?}");
+                        assert!(
+                            !generated.1.contains(&pick_warned),
+                            "`{pick}`: distinguishable branches must not collapse: {report:#?}"
+                        );
+                        let variants = enum_variants(&types, "Pick");
+                        assert_eq!(variants.len(), 2, "`{pick}`: {types}");
+                        let mut branch_fields: Vec<Vec<String>> = variants
+                            .iter()
+                            .map(|variant| {
+                                let payload = variant
+                                    .split_once('(')
+                                    .map(|(_, rest)| rest.trim_end_matches(')'))
+                                    .unwrap_or_default();
+                                let payload = payload
+                                    .strip_prefix("Box<")
+                                    .map_or(payload, |inner| inner.trim_end_matches('>'));
+                                let mut fields = declared_fields(&types, payload);
+                                fields.sort();
+                                fields
+                            })
+                            .collect();
+                        branch_fields.sort();
+                        assert_eq!(
+                            branch_fields,
+                            [["a", "b", "c"], ["a", "b", "d"]],
+                            "`{pick}`: each branch must carry `Base`'s fields and its own: {types}"
+                        );
+                    }
+                    Expect::Rejected => {
+                        assert_eq!(generated.0, Outcome::Rejected, "`{pick}`: {report:#?}");
+                        assert!(
+                            generated.1.contains(&(
+                                "E013".to_owned(),
+                                "/components/schemas/Pick".to_owned()
+                            )),
+                            "`{pick}`: E013 must point at `Pick`: {report:#?}"
+                        );
+                    }
+                }
+                outcomes.push(generated);
+            }
+            assert_eq!(
+                outcomes[0], outcomes[1],
+                "{keyword} {branches}: the `$ref`-sibling and `allOf` spellings must agree"
+            );
+        }
+    }
+}
+
 /// The collapse above is reserved for a `$ref` whose own sibling is a `oneOf`/`anyOf`. A `$ref` to a
 /// union component beside a non-union sibling (`U: anyOf[...]`, `P: {$ref: U, const: x}`) is an
 /// intersection this change does not touch: its branches may intersect to one type, but it must
