@@ -284,6 +284,13 @@ fn parse_paths(value: &SpannedValue, pointer: &JsonPointer, diags: &mut Diagnost
     let mut paths = Paths::default();
     if let Some(map) = object(value, pointer, diags) {
         for (key, value) in map.iter() {
+            // The Paths Object is `^/` path items plus `specification-extensions` (`^x-`, any
+            // value), and `unevaluatedProperties: false` rejects every other key before parsing
+            // began — so an `x-` key is author data, not a path item, and is skipped (#370), as
+            // `parse_responses` skips its own.
+            if key.name.starts_with("x-") {
+                continue;
+            }
             if let Some(item) = parse_path_item(value, &pointer.push(&key.name), diags) {
                 paths.items.insert(key.name.clone(), item);
             }
