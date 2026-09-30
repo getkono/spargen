@@ -49,13 +49,56 @@ documented error response (`Api`), of an undocumented status (`UnexpectedStatus`
 an undocumented 2xx), and of a response whose body failed to decode (`Decode`, whether the status
 was a success or a documented error), and `None` for every class that produced no response, so a
 log line can report which status failed without matching variants. `is_transient()` reads that same
-status for `Decode`: a `429` or `5xx` whose body did not match its schema is still transient. A
+status for `Decode`: a `429` or `5xx` whose body did not match its schema is still transient.
+`Decode` also keeps the response's headers, so a documented `429` whose body a proxy in front of
+the server replaced with an HTML page still exposes its `Retry-After`. A
 `RetryPolicy` is handed a `RetryOutcome`, not an `Error`, and reads the status with
 `RetryOutcome::status()`.
 `RetryWait` is re-exported by the generated client, so a policy names it rather than spelling out
 `Pin<Box<dyn Future<Output = ()> + Send + 'a>>`. The
 [petstore example](https://github.com/getkono/spargen/tree/master/examples/petstore) ships a
 complete `RetryPolicy` driven by a tokio timer.
+
+## Problem details
+
+`Error::problem()` returns the [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) members of the
+failed call's error response body as a `ProblemDetails` (`problem_type`, `title`, `status`,
+`detail`, `instance`), whichever operation and status produced it. Its bound is
+`ApiErrorProblem`, which every generated error type implements — the multi-status enum, including
+one whose statuses carry different body types and so has no `api_body`, the single-body newtype,
+and the uninhabited shape — so one function generic over `E` reads every operation:
+
+```rust
+fn log_problem<E: api::ApiErrorProblem>(error: &api::Error<E>) {
+    if let Some(problem) = error.problem() {
+        eprintln!("{}: {:?}", problem.problem_type_or_blank(), problem.detail);
+    }
+}
+```
+
+It answers from whichever class carried a body:
+
+- `Error::Api`: the typed body, read as it serializes to JSON. A documented bodyless status, and
+  a body read as raw bytes, answer `None`.
+- `Error::Decode` and `Error::UnexpectedStatus` with a `4xx` or `5xx` status: the retained raw
+  body, parsed as JSON. A documented error status whose body did not match its schema — a problem
+  `type` the description does not list — still yields its `type` and `detail` here. A body the
+  error-body cap truncated is no longer JSON and answers `None`, and a success status is never
+  read.
+
+A member is `Some` only with the type RFC 9457 gives it (a string, or an integer HTTP status for
+`status`); `problem_type_or_blank()` applies the RFC's `about:blank` default for an absent `type`.
+The reader asserts nothing about whether the server meant the body as problem details: an object
+body answers with whichever of those member names it carries. Extension members are not read.
+
+A description that narrows the problem `type` per status (`allOf: [$ref: Problem, {properties:
+{type: {const: …}}}]`) makes an unlisted `type` a decode failure by default, so it reaches the raw
+path above. The opt-in `open_narrowing` (`Spec::open_narrowing(true)`, `open_narrowing = true` in
+`spargen.toml`, `--open-narrowing`, or `open_narrowing` in `generate_api!`) lowers that narrowing,
+in a response body's own schema, to an open enum instead: each listed value keeps its variant, one
+more (`Other(String)`) holds any other string, and the response decodes into `Error::Api`, where
+`problem()` reads it like any other. The [support matrix](./support-matrix.md)'s Responses row
+states exactly which positions it opens.
 
 ## Middleware
 
@@ -178,4 +221,11 @@ API stays one deref away.
 let at = DateTime(time::OffsetDateTime::now_utc());
 let year = at.year();                  // through `Deref`
 let inner: time::OffsetDateTime = at.into();
+```
+
+Both also parse their RFC 3339 text with `FromStr`, failing with `DateParseError`, which the
+generated root re-exports beside them:
+
+```rust
+let day: Result<Date, DateParseError> = "2024-01-01".parse();
 ```

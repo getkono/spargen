@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use futures_core::Stream;
+use reqwest::header::HeaderMap;
 use reqwest::{Request, Response, StatusCode};
 use serde::de::DeserializeOwned;
 
@@ -105,6 +106,8 @@ pub struct EventStream<T> {
     /// latest accepted reconnect. A per-frame decode failure reports it as `Error::Decode`'s
     /// `status`.
     status: StatusCode,
+    /// The headers of that same response, reported as `Error::Decode`'s `headers`.
+    headers: HeaderMap,
     /// Bytes read but not yet framed into a complete item. Partial frames live here between chunks.
     buffer: Vec<u8>,
     /// The framing mode for this body.
@@ -140,9 +143,11 @@ struct ReconnectContext {
 impl<T> EventStream<T> {
     /// Wrap a streaming response with the framing mode chosen for its media type. The response is
     /// consumed lazily — no bytes are read until the first [`Self::next`] call.
-    pub fn new(response: Response, framing: Framing) -> Self {
+    /// Crate-visible, like [`Self::new_reconnectable`], which builds on it.
+    pub(crate) fn new(response: Response, framing: Framing) -> Self {
         Self {
             status: response.status(),
+            headers: response.headers().clone(),
             state: StreamState::Body(Box::pin(response.bytes_stream())),
             buffer: Vec::new(),
             framing,
@@ -155,7 +160,11 @@ impl<T> EventStream<T> {
 
     /// Build a stream that can opt into reconnecting the prepared request. Generated operation
     /// methods use this constructor; ordinary callers use [`Self::with_reconnect`] to enable it.
-    pub fn new_reconnectable(
+    /// Crate-visible: the generated operation methods share the consumer's crate with the
+    /// embedded runtime, so they reach it while the [`Framing`] it takes stays outside the
+    /// generated public API. The `allow` is for this crate's own build: its caller is generated code.
+    #[allow(dead_code)]
+    pub(crate) fn new_reconnectable(
         response: Response,
         framing: Framing,
         core: ClientCore,
@@ -169,19 +178,14 @@ impl<T> EventStream<T> {
                 .map(str::to_owned)
         });
         Self {
-            status: response.status(),
-            state: StreamState::Body(Box::pin(response.bytes_stream())),
-            buffer: Vec::new(),
-            framing,
             last_event_id,
-            reconnect_delay: None,
             reconnect: request.map(|request| ReconnectContext {
                 core,
                 request,
                 policy: None,
                 attempt: 0,
             }),
-            _marker: PhantomData,
+            ..Self::new(response, framing)
         }
     }
 
@@ -231,7 +235,7 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
             match next_frame(&mut this.buffer, this.framing, at_eof) {
                 FramePoll::Item { payload, metadata } => {
                     this.apply_metadata(metadata);
-                    let item = deserialize_item::<T>(this.status, &payload);
+                    let item = deserialize_item::<T>(this.status, &this.headers, &payload);
                     if item.is_ok() {
                         if let Some(reconnect) = this.reconnect.as_mut() {
                             reconnect.attempt = 0;
@@ -300,6 +304,7 @@ impl<T: DeserializeOwned> Stream for EventStream<T> {
                     }
                     Poll::Ready(Ok(response)) => {
                         this.status = response.status();
+                        this.headers = response.headers().clone();
                         this.state = StreamState::Body(Box::pin(response.bytes_stream()));
                     }
                     Poll::Ready(Err(error)) => {
@@ -649,14 +654,16 @@ fn take_line(buf: &[u8], from: usize) -> Option<(&[u8], usize)> {
 }
 
 /// Decode one framed JSON payload into `T`. A parse failure becomes [`Error::Decode`] carrying the
-/// status of the response the frame was read from, the serde path, and the raw frame — never a
-/// silent skip.
+/// status and headers of the response the frame was read from, the serde path, and the raw frame —
+/// never a silent skip. The headers are cloned only on failure.
 fn deserialize_item<T: DeserializeOwned>(
     status: StatusCode,
+    headers: &HeaderMap,
     payload: &[u8],
 ) -> Result<T, Error<Infallible>> {
     serde_json::from_slice::<T>(payload).map_err(|error| Error::Decode {
         status,
+        headers: headers.clone(),
         path: error.to_string(),
         body: Bytes::copy_from_slice(payload),
         truncated: false,
@@ -871,7 +878,11 @@ mod tests {
         let (items, _) = drain(&mut buf, Framing::Ndjson, false);
         assert_eq!(items, vec!["not json"]);
         let decoded: Result<serde_json::Value, Error<std::convert::Infallible>> =
-            super::deserialize_item(reqwest::StatusCode::OK, items[0].as_bytes());
+            super::deserialize_item(
+                reqwest::StatusCode::OK,
+                &reqwest::header::HeaderMap::new(),
+                items[0].as_bytes(),
+            );
         assert!(matches!(
             decoded,
             Err(Error::Decode {
@@ -884,7 +895,11 @@ mod tests {
     #[test]
     fn well_formed_json_frame_deserializes() {
         let decoded: Result<serde_json::Value, Error<std::convert::Infallible>> =
-            super::deserialize_item(reqwest::StatusCode::OK, br#"{"a":1}"#);
+            super::deserialize_item(
+                reqwest::StatusCode::OK,
+                &reqwest::header::HeaderMap::new(),
+                br#"{"a":1}"#,
+            );
         assert_eq!(decoded.unwrap(), serde_json::json!({"a": 1}));
     }
 
@@ -908,10 +923,14 @@ mod tests {
         response_with_status(200, body)
     }
 
+    /// Every synthetic initial response carries `x-response: initial`, and every response a
+    /// [`SequenceBackend`] returns carries `x-response: reconnected`, so a test can tell which
+    /// response's headers a `Decode` error reports.
     fn response_with_status(status: u16, body: &str) -> reqwest::Response {
         reqwest::Response::from(
             http::Response::builder()
                 .status(status)
+                .header("x-response", "initial")
                 .body(body.to_owned())
                 .expect("valid synthetic response"),
         )
@@ -955,6 +974,7 @@ mod tests {
                 Ok(reqwest::Response::from(
                     http::Response::builder()
                         .status(status)
+                        .header("x-response", "reconnected")
                         .body(body)
                         .expect("valid synthetic response"),
                 ))
@@ -1077,8 +1097,8 @@ mod tests {
         assert!(poll_ready(stream.next()).is_none());
     }
 
-    /// A malformed frame is a `Decode` error that carries the status of the response the stream
-    /// is reading — a non-`200` here, so a hard-coded status cannot pass.
+    /// A malformed frame is a `Decode` error that carries the status and headers of the response
+    /// the stream is reading — a non-`200` here, so a hard-coded status cannot pass.
     #[test]
     fn next_yields_a_decode_error_for_a_malformed_item() {
         let mut stream: EventStream<serde_json::Value> =
@@ -1090,15 +1110,19 @@ mod tests {
                     error.status(),
                     Some(reqwest::StatusCode::from_u16(203).unwrap())
                 );
+                let Error::Decode { headers, .. } = error else {
+                    unreachable!()
+                };
+                assert_eq!(headers.get("x-response").unwrap(), "initial");
             }
             other => panic!("expected a Decode error, got {other:?}"),
         }
     }
 
-    /// After a reconnect, a malformed frame reports the reconnected response's status, not the
-    /// initial one's: the frame was read from the new body.
+    /// After a reconnect, a malformed frame reports the reconnected response's status and headers,
+    /// not the initial one's: the frame was read from the new body.
     #[test]
-    fn a_decode_error_after_a_reconnect_reports_the_reconnected_status() {
+    fn a_decode_error_after_a_reconnect_reports_the_reconnected_status_and_headers() {
         let backend = Arc::new(SequenceBackend::new([(203, "data: not json\n\n")]));
         let policy = Arc::new(ImmediateReconnect {
             max_attempts: 1,
@@ -1111,7 +1135,12 @@ mod tests {
             serde_json::json!({"seq": 1})
         );
         match poll_ready(stream.next()).unwrap() {
-            Err(Error::Decode { status, .. }) => assert_eq!(status.as_u16(), 203),
+            Err(Error::Decode {
+                status, headers, ..
+            }) => {
+                assert_eq!(status.as_u16(), 203);
+                assert_eq!(headers.get("x-response").unwrap(), "reconnected");
+            }
             other => panic!("expected a Decode error from the reconnected body, got {other:?}"),
         }
     }

@@ -9,6 +9,8 @@
 name = "petstore-macro-example"
 version = "0.0.0"
 edition = "2021"
+# The repository's licence; `mise run deny` fails an example crate with none (#184).
+license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace]

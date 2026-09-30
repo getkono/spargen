@@ -3,6 +3,9 @@
 fn main() {
     let out = std::env::var("OUT_DIR").unwrap();
     let build = spargen::Spec::new(concat!(env!("CARGO_MANIFEST_DIR"), "/petstore.yaml"))
+        // Each documented problem status narrows the problem `type` to one value; open those sets,
+        // so a problem type the server adds later still decodes into `Error::Api`.
+        .open_narrowing(true)
         .build(format!("{out}/petstore.rs"))
         // This IS a build script, and generating without Cargo wired up would mean a silently
         // stale client — so say it must be, and fail loudly if it ever is not.

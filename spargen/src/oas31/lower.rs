@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use indexmap::IndexMap;
+use indexmap::{IndexMap, IndexSet};
 
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
@@ -68,11 +68,63 @@ fn resolved_hint(provenance: &Provenance, fallback: &str) -> String {
 }
 
 /// Lower a typed OpenAPI 3.1 or 3.2 [`Document`] into the version-agnostic [`Api`] IR.
+///
+/// Lowering runs as one or more whole passes over the document, and only the last one's IR and
+/// diagnostics are kept. A back-edge — a `$ref` taken while its target's body is still being
+/// lowered — has to be typed before that body has decided whether the target is nullable, so it is
+/// typed from a reserve-time guess ([`schema_is_nullable`], which cannot see a `null` that a union
+/// member, an `allOf`, or a referenced component supplies). When the body then decides otherwise,
+/// every field that took the back-edge disagrees with every field that referenced the finished
+/// component, and the one that took it cannot decode a value its schema admits (issue #222). A pass
+/// that found such a disagreement is discarded and the document is lowered again with the body's
+/// answer settled for that reservation, so the back-edge reads what a finished reference reads.
+///
+/// Each extra pass settles at least one reservation it had not settled before, and a settled value
+/// is never revised, so the loop ends within one pass per reservation plus one. A document with no
+/// such back-edge — every one without a recursive nullable component — is lowered exactly once.
 pub(crate) fn lower(
     document: &Document,
     resolver: &Resolver,
     diags: &mut Diagnostics,
+    options: LowerOptions,
 ) -> Result<Api, Aborted> {
+    let mut settled = HashMap::new();
+    loop {
+        let mut pass = diags.clone();
+        let (api, revisions) = lower_pass(document, resolver, &mut pass, &settled, options);
+        let mut changed = false;
+        for (reservation, nullable) in revisions {
+            if let std::collections::hash_map::Entry::Vacant(entry) = settled.entry(reservation) {
+                entry.insert(nullable);
+                changed = true;
+            }
+        }
+        if !changed {
+            *diags = pass;
+            return api;
+        }
+    }
+}
+
+/// One reservation's identity, in whichever of the three memos holds it: a root component by name,
+/// a remote target by absolute `url#fragment`, a bundle target by resolved `file#pointer`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Reservation {
+    Component(String),
+    Remote(String),
+    Resolved(String),
+}
+
+/// One lowering pass. `settled` holds the nullability an earlier pass's bodies decided for the
+/// reservations whose back-edges read a guess that turned out wrong; the second value returned is
+/// every such reservation this pass found (see [`lower`]).
+fn lower_pass(
+    document: &Document,
+    resolver: &Resolver,
+    diags: &mut Diagnostics,
+    settled: &HashMap<Reservation, bool>,
+    options: LowerOptions,
+) -> (Result<Api, Aborted>, Vec<(Reservation, bool)>) {
     let mut security_schemes = lower_security_schemes(document, diags);
     // OpenAPI 3.2 lets a security requirement name a Security Scheme Object by URI instead of by
     // component name. A component name always wins — the specification is explicit that name
@@ -94,7 +146,15 @@ pub(crate) fn lower(
         resolved_components: HashMap::new(),
         resolved_in_progress: HashMap::new(),
         resolved_alias_stack: HashSet::new(),
+        resolved_contributions: HashMap::new(),
+        resolved_member_stack: Vec::new(),
+        settled,
+        guessed: HashSet::new(),
+        revisions: Vec::new(),
         depth: 0,
+        open_narrowing: options.open_narrowing,
+        narrowing_opens: false,
+        open_candidates: HashSet::new(),
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -378,6 +438,7 @@ pub(crate) fn lower(
         .iter()
         .filter_map(|server| lower_server(server, ctx.diags))
         .collect();
+    let revisions = std::mem::take(&mut ctx.revisions);
     let api = Api {
         info: Info {
             title: document.info.title.clone(),
@@ -389,7 +450,7 @@ pub(crate) fn lower(
         types: ctx.graph,
         security_schemes,
     };
-    ctx.diags.result(api)
+    (ctx.diags.result(api), revisions)
 }
 
 fn append_text(target: &mut Option<String>, text: String) {
@@ -439,9 +500,11 @@ struct LowerCtx<'a, 'doc> {
     /// used via `$ref` would emit a non-`Option` field that rejects a conforming `null` payload.
     components: HashMap<String, (TypeId, bool)>,
     /// Components currently being lowered, mapped to the id reserved for their root and their
-    /// nullability (computed at reserve time from the schema). A `$ref` that re-enters a name still
-    /// in this map is a cycle-closing back-edge and is boxed against the reserved id, carrying the
-    /// same nullability a completed lowering would.
+    /// provisional nullability (an earlier pass's settled answer, else a reserve-time guess from
+    /// the schema). A `$ref` that re-enters a name still in this map is a cycle-closing back-edge
+    /// and is boxed against the reserved id; a guess it read that the body contradicts is recorded
+    /// in [`Self::revisions`], and [`lower`] lowers again until each back-edge carries the same
+    /// nullability a completed lowering does.
     in_progress: HashMap<String, (TypeId, bool)>,
     /// Guards chains of component aliases (`A -> B -> A`) that do not have a concrete schema body
     /// to enter the normal reserve/box recursion path.
@@ -472,10 +535,60 @@ struct LowerCtx<'a, 'doc> {
     /// Guards a chain of bare-`$ref` (alias) bundle targets, which have no body to reserve a root
     /// against; the counterpart of [`Self::remote_alias_stack`].
     resolved_alias_stack: HashSet<String>,
+    /// What a bundle-`$ref` `allOf` member contributes, keyed by the resolved target's own
+    /// `file#pointer` (see [`resolved_identity`]): the [`Self::resolved_components`] analogue for the
+    /// one resolution site that does not lower its target to a type. `allOf` is an applicator, so
+    /// [`Self::gather_member`] flattens such a target's fields into the enclosing object instead of
+    /// referencing a shared type, and without this memo it re-expanded the target at every use — a
+    /// branching reuse graph cost work and generated types exponential in its depth. The target is
+    /// expanded once and its contribution replayed at every later use, so the types its body lowers
+    /// to are shared exactly as a root component member's are through [`Self::push_ref_member`].
+    ///
+    /// A contribution is recorded only once its expansion succeeds; one that failed re-expands, and
+    /// reports again, at its next use, as it always did. What is replayed is a copy the enclosing
+    /// merge consumes, so nothing one composition does to the merged fields reaches the next use.
+    resolved_contributions: HashMap<String, Vec<Contribution>>,
+    /// The bundle-`$ref` `allOf` member targets being expanded right now, outermost first, each
+    /// with whether its body is a bare `$ref` alias. A target is flattened through its own `$ref`
+    /// and `allOf` rather than lowered to a reserved type, so nothing else notices when that
+    /// expansion reaches a target already on this stack; [`Self::gather_ref_target`] does, and
+    /// rejects the loop instead of recursing through it. The stack belongs to the type being
+    /// lowered: [`Self::lower_reserved_body`] empties it for each reserved body, so it never spans a
+    /// reservation, and a target reached through one sits on the stack of the type it was
+    /// reached from only.
+    resolved_member_stack: Vec<(String, bool)>,
+    /// The nullability earlier passes' bodies decided for reservations whose back-edges read a
+    /// wrong reserve-time guess; consulted before [`schema_is_nullable`] when a reservation opens.
+    settled: &'a HashMap<Reservation, bool>,
+    /// Open reservations whose provisional nullability a back-edge has read during this pass.
+    guessed: HashSet<Reservation>,
+    /// Reservations whose body decided a nullability other than the provisional one a back-edge
+    /// read, with the body's answer: the pass is stale, and [`lower`] runs another.
+    revisions: Vec<(Reservation, bool)>,
     /// Current schema-lowering recursion depth, incremented on entry to [`Self::lower_schema`] and
     /// decremented on exit. A `$ref`/allOf/array/object chain that pushes this past
     /// [`MAX_SCHEMA_DEPTH`] is rejected (`E014`) rather than allowed to overflow the stack.
     depth: u32,
+    /// The `open_narrowing` option: whether a string `enum`/`const` narrowing a plain `string`
+    /// is lowered as an open set where [`Self::narrowing_opens`] allows it.
+    open_narrowing: bool,
+    /// Whether the schema being lowered right now is one `open_narrowing` applies to: set by
+    /// [`Self::lower_chosen_response_body`] for a response body's own schema, and cleared by
+    /// [`Self::closed_narrowing`] for every `$ref` target and every `oneOf`/`anyOf` lowered inside
+    /// it. Always `false` while the option is off.
+    narrowing_opens: bool,
+    /// The string sets [`Self::lower_enum`] lowered while [`Self::narrowing_opens`] held: each is
+    /// the type of one inline `enum`/`const` in a position `open_narrowing` applies to, and no
+    /// `$ref` target, memo, or union reaches it, so [`Self::narrowed_string`] opens it in place
+    /// rather than leaving it beside an open copy as an unused public type.
+    open_candidates: HashSet<TypeId>,
+}
+
+/// The options that change what lowering produces.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct LowerOptions {
+    /// `Spec::open_narrowing`: lower a response body's own string narrowings as open sets.
+    pub(crate) open_narrowing: bool,
 }
 
 impl<'a, 'doc> LowerCtx<'a, 'doc> {
@@ -488,11 +601,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`crate::compat`]'s auto-carve maps back to an enclosing operation, so a root-level
     /// provenance here would make the rejection un-carvable.
     ///
-    /// Carvability holds for a `$ref` site in the root document. `omittable_enclosing` keys on the
-    /// pointer alone and not on the file, so a rejection whose provenance lies in a referenced
-    /// sub-file still yields a rule read against the root document, which matches nothing and ends
-    /// the run with `E019`. That is pre-existing and not specific to this diagnostic, but this
-    /// diagnostic can reach it.
+    /// Carvability holds for a `$ref` site in a referenced sub-file too, provided `at` carries that
+    /// file's span: `compat::carve_rules` reads the pointer in the file the span lies in, and
+    /// carves a sub-file construct as a file-scoped pointer rule.
     ///
     /// A name the root document does not declare is handed to [`Self::ensure_resolved`], because a
     /// `$ref` written inside a sub-file spells that file's own components the same way. That is a
@@ -510,6 +621,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         reference: Option<&str>,
         at: &crate::diag::Provenance,
     ) -> Option<Ty> {
+        self.closed_narrowing(|ctx| ctx.ensure_component_closed(name, reference, at))
+    }
+
+    /// [`Self::ensure_component`]'s body, run with `open_narrowing` out of effect: a component is
+    /// a `$ref` target, lowered once and shared by every use, whichever position first reached it.
+    fn ensure_component_closed(
+        &mut self,
+        name: &str,
+        reference: Option<&str>,
+        at: &crate::diag::Provenance,
+    ) -> Option<Ty> {
         self.warn_if_root_shadows_the_referring_file(name, reference, at);
         if let Some(&(id, nullable)) = self.components.get(name) {
             return Some(Ty {
@@ -521,7 +643,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let Some(&(id, nullable)) = self.in_progress.get(name) {
             // Re-entered while still lowering this component: a cycle-closing `$ref` back-edge.
             // Box the reference so the recursive type has a finite size instead of rejecting it;
-            // the reserved id will hold the root def once the in-progress body finishes.
+            // the reserved id will hold the root def once the in-progress body finishes. The
+            // nullability is provisional, so say it was read: the body checks it when it finishes.
+            self.guessed.insert(Reservation::Component(name.to_owned()));
             return Some(Ty {
                 id,
                 nullable,
@@ -579,29 +703,47 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 RefOr::Ref(reference) => reference.clone(),
                 RefOr::Item(_) => return None,
             };
-            if !self.component_alias_stack.insert(name.to_owned()) {
-                Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
-                    .message(format!(
-                        "schema component alias `{name}` forms a reference cycle"
-                    ))
-                    .emit(self.diags);
-                return None;
-            }
-            let ty = if let Some(target) = reference.reference.strip_prefix("#/components/schemas/")
-            {
-                self.ensure_component(target, Some(&reference.reference), &reference.provenance)
-            } else if is_remote_ref(&reference.reference) {
-                self.ensure_remote(&reference.reference)
-            } else {
-                self.ensure_resolved(&reference.reference, &reference.provenance, name)
-            };
-            self.component_alias_stack.remove(name);
-            if let Some(ty) = ty {
-                self.components
-                    .insert(name.to_owned(), (ty.id, ty.nullable));
-            }
-            return ty;
+            return self.chain_component_alias(name, &reference.reference, &reference.provenance);
         };
+        // A `$ref` whose siblings bear no shape — `description`, `title`, a validation keyword such
+        // as `maxLength` — is the same alias spelled with annotations beside it: the parser keeps any
+        // sibling key as an inline schema, but `lower_schema_inner`'s `$ref` arm returns the TARGET
+        // for it without inserting anything. Through the reserve/pop machinery below that is two
+        // faults, one per declaration order: a target lowered earlier leaves this frame's
+        // reservation as the last insert and the invariant assertion aborts the process; a target
+        // lowered inside this frame is the last insert, so its def is lifted into this reservation
+        // and the target's own component entry is left naming an id that no longer holds it.
+        // Chaining exactly as the bare spelling does gives both the one answer that spelling gives,
+        // cycle check included. The siblings are still acknowledged where they always were: the
+        // audit reports an ignored validation keyword (`W001`) independently of lowering. A
+        // `default` is the one sibling this frame used to carry (as a doc note on the root's own
+        // def); an alias has no def to carry it, so it is reported as `W005` in the parser's words
+        // for the bare `$ref`+`default` spelling rather than dropped silently.
+        if let Some(reference) = schema.reference.as_deref() {
+            let mut sibling = schema.clone();
+            sibling.reference = None;
+            if !schema_has_shape_constraint(&sibling) {
+                if let Some(default) = &schema.default {
+                    let at = crate::diag::Provenance::new(
+                        schema.provenance.pointer.push("default"),
+                        Some(default.span),
+                    );
+                    Diagnostic::warning(Code::SchemaDefaultNotApplied, at)
+                        .message(
+                            "a schema `default` declared alongside `$ref` is dropped when the \
+                             reference resolves and is not applied",
+                        )
+                        .remedy(
+                            "move the default onto the referenced schema, or set the value \
+                             explicitly",
+                        )
+                        .emit(self.diags);
+                }
+                let reference = reference.to_owned();
+                let provenance = schema.provenance.clone();
+                return self.chain_component_alias(name, &reference, &provenance);
+            }
+        }
         // A component whose whole body is `oneOf`/`anyOf` over one `$ref` and one or more `null`
         // members names no shape of its own: it is a **nullable alias** for its target, the union
         // spelling of `B: {$ref: A}` with a null branch added. Recognised here, before anything is
@@ -622,16 +764,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // over `types`, `enum_values` and `const_value` and never looks at `oneOf`/`anyOf`/`$ref`/
         // `allOf`, so for any composed body it is a guess. Writing it back over the lowered result
         // discarded every decision `lower_union` makes about null the moment a union was spelled as
-        // a named component — the dominant spelling in real descriptions.
-        let provisional_nullable = schema_is_nullable(schema);
+        // a named component — the dominant spelling in real descriptions. A guess a back-edge read
+        // and the body then contradicted is reported by `settle_reservation`, and the next pass
+        // opens this reservation with the body's answer instead (see [`lower`]).
+        let reservation = Reservation::Component(name.to_owned());
+        let provisional_nullable = self.provisional_nullability(&reservation, schema);
         // Reserve the root id before lowering the body so any back-edge encountered mid-body can
         // box a reference to it. The root's def is inserted last (children first) and then lifted
         // into this reserved slot, which keeps ids dense and stable.
         let root_id = self.graph.reserve();
         self.in_progress
             .insert(name.to_owned(), (root_id, provisional_nullable));
-        let lowered = self.lower_schema(schema, name);
+        let lowered = self.lower_reserved_body(schema, name);
         self.in_progress.remove(name);
+        self.settle_reservation(
+            reservation,
+            provisional_nullable,
+            lowered.map(|ty| ty.nullable),
+        );
         let mut ty = lowered?;
         let (popped_id, mut def) = self.graph.pop_last().expect("component root def");
         // Hard invariant (release too): a component root's def is always the last graph insert
@@ -660,6 +810,65 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let nullable = ty.nullable;
         self.components.insert(name.to_owned(), (root_id, nullable));
         Some(ty)
+    }
+
+    /// The nullability a reservation opens with: an earlier pass's settled answer for it when there
+    /// is one, [`schema_is_nullable`]'s guess otherwise.
+    fn provisional_nullability(&self, reservation: &Reservation, schema: &Schema) -> bool {
+        self.settled
+            .get(reservation)
+            .copied()
+            .unwrap_or_else(|| schema_is_nullable(schema))
+    }
+
+    /// Close a reservation's nullability bookkeeping once its body is lowered: when a back-edge read
+    /// the `provisional` value and the body decided otherwise, record the body's answer, which makes
+    /// this pass stale (see [`lower`]). A body that failed to lower decides nothing.
+    fn settle_reservation(
+        &mut self,
+        reservation: Reservation,
+        provisional: bool,
+        lowered: Option<bool>,
+    ) {
+        let read = self.guessed.remove(&reservation);
+        if let Some(lowered) = lowered {
+            if read && lowered != provisional {
+                self.revisions.push((reservation, lowered));
+            }
+        }
+    }
+
+    /// Resolve the component `name`, whose root is an alias for `reference`, to the target's type and
+    /// record it under `name`. An alias has no body of its own, so nothing is reserved for it; the
+    /// alias stack is what makes a chain of aliases that loops back terminate, as `E004`.
+    fn chain_component_alias(
+        &mut self,
+        name: &str,
+        reference: &str,
+        at: &crate::diag::Provenance,
+    ) -> Option<Ty> {
+        if !self.component_alias_stack.insert(name.to_owned()) {
+            // E004 case: cycle
+            Diagnostic::error(Code::UnresolvedRef, at.clone())
+                .message(format!(
+                    "schema component alias `{name}` forms a reference cycle"
+                ))
+                .emit(self.diags);
+            return None;
+        }
+        let ty = if let Some(target) = reference.strip_prefix("#/components/schemas/") {
+            self.ensure_component(target, Some(reference), at)
+        } else if is_remote_ref(reference) {
+            self.ensure_remote(reference)
+        } else {
+            self.ensure_resolved(reference, at, name)
+        };
+        self.component_alias_stack.remove(name);
+        if let Some(ty) = ty {
+            self.components
+                .insert(name.to_owned(), (ty.id, ty.nullable));
+        }
+        ty
     }
 
     /// Acknowledge a sub-file's own component declaration that a same-named root declaration
@@ -714,6 +923,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             "`#/components/schemas/{name}` here reads the root document's `{name}`; the `{name}` \
              declared in `{path}` is shadowed by it and has no effect on this reference"
         );
+        // W011 case: shadowed-component
         Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
             .message(message)
             .remedy(
@@ -804,7 +1014,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `None` for a target that is finished, absent, or was never a reservation — every one of
     /// which the ordinary lowering path handles and reports for itself. It resolves no node and
     /// lowers nothing, so asking costs the lowering that follows nothing; the one thing it does
-    /// besides look up is raise [`Code::DeclarationHasNoEffect`] when it answers `Some` for a name
+    /// besides look up is raise the shadowed-component `W011` when it answers `Some` for a name
     /// a sub-file also declares, because answering `Some` is answering *instead of*
     /// [`Self::ensure_component`], which is where that warning otherwise lives.
     fn open_reservation_for_ref(
@@ -836,13 +1046,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // root wins silently retargets a sub-file's own declaration — supported as the
                     // matrix describes, but unreported, which the matrix also promises against.
                     self.warn_if_root_shadows_the_referring_file(name, Some(reference), at);
+                    // And instead of `ensure_component`'s back-edge arm, which is where a read of
+                    // the provisional nullability is otherwise recorded.
+                    self.guessed.insert(Reservation::Component(name.to_owned()));
                 }
                 return entry;
             }
         } else if is_remote_ref(reference) {
             // `ensure_remote` keys on the absolute URL, and a reference inside a vendored document
             // has already been rewritten absolute, so the reference *is* the key.
-            return self.remote_in_progress.get(reference).copied();
+            let entry = self.remote_in_progress.get(reference).copied();
+            if entry.is_some() {
+                self.guessed
+                    .insert(Reservation::Remote(reference.to_owned()));
+            }
+            return entry;
         }
         let (file, pointer) = self.resolver.reference_identity(reference, at)?;
         // `ensure_resolved` routes a target inside the root's component map back to
@@ -854,13 +1072,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .filter(|name| !name.is_empty() && !name.contains('/'))
             {
                 if self.document.components.schemas.contains_key(name) {
-                    return self.in_progress.get(name).copied();
+                    let entry = self.in_progress.get(name).copied();
+                    if entry.is_some() {
+                        self.guessed.insert(Reservation::Component(name.to_owned()));
+                    }
+                    return entry;
                 }
             }
         }
-        self.resolved_in_progress
-            .get(&format!("{}#{}", file.0, pointer))
-            .copied()
+        let key = format!("{}#{}", file.0, pointer);
+        let entry = self.resolved_in_progress.get(&key).copied();
+        if entry.is_some() {
+            self.guessed.insert(Reservation::Resolved(key));
+        }
+        entry
     }
 
     /// Lower a remote (`http`/`https`) `$ref` to a shared, cycle-safe type — the remote analogue of
@@ -870,6 +1095,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// schema — returns a boxed back-edge against the reserved root id, so recursion terminates and
     /// generates a finite (boxed) type instead of overflowing the stack.
     fn ensure_remote(&mut self, reference: &str) -> Option<Ty> {
+        self.closed_narrowing(|ctx| ctx.ensure_remote_closed(reference))
+    }
+
+    /// [`Self::ensure_remote`]'s body, run with `open_narrowing` out of effect, as for a component.
+    fn ensure_remote_closed(&mut self, reference: &str) -> Option<Ty> {
         if let Some(&(id, nullable)) = self.remote_components.get(reference) {
             return Some(Ty {
                 id,
@@ -878,6 +1108,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         }
         if let Some(&(id, nullable)) = self.remote_in_progress.get(reference) {
+            self.guessed
+                .insert(Reservation::Remote(reference.to_owned()));
             return Some(Ty {
                 id,
                 nullable,
@@ -895,6 +1127,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // than through the reserve/pop machinery, which assumes the body inserts a fresh root.
         if schema.reference.is_some() {
             if !self.remote_alias_stack.insert(reference.to_owned()) {
+                // E004 case: cycle
                 Diagnostic::error(Code::UnresolvedRef, self.document.provenance.clone())
                     .message(format!("remote $ref `{reference}` forms an alias cycle"))
                     .emit(self.diags);
@@ -916,12 +1149,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(alias);
         }
 
-        let nullable = schema_is_nullable(&schema);
+        // Provisional, as in `ensure_component`: a back-edge met mid-body needs an answer before the
+        // body has one, and `schema_is_nullable` cannot see a composed body's null.
+        let reservation = Reservation::Remote(reference.to_owned());
+        let provisional_nullable = self.provisional_nullability(&reservation, &schema);
         let root_id = self.graph.reserve();
         self.remote_in_progress
-            .insert(reference.to_owned(), (root_id, nullable));
-        let lowered = self.lower_schema(&schema, reference);
+            .insert(reference.to_owned(), (root_id, provisional_nullable));
+        let lowered = self.lower_reserved_body(&schema, reference);
         self.remote_in_progress.remove(reference);
+        self.settle_reservation(
+            reservation,
+            provisional_nullable,
+            lowered.map(|ty| ty.nullable),
+        );
         let mut ty = lowered?;
         let (popped_id, mut def) = self.graph.pop_last().expect("remote root def");
         // Same last-insert invariant as `ensure_component`: the remote type's root is the final
@@ -936,9 +1177,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.graph.fill(root_id, def);
         ty.id = root_id;
-        ty.nullable = nullable;
+        // The body's answer, cached under the same value so a direct return and a later cache hit
+        // yield an identical `Ty` — see `ensure_component`.
         self.remote_components
-            .insert(reference.to_owned(), (root_id, nullable));
+            .insert(reference.to_owned(), (root_id, ty.nullable));
         Some(ty)
     }
 
@@ -985,6 +1227,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// removed types were artefacts of lowering the same schema repeatedly — but it is a breaking
     /// change to the generated API and is released as one.
     fn ensure_resolved(&mut self, reference: &str, at: &Provenance, hint: &str) -> Option<Ty> {
+        self.closed_narrowing(|ctx| ctx.ensure_resolved_closed(reference, at, hint))
+    }
+
+    /// [`Self::ensure_resolved`]'s body, run with `open_narrowing` out of effect, as for a
+    /// component.
+    fn ensure_resolved_closed(
+        &mut self,
+        reference: &str,
+        at: &Provenance,
+        hint: &str,
+    ) -> Option<Ty> {
         let resolved = self.resolver.resolve(reference, at, self.diags).ok()?;
         let schema = resolved.schema.into_owned();
         let Some(key) = resolved_identity(&schema.provenance) else {
@@ -993,7 +1246,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // one is worse. Every schema the parser produces carries a span, so this is defensive.
             return self.lower_schema(&schema, hint);
         };
-        // A resolved target that is a root component already has an identity — its name.
+        // A resolved target that is a root component already has an identity — its name. The
+        // `contains_key` alone decides it: a pointer deeper than a component (`Tree/properties/x`)
+        // cannot equal a key, because structural validation rejects any root component key outside
+        // `^[a-zA-Z0-9._-]+$` before lowering runs.
         if schema
             .provenance
             .span
@@ -1004,7 +1260,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .pointer
                 .as_str()
                 .strip_prefix("/components/schemas/")
-                .filter(|name| !name.is_empty() && !name.contains('/'))
             {
                 if self.document.components.schemas.contains_key(name) {
                     return self.ensure_component(name, Some(reference), at);
@@ -1019,6 +1274,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         }
         if let Some(&(id, nullable)) = self.resolved_in_progress.get(&key) {
+            self.guessed.insert(Reservation::Resolved(key));
             return Some(Ty {
                 id,
                 nullable,
@@ -1036,6 +1292,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // which assumes the body inserts a fresh root.
         if schema.reference.is_some() {
             if !self.resolved_alias_stack.insert(key.clone()) {
+                // E004 case: cycle
                 Diagnostic::error(Code::UnresolvedRef, at.clone())
                     .message(format!(
                         "schema reference `{reference}` forms an alias cycle"
@@ -1058,12 +1315,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(alias);
         }
 
-        let nullable = schema_is_nullable(&schema);
+        // Provisional, as in `ensure_component`: a back-edge met mid-body needs an answer before the
+        // body has one, and `schema_is_nullable` cannot see a composed body's null.
+        let reservation = Reservation::Resolved(key.clone());
+        let provisional_nullable = self.provisional_nullability(&reservation, &schema);
         let root_id = self.graph.reserve();
         self.resolved_in_progress
-            .insert(key.clone(), (root_id, nullable));
-        let lowered = self.lower_schema(&schema, &hint);
+            .insert(key.clone(), (root_id, provisional_nullable));
+        let lowered = self.lower_reserved_body(&schema, &hint);
         self.resolved_in_progress.remove(&key);
+        self.settle_reservation(
+            reservation,
+            provisional_nullable,
+            lowered.map(|ty| ty.nullable),
+        );
         let mut ty = lowered?;
         let (popped_id, mut def) = self.graph.pop_last().expect("resolved root def");
         // Same last-insert invariant as `ensure_component` and `ensure_remote`: the target's root is
@@ -1078,8 +1343,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         self.graph.fill(root_id, def);
         ty.id = root_id;
-        ty.nullable = nullable;
-        self.resolved_components.insert(key, (root_id, nullable));
+        // The body's answer, cached under the same value so a direct return and a later cache hit
+        // yield an identical `Ty` — see `ensure_component`.
+        self.resolved_components.insert(key, (root_id, ty.nullable));
         Some(ty)
     }
 
@@ -1101,22 +1367,45 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// never accumulate against the cap.
     fn lower_schema(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         if self.depth >= MAX_SCHEMA_DEPTH {
-            Diagnostic::error(Code::SchemaNestingTooDeep, schema.provenance.clone())
-                .message(format!(
-                    "schema nesting exceeds the maximum lowering depth of {MAX_SCHEMA_DEPTH} \
-                     (a very long `$ref` chain or a pathologically nested schema)"
-                ))
-                .remedy(
-                    "flatten the offending schema chain, or omit this API segment with \
-                     spargen::omit!",
-                )
-                .emit(self.diags);
-            return None;
+            return self.reject_too_deep(&schema.provenance);
         }
         self.depth += 1;
         let result = self.lower_schema_inner(schema, hint);
         self.depth -= 1;
         result
+    }
+
+    /// Lower the body of a type whose root id `ensure_component`, `ensure_remote` or
+    /// `ensure_resolved` has just reserved, with [`Self::resolved_member_stack`] empty for the
+    /// duration and restored after.
+    ///
+    /// The stack answers "is this expansion inside itself", and a reservation starts a new type:
+    /// a member target flattened by an enclosing expansion and met again inside this body is a
+    /// recursive *field* of the new type, which the reservation boxes, not a loop of the enclosing
+    /// expansion. Re-entering the reserved type itself is refused by its `*_in_progress` entry, so
+    /// every loop that crosses this boundary is still caught, as the root document catches it.
+    fn lower_reserved_body(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        let enclosing = std::mem::take(&mut self.resolved_member_stack);
+        let lowered = self.lower_schema(schema, hint);
+        self.resolved_member_stack = enclosing;
+        lowered
+    }
+
+    /// The `E014` rejection [`Self::lower_schema`] reports at [`MAX_SCHEMA_DEPTH`], shared with the
+    /// one other recursion that does not pass through it: [`Self::gather_ref_target`]'s expansion
+    /// of a bundle-`$ref` `allOf` member's target.
+    fn reject_too_deep<T>(&mut self, provenance: &Provenance) -> Option<T> {
+        Diagnostic::error(Code::SchemaNestingTooDeep, provenance.clone())
+            .message(format!(
+                "schema nesting exceeds the maximum lowering depth of {MAX_SCHEMA_DEPTH} \
+                 (a very long `$ref` chain or a pathologically nested schema)"
+            ))
+            .remedy(
+                "flatten the offending schema chain, or omit this API segment with \
+                 spargen::omit!",
+            )
+            .emit(self.diags);
+        None
     }
 
     fn lower_schema_inner(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
@@ -1169,7 +1458,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `is_in_progress_root` stays as a backstop and adds no rejection of its own: a target
             // still being lowered is one whose lowering reached this site, which is a cycle the walk
             // finds. Kept so that a walk which ever missed one reports the recursion, rather than
-            // leaving `intersect_types`' fail-closed arm to report it as an empty intersection.
+            // leaving `intersect_types`' fail-closed arm to report it as a failed intersection.
             let back_edge = self.ref_closes_a_cycle(reference, &schema.provenance)
                 || self.is_in_progress_root(referenced.id);
             if back_edge {
@@ -1193,7 +1482,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // The local noun is "schema", not "component": a local target need not be a
                 // component at all (`./lib.yaml#/bag/Tree`, or `#/bag/Tree` inside a sub-file), and
                 // a two-way predicate cannot tell that case apart, so the wording must hold for it.
-                return self.reject_ref_sibling_intersection(
+                return self.reject_ref_sibling_cycle(
                     schema,
                     if is_remote_ref(reference) {
                         "this remote `$ref` closes a reference cycle back to the schema that \
@@ -1207,20 +1496,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
-            let Some(intersection) =
+            let Ok(intersection) =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
             else {
                 // `$ref` is an applicator: the value must satisfy the target AND these siblings.
-                // `intersect_types` returns `None` for two distinct conditions — the intersection is
+                // `intersect_types` fails for two distinct conditions — the intersection is
                 // empty, so no value satisfies both, or it is inhabited but has no single Rust type
-                // — and the message must not claim the first when it may be the second. Either way
+                // — and this one message covers both, so it must not claim the first. Either way
                 // it is reported rather than dropped: dropping would silently delete a body,
                 // parameter or property from the generated client.
-                return self.reject_ref_sibling_intersection(
-                    schema,
-                    "the `$ref` target and this schema's own sibling keywords have an empty or \
-                     unrepresentable intersection",
-                );
+                return self.reject_ref_sibling_intersection(schema);
             };
             // Only a `$ref` whose own sibling is a `oneOf`/`anyOf` is collapsed. A `$ref` to a union
             // beside a non-union sibling is an intersection this check was never meant for, and it
@@ -1459,12 +1744,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// graph insert — preserving the [`Self::ensure_component`] last-insert invariant when the union
     /// is a component body.
     fn lower_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        self.closed_narrowing(|ctx| ctx.lower_union_closed(schema, hint))
+    }
+
+    /// [`Self::lower_union`]'s body, run with `open_narrowing` out of effect. A union tells its
+    /// variants apart by what each one refuses — a `Trial` `oneOf` requires exactly one to match —
+    /// so an open set inside a variant could make two variants accept the same value and fail a
+    /// value the closed union decodes.
+    fn lower_union_closed(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let (members, mode): (Vec<&SchemaOr>, UnionMode) =
             match (schema.one_of.is_empty(), schema.any_of.is_empty()) {
                 (false, true) => (schema.one_of.iter().collect(), UnionMode::OneOf),
                 (true, false) => (schema.any_of.iter().collect(), UnionMode::AnyOf),
                 (false, false) => {
-                    return self.reject_union(
+                    return self.reject_unrepresentable_union(
                     schema,
                     "a single schema node declares both `oneOf` and `anyOf`; their intersected \
                      applicator semantics are not representable as one generated union",
@@ -1520,7 +1813,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if self.member_closes_a_cycle(member, &schema.provenance)
                     && !self.member_is_this_union(member, &schema.provenance)
                 {
-                    return self.reject_ref_sibling_intersection(
+                    return self.reject_ref_sibling_cycle(
                         schema,
                         "this union member's `$ref` closes a reference cycle back to the schema \
                          that encloses it, so the enclosing schema's own sibling keywords would \
@@ -1557,7 +1850,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `a_union_whose_sole_member_is_its_own_reservation_is_rejected` in `tests/frontend.rs`
             // asserts the reported error codes are **exactly** `[E007]` on both its spellings.
             if self.reservation_at(&schema.provenance) == Some(inner.id) {
-                return self.reject_union(
+                return self.reject_self_referential_union(
                     schema,
                     "a union member is a direct recursive `$ref` to the union being lowered, so \
                      the member is the union itself and decoding it would never terminate",
@@ -1569,7 +1862,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // cannot compose with one. Reported with the same wording the other two spellings use,
             // because it is the same fact about the same document.
             if sibling.is_some() && self.is_in_progress_root(inner.id) {
-                return self.reject_ref_sibling_intersection(
+                return self.reject_ref_sibling_cycle(
                     schema,
                     "this union member's `$ref` closes a reference cycle back to the schema that \
                      encloses it, so the enclosing schema's own sibling keywords would have to be \
@@ -1597,7 +1890,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // mis-assembled.
             if self.is_reservation(inner.id) {
                 if self.reservation_at(&schema.provenance).is_some() {
-                    return self.reject_union(
+                    return self.reject_self_referential_union(
                         schema,
                         "this schema's whole body is a union whose only non-null member is a \
                          `$ref` that closes a reference cycle, so the schema names no shape of its \
@@ -1620,7 +1913,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // and it already reaches the intersection on the sibling side, where it belongs —
                 // it can narrow what the result accepts, never create something to accept.
                 inner.nullable = inner.nullable || null_from_member;
-                let Some(constrained) =
+                let Ok(constrained) =
                     self.intersect_types(inner, sibling.ty, &format!("{hint}Constrained"))
                 else {
                     // Neither side admits null and the non-null shapes do not meet, so nothing is
@@ -1631,9 +1924,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // output that still exists, and here no enum is generated at all.
                     //
                     // The message says "empty or unrepresentable" for the same reason Site A's
-                    // does: `None` covers both, and the sole non-null member is named because there
+                    // does: it covers both, and the sole non-null member is named because there
                     // is exactly one, so the author needs no index to find it.
-                    return self.reject_union(
+                    return self.reject_branchless_union(
                         schema,
                         "the union's sole non-null member and the enclosing schema's own sibling \
                          keywords have an empty or unrepresentable intersection, leaving the union \
@@ -1682,7 +1975,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the member is a *different* type — and rejecting it refuses the most common recursive
             // construct there is, which `docs/support-matrix.md` lists as supported.
             if self.reservation_at(&schema.provenance) == Some(ty.id) {
-                return self.reject_union(
+                return self.reject_self_referential_union(
                     schema,
                     "a union member is a direct recursive `$ref` to the union being lowered, so \
                      the member is the union itself and decoding it would never terminate",
@@ -1693,7 +1986,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // placeholder. Guarded on there being a sibling at all, so an ordinary recursive
             // `oneOf` still boxes its back-edge and generates.
             if sibling.is_some() && self.is_in_progress_root(ty.id) {
-                return self.reject_ref_sibling_intersection(
+                return self.reject_ref_sibling_cycle(
                     schema,
                     "this union member's `$ref` closes a reference cycle back to the schema that \
                      encloses it, so the enclosing schema's own sibling keywords would have to be \
@@ -1701,23 +1994,39 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             if let Some(sibling) = sibling {
-                let Some(intersection) = self.intersect_types(
+                ty = match self.intersect_types(
                     ty,
                     sibling.ty,
                     &format!("{hint}Variant{index}Constrained"),
-                ) else {
+                ) {
+                    Ok(intersection) => intersection,
                     // The sibling constraints make this branch impossible; JSON Schema simply
                     // removes it from the union's accepted set. Acknowledge it, because a variant
                     // vanishing from the generated enum is otherwise invisible.
-                    Diagnostic::warning(Code::DeclarationHasNoEffect, schema.provenance.clone())
+                    Err(NoMeet::Empty) => {
+                        // W011 case: excluded-union-branch
+                        Diagnostic::warning(
+                            Code::DeclarationHasNoEffect,
+                            schema.provenance.clone(),
+                        )
                         .message(format!(
                             "union member {index} cannot satisfy the enclosing schema's own \
                              constraints, so it is not a variant of the generated enum"
                         ))
                         .emit(self.diags);
-                    continue;
+                        continue;
+                    }
+                    // The branch does admit values the siblings admit, but no Rust type holds
+                    // them, so it can be neither kept nor dropped without refusing them.
+                    Err(NoMeet::Unrepresentable) => {
+                        let message = format!(
+                            "union member {index} and the enclosing schema's own sibling keywords \
+                             share values that no single Rust type represents, so the member can \
+                             be neither generated nor dropped"
+                        );
+                        return self.reject_unrepresentable_meet(schema, &message);
+                    }
                 };
-                ty = intersection;
             }
             // Hoist a variant's own nullability up to the union: a `null` payload then resolves at the
             // outer `Option<Union>` (→ `None`), and the discriminated/disjoint dispatch below only
@@ -1751,7 +2060,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             if null_from_member && sibling.is_none_or(|sibling| self.ty_accepts_null(sibling.ty)) {
                 return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
             }
-            return self.reject_union(
+            return self.reject_branchless_union(
                 schema,
                 "union sibling constraints make every variant impossible",
             );
@@ -1789,7 +2098,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .unwrap_or(target);
                 !members.contains(&name)
             }) {
-                return self.reject_union(
+                return self.reject_unrepresentable_union(
                     schema,
                     &format!(
                         "`discriminator.mapping` maps `{tag}` to `{target}`, which names none of \
@@ -1808,7 +2117,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .strip_prefix("#/components/schemas/")
                     .unwrap_or(target);
                 if !ref_names.iter().any(|name| name.as_deref() == Some(bare)) {
-                    return self.reject_union(
+                    return self.reject_unrepresentable_union(
                         schema,
                         &format!(
                             "`discriminator.defaultMapping` names `{target}`, which is not one of \
@@ -1883,6 +2192,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Lower one union member, returning its type and — when the member is a `$ref` to a component —
     /// that component's name (used to derive the variant name and implicit discriminator tag).
+    ///
+    /// The name is a fact about how the member is *written*; the type is what it *means*. A bare
+    /// component `$ref` means its target, so it is that component's shared type. A `$ref` beside
+    /// shape-bearing siblings means the intersection of the two — `$ref` is an applicator in
+    /// 2020-12 — so it lowers through `lower_schema_or`, the same `$ref`-sibling intersection every
+    /// other position takes (an empty or unrepresentable one is `E013` at the member), and keeps
+    /// the component name only for naming. Returning the target here instead discarded the
+    /// siblings in silence (#279).
     fn lower_union_variant(
         &mut self,
         member: &SchemaOr,
@@ -1892,8 +2209,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if let (Some(name), SchemaOr::Schema(schema)) =
             (member_component_name(member, root), member)
         {
-            let ty =
-                self.ensure_component(name, schema.reference.as_deref(), &schema.provenance)?;
+            let mut sibling = schema.as_ref().clone();
+            sibling.reference = None;
+            let ty = if schema_has_shape_constraint(&sibling) {
+                self.lower_schema_or(member, hint)?
+            } else {
+                self.ensure_component(name, schema.reference.as_deref(), &schema.provenance)?
+            };
             return Some((ty, Some(name.to_owned())));
         }
         let ty = self.lower_schema_or(member, hint)?;
@@ -2084,6 +2406,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             },
             // A reservation cannot be categorised — its body has not been lowered, so nothing is
             // known about the JSON it serialises as. Uncategorisable, exactly like the others here.
+            //
+            // This arm is **live** on documents that generate cleanly. `lower_union` refuses a
+            // member that is *this* union's own reservation, but not one that is another open
+            // component's: `Tree: {type: array, items: {oneOf: [{$ref: Tree}, {type: string}]}}`
+            // lowers the items union while `Tree` is still reserved, and both `disjoint_strategy`
+            // and `discriminated_strategy` ask for the back edge's category. Guessing one (a
+            // reservation is usually an object) would emit a disjoint `Deserialize` that routes the
+            // back edge by `value.is_object()`, and a `Tree` — an array — would then match no
+            // variant at runtime. `None` sends the union to trial matching, which decodes it.
+            // Pinned by `a_union_back_edge_to_an_open_component_is_not_categorised`.
             TypeKind::Reserved
             | TypeKind::Bytes
             | TypeKind::Null
@@ -2107,6 +2439,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 {
                     Some(structure)
                 }
+                // A reservation's fields are not known yet, so no required key can be proven
+                // unique to it: not a sound discriminator, like any non-closed variant.
+                TypeKind::Reserved => None,
                 _ => None,
             })
             .collect();
@@ -2128,16 +2463,43 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(keys)
     }
 
-    fn reject_union<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+    /// A union whose applicators or discriminator describe a combination no generated enum can
+    /// carry: `oneOf` beside `anyOf`, or a discriminator whose `mapping`/`defaultMapping` names no
+    /// member.
+    fn reject_unrepresentable_union<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        // E007 case: unrepresentable-applicators
         Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
             .message(message.to_owned())
             .remedy(
-                // The remedy has to serve every situation this rejecter carries, and the two
-                // cycle situations are not answered by a discriminator or by disjointness: what
-                // the author has to change there is the self-reference itself.
-                "add a discriminator, restructure the variants to be disjoint, break the reference \
-                 cycle where a member refers to the union it is written in, or omit this API \
-                 segment with spargen::omit!",
+                "split the applicators into separate schemas, make every discriminator mapping name \
+                 a member of the union, or omit this API segment with spargen::omit!",
+            )
+            .emit(self.diags);
+        None
+    }
+
+    /// A union that resolves to itself, so its generated `Deserialize` would re-enter itself on the
+    /// same input with no base case.
+    fn reject_self_referential_union<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        // E007 case: resolves-to-itself
+        Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(
+                "break the reference cycle where a member refers to the union it is written in, or \
+                 omit this API segment with spargen::omit!",
+            )
+            .emit(self.diags);
+        None
+    }
+
+    /// A union the enclosing schema's own sibling keywords leave with no branch at all.
+    fn reject_branchless_union<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        // E007 case: no-branch-left
+        Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(
+                "reconcile the enclosing schema's sibling keywords with the union's members, or \
+                 omit this API segment with spargen::omit!",
             )
             .emit(self.diags);
         None
@@ -2262,8 +2624,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// `allOf`. The gathered members are then combined:
     ///
     /// * **all object members** → one flattened [`Struct`]: the union of properties in first-seen
-    ///   order, recursive typed intersections for properties declared by several members, the union
-    ///   of `required`, and a conservatively intersected `additionalProperties` policy;
+    ///   order, recursive typed intersections for properties declared by several members (an empty
+    ///   one types the field uninhabited unless some member requires it, which is `E013` — the rule
+    ///   `intersect_structs` applies), the union of `required`, and a conservatively intersected
+    ///   `additionalProperties` policy;
     /// * **all scalar members** → their typed intersection, including numeric narrowing, enum
     ///   narrowing, arrays/objects/unions, and exact nullability; an empty intersection → `E013`;
     /// * an **object/scalar mix** → `E013`.
@@ -2288,10 +2652,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
         // Object-vs-scalar mix has no single representable type.
         if has_object && !scalars.is_empty() {
-            return self.reject_all_of(
-                schema,
-                "an `allOf` mixes object and scalar members, which cannot form one type",
-            );
+            return self.reject_all_of_object_scalar_mix(schema);
         }
 
         // All-scalar allOf: recursively intersect compatible members (for example integer with
@@ -2310,15 +2671,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return Some(self.with_all_of_nullability(schema, ty));
             };
             for (index, member) in scalars.iter().copied().enumerate().skip(1) {
-                let Some(merged) = self.intersect_types(
+                let Ok(merged) = self.intersect_types(
                     intersection,
                     member,
                     &format!("{hint}Intersection{index}"),
                 ) else {
-                    return self.reject_all_of(
-                        schema,
-                        "`allOf` scalar members have an empty or unrepresentable intersection",
-                    );
+                    return self.reject_all_of_scalars(schema);
                 };
                 intersection = merged;
             }
@@ -2338,6 +2696,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut fields: IndexMap<String, Field> = IndexMap::new();
         let mut required: Vec<String> = Vec::new();
         let mut additional = AdditionalProps::Allow;
+        // Repeated properties whose types have no common value, in first-seen order.
+        let mut uninhabited: IndexSet<String> = IndexSet::new();
         for contribution in &contributions {
             let Contribution::Object {
                 fields: member_fields,
@@ -2368,45 +2728,91 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     let unlowered = [&additional, member_additional].into_iter().any(|policy| {
                         matches!(policy, AdditionalProps::Typed(ty) if self.is_reservation(ty.id))
                     });
-                    return self.reject_all_of(
-                        schema,
-                        if unlowered {
+                    if unlowered {
+                        return self.reject_all_of_cycle(
+                            schema.provenance.clone(),
                             "an `allOf` member's `additionalProperties` value schema is a `$ref` \
                              that closes a reference cycle back to the schema being lowered, whose \
                              body is not yet known, so the merged overflow map has no computable \
-                             value type"
-                        } else {
-                            "`allOf` members declare conflicting `additionalProperties`"
-                        },
-                    );
+                             value type",
+                        );
+                    }
+                    return self.reject_all_of_additional(schema);
                 }
             }
             for field in member_fields {
                 match fields.get_mut(&field.name.wire) {
                     Some(existing) => {
                         // A repeated property is an intersection, not an equality assertion: retain
-                        // the narrower compatible type and reject only an empty/unrepresentable
-                        // intersection.
-                        let Some(intersection) = self.intersect_types(
-                            existing.ty,
-                            field.ty,
-                            &format!("{hint}{}Intersection", field.name.wire),
-                        ) else {
-                            let message = format!(
-                                "property `{}` appears in multiple `allOf` members with \
-                                 conflicting types",
-                                field.name.wire
-                            );
-                            return self.reject_all_of(schema, &message);
-                        };
-                        existing.ty = intersection;
+                        // the narrower compatible type.
+                        let field_hint = format!("{hint}{}Intersection", field.name.wire);
+                        let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
                         existing.required = existing.required || field.required;
+                        existing.ty = match intersection {
+                            Ok(ty) => ty,
+                            // A reservation's body is not known yet, so the failure here says
+                            // nothing about whether the property's types meet; typing the field
+                            // uninhabited would be a guess. Refuse it, naming the cycle rather
+                            // than a conflict nobody wrote.
+                            Err(_)
+                                if self.is_reservation(existing.ty.id)
+                                    || self.is_reservation(field.ty.id) =>
+                            {
+                                let message = format!(
+                                    "property `{}` repeated across `allOf` members is typed by a \
+                                     `$ref` that closes a reference cycle back to the schema \
+                                     being lowered, so its intersection cannot be computed",
+                                    field.name.wire
+                                );
+                                return self
+                                    .reject_all_of_cycle(schema.provenance.clone(), &message);
+                            }
+                            // The same rule `intersect_structs` applies to a `$ref` and its
+                            // siblings, so the four equivalent spellings of one conjunction agree:
+                            // the types cannot meet, but that empties the object only if some
+                            // instance must carry the property. Whether one must is not known
+                            // until every member's `required` has been read — a later member may
+                            // require it without declaring it — so the field takes an uninhabited
+                            // type now and the requirement is settled after the loop. A member's
+                            // applied `default` goes with the old type: no value of it is a value
+                            // of the field any more (it stays documented in rustdoc).
+                            Err(NoMeet::Empty) => {
+                                uninhabited.insert(field.name.wire.clone());
+                                if let Some(default) = &mut existing.default {
+                                    default.applied = None;
+                                }
+                                self.insert_type(
+                                    &field_hint,
+                                    TypeKind::Never,
+                                    Docs::default(),
+                                    None,
+                                )
+                            }
+                            // Only an empty meet is uninhabited: these two types share values, and
+                            // an uninhabited field would refuse every object carrying one.
+                            Err(NoMeet::Unrepresentable) => {
+                                let message = format!(
+                                    "property `{}` repeated across `allOf` members has types that \
+                                     share values no single Rust type represents",
+                                    field.name.wire
+                                );
+                                return self.reject_unrepresentable_meet(schema, &message);
+                            }
+                        };
                     }
                     None => {
                         fields.insert(field.name.wire.clone(), field.clone());
                     }
                 }
             }
+        }
+
+        // An uninhabited property that any member requires obliges every instance to carry a value
+        // no type admits: the composition is empty, and that is the document error.
+        if let Some(name) = uninhabited.iter().find(|name| {
+            required.contains(name) || fields.get(*name).is_some_and(|field| field.required)
+        }) {
+            return self.reject_all_of_required_property(schema, name);
         }
 
         // Apply the required union, then keep required fields consistent: a serde default only fires
@@ -2465,81 +2871,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // A `true`/`{}` member imposes no constraint.
             SchemaOr::Bool(true) => return Some(()),
             SchemaOr::Bool(false) => {
-                return self
-                    .reject_all_of_unit(member_provenance(member), "an `allOf` member is `false`");
+                return self.reject_all_of_false_member(member_provenance(member));
             }
             SchemaOr::Schema(schema) => schema.as_ref(),
         };
 
         if let Some(reference) = &schema.reference {
-            if let Some(name) = reference.strip_prefix("#/components/schemas/") {
-                // A `$ref` to a component still being lowered is a direct recursive allOf member
-                // whose fields are not yet known — irreconcilable (distinct from a member with
-                // recursive *fields*, which lowers fine).
-                if self.in_progress.contains_key(name) {
-                    return self.reject_all_of_unit(
-                        schema.provenance.clone(),
-                        "an `allOf` member is a direct recursive `$ref` to the component being \
-                         lowered",
-                    );
-                }
-                let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
-                // The pre-check above sees root components only. A name the root does not declare
-                // is a *sub-file* component, and it reaches its own reservation through
-                // `ensure_resolved`, so a direct recursive member there arrives here as a back-edge
-                // rather than being caught above. Refuse to read it for the same reason: see
-                // `is_in_progress_root`.
-                if self.is_in_progress_root(ty.id) {
-                    return self.reject_all_of_unit(
-                        schema.provenance.clone(),
-                        "an `allOf` member is a direct recursive `$ref` to the component being \
-                         lowered",
-                    );
-                }
-                self.push_ref_member(ty, out);
+            self.gather_ref_target(schema, reference, hint, out)?;
+            // `$ref` is an applicator, not a replacement for the member that holds it: the member
+            // is the target AND its own shape-bearing siblings, so those are further conjuncts of
+            // this same merge, gathered exactly as a separate member carrying them would be. Every
+            // arm above used to return once the target was pushed, which silently deleted the
+            // siblings' properties and `required`, and let a sibling contradicting its target
+            // generate as the target alone. The gate is the one `lower_schema_inner` asks of a
+            // `$ref`'s siblings, so the two positions agree on what counts as a shape.
+            let mut sibling = schema.clone();
+            sibling.reference = None;
+            if !schema_has_shape_constraint(&sibling) {
                 return Some(());
             }
-            // A remote `$ref` member goes through the cycle-safe remote path, exactly like a
-            // component member: a member still being lowered is a direct recursive ref whose fields
-            // are not yet known (irreconcilable), otherwise its shared type contributes its fields.
-            if is_remote_ref(reference) {
-                if self.remote_in_progress.contains_key(reference) {
-                    return self.reject_all_of_unit(
-                        schema.provenance.clone(),
-                        "an `allOf` member is a direct recursive remote `$ref` to the schema being \
-                         lowered",
-                    );
-                }
-                let ty = self.ensure_remote(reference)?;
-                if self.is_in_progress_root(ty.id) {
-                    return self.reject_all_of_unit(
-                        schema.provenance.clone(),
-                        "an `allOf` member is a direct recursive remote `$ref` to the schema being \
-                         lowered",
-                    );
-                }
-                self.push_ref_member(ty, out);
-                return Some(());
-            }
-            // Non-component refs resolve (or error) exactly as `lower_schema` does; treat the target
-            // as an inline member.
-            let resolved = self
-                .resolver
-                .resolve(reference, &schema.provenance, self.diags)
-                .ok()?;
-            let target = resolved.schema.into_owned();
-            // This arm inlines rather than referencing a shared type, so there is no `Ty` to test —
-            // test the target instead. Without this, a member that is the very schema being lowered
-            // descends into its own body again and stops only at `MAX_SCHEMA_DEPTH`, reporting a
-            // chain length for what is a cycle of length one. The component and remote arms above
-            // refuse to read an in-progress member; this one now does too.
-            if self.resolved_target_in_progress(&target.provenance) {
-                return self.reject_all_of_unit(
-                    schema.provenance.clone(),
-                    "an `allOf` member is a direct recursive `$ref` to the schema being lowered",
-                );
-            }
-            return self.gather_inline(&target, hint, out);
+            return self.gather_member(
+                &SchemaOr::Schema(Box::new(sibling)),
+                &format!("{hint}Constraint"),
+                out,
+            );
         }
 
         if !schema.all_of.is_empty() {
@@ -2550,10 +2905,201 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.gather_inline(schema, hint, out)
     }
 
+    /// Push the contribution of an `allOf` member's `$ref` target — and only the target: the
+    /// member's own siblings are [`Self::gather_member`]'s to gather, after this returns.
+    fn gather_ref_target(
+        &mut self,
+        schema: &Schema,
+        reference: &str,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
+        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+            // A `$ref` to a component still being lowered is a direct recursive allOf member
+            // whose fields are not yet known — irreconcilable (distinct from a member with
+            // recursive *fields*, which lowers fine).
+            if self.in_progress.contains_key(name) {
+                return self.reject_all_of_cycle(
+                    schema.provenance.clone(),
+                    "an `allOf` member is a direct recursive `$ref` to the component being \
+                     lowered",
+                );
+            }
+            let ty = self.ensure_component(name, Some(reference), &schema.provenance)?;
+            // The pre-check above sees root components only. A name the root does not declare
+            // is a *sub-file* component, and it reaches its own reservation through
+            // `ensure_resolved`, so a direct recursive member there arrives here as a back-edge
+            // rather than being caught above; `push_ref_member` refuses to read it.
+            return self.push_ref_member(
+                ty,
+                &schema.provenance,
+                "an `allOf` member is a direct recursive `$ref` to the component being lowered",
+                out,
+            );
+        }
+        // A remote `$ref` member goes through the cycle-safe remote path, exactly like a
+        // component member: a member still being lowered is a direct recursive ref whose fields
+        // are not yet known (irreconcilable), otherwise its shared type contributes its fields.
+        if is_remote_ref(reference) {
+            if self.remote_in_progress.contains_key(reference) {
+                return self.reject_all_of_cycle(
+                    schema.provenance.clone(),
+                    "an `allOf` member is a direct recursive remote `$ref` to the schema being \
+                     lowered",
+                );
+            }
+            let ty = self.ensure_remote(reference)?;
+            return self.push_ref_member(
+                ty,
+                &schema.provenance,
+                "an `allOf` member is a direct recursive remote `$ref` to the schema being \
+                 lowered",
+                out,
+            );
+        }
+        // Non-component refs resolve (or error) exactly as `lower_schema` does; the target is then
+        // gathered as an inline member would be (see `gather_resolved_target`).
+        let resolved = self
+            .resolver
+            .resolve(reference, &schema.provenance, self.diags)
+            .ok()?;
+        let target = resolved.schema.into_owned();
+        // This arm inlines rather than referencing a shared type, so there is no `Ty` to test —
+        // test the target instead. Without this, a member that is the very schema being lowered
+        // descends into its own body again and stops only at `MAX_SCHEMA_DEPTH`, reporting a
+        // chain length for what is a cycle of length one. The component and remote arms above
+        // refuse to read an in-progress member; this one now does too.
+        if self.resolved_target_in_progress(&target.provenance) {
+            return self.reject_all_of_cycle(
+                schema.provenance.clone(),
+                "an `allOf` member is a direct recursive `$ref` to the schema being lowered",
+            );
+        }
+        // Expand the target once per resolved `file#pointer` and replay its contribution at
+        // every later use: see `resolved_contributions`. The in-progress test above runs
+        // first on every use, so a replay never stands in for a refusal. Only the target is
+        // memoised: the member's siblings belong to this use, and `gather_member` adds them.
+        let Some(key) = resolved_identity(&target.provenance) else {
+            // No span, so no identity to key on — expand un-memoised, as `ensure_resolved`
+            // lowers un-deduplicated in the same case. The depth cap still bounds it.
+            return self.gather_resolved_target(target, hint, out);
+        };
+        if let Some(recorded) = self.resolved_contributions.get(&key) {
+            out.extend(recorded.iter().cloned());
+            return Some(());
+        }
+        // The target's expansion follows its own `$ref` and `allOf` members, and nothing on that
+        // path reserves a type a re-entry could be boxed against, so a target this expansion is
+        // already inside is a loop: reject it rather than recurse to the depth cap. A loop made
+        // only of bare aliases is the alias cycle `ensure_resolved` reports; one that passes
+        // through a body is a member recursive through its own composition, as the root document
+        // reports it.
+        if let Some(start) = self
+            .resolved_member_stack
+            .iter()
+            .position(|(open, _)| *open == key)
+        {
+            if self.resolved_member_stack[start..]
+                .iter()
+                .all(|&(_, alias)| alias)
+            {
+                // E004 case: cycle
+                Diagnostic::error(Code::UnresolvedRef, schema.provenance.clone())
+                    .message(format!(
+                        "schema reference `{reference}` forms an alias cycle"
+                    ))
+                    .remedy(
+                        "give one component in the cycle a schema body, or break the cycle at one \
+                         of its references",
+                    )
+                    .emit(self.diags);
+                return None;
+            }
+            return self.reject_all_of_cycle(
+                schema.provenance.clone(),
+                "an `allOf` member is a recursive `$ref` that reaches itself through its target's \
+                 own `$ref` and `allOf` members",
+            );
+        }
+        // Name what the body lowers to for the schema it came from, not for whichever use
+        // reached it first — once one expansion serves every use, a per-use hint would make
+        // the generated names depend on lowering order. The `Member` suffix keeps it off the
+        // hint `ensure_resolved` gives the same target when it is also a direct `$ref`: that
+        // lowers a second copy of the body, and two copies on one hint would leave the bare
+        // name (`Basemeta`, or a scalar target's own `Code`) to whichever lowering ran first.
+        let hint = format!("{}Member", resolved_hint(&target.provenance, hint));
+        let mut contributed = Vec::new();
+        self.resolved_member_stack
+            .push((key.clone(), target.reference.is_some()));
+        let expanded = self.gather_resolved_target(target, &hint, &mut contributed);
+        self.resolved_member_stack.pop();
+        expanded?;
+        self.resolved_contributions.insert(key, contributed.clone());
+        out.extend(contributed);
+        Some(())
+    }
+
+    /// Expand a bundle-`$ref` `allOf` member's resolved target as [`Self::gather_member`] expands
+    /// any member: a target that is itself a `$ref` chains to *its* target (and gathers its own
+    /// siblings), one that is an `allOf` flattens its members, and only a plain body is read for
+    /// object or scalar keywords. Reading every target as a plain body took an `allOf` or alias
+    /// target, which carries neither kind of keyword, for a pure annotation, and silently dropped
+    /// everything it constrains (issue #306).
+    ///
+    /// This recursion does not pass through [`Self::lower_schema`], so it counts against
+    /// [`Self::depth`] itself: a long acyclic chain of such targets rejects with `E014` rather than
+    /// exhausting the stack. Loops are the caller's to refuse, before this is entered.
+    fn gather_resolved_target(
+        &mut self,
+        target: Schema,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
+        // The target's contribution is memoised and replayed at every later use of it, so what it
+        // lowers must not depend on the position that first reached it: it is a `$ref` target,
+        // and `open_narrowing` is out of effect there. The merge of its fields with the enclosing
+        // members' still happens at the use site.
+        self.closed_narrowing(|ctx| ctx.gather_resolved_target_closed(target, hint, out))
+    }
+
+    /// [`Self::gather_resolved_target`]'s body, run with `open_narrowing` out of effect.
+    fn gather_resolved_target_closed(
+        &mut self,
+        target: Schema,
+        hint: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
+        if self.depth >= MAX_SCHEMA_DEPTH {
+            return self.reject_too_deep(&target.provenance);
+        }
+        self.depth += 1;
+        let result = self.gather_member(&SchemaOr::Schema(Box::new(target)), hint, out);
+        self.depth -= 1;
+        result
+    }
+
     /// Turn a resolved `$ref` member's already-lowered type into a contribution: an object component
-    /// contributes a *copy* of its fields/`additionalProperties`; any other kind is a scalar member.
-    fn push_ref_member(&mut self, ty: Ty, out: &mut Vec<Contribution>) {
+    /// contributes a *copy* of its fields/`additionalProperties`; any other lowered kind is a
+    /// scalar member.
+    ///
+    /// A member whose body is still being lowered is refused here, with `recursive` as the
+    /// message, rather than by each caller: a reservation's kind says nothing about the schema's
+    /// shape, and reading it as "not a struct" is exactly how a recursive member once became a
+    /// silent scalar. A caller cannot forget the guard because it no longer holds it.
+    fn push_ref_member(
+        &mut self,
+        ty: Ty,
+        provenance: &Provenance,
+        recursive: &str,
+        out: &mut Vec<Contribution>,
+    ) -> Option<()> {
+        // Every id `is_in_progress_root` accepts is still a `Reserved` placeholder — each
+        // in-progress map is entered with a fresh `reserve` and left before its `fill` — so this
+        // arm is the whole guard the callers used to hold.
         match self.graph.get(ty.id).map(|def| &def.kind) {
+            Some(TypeKind::Reserved) => {
+                return self.reject_all_of_cycle(provenance.clone(), recursive)
+            }
             Some(TypeKind::Struct(structure)) => {
                 let fields = structure.fields.clone();
                 let required = fields
@@ -2570,6 +3116,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             _ => out.push(Contribution::Scalar(ty)),
         }
+        Some(())
     }
 
     fn gather_inline(
@@ -2605,7 +3152,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(match (acc, next) {
             (AdditionalProps::Deny, _) | (_, AdditionalProps::Deny) => AdditionalProps::Deny,
             (AdditionalProps::Typed(x), AdditionalProps::Typed(y)) => {
-                let intersection = self.intersect_types(**x, **y, hint)?;
+                let intersection = self.intersect_types(**x, **y, hint).ok()?;
                 AdditionalProps::Typed(Box::new(intersection))
             }
             (AdditionalProps::Typed(x), AdditionalProps::Allow)
@@ -2626,39 +3173,117 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ty
     }
 
-    fn reject_all_of(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
-        self.reject_all_of_unit(schema.provenance.clone(), message);
-        None
-    }
-
-    /// Report that a `$ref` target and its own sibling keywords have no single typed intersection.
-    /// `$ref` is a 2020-12 applicator, so this is the same class of irreconcilable composition
-    /// [`Self::reject_all_of`] reports — `E013` covers both spellings — but the remedy names the
-    /// construct the author actually wrote. The name says *which site* rather than *why*: the
-    /// underlying `None` covers an empty intersection and an inhabited but unrepresentable one, and
-    /// the caller's message must distinguish no further than that.
-    fn reject_ref_sibling_intersection(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
+    /// An `allOf` that mixes object and scalar members, which no single type can be.
+    fn reject_all_of_object_scalar_mix<T>(&mut self, schema: &Schema) -> Option<T> {
+        // E013 case: object-scalar-mix
         Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(message.to_owned())
-            .remedy(
-                "restructure the schema so the `$ref` target and its sibling keywords describe one \
-                 representable type, or omit this API segment with spargen::omit!",
-            )
+            .message("an `allOf` mixes object and scalar members, which cannot form one type")
+            .remedy(ALL_OF_REMEDY)
             .emit(self.diags);
         None
     }
 
-    fn reject_all_of_unit(
+    /// An all-scalar `allOf` whose members have no common value or no single representable type.
+    fn reject_all_of_scalars<T>(&mut self, schema: &Schema) -> Option<T> {
+        // E013 case: scalar-members
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message("`allOf` scalar members have an empty or unrepresentable intersection")
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// `allOf` members whose `additionalProperties` value schemas have no common type.
+    fn reject_all_of_additional<T>(&mut self, schema: &Schema) -> Option<T> {
+        // E013 case: additional-values
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message("`allOf` members declare conflicting `additionalProperties`")
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// A property repeated across `allOf` members with types that cannot meet, which a member
+    /// requires, so every instance must carry a value no type admits.
+    fn reject_all_of_required_property<T>(&mut self, schema: &Schema, name: &str) -> Option<T> {
+        // E013 case: required-property
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(format!(
+                "property `{name}` appears in multiple `allOf` members with conflicting types, and \
+                 a member requires it"
+            ))
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// An `allOf` member that is the boolean schema `false`, which admits no value, so neither
+    /// does the composition.
+    fn reject_all_of_false_member<T>(&mut self, provenance: crate::diag::Provenance) -> Option<T> {
+        // E013 case: false-member
+        Diagnostic::error(Code::AllOfIrreconcilable, provenance)
+            .message("an `allOf` member is `false`")
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// An `allOf` whose merge would have to read a `$ref` target still being lowered: a member that
+    /// is a direct recursive reference, or a property or `additionalProperties` value two members
+    /// both constrain that is typed by one. Its body is not known yet, so the composition can be
+    /// computed neither against it nor by discarding it.
+    fn reject_all_of_cycle<T>(
         &mut self,
         provenance: crate::diag::Provenance,
         message: &str,
-    ) -> Option<()> {
+    ) -> Option<T> {
+        // E013 case: cycle
         Diagnostic::error(Code::AllOfIrreconcilable, provenance)
             .message(message.to_owned())
-            .remedy(
-                "restructure the composition so members agree, or omit this API segment with \
-                 spargen::omit!",
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// Two sides that share values no single Rust type represents ([`NoMeet::Unrepresentable`]),
+    /// met where an empty meet would have been typed uninhabited or dropped: a union branch against
+    /// the enclosing schema's siblings, or a property repeated across `allOf` members. Either
+    /// stand-in would refuse the values the two sides share, so the composition is refused instead.
+    fn reject_unrepresentable_meet<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        // E013 case: unrepresentable-meet
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// Report that a `$ref` target and its own sibling keywords have no single typed intersection.
+    /// `$ref` is a 2020-12 applicator, so this is the same class of irreconcilable composition an
+    /// `allOf` reports — `E013` covers both spellings — but the remedy names the construct the
+    /// author actually wrote. Its callers report an empty intersection and an inhabited but
+    /// unrepresentable one alike, for any of the reasons an `allOf` merge has, so the message
+    /// distinguishes no further than that.
+    fn reject_ref_sibling_intersection(&mut self, schema: &Schema) -> Option<Ty> {
+        // E013 case: scalar-members, required-property, additional-values, object-scalar-mix, unrepresentable-meet
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(
+                "the `$ref` target and this schema's own sibling keywords have an empty or \
+                 unrepresentable intersection",
             )
+            .remedy(REF_SIBLING_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// Report that a `$ref` carrying shape-bearing siblings — or a union member, when the union
+    /// has siblings of its own — closes a reference cycle back to the schema enclosing it, so the
+    /// siblings would have to be intersected with a target whose definition depends on the result.
+    fn reject_ref_sibling_cycle(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
+        // E013 case: cycle
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(REF_SIBLING_REMEDY)
             .emit(self.diags);
         None
     }
@@ -2744,9 +3369,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// independently from the non-null shape; an intersection containing only JSON `null` becomes
     /// [`TypeKind::Null`]. Derived arrays, objects, enums, and narrowed unions are inserted into the
     /// graph so codegen still sees an ordinary, fully typed IR node.
-    fn intersect_types(&mut self, a: Ty, b: Ty, hint: &str) -> Option<Ty> {
-        let a_kind = self.graph.get(a.id)?.kind.clone();
-        let b_kind = self.graph.get(b.id)?.kind.clone();
+    ///
+    /// No typed intersection is one of two answers, and [`NoMeet`] says which: an empty one may be
+    /// typed uninhabited where an empty value remains (an array's items, a property no side
+    /// requires) or collapse to `null` where both sides admit it, while an unrepresentable one is
+    /// never narrowed that way — it reaches a caller that reports it.
+    fn intersect_types(&mut self, a: Ty, b: Ty, hint: &str) -> Result<Ty, NoMeet> {
+        let (Some(a_def), Some(b_def)) = (self.graph.get(a.id), self.graph.get(b.id)) else {
+            return Err(NoMeet::Unrepresentable);
+        };
+        let a_kind = a_def.kind.clone();
+        let b_kind = b_def.kind.clone();
 
         // Fail closed on a reservation, BEFORE nullability is consulted. A `TypeKind::Reserved`
         // operand is a placeholder whose body is still being lowered, so no true statement can be
@@ -2754,48 +3387,46 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // safe thing to do with one is refuse to read it. The callers above guard their own paths,
         // but a guard that asks about the *spelling* of a reference rather than its resolved
         // identity lets one through, and the rescue below then converted that unanswerable
-        // intersection into a confident wrong answer: `intersect_non_null` has no `Reserved` arm, so
-        // it returned `None`, and `None if accepts_null` typed the position as the exact JSON null
-        // type. The result was `pub type X = ();` — a client that decodes only `null` for a schema
-        // that accepts objects — emitted with no diagnostic, which is the standing invariant's
-        // fourth, silent behaviour.
+        // intersection into a confident wrong answer: `intersect_non_null` found no meet for it
+        // (it now refuses by a `Reserved` arm of its own), and the null rescue typed the
+        // position as the exact JSON null type. The result was `pub type X = ();` — a client that
+        // decodes only `null` for a schema that accepts objects — emitted with no diagnostic,
+        // which is the standing invariant's fourth, silent behaviour.
         //
-        // Returning `None` here hands the refusal to the caller. It is a backstop, not a guarantee
-        // of rejection: most callers report `None` as an irreconcilable composition, but two treat
-        // it as "provably empty" — the `Array` arm of `intersect_non_null` types the items as
-        // `Never`, and `intersect_structs` keeps an optional conflicting property as `Never` — so a
-        // reservation that reaches either through a missed caller-side guard is still emitted as an
-        // uninhabited type rather than rejected. The caller-side guards are what reject; this arm
-        // only keeps the null-collapse rescue below from turning the refusal into `()`.
+        // Refusing it as `NoMeet::Unrepresentable` hands the refusal to the caller, and that answer
+        // is never typed uninhabited or collapsed to `null`: the `Never` fallbacks (an array's
+        // items, a property no side requires) take only `NoMeet::Empty`, and so does the null
+        // rescue below. So a reservation that slips past a caller-side guard is still rejected.
         //
         // A reservation intersected with ITSELF is exempt: `X ∩ X = X` needs no knowledge of the
         // body, and it is how every ordinary recursive schema composes when two `allOf` members
         // repeat one construct. Refusing it rejected those documents with a false "conflicting
-        // types" message, and at the two `Never` callers above emitted a `kids` array that decodes
-        // only `[]`. `intersect_non_null` answers it by its identity short-circuit.
+        // types" message. `intersect_non_null` answers it by its identity short-circuit.
         if a.id != b.id
             && (matches!(a_kind, TypeKind::Reserved) || matches!(b_kind, TypeKind::Reserved))
         {
-            return None;
+            return Err(NoMeet::Unrepresentable);
         }
 
         let accepts_null = type_accepts_null(a, &a_kind) && type_accepts_null(b, &b_kind);
 
         let non_null = if matches!(a_kind, TypeKind::Null) || matches!(b_kind, TypeKind::Null) {
-            None
+            Err(NoMeet::Empty)
         } else {
             self.intersect_non_null(a, &a_kind, b, &b_kind, hint)
         };
 
         match non_null {
-            Some(mut ty) => {
+            Ok(mut ty) => {
                 ty.nullable = accepts_null;
-                Some(ty)
+                Ok(ty)
             }
-            None if accepts_null => {
-                Some(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+            // Only an EMPTY non-null meet leaves exactly `null`. An unrepresentable one still holds
+            // the non-null values the two sides share, and `()` would refuse every one of them.
+            Err(NoMeet::Empty) if accepts_null => {
+                Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
             }
-            None => None,
+            Err(no_meet) => Err(no_meet),
         }
     }
 
@@ -2931,25 +3562,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         b: Ty,
         b_kind: &TypeKind,
         hint: &str,
-    ) -> Option<Ty> {
+    ) -> Result<Ty, NoMeet> {
         if a.id == b.id {
             let mut ty = a;
             ty.nullable = false;
             ty.boxed = a.boxed || b.boxed;
-            return Some(ty);
+            return Ok(ty);
         }
 
         match (a_kind, b_kind) {
-            (TypeKind::Any, _) => Some(non_nullable(b)),
-            (_, TypeKind::Any) => Some(non_nullable(a)),
+            // Nothing true can be said about intersecting an unlowered body with anything else
+            // (the identical reservation answered above by id). `intersect_types` refuses this
+            // before calling here; stating it again means a new caller inherits the refusal rather
+            // than reaching the `Any` arms below, which would answer with the placeholder itself.
+            (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => Err(NoMeet::Unrepresentable),
+            (TypeKind::Any, _) => Ok(non_nullable(b)),
+            (_, TypeKind::Any) => Ok(non_nullable(a)),
             (TypeKind::Primitive(left), TypeKind::Primitive(right)) => {
-                let primitive = intersect_primitives(*left, *right)?;
+                let Some(primitive) = intersect_primitives(*left, *right) else {
+                    return Err(no_meet(a_kind, b_kind));
+                };
                 if primitive == *left {
-                    Some(non_nullable(a))
+                    Ok(non_nullable(a))
                 } else if primitive == *right {
-                    Some(non_nullable(b))
+                    Ok(non_nullable(b))
                 } else {
-                    Some(self.insert_type(
+                    Ok(self.insert_type(
                         hint,
                         TypeKind::Primitive(primitive),
                         Docs::default(),
@@ -2957,6 +3595,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ))
                 }
             }
+            // A set's variants are the values the description lists, open or not: `open` says only
+            // that the lowering also holds an unlisted string, because a plain `string` was met
+            // (`narrowed_string`). So two sets meet in the values both list, open when either is.
+            // Both parts are order-independent (an intersection and a disjunction), so an `allOf`
+            // lowers to the same set whichever order its members are written in; keeping the
+            // closed side whole instead would admit values the open side's description forbids.
+            // Where `open_narrowing` is out of effect (inside a union, which `intersect_union`
+            // reaches with a set the response already opened) the meet is closed: two variants
+            // that each held an unlisted string would both match it, and the trial union would
+            // refuse every value.
             (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
                 let variants: Vec<ScalarValue> = left
                     .variants
@@ -2964,18 +3612,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .filter(|value| right.variants.contains(value))
                     .cloned()
                     .collect();
+                let open = self.narrowing_opens && (left.open || right.open);
                 if variants.is_empty() {
-                    None
-                } else if variants == left.variants {
-                    Some(non_nullable(a))
-                } else if variants == right.variants {
-                    Some(non_nullable(b))
+                    // Both value sets are finite and listed in full, so sharing no value is proof.
+                    Err(NoMeet::Empty)
+                } else if variants == left.variants && open == left.open {
+                    Ok(non_nullable(a))
+                } else if variants == right.variants && open == right.open {
+                    Ok(non_nullable(b))
+                } else if open && variants == left.variants {
+                    Ok(self.opened_set(a, left))
+                } else if open && variants == right.variants {
+                    Ok(self.opened_set(b, right))
                 } else {
-                    Some(self.insert_type(
+                    Ok(self.insert_type(
                         hint,
                         TypeKind::Enum(ScalarEnum {
                             repr: left.repr,
                             variants,
+                            open,
                         }),
                         Docs::default(),
                         None,
@@ -2985,26 +3640,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (TypeKind::Enum(enumeration), TypeKind::Primitive(primitive))
                 if enum_matches_primitive(enumeration.repr, *primitive) =>
             {
-                Some(non_nullable(a))
+                Ok(self.narrowed_string(a, enumeration, *primitive, hint))
             }
             (TypeKind::Primitive(primitive), TypeKind::Enum(enumeration))
                 if enum_matches_primitive(enumeration.repr, *primitive) =>
             {
-                Some(non_nullable(b))
+                Ok(self.narrowed_string(b, enumeration, *primitive, hint))
             }
             (TypeKind::Array(left), TypeKind::Array(right)) => {
                 let item_hint = format!("{hint}Item");
-                let item = self
-                    .intersect_types(**left, **right, &item_hint)
-                    .unwrap_or_else(|| {
+                let item = match self.intersect_types(**left, **right, &item_hint) {
+                    Ok(item) => item,
+                    // No item satisfies both, so exactly the empty array satisfies both arrays:
+                    // `Vec<Never>` is faithful.
+                    Err(NoMeet::Empty) => {
                         self.insert_type(&item_hint, TypeKind::Never, Docs::default(), None)
-                    });
+                    }
+                    // Items both sides admit exist, and `Vec<Never>` would refuse every array that
+                    // holds one.
+                    Err(NoMeet::Unrepresentable) => return Err(NoMeet::Unrepresentable),
+                };
                 if same_ty(item, **left) {
-                    Some(non_nullable(a))
+                    Ok(non_nullable(a))
                 } else if same_ty(item, **right) {
-                    Some(non_nullable(b))
+                    Ok(non_nullable(b))
                 } else {
-                    Some(self.insert_type(
+                    Ok(self.insert_type(
                         hint,
                         TypeKind::Array(Box::new(item)),
                         Docs::default(),
@@ -3012,6 +3673,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     ))
                 }
             }
+            // A position with no intersection is unrepresentable rather than empty, whichever way
+            // it fails: `prefixItems` does not require the array to reach that position, so an
+            // array shorter than it still satisfies both tuples.
             (TypeKind::Tuple(left), TypeKind::Tuple(right)) if left.len() == right.len() => {
                 let items = left
                     .iter()
@@ -3019,15 +3683,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .enumerate()
                     .map(|(index, (left, right))| {
                         self.intersect_types(*left, *right, &format!("{hint}Item{index}"))
+                            .ok()
                     })
-                    .collect::<Option<Vec<_>>>()?;
-                Some(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(NoMeet::Unrepresentable)?;
+                Ok(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
             }
             // A homogeneous array against a tuple: every tuple position must also satisfy the
             // array's item schema, and the length is the tuple's. So the intersection is the tuple
             // with each position narrowed by the item — `{$ref: Coord, type: array}` over a
-            // `prefixItems` `Coord` is `Coord`. A position with no intersection leaves no tuple
-            // (unlike the array-array arm, a fixed-length tuple has no empty value to fall back on).
+            // `prefixItems` `Coord` is `Coord`. A position with no intersection leaves no tuple,
+            // and, as for two tuples, that is unrepresentable rather than empty.
             (TypeKind::Array(item), TypeKind::Tuple(positions)) => {
                 self.intersect_array_tuple(**item, positions, b, hint)
             }
@@ -3037,55 +3703,167 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             (TypeKind::Struct(left), TypeKind::Struct(right)) => {
                 self.intersect_structs(left, right, hint)
             }
-            (TypeKind::Union(union), _) => self.intersect_union(a, union, b, hint),
-            (_, TypeKind::Union(union)) => self.intersect_union(b, union, a, hint),
-            (TypeKind::Bytes, TypeKind::Bytes) => Some(non_nullable(a)),
+            // A union's variants stay closed for the reason `lower_union_closed` gives; a union
+            // that narrows to one branch is no union, and `intersect_union` meets that branch where
+            // the enclosing position's answer holds.
+            (TypeKind::Union(union), _) => {
+                let enclosing = self.narrowing_opens;
+                self.closed_narrowing(|ctx| ctx.intersect_union(a, union, b, hint, enclosing))
+            }
+            (_, TypeKind::Union(union)) => {
+                let enclosing = self.narrowing_opens;
+                self.closed_narrowing(|ctx| ctx.intersect_union(b, union, a, hint, enclosing))
+            }
+            (TypeKind::Bytes, TypeKind::Bytes) => Ok(non_nullable(a)),
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
             // string conjoined with it is the binary content: `{$ref: Data, format: binary}` over a
             // string `Data` lowers exactly as the inline `{type: string, format: binary}` does. Only
             // the unformatted string: `uuid` and the date formats carry a decoded representation of
-            // their own that `Bytes` cannot also be.
-            (TypeKind::Bytes, TypeKind::Primitive(Prim::String)) => Some(non_nullable(a)),
-            (TypeKind::Primitive(Prim::String), TypeKind::Bytes) => Some(non_nullable(b)),
-            _ => None,
+            // their own that `Bytes` cannot also be, so that pair is unrepresentable (`no_meet`).
+            (TypeKind::Bytes, TypeKind::Primitive(Prim::String)) => Ok(non_nullable(a)),
+            (TypeKind::Primitive(Prim::String), TypeKind::Bytes) => Ok(non_nullable(b)),
+            _ => Err(no_meet(a_kind, b_kind)),
         }
+    }
+
+    /// The meet of the scalar set `set` (whose type is `enum_ty`) with the primitive `primitive` it
+    /// is a set of: the set itself, or — for a closed string set narrowing a plain `string` where
+    /// [`Self::narrowing_opens`] holds — an open set listing the same values, whose domain is the
+    /// `string` it narrowed. That is the set itself, opened, when it is one of
+    /// [`Self::open_candidates`], and a new open copy otherwise (a set that came from a `$ref`
+    /// target, or from another intersection, may be reached from where it must stay closed).
+    ///
+    /// Only a plain `string` widens it: `uuid` and the date formats have a decoded representation
+    /// of their own that an arbitrary string is not.
+    ///
+    /// A set the response already opened, met where [`Self::narrowing_opens`] does not hold (a
+    /// union variant `intersect_union` meets it with), is a new closed copy under `hint`, for the
+    /// reason the enum-meet arm of [`Self::intersect_non_null`] gives.
+    fn narrowed_string(
+        &mut self,
+        enum_ty: Ty,
+        set: &ScalarEnum,
+        primitive: Prim,
+        hint: &str,
+    ) -> Ty {
+        if set.open && !self.narrowing_opens {
+            return self.insert_type(
+                hint,
+                TypeKind::Enum(ScalarEnum {
+                    open: false,
+                    ..set.clone()
+                }),
+                Docs::default(),
+                None,
+            );
+        }
+        let opens = self.narrowing_opens
+            && set.repr == ScalarRepr::String
+            && !set.open
+            && primitive == Prim::String;
+        if !opens {
+            return non_nullable(enum_ty);
+        }
+        self.opened_set(enum_ty, set)
+    }
+
+    /// The closed set `set` (whose type is `enum_ty`), opened: in place when it is one of
+    /// [`Self::open_candidates`], and as a new open copy otherwise, as [`Self::narrowed_string`]
+    /// describes.
+    fn opened_set(&mut self, enum_ty: Ty, set: &ScalarEnum) -> Ty {
+        if self.open_candidates.contains(&enum_ty.id) {
+            if let Some(TypeKind::Enum(own)) =
+                self.graph.get_mut(enum_ty.id).map(|def| &mut def.kind)
+            {
+                own.open = true;
+                return non_nullable(enum_ty);
+            }
+        }
+        // Named for the closed set it opens, which stays in the graph where it came from.
+        let (name_hint, docs, provenance) = match self.graph.get(enum_ty.id) {
+            Some(def) => (
+                format!("{}Open", def.name_hint),
+                def.docs.clone(),
+                Some(def.provenance.clone()),
+            ),
+            None => return non_nullable(enum_ty),
+        };
+        self.insert_type(
+            &name_hint,
+            TypeKind::Enum(ScalarEnum {
+                repr: ScalarRepr::String,
+                variants: set.variants.clone(),
+                open: true,
+            }),
+            docs,
+            provenance,
+        )
+    }
+
+    /// Run `lower` with `open_narrowing` out of effect, restoring the enclosing position's answer
+    /// afterwards. Every `$ref` target and every union is lowered through this.
+    fn closed_narrowing<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> T {
+        let enclosing = std::mem::replace(&mut self.narrowing_opens, false);
+        let lowered = lower(self);
+        self.narrowing_opens = enclosing;
+        lowered
+    }
+
+    /// Run `lower` over a response body's own schema: with `open_narrowing` in effect when the
+    /// option is on, restoring the enclosing answer afterwards.
+    fn response_narrowing<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> T {
+        let enclosing = std::mem::replace(&mut self.narrowing_opens, self.open_narrowing);
+        let lowered = lower(self);
+        self.narrowing_opens = enclosing;
+        lowered
     }
 
     /// The intersection of a homogeneous array whose items are `item` with the tuple `tuple`, whose
     /// positions are `positions`: the tuple, each position intersected with `item`. Returns the
-    /// tuple itself when no position narrowed, and `None` when any position has no intersection.
+    /// tuple itself when no position narrowed, and [`NoMeet::Unrepresentable`] when any position
+    /// has no intersection.
     fn intersect_array_tuple(
         &mut self,
         item: Ty,
         positions: &[Ty],
         tuple: Ty,
         hint: &str,
-    ) -> Option<Ty> {
+    ) -> Result<Ty, NoMeet> {
         let items = positions
             .iter()
             .enumerate()
             .map(|(index, position)| {
                 self.intersect_types(*position, item, &format!("{hint}Item{index}"))
+                    .ok()
             })
-            .collect::<Option<Vec<_>>>()?;
+            .collect::<Option<Vec<_>>>()
+            .ok_or(NoMeet::Unrepresentable)?;
         if items
             .iter()
             .zip(positions)
             .all(|(narrowed, position)| same_ty(*narrowed, *position))
         {
-            Some(non_nullable(tuple))
+            Ok(non_nullable(tuple))
         } else {
-            Some(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
+            Ok(self.insert_type(hint, TypeKind::Tuple(items), Docs::default(), None))
         }
     }
 
-    fn intersect_structs(&mut self, left: &Struct, right: &Struct, hint: &str) -> Option<Ty> {
+    fn intersect_structs(
+        &mut self,
+        left: &Struct,
+        right: &Struct,
+        hint: &str,
+    ) -> Result<Ty, NoMeet> {
         let mut fields: IndexMap<String, Field> = left
             .fields
             .iter()
             .cloned()
             .map(|field| (field.name.wire.clone(), field))
             .collect();
+        // An unrepresentable property is remembered rather than returned at once: a later
+        // required property whose types are disjoint still proves the whole object empty.
+        let mut unrepresentable = false;
         for field in &right.fields {
             match fields.get_mut(&field.name.wire) {
                 Some(existing) => {
@@ -3093,20 +3871,30 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
                     let required = existing.required || field.required;
                     existing.ty = match intersection {
-                        Some(ty) => ty,
+                        Ok(ty) => ty,
                         // Mirrors the array arm above, and for the same reason `E013`'s explain
                         // gives for it: a property NEITHER side requires does not empty the
                         // object when its two types cannot meet, because every instance that
                         // omits it still satisfies both sides. The field takes an uninhabited
                         // type, so the instances that remain representable are exactly the valid
                         // ones. Propagating the failure would reject a document that `{}`
-                        // satisfies.
-                        None if !required => {
+                        // satisfies. An applied `default` goes with the old type, since no value
+                        // of it is a value of the field any more (it stays documented in rustdoc).
+                        Err(NoMeet::Empty) if !required => {
+                            if let Some(default) = &mut existing.default {
+                                default.applied = None;
+                            }
                             self.insert_type(&field_hint, TypeKind::Never, Docs::default(), None)
                         }
                         // Required on one side or the other: every instance must carry a value no
                         // type admits, so the composition really is empty.
-                        None => return None,
+                        Err(NoMeet::Empty) => return Err(NoMeet::Empty),
+                        // Values both sides admit exist, so an uninhabited field would refuse every
+                        // object carrying one, required or not.
+                        Err(NoMeet::Unrepresentable) => {
+                            unrepresentable = true;
+                            continue;
+                        }
                     };
                     existing.required = required;
                     if existing.required {
@@ -3120,12 +3908,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
             }
         }
-        let additional = self.merge_additional(
-            &left.additional,
-            &right.additional,
-            &format!("{hint}Additional"),
-        )?;
-        Some(self.insert_type(
+        if unrepresentable {
+            return Err(NoMeet::Unrepresentable);
+        }
+        // Two additional-value types that do not meet leave the object inhabited (one with no
+        // additional key satisfies both), so that failure is never an empty object.
+        let additional = self
+            .merge_additional(
+                &left.additional,
+                &right.additional,
+                &format!("{hint}Additional"),
+            )
+            .ok_or(NoMeet::Unrepresentable)?;
+        Ok(self.insert_type(
             hint,
             TypeKind::Struct(Struct {
                 fields: fields.into_values().collect(),
@@ -3148,31 +3943,48 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .then_some(first.ty)
     }
 
+    /// The meet of the union `union` (whose type is `union_ty`) with `other`, branch by branch.
+    /// Called with `open_narrowing` out of effect, so every retained branch is closed.
+    /// `enclosing_opens` is [`Self::narrowing_opens`] where the meet was asked for: when exactly one
+    /// branch survives, the result is no union, and that branch is met again under that answer, so
+    /// the meet is the same set whichever order the `allOf` writes the union and the `string` in
+    /// (written first, the union narrows to that branch before the `string` opens it).
     fn intersect_union(
         &mut self,
         union_ty: Ty,
         union: &Union,
         other: Ty,
         hint: &str,
-    ) -> Option<Ty> {
+        enclosing_opens: bool,
+    ) -> Result<Ty, NoMeet> {
         let mut variants = Vec::new();
         let mut retained = Vec::new();
         for (index, variant) in union.variants.iter().enumerate() {
-            if let Some(ty) =
-                self.intersect_types(variant.ty, other, &format!("{hint}Variant{index}"))
-            {
-                variants.push(UnionVariant {
-                    name_hint: variant.name_hint.clone(),
-                    ty,
-                });
-                retained.push(index);
+            match self.intersect_types(variant.ty, other, &format!("{hint}Variant{index}")) {
+                Ok(ty) => {
+                    variants.push(UnionVariant {
+                        name_hint: variant.name_hint.clone(),
+                        ty,
+                    });
+                    retained.push(index);
+                }
+                // A branch no value of `other` satisfies contributes nothing to the intersection,
+                // so dropping it loses no value.
+                Err(NoMeet::Empty) => {}
+                // A branch that shares values with `other` but has no type for them cannot be
+                // dropped without refusing those values, whatever the other branches do.
+                Err(NoMeet::Unrepresentable) => return Err(NoMeet::Unrepresentable),
             }
         }
         if variants.len() == 1 {
-            return variants.into_iter().next().map(|variant| variant.ty);
+            if enclosing_opens {
+                let branch = union.variants[retained[0]].ty;
+                return self.response_narrowing(|ctx| ctx.intersect_types(branch, other, hint));
+            }
+            return Ok(variants.remove(0).ty);
         }
         if variants.is_empty() {
-            return None;
+            return Err(NoMeet::Empty);
         }
         if variants.len() == union.variants.len()
             && variants
@@ -3180,7 +3992,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 .zip(&union.variants)
                 .all(|(left, right)| same_ty(left.ty, right.ty))
         {
-            return Some(non_nullable(union_ty));
+            return Ok(non_nullable(union_ty));
         }
         let strategy = match &union.strategy {
             UnionStrategy::Discriminated {
@@ -3208,7 +4020,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 priorities: retained.iter().map(|index| priorities[*index]).collect(),
             },
         };
-        Some(self.insert_type(
+        Ok(self.insert_type(
             hint,
             TypeKind::Union(Union { variants, strategy }),
             Docs::default(),
@@ -3266,6 +4078,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 (TypeKind::Array(x), TypeKind::Array(y)) => {
                     self.same_map_value_type_guarded(**x, **y, visiting)
                 }
+                // An unlowered body cannot be proven the same value type as anything else, so the
+                // pair is heterogeneous and the map is rejected with `E005` rather than merged on
+                // a guess. The same reservation on both sides already answered `true` by id.
+                (TypeKind::Reserved, _) | (_, TypeKind::Reserved) => false,
                 _ => false,
             },
             _ => false,
@@ -3406,14 +4222,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate that
         // preserves the component-root last-insert invariant asserted in `ensure_component`.
+        let repr = repr.unwrap_or(ScalarRepr::String);
         let mut ty = self.insert_schema_type(
             schema,
             hint,
             TypeKind::Enum(ScalarEnum {
-                repr: repr.unwrap_or(ScalarRepr::String),
+                repr,
                 variants,
+                open: false,
             }),
         );
+        if self.narrowing_opens && repr == ScalarRepr::String {
+            self.open_candidates.insert(ty.id);
+        }
         ty.nullable = has_null;
         Some(ty)
     }
@@ -3468,6 +4289,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 "accept" | "content-type" | "authorization"
             )
         {
+            // W011 case: reserved-header-parameter
             Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
                 .message(format!(
                     "header parameter `{}` is ignored: the specification reserves `Accept`, \
@@ -3591,6 +4413,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // Deprecated in 3.2, and inert for a typed client: an absent optional parameter is simply
         // not sent, so there is never a case where the client would send an empty string instead.
         if parameter.allow_empty_value {
+            // W011 case: allow-empty-value
             Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
                 .message(
                     "`allowEmptyValue` has no effect: an optional parameter the caller omits is \
@@ -3603,6 +4426,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if parameter.allow_reserved
             && (location == ParamLoc::Header || matches!(style, ParamStyle::Cookie))
         {
+            // W011 case: allow-reserved-parameter
             Diagnostic::warning(Code::DeclarationHasNoEffect, parameter.provenance.clone())
                 .message(
                     "`allowReserved` has no effect here: this parameter is sent without \
@@ -3687,7 +4511,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn lower_request_body(&mut self, body: &RequestBodyObject) -> Option<RequestBody> {
         // A structured-suffix range such as `application/*+json` ranks with the concrete types its
         // suffix covers, so it could win a tie or a rank and then be refused below as a range. While
-        // a sibling can be sent, it is withheld from the choice and reported as not generated.
+        // a sibling can be sent, it is withheld from the choice and reported as not selected.
         let (candidates, withheld) = request_media_candidates(&body.content);
         let ChosenMedia {
             media: media_name,
@@ -3701,9 +4525,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             |object: &&super::MediaTypeObject| media_object_is_opaque(object),
         )?;
         let lowered = self.lower_chosen_request_body(body, media_name, object)?;
-        // Both `W014`s claim the selection "is generated", so they are emitted only now that every
-        // gate above has accepted it: the alternatives `choose_media` passed over, then the
-        // withheld suffix ranges — each true, always in this order.
+        // Both `W014`s are emitted only now that every gate above has accepted the selection: a
+        // refused one is reported by its `E009` alone, since no method narrows to a body that is
+        // not lowered. First the alternatives `choose_media` passed over, then the withheld suffix
+        // ranges — always in this order.
         let withheld = alternative_media_ignored(media_name, &withheld, &body.provenance);
         for warning in narrowing.into_iter().chain(withheld) {
             self.diags.emit(warning);
@@ -3925,6 +4750,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         if let Some((field, at)) = positional {
             if media == MediaType::FormUrlEncoded {
+                // W011 case: positional-encoding-form
                 Diagnostic::warning(Code::DeclarationHasNoEffect, at)
                     .message(format!(
                         "`{field}` has no effect on `{media_name}`: the specification scopes it to \
@@ -3974,6 +4800,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // An `encoding` key naming no property has nothing to apply to.
         for name in object.encoding.keys() {
             if !fields.iter().any(|(wire, _)| wire == name) {
+                // W011 case: encoding-unknown-property
                 Diagnostic::warning(Code::DeclarationHasNoEffect, at.clone())
                     .message(format!(
                         "`encoding` entry `{name}` names no property of the body schema, so it is \
@@ -3997,6 +4824,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Apply the Encoding Object's mode switch for one property.
+    ///
+    /// In media mode a part's bytes come from the property's lowered type and its declared
+    /// `contentType` rides on it as the header. A declaration is refused (`E009`) where the two
+    /// cannot agree: a property rendered as JSON (anything but a scalar or bytes) whose declared
+    /// type is not JSON, on multipart (the part's header) and on form-urlencoded (the field's
+    /// serialization syntax) alike.
     fn encoding_mode(
         &mut self,
         declared: Option<&EncodingObject>,
@@ -4089,6 +4922,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // Multipart part values are never percent-encoded, so `allowReserved` is inert.
                 let allow_reserved = encoding.allow_reserved.unwrap_or(false);
                 if allow_reserved && media == MediaType::Multipart {
+                    // W011 case: allow-reserved-multipart
                     Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
                         .message(
                             "`allowReserved` has no effect on `multipart/form-data`: part values \
@@ -4106,10 +4940,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let explicit = declared.and_then(|encoding| encoding.content_type.as_deref());
         let content_type = match explicit {
             // `contentType` is a comma-separated list of acceptable types, but a client sends
-            // exactly one, so the first element wins.
+            // exactly one, so the first element wins. A comma inside a quoted parameter value is
+            // part of that element, not a list separator.
             Some(list) => {
-                let first = list.split(',').next().unwrap_or(list).trim().to_owned();
-                if first.contains('*') {
+                let first = first_list_element(list).to_owned();
+                // Only the essence can be a range; a `*` in a parameter value is an ordinary
+                // `tchar`.
+                if media_essence(&first).contains('*') {
                     Diagnostic::error(
                         Code::UnsupportedMediaType,
                         declared
@@ -4142,7 +4979,50 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .emit(self.diags);
                     return None;
                 }
-                first
+                // Its parameters are sent too, so they are held to RFC 9110 § 5.6.6: a
+                // parameter without `=` (`text/plain; foo`) would otherwise generate with nothing
+                // reported and fail only when the part's `Content-Type` is parsed at request time.
+                // Only a multipart part sends it (`mime_str`); a form-urlencoded field's
+                // `contentType` only picks the codec, so a value the transport could not carry is
+                // no reason to refuse it there. A malformed list is refused under either, as the
+                // essence rule above is: it is not a media type.
+                match media_type_with_parameters(&first) {
+                    Ok(canonical) => canonical,
+                    Err(ParameterFault::Unsendable(canonical)) if media != MediaType::Multipart => {
+                        canonical
+                    }
+                    Err(fault) => {
+                        let (message, remedy) = match fault {
+                            ParameterFault::Malformed => (
+                                format!(
+                                    "`encoding.{name}.contentType: {first}` has a parameter \
+                                     that is not `name=value` under RFC 9110 § 5.6.6"
+                                ),
+                                "write each parameter as `name=value`, with a token name and a \
+                                 token or quoted-string value, such as `text/plain; charset=utf-8`",
+                            ),
+                            ParameterFault::Unsendable(_) => (
+                                format!(
+                                    "`encoding.{name}.contentType: {first}` has a quoted \
+                                     parameter value the generated client cannot send: an empty \
+                                     value, or one holding a `\"` or a tab"
+                                ),
+                                "quote a non-empty value without `\"` or a tab, or drop the \
+                                 parameter",
+                            ),
+                        };
+                        Diagnostic::error(
+                            Code::UnsupportedMediaType,
+                            declared
+                                .map(|encoding| encoding.provenance.clone())
+                                .unwrap_or_else(|| at.clone()),
+                        )
+                        .message(message)
+                        .remedy(remedy)
+                        .emit(self.diags);
+                        return None;
+                    }
+                }
             }
             None => self.default_content_type(field_ty),
         };
@@ -4154,6 +5034,60 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Some(codec @ (MediaType::Json | MediaType::Text | MediaType::OctetStream)) => codec,
             _ => self.natural_codec(field_ty),
         };
+        // That header-rides rule holds only where the header and the bytes agree. A scalar part
+        // is the text the document described and a bytes part is whatever the caller supplies, so
+        // either carries any well-formed declaration. Every other property is rendered as JSON
+        // whatever it declares, so a declaration that is not JSON (`application/xml` over an
+        // object, `text/csv` over an array, or a type with no codec at all) would put JSON under
+        // a header naming another syntax — bytes no reader of the document predicts. Refused.
+        // Media types are case-insensitive (RFC 9110 § 8.3.1), and the classifier's JSON arms are
+        // spelled in lowercase, so `Application/JSON` is judged as the JSON it is.
+        //
+        // A form-urlencoded field has no header, so the argument there is not the same one, but it
+        // reaches the same rule: its `contentType` is the only statement of the syntax the field's
+        // value is serialized in before percent-encoding (the specification's form examples), so
+        // it is what a server decodes the field by. Spargen serializes a non-scalar field only as
+        // JSON (`FormMode::Json`); XML or any other syntax has no field codec, and `text/plain`
+        // over an object or array has no defined rendering (the runtime's `FormMode::Text` refuses
+        // a nested value, failing every call). Either way the declaration cannot be honoured, so
+        // it is refused rather than sent as JSON or generated to fail.
+        if matches!(media, MediaType::Multipart | MediaType::FormUrlEncoded)
+            && explicit.is_some()
+            && self.natural_codec(field_ty) == MediaType::Json
+            && classify_media(&media_essence(&content_type).to_ascii_lowercase())
+                .map(|(codec, _)| codec)
+                != Some(MediaType::Json)
+        {
+            Diagnostic::error(
+                Code::UnsupportedMediaType,
+                declared
+                    .map(|encoding| encoding.provenance.clone())
+                    .unwrap_or_else(|| at.clone()),
+            )
+            .message(if media == MediaType::Multipart {
+                format!(
+                    "property `{name}` declares `contentType: {content_type}`, but it is not a \
+                     scalar or binary value, so spargen can send it only as JSON; the part's bytes \
+                     would contradict its header"
+                )
+            } else {
+                format!(
+                    "property `{name}` declares `contentType: {content_type}`, but it is not a \
+                     scalar value, so spargen can serialize it into a form field only as JSON; the \
+                     field would not be in the syntax the document declares"
+                )
+            })
+            .remedy(if media == MediaType::Multipart {
+                "declare `application/json` (or a `+json` type), make the property a string or \
+                 binary value, or omit this API segment with spargen::omit!"
+            } else {
+                "declare `application/json` (or a `+json` type), select RFC 6570 serialization \
+                 with `style`/`explode`, make the property a scalar, or omit this API segment with \
+                 spargen::omit!"
+            })
+            .emit(self.diags);
+            return None;
+        }
         // A form field is a single URL-encoded string; raw bytes have no representation there.
         if media == MediaType::FormUrlEncoded && codec == MediaType::OctetStream {
             Diagnostic::error(
@@ -4191,6 +5125,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         match self.graph.get(ty.id).map(|def| &def.kind) {
             Some(TypeKind::Bytes) => MediaType::OctetStream,
             Some(TypeKind::Primitive(_) | TypeKind::Enum(_)) => MediaType::Text,
+            // Encodings are lowered per operation, after every component the body reaches is
+            // filled, so this is not expected. Were it reached, JSON is the codec that renders any
+            // value faithfully, and it agrees with `default_content_type`'s answer for the same
+            // placeholder, so the part's header and its bytes cannot disagree.
+            Some(TypeKind::Reserved) => MediaType::Json,
             _ => MediaType::Json,
         }
     }
@@ -4207,6 +5146,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // is the 3.2 rule and the only self-consistent reading for a nested array.
             Some(TypeKind::Array(_)) | Some(TypeKind::Tuple(_)) => "application/json".to_owned(),
             Some(TypeKind::Primitive(_)) | Some(TypeKind::Enum(_)) => "text/plain".to_owned(),
+            // Not expected, for the reason `natural_codec` states. Were it reached, JSON is what
+            // `natural_codec` renders a placeholder as, so it is the header that tells the truth
+            // about those bytes; the octet-stream fallback below would not.
+            Some(TypeKind::Reserved) => "application/json".to_owned(),
             _ => "application/octet-stream".to_owned(),
         }
     }
@@ -4229,6 +5172,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Vec::new();
         }
         if media != MediaType::Multipart {
+            // W011 case: encoding-headers-non-multipart
             Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
                 .message(format!(
                     "`encoding.{name}.headers` applies only to `multipart` content"
@@ -4265,6 +5209,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match literal {
                 Some(value) => headers.push((header_name.clone(), value)),
                 None => {
+                    // W011 case: encoding-header-no-value
                     Diagnostic::warning(Code::DeclarationHasNoEffect, encoding.provenance.clone())
                         .message(format!(
                             "`encoding.{name}.headers.{header_name}` pins no value, so there is \
@@ -4330,9 +5275,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                  value: object,
                  narrowing,
              }| {
-                let lowered = self.lower_chosen_response_body(response, media_name, object)?;
-                // `W014` claims the selection "is generated": emitted only once the gates in
-                // `lower_chosen_response_body` have accepted it.
+                let lowered = self.response_narrowing(|ctx| {
+                    ctx.lower_chosen_response_body(response, media_name, object)
+                })?;
+                // `W014` is emitted only once the gates in `lower_chosen_response_body` have
+                // accepted the selection; a refused one is reported by its `E009` alone.
                 if let Some(narrowing) = narrowing {
                     self.diags.emit(narrowing);
                 }
@@ -4503,6 +5450,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // The specification says a documented `Content-Type` header SHALL be ignored: the
             // media type is already the operation's, and a second source would only disagree.
             if name.eq_ignore_ascii_case("content-type") {
+                // W011 case: response-content-type
                 Diagnostic::warning(Code::DeclarationHasNoEffect, response.provenance.clone())
                     .message(
                         "a documented `Content-Type` response header is ignored; the operation's \
@@ -4521,6 +5469,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     continue;
                 };
                 let Some(shape) = self.header_shape(ty) else {
+                    // W011 case: response-header-untyped
                     Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
                         .message(format!(
                             "response header `{name}` has a shape `simple` serialization cannot \
@@ -4545,6 +5494,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // rare form: `Content-Range` on a ranged response is routinely documented this way,
                 // and refusing it cost a typed accessor for no reason.
                 if !matches!(media, MediaType::Json | MediaType::Text) {
+                    // W011 case: response-header-untyped
                     Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
                         .message(format!(
                             "response header `{name}` uses a `content` media type spargen cannot \
@@ -4562,6 +5512,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .emit(self.diags);
                 }
                 let Some(schema) = object.schema.as_ref() else {
+                    // W011 case: response-header-untyped
                     Diagnostic::warning(Code::DeclarationHasNoEffect, header.provenance.clone())
                         .message(format!(
                             "response header `{name}` declares `content` without a schema, so no \
@@ -4581,6 +5532,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     // representable: a list or an object under `text/plain` says nothing about how
                     // the value is framed, and `simple` is not that framing.
                     let Some(shape @ crate::ir::HeaderShape::Scalar) = self.header_shape(ty) else {
+                        // W011 case: response-header-untyped
                         Diagnostic::warning(
                             Code::DeclarationHasNoEffect,
                             header.provenance.clone(),
@@ -4602,14 +5554,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // line. The declared schema therefore describes ONE cookie, and the accessor is a list
             // of them — a schema that is already a list is taken to be that list.
             let (ty, shape) = if name.eq_ignore_ascii_case("set-cookie") {
-                let list = match self.graph.get(ty.id).map(|def| &def.kind) {
-                    Some(TypeKind::Array(_)) => ty,
-                    _ => self.insert_type(
+                let already_list = match self.graph.get(ty.id).map(|def| &def.kind) {
+                    Some(TypeKind::Array(_)) => true,
+                    // `header_shape` refused a reservation above, so none reaches here; were one
+                    // to, it is not known to be a list, and the declared schema is one cookie.
+                    Some(TypeKind::Reserved) => false,
+                    _ => false,
+                };
+                let list = if already_list {
+                    ty
+                } else {
+                    self.insert_type(
                         &format!("Header{name}"),
                         TypeKind::Array(Box::new(ty)),
                         Docs::default(),
                         Some(header.provenance.clone()),
-                    ),
+                    )
                 };
                 (list, crate::ir::HeaderShape::SetCookie)
             } else {
@@ -4642,11 +5602,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match current {
                 RefOr::Item(header) => return Some(header),
                 RefOr::Ref(reference) => {
-                    if !seen.insert(reference.reference.clone()) {
-                        Diagnostic::error(Code::UnresolvedRef, reference.provenance)
-                            .message("header reference cycle cannot be resolved")
-                            .emit(self.diags);
-                        return None;
+                    if !seen.insert(self.hop_identity(&reference)) {
+                        return self.reject_alias_cycle(&reference.provenance, "header");
                     }
                     let alias = reference
                         .reference
@@ -4655,43 +5612,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     match alias {
                         Some(Some(target)) => current = target,
                         Some(None) => {
-                            Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
-                                .message(format!(
-                                    "unresolved header reference `{}`",
-                                    reference.reference
-                                ))
-                                .emit(self.diags);
-                            return None;
+                            return self.reject_component_alias(
+                                &reference.provenance,
+                                "header",
+                                &reference.reference,
+                            );
                         }
                         // Not a component alias: a multi-file description may reference a whole
                         // file, which resolves through the input bundle exactly as a Parameter or
-                        // Response Object reference already does.
+                        // Response Object reference already does — and may itself be a Reference,
+                        // followed from the file it is written in.
                         None => {
-                            let from = reference
-                                .provenance
-                                .span
-                                .map(|span| span.file)
-                                .unwrap_or(crate::diag::FileId(0));
-                            return match self.resolver.resolve_component(
-                                &reference.reference,
-                                from,
+                            current = self.follow_bundle_reference(
+                                &reference,
+                                "header",
                                 super::deserialize::parse_header_object,
-                                self.diags,
-                            ) {
-                                Some(resolved) => Some(resolved),
-                                None => {
-                                    Diagnostic::error(
-                                        Code::UnresolvedRef,
-                                        reference.provenance.clone(),
-                                    )
-                                    .message(format!(
-                                        "unresolved header reference `{}`",
-                                        reference.reference
-                                    ))
-                                    .emit(self.diags);
-                                    None
-                                }
-                            };
+                            )?;
                         }
                     }
                 }
@@ -4707,47 +5643,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             Some(TypeKind::Array(_)) => Some(crate::ir::HeaderShape::Array),
             Some(TypeKind::Struct(_)) => Some(crate::ir::HeaderShape::Object),
+            // Headers are lowered per operation, after every component they reach is filled, so
+            // this is not expected. Were it reached, an unknown body has no provable `simple`
+            // shape: `None` sends the header to the callers' `W011` (no accessor, warned) instead
+            // of guessing one.
+            Some(TypeKind::Reserved) => None,
             _ => None,
         }
     }
 
     fn resolve_parameter(&mut self, parameter: &RefOr<ParameterObject>) -> Option<ParameterObject> {
-        let mut current = parameter;
+        let mut current = parameter.clone();
         let mut seen = HashSet::new();
         loop {
             match current {
-                RefOr::Item(parameter) => return Some(parameter.clone()),
+                RefOr::Item(parameter) => return Some(parameter),
                 RefOr::Ref(reference) => {
-                    self.note_reference_docs(reference);
-                    if !seen.insert(reference.reference.clone()) {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "parameter",
-                            "cycle",
-                        );
+                    self.note_reference_docs(&reference);
+                    if !seen.insert(self.hop_identity(&reference)) {
+                        return self.reject_alias_cycle(&reference.provenance, "parameter");
                     }
                     let Some(name) = reference.reference.strip_prefix("#/components/parameters/")
                     else {
                         // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref`.
-                        let from = reference
-                            .provenance
-                            .span
-                            .map(|span| span.file)
-                            .unwrap_or(crate::diag::FileId(0));
-                        return match self.resolver.resolve_component(
-                            &reference.reference,
-                            from,
+                        // file, which resolves through the input bundle like a schema `$ref` —
+                        // and may itself be a Reference, followed from the file it is written in.
+                        current = self.follow_bundle_reference(
+                            &reference,
+                            "parameter",
                             super::deserialize::parse_parameter,
-                            self.diags,
-                        ) {
-                            Some(resolved) => Some(resolved),
-                            None => self.reject_component_alias(
-                                &reference.provenance,
-                                "parameter",
-                                &reference.reference,
-                            ),
-                        };
+                        )?;
+                        continue;
                     };
                     let Some(target) = self.document.components.parameters.get(name) else {
                         return self.reject_component_alias(
@@ -4756,7 +5682,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             &reference.reference,
                         );
                     };
-                    current = target;
+                    current = target.clone();
                 }
             }
         }
@@ -4766,44 +5692,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         &mut self,
         body: &RefOr<RequestBodyObject>,
     ) -> Option<RequestBodyObject> {
-        let mut current = body;
+        let mut current = body.clone();
         let mut seen = HashSet::new();
         loop {
             match current {
-                RefOr::Item(body) => return Some(body.clone()),
+                RefOr::Item(body) => return Some(body),
                 RefOr::Ref(reference) => {
-                    self.note_reference_docs(reference);
-                    if !seen.insert(reference.reference.clone()) {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "request body",
-                            "cycle",
-                        );
+                    self.note_reference_docs(&reference);
+                    if !seen.insert(self.hop_identity(&reference)) {
+                        return self.reject_alias_cycle(&reference.provenance, "request body");
                     }
                     let Some(name) = reference
                         .reference
                         .strip_prefix("#/components/requestBodies/")
                     else {
                         // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref`.
-                        let from = reference
-                            .provenance
-                            .span
-                            .map(|span| span.file)
-                            .unwrap_or(crate::diag::FileId(0));
-                        return match self.resolver.resolve_component(
-                            &reference.reference,
-                            from,
+                        // file, which resolves through the input bundle like a schema `$ref` —
+                        // and may itself be a Reference, followed from the file it is written in.
+                        current = self.follow_bundle_reference(
+                            &reference,
+                            "request body",
                             super::deserialize::parse_request_body,
-                            self.diags,
-                        ) {
-                            Some(resolved) => Some(resolved),
-                            None => self.reject_component_alias(
-                                &reference.provenance,
-                                "request body",
-                                &reference.reference,
-                            ),
-                        };
+                        )?;
+                        continue;
                     };
                     let Some(target) = self.document.components.request_bodies.get(name) else {
                         return self.reject_component_alias(
@@ -4812,49 +5723,34 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             &reference.reference,
                         );
                     };
-                    current = target;
+                    current = target.clone();
                 }
             }
         }
     }
 
     fn resolve_response(&mut self, response: &RefOr<ResponseObject>) -> Option<ResponseObject> {
-        let mut current = response;
+        let mut current = response.clone();
         let mut seen = HashSet::new();
         loop {
             match current {
-                RefOr::Item(response) => return Some(response.clone()),
+                RefOr::Item(response) => return Some(response),
                 RefOr::Ref(reference) => {
-                    self.note_reference_docs(reference);
-                    if !seen.insert(reference.reference.clone()) {
-                        return self.reject_component_alias(
-                            &reference.provenance,
-                            "response",
-                            "cycle",
-                        );
+                    self.note_reference_docs(&reference);
+                    if !seen.insert(self.hop_identity(&reference)) {
+                        return self.reject_alias_cycle(&reference.provenance, "response");
                     }
                     let Some(name) = reference.reference.strip_prefix("#/components/responses/")
                     else {
                         // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref`.
-                        let from = reference
-                            .provenance
-                            .span
-                            .map(|span| span.file)
-                            .unwrap_or(crate::diag::FileId(0));
-                        return match self.resolver.resolve_component(
-                            &reference.reference,
-                            from,
+                        // file, which resolves through the input bundle like a schema `$ref` —
+                        // and may itself be a Reference, followed from the file it is written in.
+                        current = self.follow_bundle_reference(
+                            &reference,
+                            "response",
                             super::deserialize::parse_response,
-                            self.diags,
-                        ) {
-                            Some(resolved) => Some(resolved),
-                            None => self.reject_component_alias(
-                                &reference.provenance,
-                                "response",
-                                &reference.reference,
-                            ),
-                        };
+                        )?;
+                        continue;
                     };
                     let Some(target) = self.document.components.responses.get(name) else {
                         return self.reject_component_alias(
@@ -4863,10 +5759,49 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                             &reference.reference,
                         );
                     };
-                    current = target;
+                    current = target.clone();
                 }
             }
         }
+    }
+
+    /// One hop of a Parameter, Request Body, Response or Header chain through the input bundle:
+    /// the target as written, which is either the object or the next Reference to follow. A miss
+    /// is reported here, in the words of the way it failed.
+    fn follow_bundle_reference<T>(
+        &mut self,
+        reference: &super::Reference,
+        kind: &str,
+        parse: fn(&SpannedValue, &crate::diag::JsonPointer, &mut Diagnostics) -> Option<T>,
+    ) -> Option<RefOr<T>> {
+        let from = reference
+            .provenance
+            .span
+            .map_or_else(|| self.resolver.root_id(), |span| span.file);
+        match self
+            .resolver
+            .resolve_component_or_ref(&reference.reference, from, parse, self.diags)
+        {
+            Ok(target) => Some(target),
+            Err(miss) => self.reject_unfollowable_reference(
+                &reference.provenance,
+                kind,
+                &reference.reference,
+                miss,
+            ),
+        }
+    }
+
+    /// What a reference hop names, for a chain's cycle check: the `(file, pointer)` it resolves to
+    /// wherever the bundle can place it, so one relative spelling written in two files is two
+    /// targets and two spellings of one target are one; the reference as written otherwise.
+    fn hop_identity(
+        &self,
+        reference: &super::Reference,
+    ) -> Result<(crate::diag::FileId, crate::diag::JsonPointer), String> {
+        self.resolver
+            .reference_identity(&reference.reference, &reference.provenance)
+            .ok_or_else(|| reference.reference.clone())
     }
 
     /// Acknowledge a Reference Object `summary`/`description`.
@@ -4878,6 +5813,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if reference.summary.is_none() && reference.description.is_none() {
             return;
         }
+        // W011 case: reference-docs
         Diagnostic::warning(Code::DeclarationHasNoEffect, reference.provenance.clone())
             .message(format!(
                 "the `summary`/`description` on the reference to `{}` documents this use site, \
@@ -4888,15 +5824,67 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .emit(self.diags);
     }
 
+    /// A reference into `#/components/<kind>/` naming an entry the document does not declare.
     fn reject_component_alias<T>(
         &mut self,
         provenance: &crate::diag::Provenance,
         kind: &str,
         reference: &str,
     ) -> Option<T> {
+        // E004 case: undeclared-component
         Diagnostic::error(Code::UnresolvedRef, provenance.clone())
             .message(format!("unresolved {kind} reference `{reference}`"))
             .emit(self.diags);
+        None
+    }
+
+    /// A chain of `{kind}` reference hops that returns to a reference it already followed.
+    fn reject_alias_cycle<T>(
+        &mut self,
+        provenance: &crate::diag::Provenance,
+        kind: &str,
+    ) -> Option<T> {
+        // E004 case: cycle
+        Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+            .message(format!("{kind} reference cycle cannot be resolved"))
+            .emit(self.diags);
+        None
+    }
+
+    /// A reference outside `#/components/<kind>/` that the input bundle could not follow, reported
+    /// in the words of the way it failed: the resolver separates a reference it cannot place from
+    /// a pointer with nothing at it, and a target that exists but does not parse has already been
+    /// rejected by its parser, at the target, so it gets no second diagnostic here — the same
+    /// disposition a malformed Path Item or schema target gets.
+    fn reject_unfollowable_reference<T>(
+        &mut self,
+        provenance: &crate::diag::Provenance,
+        kind: &str,
+        reference: &str,
+        miss: super::resolve::ComponentMiss,
+    ) -> Option<T> {
+        use super::resolve::ComponentMiss;
+        match miss {
+            // The bundle cannot tell a file it does not hold from a fragment form it declines to
+            // walk, so the message says both, in the one wording `E004` reserves for that.
+            ComponentMiss::Unclassifiable => {
+                // E004 case: unsupported-or-unresolved
+                Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+                    .message(format!(
+                        "unsupported or unresolved {kind} reference `{reference}`"
+                    ))
+                    .emit(self.diags);
+            }
+            ComponentMiss::AbsentTarget => {
+                // E004 case: absent-target
+                Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+                    .message(format!(
+                        "{kind} reference target `{reference}` was not found in the input bundle"
+                    ))
+                    .emit(self.diags);
+            }
+            ComponentMiss::Unparsable => {}
+        }
         None
     }
 
@@ -4920,10 +5908,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Parameter, Response, and Request Body paths already give it.
             self.note_reference_docs(&reference);
             if !seen.insert(reference.reference.clone()) {
-                Diagnostic::error(Code::UnresolvedRef, reference.provenance)
-                    .message("media type reference cycle cannot be resolved")
-                    .emit(self.diags);
-                return None;
+                return self.reject_alias_cycle(&reference.provenance, "media type");
             }
             let Some(name) = reference.reference.strip_prefix("#/components/mediaTypes/") else {
                 // Not a component alias: a multi-file description may reference a whole file,
@@ -4943,26 +5928,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     self.diags,
                 );
                 match resolved {
-                    Some(resolved) => {
+                    Ok(resolved) => {
                         current = resolved;
                         continue;
                     }
-                    None => {
-                        Diagnostic::error(Code::UnresolvedRef, reference.provenance)
-                            .message(format!(
-                                "unsupported or unresolved Media Type Object reference `{}`",
-                                reference.reference
-                            ))
-                            .emit(self.diags);
-                        return None;
+                    Err(miss) => {
+                        return self.reject_unfollowable_reference(
+                            &reference.provenance,
+                            "Media Type Object",
+                            &reference.reference,
+                            miss,
+                        );
                     }
                 }
             };
             let Some(target) = self.document.components.media_types.get(name) else {
-                Diagnostic::error(Code::UnresolvedRef, reference.provenance)
-                    .message(format!("unresolved Media Type Object component `{name}`"))
-                    .emit(self.diags);
-                return None;
+                return self.reject_component_alias(
+                    &reference.provenance,
+                    "Media Type Object",
+                    &reference.reference,
+                );
             };
             current = target.clone();
         }
@@ -4998,6 +5983,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|(_, at)| ("itemEncoding", at.clone()))
             });
         if let Some((field, at)) = declared {
+            // W011 case: encoding-on-other-media
             Diagnostic::warning(Code::DeclarationHasNoEffect, at)
                 .message(format!(
                     "`{field}` has no effect on `{media_name}`: it applies only to `multipart` \
@@ -5043,10 +6029,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// This matters because [`Self::push_ref_member`] classifies an `allOf` member by reading
     /// `graph.get(id).kind`. That kind is now [`TypeKind::Reserved`] — it was `TypeKind::Any` until
     /// the dedicated variant landed, which is why reading one answered "scalar" for a type that is
-    /// not a scalar and the member silently became `serde_json::Value`. `push_ref_member` is still
-    /// shaped that way: its `_` arm absorbs `Reserved` without a compile error, so the guard lives
-    /// here in its callers. The three in-progress maps are exactly the set of such ids, and the only
-    /// safe thing to do with one is refuse to read it.
+    /// not a scalar and the member silently became `serde_json::Value`. `push_ref_member` now names
+    /// `Reserved` in its own `match` and refuses it, so the refusal lives in the function rather
+    /// than in each caller. Every id in the three in-progress maps is such a placeholder, and the
+    /// only safe thing to do with one is refuse to read it.
     ///
     /// This asks "is `id` **any** open reservation". A caller that needs "is `id` the reservation
     /// belonging to the schema at *this* provenance" wants [`Self::reservation_at`] instead; the two
@@ -5245,11 +6231,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         docs: Docs,
         provenance: Option<crate::diag::Provenance>,
     ) -> Ty {
+        let provenance = provenance.unwrap_or_else(|| self.document.provenance.clone());
+        let document = provenance
+            .span
+            .map(|span| self.resolver.document_key(span.file))
+            .unwrap_or_default();
         let id = self.graph.insert(TypeDef {
             name_hint: hint.to_owned(),
             kind,
             docs,
-            provenance: provenance.unwrap_or_else(|| self.document.provenance.clone()),
+            provenance,
+            document,
         });
         Ty {
             id,
@@ -5327,6 +6319,17 @@ fn parameter_shape_supported_inner(
         // A reservation's shape is unknown, so it cannot be *proved* serialisable as a parameter.
         // This function answers "is this supported", and an unknown must answer no: saying yes
         // would let a recursive schema through as a parameter on the strength of nothing.
+        //
+        // Parameters are lowered only after every component, and each lazily resolved target
+        // fills its reservation before returning, so no reservation is open here. One still
+        // survives: a component whose lowering *failed* never fills its reservation, and a
+        // component that closed a cycle through it before the failure is cached complete, holding
+        // that dangling id. `A: {properties: {bs: {$ref: B}, x: {$ref: Missing}}}` with
+        // `B: {type: array, items: {$ref: A}}` leaves `B`'s items `Reserved` for good, and a
+        // parameter referencing `B` reaches this arm. The document is already rejected by the
+        // failure (`E004` there); answering no adds `E010` for the parameter rather than accepting
+        // a shape nobody knows. Pinned by
+        // `a_parameter_reaching_a_failed_components_reservation_is_refused`.
         TypeKind::Reserved
         | TypeKind::Struct(_)
         | TypeKind::Array(_)
@@ -5418,6 +6421,65 @@ fn type_accepts_null(ty: Ty, kind: &TypeKind) -> bool {
     ty.nullable || matches!(kind, TypeKind::Null | TypeKind::Any)
 }
 
+/// Why two lowered types have no typed intersection. The two answers call for different handling,
+/// so an intersection never reports one where it may be the other.
+///
+/// Only [`NoMeet::Empty`] may be typed uninhabited ([`TypeKind::Never`]) or collapsed to the exact
+/// JSON `null`: those stand in for the intersection only when no value satisfies both sides.
+/// [`NoMeet::Unrepresentable`] is a set of values the generated client would silently refuse, so
+/// every caller reports it (`E013`) instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoMeet {
+    /// No JSON value satisfies both sides: their value categories are disjoint (a string and an
+    /// integer), or their scalar `enum` sets share no value.
+    Empty,
+    /// The sides may share values, but no single Rust type represents the ones they share — `uuid`
+    /// and `contentEncoding: base64` are both annotations on a string, so every string satisfies
+    /// both — or nothing can be known yet, because one side is a reservation.
+    Unrepresentable,
+}
+
+/// The JSON category every instance of a non-null lowered kind falls in, for a kind confined to
+/// one. Unlike [`LowerCtx::json_category`], which picks a union's dispatch and so leaves raw bytes
+/// uncategorised, this answers what an instance of a *schema* can be: binary content in a schema is
+/// a (base64) JSON string.
+fn value_category(kind: &TypeKind) -> Option<JsonCategory> {
+    match kind {
+        TypeKind::Primitive(Prim::Bool) => Some(JsonCategory::Boolean),
+        TypeKind::Primitive(Prim::I32 | Prim::I64 | Prim::F64) => Some(JsonCategory::Number),
+        TypeKind::Primitive(Prim::String | Prim::Uuid | Prim::DateTime | Prim::Date)
+        | TypeKind::Bytes => Some(JsonCategory::String),
+        TypeKind::Enum(enumeration) => Some(match enumeration.repr {
+            ScalarRepr::String => JsonCategory::String,
+            ScalarRepr::Int => JsonCategory::Number,
+            ScalarRepr::Bool => JsonCategory::Boolean,
+        }),
+        TypeKind::Array(_) | TypeKind::Tuple(_) => Some(JsonCategory::Array),
+        TypeKind::Struct(_) => Some(JsonCategory::Object),
+        // `null` is intersected before any non-null kind is compared, `Never` has no instance, a
+        // union and `Any` span several categories, and a reservation's body is not known yet.
+        TypeKind::Null
+        | TypeKind::Never
+        | TypeKind::Union(_)
+        | TypeKind::Any
+        | TypeKind::Reserved => None,
+    }
+}
+
+/// Why two non-null kinds that no intersection rule meets do not meet: empty when one side is
+/// uninhabited or the two sit in disjoint JSON categories, and otherwise unrepresentable — two
+/// strings of different formats, tuples of different lengths — because nothing here proves that
+/// no value satisfies both.
+fn no_meet(left: &TypeKind, right: &TypeKind) -> NoMeet {
+    if matches!(left, TypeKind::Never) || matches!(right, TypeKind::Never) {
+        return NoMeet::Empty;
+    }
+    match (value_category(left), value_category(right)) {
+        (Some(left), Some(right)) if left != right => NoMeet::Empty,
+        _ => NoMeet::Unrepresentable,
+    }
+}
+
 fn non_nullable(mut ty: Ty) -> Ty {
     ty.nullable = false;
     ty
@@ -5426,6 +6488,16 @@ fn non_nullable(mut ty: Ty) -> Ty {
 fn same_ty(left: Ty, right: Ty) -> bool {
     left.id == right.id && left.nullable == right.nullable && left.boxed == right.boxed
 }
+
+/// The remedy every `allOf` rejection (`E013`) gives.
+const ALL_OF_REMEDY: &str =
+    "restructure the composition so members agree, or omit this API segment with spargen::omit!";
+
+/// The remedy every `$ref`-sibling intersection rejection (`E013`) gives, naming the construct the
+/// author wrote rather than an `allOf` they did not.
+const REF_SIBLING_REMEDY: &str = "restructure the schema so the `$ref` target and its sibling \
+                                  keywords describe one representable type, or omit this API \
+                                  segment with spargen::omit!";
 
 fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
     use Prim::{Bool, Date, DateTime, String, Uuid, F64, I32, I64};
@@ -5482,6 +6554,7 @@ fn lower_security_requirement(requirement: &SecurityRequirement) -> crate::ir::S
 fn lower_server_override(servers: &[super::Server], diags: &mut Diagnostics) -> Option<String> {
     let (first, rest) = servers.split_first()?;
     for extra in rest {
+        // W011 case: extra-servers
         Diagnostic::warning(Code::DeclarationHasNoEffect, extra.provenance.clone())
             .message(format!(
                 "`servers` entry `{}` past the first has no effect here: the specification \
@@ -5552,6 +6625,7 @@ fn lower_server(server: &super::Server, diags: &mut Diagnostics) -> Option<Serve
             return None;
         }
         if !seen.contains(name.as_str()) {
+            // W011 case: unused-server-variable
             Diagnostic::warning(Code::DeclarationHasNoEffect, server.provenance.clone())
                 .message(format!(
                     "server variable `{name}` is declared but does not appear in `{}`",
@@ -5629,6 +6703,7 @@ fn resolve_path_item(
         return Some(item.clone());
     };
     if let Some(sibling) = item.reference_siblings.first() {
+        // E016 case: path-item-ref-siblings
         Diagnostic::error(Code::SpecUndefinedBehavior, reference.provenance.clone())
             .message(format!(
                 "a Path Item `$ref` declared alongside `{sibling}` has undefined behavior, so \
@@ -5649,6 +6724,7 @@ fn resolve_path_item(
     // One level of indirection is what the specification requires implementations to support, and
     // a chain would need its own cycle guard.
     if target.reference.is_some() {
+        // E004 case: declined-hop
         Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
             .message(format!(
                 "Path Item `$ref` `{}` resolves to another Path Item `$ref`; chained Path Item \
@@ -5708,7 +6784,7 @@ fn resolve_external_security_schemes(
             .span
             .map(|span| span.file)
             .unwrap_or(crate::diag::FileId(0));
-        let Some(object) = resolver.resolve_component(
+        let Ok(object) = resolver.resolve_component(
             &reference,
             from,
             super::deserialize::parse_security_scheme,
@@ -5772,6 +6848,7 @@ fn lower_security_schemes(
                 match resolved {
                     Ok(target) => target,
                     Err(message) => {
+                        // E004 case: undeclared-component, declined-hop
                         Diagnostic::error(Code::UnresolvedRef, reference.provenance.clone())
                             .message(message)
                             .remedy(
@@ -5822,6 +6899,7 @@ fn lower_security_schemes(
             "oauth2" => SecurityScheme::OAuth2,
             "openIdConnect" => SecurityScheme::OpenIdConnect,
             "mutualTLS" => {
+                // W011 case: mutual-tls
                 Diagnostic::warning(Code::DeclarationHasNoEffect, scheme.provenance.clone())
                     .message(format!(
                         "`mutualTLS` scheme `{name}` is satisfied by the client certificate on the \
@@ -6139,8 +7217,8 @@ enum BodyPosition {
 struct ChosenMedia<'a, T> {
     media: &'a str,
     value: &'a T,
-    /// Built but not emitted. `W014` says the selection "is generated", which is only true once the
-    /// caller's own gates accept it, so the caller emits this when — and only when — the selected
+    /// Built but not emitted. The narrowing `W014` discloses is only real once the caller's own
+    /// gates accept the selection, so the caller emits this when — and only when — the selected
     /// entry lowers. A selection those gates then reject is reported by its `E009` alone.
     narrowing: Option<Diagnostic>,
 }
@@ -6242,8 +7320,12 @@ fn choose_media<'a, T>(
     None
 }
 
-/// The `W014` saying `media` is generated and `ignored` is not, or `None` when nothing was ignored.
+/// The `W014` saying `media` is selected and `ignored` is not, or `None` when nothing was ignored.
 /// Built rather than emitted: see [`ChosenMedia::narrowing`].
+///
+/// The message asserts only what is decided here — which entry was selected — and never that it
+/// "is generated": whether anything is generated depends on the rest of the document and on the
+/// entry point (`check` generates nothing), neither of which this site can see (#174).
 fn alternative_media_ignored(
     media: &str,
     ignored: &[&str],
@@ -6255,7 +7337,7 @@ fn alternative_media_ignored(
     Some(
         Diagnostic::warning(Code::AlternativeMediaIgnored, provenance.clone())
             .message(format!(
-                "`{media}` is generated; the alternative media type(s) `{}` are not",
+                "`{media}` is selected; the alternative media type(s) `{}` are not",
                 ignored.join("`, `")
             ))
             .remedy(
@@ -6318,7 +7400,8 @@ fn media_object_is_opaque(object: &MediaTypeObject) -> bool {
 /// fails is not a media type, so it classifies as nothing and takes the existing unsupported path:
 /// `E009` when it is the only candidate, or an ignored alternative under `W014` otherwise. An
 /// Encoding Object's `contentType` is asked this directly and is `E009` when it fails, since it is
-/// sent verbatim even when it names no codec spargen has.
+/// sent verbatim even when it names no codec spargen has; its parameters are then held to
+/// [`media_type_with_parameters`].
 fn media_type_is_well_formed(essence: &str) -> bool {
     /// `restricted-name = restricted-name-first *126restricted-name-chars` (RFC 6838 § 4.2). ASCII
     /// letters of either case are accepted; case sensitivity is left to the arms that match names.
@@ -6394,6 +7477,160 @@ fn request_media_candidates<T>(content: &IndexMap<String, T>) -> (IndexMap<Strin
 
 fn media_essence(media: &str) -> &str {
     media.split(';').next().unwrap_or(media).trim()
+}
+
+/// The element of a comma-separated media type list a client sends: the first, ended by the first
+/// comma outside an RFC 9110 § 5.6.4 quoted-string, so `text/plain; name="a, b"` is one element.
+/// An unterminated quoted-string runs to the end of the list, where [`media_type_with_parameters`]
+/// rejects it.
+fn first_list_element(list: &str) -> &str {
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, byte) in list.bytes().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match byte {
+            b'\\' if quoted => escaped = true,
+            b'"' => quoted = !quoted,
+            b',' if !quoted => return list[..index].trim(),
+            _ => {}
+        }
+    }
+    list.trim()
+}
+
+/// Why a media type's parameter list cannot be sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParameterFault {
+    /// Not `parameters = *( OWS ";" OWS [ parameter ] )` with
+    /// `parameter = token "=" ( token / quoted-string )` (RFC 9110 §§ 5.6.6, 5.6.4).
+    Malformed,
+    /// Well-formed, but a quoted value the multipart transport's parser (`mime` 0.3, behind
+    /// reqwest's `Part::mime_str`) refuses: empty, or holding a `"` (as a quoted-pair) or a tab.
+    /// Carries the canonical form, for a caller that never sends the value.
+    Unsendable(String),
+}
+
+/// A media type whose essence is already well-formed, with its parameter list checked against
+/// RFC 9110 § 5.6.6 and re-serialized as `type/subtype; name=value; …`.
+///
+/// Names and values keep their spelling, quoted-strings included. What changes is only what the
+/// grammar leaves free: whitespace around `;` and empty parameters (`text/plain;;a=b`) are
+/// dropped, since the multipart transport's parser refuses whitespace before a `;` and an empty
+/// parameter, both of which RFC 9110 admits.
+fn media_type_with_parameters(media: &str) -> Result<String, ParameterFault> {
+    fn tchar(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'!' | b'#'
+                    | b'$'
+                    | b'%'
+                    | b'&'
+                    | b'\''
+                    | b'*'
+                    | b'+'
+                    | b'-'
+                    | b'.'
+                    | b'^'
+                    | b'_'
+                    | b'`'
+                    | b'|'
+                    | b'~'
+            )
+    }
+    fn ows(bytes: &[u8], mut at: usize) -> usize {
+        while matches!(bytes.get(at), Some(b' ' | b'\t')) {
+            at += 1;
+        }
+        at
+    }
+    fn token(bytes: &[u8], from: usize) -> Result<usize, ParameterFault> {
+        let end = from
+            + bytes[from..]
+                .iter()
+                .take_while(|byte| tchar(**byte))
+                .count();
+        if end == from {
+            Err(ParameterFault::Malformed)
+        } else {
+            Ok(end)
+        }
+    }
+    /// The end of the quoted-string opening at `from`, and whether the transport can send it.
+    fn quoted_string(bytes: &[u8], from: usize) -> Result<(usize, bool), ParameterFault> {
+        let mut sendable = true;
+        let mut at = from + 1;
+        loop {
+            match bytes.get(at).copied() {
+                None => return Err(ParameterFault::Malformed),
+                Some(b'"') => return Ok((at + 1, sendable && at > from + 1)),
+                Some(b'\\') => {
+                    // quoted-pair = "\" ( HTAB / SP / VCHAR / obs-text )
+                    match bytes.get(at + 1).copied() {
+                        Some(b'\t' | b'"') => sendable = false,
+                        Some(b' ' | 0x21..=0x7e | 0x80..=0xff) => {}
+                        _ => return Err(ParameterFault::Malformed),
+                    }
+                    at += 2;
+                }
+                // qdtext = HTAB / SP / %x21 / %x23-5B / %x5D-7E / obs-text
+                Some(b'\t') => {
+                    sendable = false;
+                    at += 1;
+                }
+                Some(b' ' | 0x21 | 0x23..=0x5b | 0x5d..=0x7e | 0x80..=0xff) => at += 1,
+                Some(_) => return Err(ParameterFault::Malformed),
+            }
+        }
+    }
+
+    let essence = media_essence(media);
+    let Some((_, parameters)) = media.split_once(';') else {
+        return Ok(essence.to_owned());
+    };
+    let bytes = parameters.as_bytes();
+    let mut canonical = essence.to_owned();
+    let mut unsendable = false;
+    let mut at = 0;
+    loop {
+        at = ows(bytes, at);
+        match bytes.get(at) {
+            None => break,
+            Some(b';') => {
+                at += 1;
+                continue;
+            }
+            Some(_) => {}
+        }
+        let name_end = token(bytes, at)?;
+        if bytes.get(name_end) != Some(&b'=') {
+            return Err(ParameterFault::Malformed);
+        }
+        let value_start = name_end + 1;
+        let value_end = if bytes.get(value_start) == Some(&b'"') {
+            let (end, sendable) = quoted_string(bytes, value_start)?;
+            unsendable |= !sendable;
+            end
+        } else {
+            token(bytes, value_start)?
+        };
+        canonical.push_str("; ");
+        canonical.push_str(&parameters[at..value_end]);
+        at = ows(bytes, value_end);
+        match bytes.get(at) {
+            None => break,
+            Some(b';') => at += 1,
+            Some(_) => return Err(ParameterFault::Malformed),
+        }
+    }
+    if unsendable {
+        Err(ParameterFault::Unsendable(canonical))
+    } else {
+        Ok(canonical)
+    }
 }
 
 /// Classify a content type into its wire codec and deterministic preference rank. Structured JSON
@@ -6508,6 +7745,9 @@ fn raw_text_type_supported(graph: &TypeGraph, ty: Ty) -> bool {
                 .variants
                 .iter()
                 .all(|variant| visit(graph, variant.ty, seen)),
+            // An unlowered body cannot be proved string-like, and this answers "is it proved":
+            // no, so the raw text body is refused rather than admitted on the strength of nothing.
+            Some(TypeKind::Reserved) => false,
             _ => false,
         };
         seen.remove(&ty.id);
@@ -6639,6 +7879,12 @@ fn representable_default(raw: &RawDefault, kind: Option<&TypeKind>) -> Option<De
         {
             Some(DefaultValue::Bool(*value))
         }
+        // A property whose type is a cycle-closing `$ref` to a component still being lowered sees
+        // its placeholder here. No literal can be proved to fit an unknown body, so the default is
+        // not representable: it is documented and reported (`W005`) rather than wired. It is also
+        // the answer the filled body would get — a cycle closes only through a schema that holds a
+        // reference (an object, array, tuple, or union), and none of those takes a literal here.
+        (_, TypeKind::Reserved) => None,
         _ => None,
     }
 }
@@ -6706,6 +7952,9 @@ fn append_doc_note(docs: &mut Docs, note: String) {
 /// compute from the same schema.
 /// One `allOf` member's contribution to the merged type: either a set of object fields (with its
 /// `additionalProperties` policy and its own `required` names) to flatten, or a scalar/leaf type.
+/// `Clone` so a bundle-`$ref` member's contribution can be recorded once and replayed at every use
+/// (see `LowerCtx::resolved_contributions`).
+#[derive(Clone)]
 enum Contribution {
     Object {
         fields: Vec<Field>,
@@ -6739,26 +7988,53 @@ fn schema_imposes_scalar(schema: &Schema) -> bool {
         || !schema.any_of.is_empty()
 }
 
-/// Whether a schema's keywords bear a shape that must be composed with whatever it sits beside — a
-/// `$ref` target, a union's branches, or an alias's single member — rather than being discarded.
+/// One row of [`SHAPE_KEYWORDS`]: a keyword's published spelling, and whether a schema carries it.
+type ShapeKeyword = (&'static str, fn(&Schema) -> bool);
+
+/// Every keyword [`schema_has_shape_constraint`] reads, as the published spelling beside the test
+/// that recognises it. The gate is exactly "any row matches", so this table IS the gate: a keyword
+/// enters or leaves it here and nowhere else.
 ///
-/// `oneOf`/`anyOf` count exactly as `allOf` does: in 2020-12 each is an applicator constraining the
-/// instance, so a union beside a `$ref` narrows the target like a `type` beside it would, and
-/// [`schema_imposes_scalar`] already treats them so. Leaving them out made a `$ref` whose only
-/// sibling was a union take the bare-reference exit, discarding the union with no diagnostic.
+/// `E013`'s explain publishes this set, less `$ref` (a `$ref`'s siblings are this gate's input with
+/// the reference already stripped, so `$ref` is never one of them); it is split there into the
+/// keywords that establish a shape, the ones that refine one, and `required`. The in-module tests
+/// hold that text equal to this table in both directions, and hold the gate to reading nothing the
+/// table does not name.
+const SHAPE_KEYWORDS: &[ShapeKeyword] = &[
+    ("type", |schema| !schema.types.types.is_empty()),
+    ("properties", |schema| !schema.properties.is_empty()),
+    ("patternProperties", |schema| {
+        !schema.pattern_properties.is_empty()
+    }),
+    ("additionalProperties", |schema| {
+        schema.additional_properties.is_some()
+    }),
+    ("required", |schema| !schema.required.is_empty()),
+    ("items", |schema| schema.items.is_some()),
+    ("prefixItems", |schema| !schema.prefix_items.is_empty()),
+    ("enum", |schema| schema.enum_values.is_some()),
+    ("const", |schema| schema.const_value.is_some()),
+    ("contentEncoding", |schema| {
+        schema.content_encoding.is_some()
+    }),
+    ("format: binary", |schema| {
+        schema.format.as_deref() == Some("binary")
+    }),
+    ("$ref", |schema| schema.reference.is_some()),
+    ("allOf", |schema| !schema.all_of.is_empty()),
+    // `oneOf`/`anyOf` count exactly as `allOf` does: in 2020-12 each is an applicator constraining
+    // the instance, so a union beside a `$ref` narrows the target like a `type` beside it would,
+    // and `schema_imposes_scalar` already treats them so. Leaving them out made a `$ref` whose only
+    // sibling was a union take the bare-reference exit, discarding the union with no diagnostic.
+    ("oneOf", |schema| !schema.one_of.is_empty()),
+    ("anyOf", |schema| !schema.any_of.is_empty()),
+];
+
+/// Whether a schema carries any keyword that gives it a shape of its own, which decides whether a
+/// `$ref`'s siblings are intersected with its target or the `$ref` is simply its target. Defined
+/// by [`SHAPE_KEYWORDS`] alone; add a keyword there, never as another clause here.
 fn schema_has_shape_constraint(schema: &Schema) -> bool {
-    !schema.types.types.is_empty()
-        || schema_is_object_like(schema)
-        || schema.items.is_some()
-        || !schema.prefix_items.is_empty()
-        || schema.enum_values.is_some()
-        || schema.const_value.is_some()
-        || schema.content_encoding.is_some()
-        || schema.format.as_deref() == Some("binary")
-        || schema.reference.is_some()
-        || !schema.all_of.is_empty()
-        || !schema.one_of.is_empty()
-        || !schema.any_of.is_empty()
+    SHAPE_KEYWORDS.iter().any(|(_, bears)| bears(schema))
 }
 
 /// The provenance of an `allOf` member for diagnostics — the schema's own provenance, or the
@@ -6807,5 +8083,179 @@ fn scalar_value(value: &SpannedValue) -> Option<ScalarValue> {
         Node::Number(Number::UInt(value)) => i64::try_from(*value).ok().map(ScalarValue::Int),
         Node::String(value) => Some(ScalarValue::String(value.clone())),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{schema_has_shape_constraint, Schema, SHAPE_KEYWORDS};
+    use crate::diag::{Code, Diagnostics, FileId, JsonPointer};
+
+    fn schema(yaml: &str) -> Schema {
+        let mut diags = Diagnostics::default();
+        let value = crate::source::parse_yaml(FileId(0), yaml, &mut diags)
+            .unwrap_or_else(|_| panic!("probe does not parse: {yaml}"));
+        super::super::deserialize::parse_schema(&value, &JsonPointer::root(), &mut diags)
+            .unwrap_or_else(|| panic!("probe is not a schema: {yaml}"))
+    }
+
+    /// The backticked spans of the one sentence of `explain` that `lead` begins, `lead` included.
+    fn backticked_in_sentence(explain: &str, lead: &str) -> Vec<String> {
+        let start = explain
+            .find(lead)
+            .unwrap_or_else(|| panic!("E013's explain no longer says {lead:?}: {explain}"));
+        let rest = &explain[start..];
+        let sentence = &rest[..rest
+            .find(". ")
+            .unwrap_or_else(|| panic!("E013's sentence {lead:?} never ends"))];
+        sentence
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The sibling keywords `E013`'s explain publishes as taking part in a `$ref`-sibling
+    /// intersection, in its three groups: those that establish a shape, those that refine one, and
+    /// `required`.
+    fn published_sibling_keywords() -> (Vec<String>, Vec<String>, Vec<String>) {
+        // Named by its code string: a `Code::<Variant>` mention of an enumerating code is read as
+        // an emission site by `diag`'s case-marker test, and this reads the text, emitting nothing.
+        let explain = "E013".parse::<Code>().expect("E013 is a code").explain();
+        let establishing = backticked_in_sentence(explain, "A sibling bears a shape of its own ");
+        // The refiners are the spans before the verb; the rest of that sentence names the `type`
+        // that gives them a shape, which is not one of them.
+        const REFINE: &str = " refine a shape rather than establish one";
+        let refine_at = explain
+            .find(REFINE)
+            .unwrap_or_else(|| panic!("E013's explain no longer names its refiners: {explain}"));
+        let refine_start = explain[..refine_at].rfind(". ").map_or(0, |at| at + 2);
+        let refiners = explain[refine_start..refine_at]
+            .split('`')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect();
+        let narrower = backticked_in_sentence(explain, "`required` is narrower still")
+            .into_iter()
+            .take(1)
+            .collect();
+        (establishing, refiners, narrower)
+    }
+
+    /// Issue #155: the explain's keyword list and the gate that decides are one set. Read in both
+    /// directions — a keyword the gate reads that the text omits, and one the text names that the
+    /// gate never reads — so neither can move alone. `$ref` is the one row the text does not name,
+    /// because the gate sees a `$ref`'s siblings with the reference already stripped.
+    #[test]
+    fn e013_explain_names_exactly_the_keywords_the_gate_reads() {
+        let (establishing, refiners, narrower) = published_sibling_keywords();
+        let mut published = BTreeSet::new();
+        for keyword in establishing.iter().chain(&refiners).chain(&narrower) {
+            assert!(
+                published.insert(keyword.as_str()),
+                "E013's explain names `{keyword}` in more than one group"
+            );
+        }
+        let gate: BTreeSet<&str> = SHAPE_KEYWORDS
+            .iter()
+            .map(|(keyword, _)| *keyword)
+            .filter(|keyword| *keyword != "$ref")
+            .collect();
+        assert_eq!(
+            published, gate,
+            "E013's explain and `SHAPE_KEYWORDS` disagree about which sibling keywords take part in \
+             a `$ref` intersection (explain groups: {establishing:?} / {refiners:?} / {narrower:?})"
+        );
+        assert_eq!(
+            SHAPE_KEYWORDS.len(),
+            gate.len() + 1,
+            "`SHAPE_KEYWORDS` repeats a keyword, or lost `$ref`"
+        );
+    }
+
+    /// Each row's name is the keyword its test recognises: a schema carrying that keyword alone
+    /// clears the gate through that row and no other. A table with a predicate filed under the
+    /// wrong name would pass the explain comparison above while publishing the wrong rule.
+    #[test]
+    fn every_shape_keyword_row_recognises_the_keyword_it_names() {
+        let probe = |keyword: &str| match keyword {
+            "type" => "type: string",
+            "properties" => "properties: { a: { type: string } }",
+            "patternProperties" => "patternProperties: { '^a': { type: string } }",
+            "additionalProperties" => "additionalProperties: false",
+            "required" => "required: [a]",
+            "items" => "items: { type: string }",
+            "prefixItems" => "prefixItems: [{ type: string }]",
+            "enum" => "enum: [a]",
+            "const" => "const: a",
+            "contentEncoding" => "contentEncoding: base64",
+            "format: binary" => "format: binary",
+            "$ref" => "$ref: '#/components/schemas/A'",
+            "allOf" => "allOf: [{ type: string }]",
+            "oneOf" => "oneOf: [{ type: string }]",
+            "anyOf" => "anyOf: [{ type: string }]",
+            other => panic!("`SHAPE_KEYWORDS` row `{other}` has no probe here; add one"),
+        };
+        for (keyword, _) in SHAPE_KEYWORDS {
+            let schema = schema(probe(keyword));
+            let matched: Vec<&str> = SHAPE_KEYWORDS
+                .iter()
+                .filter(|(_, bears)| bears(&schema))
+                .map(|(name, _)| *name)
+                .collect();
+            assert_eq!(
+                matched,
+                [*keyword],
+                "a schema carrying only `{keyword}` should clear exactly its own row"
+            );
+        }
+    }
+
+    /// The gate reads nothing the table does not name. A schema carrying every other keyword the
+    /// parser keeps — validation, annotations, content, `$defs` — does not clear it, so a
+    /// clause added to `schema_has_shape_constraint` beside the table (the `maxLength` mutation
+    /// #155 measured surviving) fails here rather than widening the published rule unseen.
+    #[test]
+    fn the_gate_reads_only_the_keywords_its_table_names() {
+        let everything_else = schema(
+            "discriminator: { propertyName: kind }\n\
+             $defs: { A: { type: string } }\n\
+             not: { type: string }\n\
+             if: { type: string }\n\
+             then: { type: string }\n\
+             else: { type: string }\n\
+             format: date-time\n\
+             contentMediaType: application/json\n\
+             contentSchema: { type: string }\n\
+             xml: { name: a }\n\
+             pattern: '^a'\n\
+             minimum: 1\n\
+             maximum: 2\n\
+             exclusiveMinimum: 0\n\
+             exclusiveMaximum: 3\n\
+             multipleOf: 1\n\
+             minLength: 1\n\
+             maxLength: 2\n\
+             minItems: 1\n\
+             maxItems: 2\n\
+             uniqueItems: true\n\
+             minProperties: 1\n\
+             maxProperties: 2\n\
+             default: a\n\
+             deprecated: true\n\
+             readOnly: true\n\
+             writeOnly: true\n\
+             title: t\n\
+             description: d\n",
+        );
+        assert!(
+            !schema_has_shape_constraint(&everything_else),
+            "the gate cleared a schema that carries none of `SHAPE_KEYWORDS`: it reads a keyword the \
+             table (and so E013's explain) does not name"
+        );
     }
 }

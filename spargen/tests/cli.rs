@@ -263,3 +263,46 @@ fn explain_rejects_an_unresolvable_code() {
         "a failed lookup must still be reported as an error under `--format json`: {json_stderr}"
     );
 }
+
+/// The report `spargen check` gives does not depend on how the spec path is spelled (#220). With
+/// the bare `openapi.yaml` the root's directory is empty, so a `$ref` to `./openapi.yaml` resolved
+/// to a path that differed from the root's as written, loaded the root again, and `W011` reported
+/// the root as shadowing itself. Only a child process can be given its own working directory, which
+/// the bare spelling needs; `frontend.rs` covers the spellings an absolute root can reach.
+#[test]
+fn check_reports_the_same_for_every_spelling_of_the_spec_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(
+        &spec,
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n\
+         paths:\n  /n:\n    get:\n      operationId: getN\n      responses:\n        '200':\n          \
+         description: ok\n          content:\n            application/json: { schema: { $ref: \
+         '#/components/schemas/Node' } }\ncomponents:\n  schemas:\n    Node:\n      type: object\n      \
+         properties:\n        parent: { $ref: '#/components/schemas/MaybeNode' }\n    MaybeNode:\n      \
+         oneOf:\n        - $ref: './openapi.yaml#/components/schemas/Node'\n        - type: 'null'\n",
+    )
+    .unwrap();
+    let absolute = spec.to_str().unwrap().to_owned();
+    for spelling in ["openapi.yaml", "./openapi.yaml", absolute.as_str()] {
+        let output = Command::new(spargen_bin())
+            .args(["check", spelling])
+            .current_dir(temp.path())
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            output.status.success(),
+            "{spelling}: stdout {stdout} stderr {stderr}"
+        );
+        assert!(
+            !stdout.contains("W011") && !stderr.contains("W011"),
+            "{spelling}: the root cannot shadow itself: stdout {stdout} stderr {stderr}"
+        );
+        assert!(
+            stderr.contains("spargen: clean"),
+            "{spelling}: stdout {stdout} stderr {stderr}"
+        );
+    }
+}

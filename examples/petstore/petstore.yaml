@@ -71,6 +71,28 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Pet"
+        # RFC 9457 problems, each status narrowing the shared `Problem`'s `type`. `build.rs` turns
+        # on `open_narrowing`, so a problem type the server adds later still decodes, typed.
+        "409":
+          description: A pet with that name already exists.
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        const: https://petstore.example/problems/name-taken
+        "422":
+          description: The pet cannot be registered as described.
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        const: https://petstore.example/problems/invalid-pet
   /pets/{petId}:
     get:
       operationId: getPet
@@ -106,6 +128,16 @@ paths:
       responses:
         "204":
           description: Deleted.
+        "409":
+          description: The pet cannot be removed yet.
+          content:
+            application/problem+json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/Problem"
+                  - properties:
+                      type:
+                        const: https://petstore.example/problems/pet-has-orders
     put:
       operationId: updatePet
       summary: Replace a pet, returning the stored pet unless the server has nothing to add.
@@ -221,4 +253,17 @@ components:
       required: [message]
       properties:
         message:
+          type: string
+    Problem:
+      type: object
+      description: An RFC 9457 problem details object.
+      required: [type, title]
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
           type: string
