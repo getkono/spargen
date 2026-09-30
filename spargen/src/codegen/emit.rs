@@ -2279,6 +2279,23 @@ pub(crate) fn emit_error_enum(
                     }
                 }
             });
+            // Every enum reads its problem-details members, whichever body type each status
+            // carries: `Error::problem` is the reader generic over operations, and the only one an
+            // enum whose statuses carry different body types has.
+            let problem_arms = entries.iter().map(|(spec, ty)| {
+                let variant_ident = status_variant_ident(*spec);
+                match ty {
+                    // A raw-bytes body has no JSON members, and serializing `Bytes` would demand
+                    // the `bytes/serde` feature a top-level bytes body is decoded without.
+                    Some(ty) if is_bytes_ty(api, *ty) => {
+                        quote! { #error_ident::#variant_ident(_) => None, }
+                    }
+                    Some(_) => quote! {
+                        #error_ident::#variant_ident(body) => support::ProblemDetails::of(body),
+                    },
+                    None => quote! { #error_ident::#variant_ident => None, },
+                }
+            });
             quote! {
                 #[allow(dead_code)]
                 #[derive(Debug, Clone)]
@@ -2295,6 +2312,14 @@ pub(crate) fn emit_error_enum(
                 }
 
                 impl std::error::Error for #error_ident {}
+
+                impl support::ApiErrorProblem for #error_ident {
+                    fn problem(&self) -> Option<support::ProblemDetails> {
+                        match self {
+                            #(#problem_arms)*
+                        }
+                    }
+                }
 
                 #accessor
             }
@@ -2339,6 +2364,12 @@ pub(crate) fn emit_error_enum(
             // one the error branch in `emit_operation` dispatches on, so the two cannot drift.
             let deserialize = (!is_bytes_ty(api, body_ty))
                 .then(|| quote! { #[derive(serde::Deserialize)] #[serde(transparent)] });
+            // As on the enum shape: a raw-bytes body has no JSON members to read.
+            let problem_expr = if is_bytes_ty(api, body_ty) {
+                quote! { None }
+            } else {
+                quote! { support::ProblemDetails::of(&self.0) }
+            };
             let doc = format!(
                 "The documented error body of this operation, wrapped so `Error<{error_ident}>` \
                  is a `std::error::Error`. Derefs and converts to the inner type."
@@ -2399,6 +2430,12 @@ pub(crate) fn emit_error_enum(
                     type Body = #body;
                     fn body(&self) -> Option<&#body> {
                         #body_expr
+                    }
+                }
+
+                impl support::ApiErrorProblem for #error_ident {
+                    fn problem(&self) -> Option<support::ProblemDetails> {
+                        #problem_expr
                     }
                 }
             }
@@ -2491,7 +2528,7 @@ pub(crate) fn emit_support(uses_xml: bool, uses_streams: bool, uses_time: bool) 
             pub use auth::{AuthError, AuthKind, AuthScheme, Credential, ExposeSecret, SecretString, TokenFuture, TokenProvider};
             pub use client::{ClientConfig, ClientCore};
             pub use dispatch::{attach_auth, build_url, build_url_on, build_url_with_query_string, build_url_with_query_string_on, classify_error, classify_error_bytes, classify_error_text, decode_success, decode_success_bytes, decode_success_text, decode_text_body, read_error_body, read_success_body, send, unexpected_status, StatusSpec};
-            pub use error::{ApiErrorBody, Error, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError};
+            pub use error::{ApiErrorBody, ApiErrorProblem, Error, ProblemDetails, ProtocolError, RedirectError, RequestCause, RequestError, TimeoutKind, TransportError};
             pub use middleware::{Middleware, MiddlewareBackend, Next};
             pub use header::{parse_header, require_header, HeaderError, HeaderShape};
             pub use parameter::{encode, serialize_deep_object, serialize_delimited, serialize_form, serialize_form_body, serialize_label, serialize_matrix, serialize_multipart_values, serialize_simple, Delimiter, FormMode, FormProperty, FormStyle, ParameterError, PercentEncoding};
@@ -3337,13 +3374,15 @@ fn reqwest_method(method: &crate::ir::Method) -> TokenStream {
 /// Anything short of that leaves a generated signature a caller can call but cannot write down.
 /// `ApiErrorBody` is the bound `Error::api_body` needs, implemented by the uniform-body error enum,
 /// the single-body newtype, and the uninhabited shape (an enum whose bodies are different generated
-/// types gets none).
+/// types gets none). `ApiErrorProblem` is the bound `Error::problem` needs, implemented by every
+/// error shape, and `ProblemDetails` is what that reader returns.
 ///
 /// `generate` emits the root `pub use` from these lists and [`error_type_ident`] steers clear of
 /// them, so the two read one source. `spargen/tests/reexport_lists.rs` holds each name to the
 /// embedded `support` module's own re-exports, and pins the emitted root surface as a golden file.
 pub(super) const ROOT_REEXPORTS: &[&str] = &[
     "ApiErrorBody",
+    "ApiErrorProblem",
     "AuthError",
     "ClientConfig",
     "ClientCore",
@@ -3358,6 +3397,7 @@ pub(super) const ROOT_REEXPORTS: &[&str] = &[
     "Middleware",
     "MiddlewareBackend",
     "Next",
+    "ProblemDetails",
     "ProtocolError",
     "RedirectError",
     "RequestCause",

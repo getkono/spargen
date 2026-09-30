@@ -110,7 +110,11 @@ the version it emits, and the idioms spargen handles.
   and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()` hands that body back
   whichever status carried it (`Error::status()` reports that status, the same value as
   `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by variant
-  instead.
+  instead. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the RFC 9457
+  members (`type`, `title`, `status`, `detail`, `instance`) of whichever error body a failure
+  carried, across every operation and body type: the typed body on `Error::Api`, and the raw body
+  of a `4xx`/`5xx` `Error::Decode` or `Error::UnexpectedStatus`. See
+  [problem details](docs/book/src/runtime.md#problem-details).
 - Beyond the request/response path, the embedded runtime carries a swappable transport seam
   (`HttpBackend`) with composable retry and middleware adapters, `Link:`-header pagination, typed
   SSE/NDJSON/JSON-sequence streams, an opt-in `blocking` client, and `wasm32-unknown-unknown`

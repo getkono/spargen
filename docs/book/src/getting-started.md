@@ -192,7 +192,9 @@ Key points of the surface:
   single-body newtype, and the uninhabited shape implement `ApiErrorBody`, so `Error::api_body()`
   hands that body back whichever status carried it (`Error::status()` reports that status, the
   same value as `ResponseValue::status()` on `Error::Api`); an enum mixing body types is matched by
-  variant instead.
+  variant instead. Every error shape implements `ApiErrorProblem`, so `Error::problem()` reads the
+  RFC 9457 members of whichever error body a failure carried, across every operation — see
+  [problem details](./runtime.md#problem-details).
 - Spec `title`/`summary`/`description` become rustdoc; `deprecated` becomes `#[deprecated]`.
 
 ## Next steps

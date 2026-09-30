@@ -59,6 +59,38 @@ the server replaced with an HTML page still exposes its `Retry-After`. A
 [petstore example](https://github.com/getkono/spargen/tree/master/examples/petstore) ships a
 complete `RetryPolicy` driven by a tokio timer.
 
+## Problem details
+
+`Error::problem()` returns the [RFC 9457](https://www.rfc-editor.org/rfc/rfc9457) members of the
+failed call's error response body as a `ProblemDetails` (`problem_type`, `title`, `status`,
+`detail`, `instance`), whichever operation and status produced it. Its bound is
+`ApiErrorProblem`, which every generated error type implements — the multi-status enum, including
+one whose statuses carry different body types and so has no `api_body`, the single-body newtype,
+and the uninhabited shape — so one function generic over `E` reads every operation:
+
+```rust
+fn log_problem<E: api::ApiErrorProblem>(error: &api::Error<E>) {
+    if let Some(problem) = error.problem() {
+        eprintln!("{}: {:?}", problem.problem_type_or_blank(), problem.detail);
+    }
+}
+```
+
+It answers from whichever class carried a body:
+
+- `Error::Api`: the typed body, read as it serializes to JSON. A documented bodyless status, and
+  a body read as raw bytes, answer `None`.
+- `Error::Decode` and `Error::UnexpectedStatus` with a `4xx` or `5xx` status: the retained raw
+  body, parsed as JSON. A documented error status whose body did not match its schema — a problem
+  `type` the description does not list — still yields its `type` and `detail` here. A body the
+  error-body cap truncated is no longer JSON and answers `None`, and a success status is never
+  read.
+
+A member is `Some` only with the type RFC 9457 gives it (a string, or an integer HTTP status for
+`status`); `problem_type_or_blank()` applies the RFC's `about:blank` default for an absent `type`.
+The reader asserts nothing about whether the server meant the body as problem details: an object
+body answers with whichever of those member names it carries. Extension members are not read.
+
 ## Middleware
 
 `MiddlewareBackend` wraps an inner backend with an ordered chain of `Middleware`. Each middleware

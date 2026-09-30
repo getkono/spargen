@@ -2833,6 +2833,45 @@ fn every_error_shape_implements_api_error_body() {
     assert!(never(&basic_client::Error::request_message("x")));
 }
 
+// `Error::problem` is generic over every operation, including an enum whose statuses carry
+// DIFFERENT body types (`getMulti`), which has no `ApiErrorBody` and so no `api_body`.
+#[test]
+fn the_problem_reader_is_generic_over_every_error_shape() {
+    fn detail<E: basic_client::ApiErrorProblem>(error: &basic_client::Error<E>) -> Option<String> {
+        error.problem().and_then(|problem| problem.detail)
+    }
+    fn api<E>(status: reqwest::StatusCode, body: E) -> basic_client::Error<E> {
+        basic_client::Error::Api(basic_client::ResponseValue::new(status, Default::default(), body))
+    }
+    // The uniform-body enum.
+    let shared = basic_client::GetSharedError::Status409(Box::new(basic_client::types::Problem {
+        title: "conflict".to_owned(),
+        detail: "dup".to_owned(),
+    }));
+    assert_eq!(detail(&api(reqwest::StatusCode::CONFLICT, shared)), Some("dup".to_owned()));
+    // The heterogeneous enum: a body with no `detail` member answers with the members it has.
+    let multi = basic_client::GetMultiError::Status404(Box::new(
+        basic_client::types::NotFoundError { reason: "gone".to_owned() },
+    ));
+    let problem = api(reqwest::StatusCode::NOT_FOUND, multi).problem().expect("an object body");
+    assert_eq!(problem, basic_client::ProblemDetails::default());
+    // A documented bodyless status, a textual body, and a raw-bytes body have no members.
+    let unit = api(reqwest::StatusCode::UNAUTHORIZED, basic_client::GetSharedError::Status401);
+    assert!(unit.problem().is_none());
+    let text = basic_client::GetRawMultiError::Status400(Box::new("bad".to_owned()));
+    assert!(api(reqwest::StatusCode::BAD_REQUEST, text).problem().is_none());
+    let raw = basic_client::GetRawMultiError::Status409(Box::new(bytes::Bytes::from_static(
+        br#"{"detail":"never read"}"#,
+    )));
+    assert!(api(reqwest::StatusCode::CONFLICT, raw).problem().is_none());
+    // The single-body newtype and the uninhabited shape.
+    let wrapped = basic_client::GetTextErrorError("nope".to_owned());
+    assert!(api(reqwest::StatusCode::BAD_REQUEST, wrapped).problem().is_none());
+    let never: basic_client::Error<std::convert::Infallible> =
+        basic_client::Error::request_message("x");
+    assert!(never.problem().is_none());
+}
+
 #[test]
 fn a_nullable_error_body_answers_none_for_null_on_both_shapes() {
     use basic_client::ApiErrorBody;
