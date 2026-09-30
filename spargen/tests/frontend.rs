@@ -18543,9 +18543,8 @@ fn a_dangling_file_ref_inside_an_extension_is_not_read_like_a_pointer_ref() {
 }
 
 /// The loader's stop is not confined to `responses`: an extension on any object whose keys are
-/// fixed fields is author data wherever it sits, so no file it names is read. The Paths Object is
-/// absent because the parser still reads an `x-` key there as a path item (#370), so the loader
-/// reads it too; `a_file_ref_under_a_paths_extension_is_read_while_the_parser_reads_it` pins that.
+/// fixed fields is author data wherever it sits, so no file it names is read. That includes the
+/// Paths Object, whose other keys all start with `/` (#370).
 #[test]
 fn a_dangling_file_ref_is_not_read_in_any_extension_position() {
     let dangling = "{ $ref: 'nowhere.yaml' }";
@@ -18556,6 +18555,7 @@ fn a_dangling_file_ref_is_not_read_in_any_extension_position() {
     let cases = [
         ("the document root", format!("{head}x-note: {dangling}\npaths: {{}}\n")),
         ("the Info Object", format!("openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0, x-note: {dangling} }}\nservers: [{{ url: 'https://e.com' }}]\npaths: {{}}\n")),
+        ("the Paths Object", format!("{head}paths:\n  x-note: {dangling}\n")),
         ("a Path Item", format!("{head}paths:\n  /pet:\n    x-note: {dangling}\n    get:\n      operationId: getPet\n      responses:\n        '200': {{ description: ok }}\n")),
         ("an Operation", format!("{head}paths:\n  /pet:\n    get:\n      operationId: getPet\n      x-note: {dangling}\n      responses:\n        '200': {{ description: ok }}\n")),
         ("a Response", format!("{head}paths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200':\n          description: ok\n          x-note: {dangling}\n")),
@@ -18573,45 +18573,88 @@ fn a_dangling_file_ref_is_not_read_in_any_extension_position() {
     }
 }
 
-/// Until #370 lands, `parse_paths` reads an `x-` key of the Paths Object as a path item, so the
-/// loader must read the file it references: otherwise a present file is never loaded and the
-/// parser's `$ref` to it fails with `E004`. A file ref there reaches the same verdict as its
-/// pointer twin — both succeed when the target exists, and both reject when it does not (the
-/// file ref with the loader's `E011`, the pointer ref with `E004`), as on `master`.
+/// A root document with one real operation, `getPet`, and `entries` appended under `paths`.
+fn spec_with_paths_entries(entries: &str) -> String {
+    format!(
+        "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\npaths:\n  /pet:\n    get:\n      operationId: getPet\n      responses:\n        '200': {{ description: ok }}\n{entries}"
+    )
+}
+
+/// The Paths Object is `patternProperties: { "^/": path-item }` plus `specification-extensions`
+/// (`^x-: true`) in both vendored schemas, so an `x-` key there is author data, never a path item
+/// (#370). `parse_paths` once handed it to `parse_path_item`, whatever its value: a scalar was
+/// rejected with `E011: expected an object`, a dangling pointer `$ref` with `E004`, and an
+/// operation-shaped value, inline or through a `$ref` that resolves, became an operation of the
+/// generated client. Each of those documents is valid, and each now generates the one real
+/// operation and nothing else, with no diagnostic.
 #[test]
-fn a_file_ref_under_a_paths_extension_is_read_while_the_parser_reads_it() {
-    const ITEM: &str = "get:\n  operationId: ghost\n  responses:\n    '200': { description: ok }\n";
-    let head =
-        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n";
-    let file = format!("{head}paths:\n  x-note: {{ $ref: 'item.yaml' }}\n");
-    let pointer = format!(
-        "{head}paths:\n  x-note: {{ $ref: '#/components/pathItems/Ghost' }}\ncomponents:\n  pathItems:\n    Ghost:\n      get:\n        operationId: ghost\n        responses:\n          '200': {{ description: ok }}\n"
-    );
-    let dangling_pointer =
-        format!("{head}paths:\n  x-note: {{ $ref: '#/components/pathItems/Ghost' }}\n");
-
-    let (generated, checked, _) =
-        generate_and_check_files(&[("openapi.yaml", &file), ("item.yaml", ITEM)]);
-    let (pointer_generated, pointer_checked) = (generate(&pointer), check(&pointer));
-    for report in [&generated, &checked, &pointer_generated, &pointer_checked] {
-        assert!(report.outcome().is_success(), "{report:#?}");
-        assert!(!has_code(report, Code::UnresolvedRef), "{report:#?}");
-    }
-    assert_eq!(checked.outcome(), pointer_checked.outcome());
-
-    let (generated, checked, _) = generate_and_check_files(&[("openapi.yaml", &file)]);
-    for report in [&generated, &checked] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            messages_for(report, Code::InvalidInput)
-                .iter()
-                .any(|message| message.contains("failed to read") && message.contains("item.yaml")),
-            "{report:#?}"
+fn a_paths_object_extension_is_not_a_path_item_whatever_its_value_shape() {
+    const GHOST: &str = "get: { operationId: ghost, responses: { '200': { description: ok } } }";
+    for (value, rest) in [
+        ("hello", ""),
+        ("[1, 2]", ""),
+        ("null", ""),
+        ("42", ""),
+        ("{ $ref: '#/nope' }", ""),
+        (format!("{{ {GHOST} }}").as_str(), ""),
+        (
+            "{ $ref: '#/components/pathItems/Ghost' }",
+            format!("components:\n  pathItems:\n    Ghost: {{ {GHOST} }}\n").as_str(),
+        ),
+    ] {
+        let spec = spec_with_paths_entries(&format!("  x-note: {value}\n{rest}"));
+        let (generated, code) = generate_with_code(&spec);
+        let checked = check(&spec);
+        assert_eq!(
+            generated.outcome(),
+            Outcome::Generated,
+            "`x-note: {value}`: {generated:#?}"
         );
+        assert!(
+            generated.diagnostics().is_empty(),
+            "`x-note: {value}`: {generated:#?}"
+        );
+        assert_eq!(
+            checked.outcome(),
+            Outcome::Clean,
+            "`x-note: {value}`: {checked:#?}"
+        );
+        assert!(code.contains("fn get_pet"), "`x-note: {value}`");
+        assert!(!code.contains("ghost"), "`x-note: {value}`: {code}");
     }
-    for report in [&generate(&dangling_pointer), &check(&dangling_pointer)] {
+}
+
+/// The loader stops at a Paths Object extension as the parser does (#370), so a file ref there
+/// is never read: a missing target is not the loader's `E011` "failed to read", and a present one
+/// contributes no operation.
+#[test]
+fn a_file_ref_under_a_paths_object_extension_is_not_read() {
+    const ITEM: &str = "get:\n  operationId: ghost\n  responses:\n    '200': { description: ok }\n";
+    let spec = spec_with_paths_entries("  x-note: { $ref: 'item.yaml' }\n");
+    for files in [
+        &[("openapi.yaml", spec.as_str()), ("item.yaml", ITEM)][..],
+        &[("openapi.yaml", spec.as_str())][..],
+    ] {
+        let (generated, checked, code) = generate_and_check_files(files);
+        assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+        assert!(generated.diagnostics().is_empty(), "{generated:#?}");
+        assert_eq!(checked.outcome(), Outcome::Clean, "{checked:#?}");
+        assert!(code.contains("fn get_pet"));
+        assert!(!code.contains("ghost"), "{code}");
+    }
+}
+
+/// The skip is `^x-`, exactly as the metaschema spells it — case-sensitively. `X-note` under
+/// `paths` is neither an extension nor a path (`unevaluatedProperties: false`), so it is rejected
+/// under `E011` rather than skipped or read as a path item.
+#[test]
+fn an_uppercase_paths_object_key_is_not_a_specification_extension() {
+    let spec = spec_with_paths_entries(
+        "  X-note: { get: { operationId: ghost, responses: { '200': { description: ok } } } }\n",
+    );
+    for report in [&generate(&spec), &check(&spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(has_code(report, Code::UnresolvedRef), "{report:#?}");
+        assert!(has_code(report, Code::InvalidInput), "{report:#?}");
     }
 }
 
