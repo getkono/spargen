@@ -3,7 +3,7 @@
 //!
 //! `env!("CARGO_BIN_EXE_spargen")` expands to a path even when the `cli` feature is off and the
 //! binary is not built, so every test that spawns it, and each helper only those tests use,
-//! carries `#[cfg(feature = "cli")]`. The library-only tests at the end run under any feature set.
+//! carries `#[cfg(feature = "cli")]`. The tests that drive the library run under any feature set.
 
 #[cfg(feature = "cli")]
 use std::path::Path;
