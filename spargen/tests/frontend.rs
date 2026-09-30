@@ -3436,6 +3436,281 @@ components:
     }
 }
 
+/// A file-referenced `allOf` member whose target is itself an `allOf`, or a bare `$ref` alias,
+/// contributes what that target constrains (issue #306).
+///
+/// The member's target used to be read only for object keywords and scalar keywords. A body that
+/// is `allOf: [...]` or a bare `$ref` carries neither, so it was taken for a pure annotation and
+/// contributed nothing: `Holder` generated as an empty struct, both required properties gone, and
+/// no diagnostic. The root-component spelling of the same shape always lowered the target first,
+/// so the two spellings are held to the same fields here.
+#[test]
+fn a_file_referenced_all_of_member_whose_target_is_an_all_of_or_an_alias_contributes_its_fields() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Holder:
+      allOf:
+        - $ref: 'PREFIX#/components/schemas/Inner'
+        - $ref: 'PREFIX#/components/schemas/Alias'
+        - $ref: 'PREFIX#/components/schemas/Narrowed'
+    Inner:
+      allOf:
+        - { type: object, required: [x], properties: { x: { type: string } } }
+    Alias: { $ref: 'PREFIX#/components/schemas/Other' }
+    Other: { type: object, required: [y], properties: { y: { type: integer } } }
+    Narrowed:
+      $ref: 'PREFIX#/components/schemas/Loose'
+      required: [z]
+    Loose: { type: object, properties: { z: { type: boolean } } }
+"##;
+    for (spelling, prefix) in [("explicit", "./lib.yaml"), ("bare", "")] {
+        let lib = LIB.replace("PREFIX", prefix);
+        let (generated, checked, code) = split("./lib.yaml#/components/schemas/Holder", &lib);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().is_empty(),
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        assert_eq!(
+            declared_fields(&types, "Holder"),
+            ["x", "y", "z"],
+            "{spelling}: every member's target must contribute its properties: {types}"
+        );
+        // Each is required — by the `allOf` target, by the alias's target, and by the alias's own
+        // `required` sibling — so none may be optional. The bare spelling lowers `Narrowed` to a
+        // type of its own first, and that path still drops a `$ref`'s bare `required` sibling
+        // (#140), so `z`'s requirement is asserted only where the target is flattened.
+        let required: &[&str] = if prefix.is_empty() {
+            &["x", "y"]
+        } else {
+            &["x", "y", "z"]
+        };
+        let holder: String = types
+            .lines()
+            .skip_while(|line| !line.trim_start().starts_with("pub struct Holder "))
+            .take_while(|line| !line.trim_start().starts_with('}'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for field in required {
+            let ty = field_type(&holder, &format!("pub {field}:")).unwrap_or_default();
+            assert!(
+                !ty.is_empty() && !ty.starts_with("Option<"),
+                "{spelling}: `{field}` is required: {types}"
+            );
+        }
+    }
+}
+
+/// Expanding a file-referenced `allOf` member's target through its own `$ref` and `allOf` gives the
+/// expansion a way back to where it started, and nothing reserves a type along the way. Every such
+/// loop is rejected as the cycle it is, in the code the same loop reports elsewhere: a chain of bare
+/// aliases is `E004`'s alias cycle, as `ensure_resolved` reports it; a loop through an `allOf` body
+/// is `E013`'s recursive member, as the root document reports it. None may walk to the depth cap
+/// (`E014`), and none may generate.
+#[test]
+fn a_file_referenced_all_of_member_that_reaches_itself_is_rejected_as_a_cycle() {
+    let cases = [
+        (
+            "alias cycle",
+            r##"
+components:
+  schemas:
+    Holder:
+      allOf:
+        - $ref: './lib.yaml#/components/schemas/A'
+    A: { $ref: './lib.yaml#/components/schemas/B' }
+    B: { $ref: './lib.yaml#/components/schemas/A' }
+"##,
+            Code::UnresolvedRef,
+        ),
+        (
+            "allOf of itself",
+            r##"
+components:
+  schemas:
+    Holder:
+      allOf:
+        - $ref: './lib.yaml#/components/schemas/Inner'
+    Inner:
+      allOf:
+        - $ref: './lib.yaml#/components/schemas/Inner'
+"##,
+            Code::AllOfIrreconcilable,
+        ),
+        (
+            "alias into an allOf of the alias",
+            r##"
+components:
+  schemas:
+    Holder:
+      allOf:
+        - $ref: './lib.yaml#/components/schemas/A'
+    A: { $ref: './lib.yaml#/components/schemas/B' }
+    B:
+      allOf:
+        - { type: object, properties: { x: { type: string } } }
+        - $ref: './lib.yaml#/components/schemas/A'
+"##,
+            Code::AllOfIrreconcilable,
+        ),
+        // The same loop with the alias spelled as the sub-file's own bare component name. That
+        // link reaches `B` through the component arm, which lowers `B` to a reserved type rather
+        // than flattening it, so the loop still passes through `B`'s body and is `E013`, not an
+        // alias cycle.
+        (
+            "bare alias into an allOf of the alias",
+            r##"
+components:
+  schemas:
+    Holder:
+      allOf:
+        - $ref: './lib.yaml#/components/schemas/A'
+    A: { $ref: '#/components/schemas/B' }
+    B:
+      allOf:
+        - { type: object, properties: { x: { type: string } } }
+        - $ref: './lib.yaml#/components/schemas/A'
+"##,
+            Code::AllOfIrreconcilable,
+        ),
+    ];
+    for (shape, lib, expected) in cases {
+        let (generated, checked, _) = split("./lib.yaml#/components/schemas/Holder", lib);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{shape}/{entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| d.code == expected
+                    && (d.message.contains("cycle") || d.message.contains("recursive"))),
+                "{shape}/{entry}: the rejection must be {expected:?} naming the cycle: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::SchemaNestingTooDeep),
+                "{shape}/{entry}: a loop is a cycle, not a deep chain: {report:#?}"
+            );
+            if expected != Code::UnresolvedRef {
+                assert!(
+                    !has_code(report, Code::UnresolvedRef),
+                    "{shape}/{entry}: a loop through a body is not an alias cycle: {report:#?}"
+                );
+            }
+        }
+    }
+}
+
+/// A file-referenced `allOf` member whose expansion lowers a property that refers back to that
+/// member is an ordinary recursive type, not a member recursive through its own composition.
+///
+/// `Holder`'s member `Node` flattens `NodeBase`, whose `children` items refer to `Node`. Lowering
+/// those items gives `Node` a type of its own, with its own reservation, and that lowering flattens
+/// `NodeBase` again. It is a new type, so re-entering `NodeBase` there is not a loop of the outer
+/// expansion. The root-document spelling of the same shape always generated, and every spelling is
+/// held to it here.
+#[test]
+fn a_file_referenced_all_of_member_with_a_property_back_edge_generates() {
+    const LIB: &str = r##"
+components:
+  schemas:
+    Holder:
+      allOf:
+        - $ref: 'PREFIX#/components/schemas/Node'
+    Node:
+      allOf:
+        - $ref: 'PREFIX#/components/schemas/NodeBase'
+    NodeBase:
+      type: object
+      properties:
+        children:
+          type: array
+          items: { $ref: 'PREFIX#/components/schemas/Node' }
+"##;
+    let mut runs = Vec::new();
+    for (spelling, prefix) in [("explicit", "./lib.yaml"), ("bare", "")] {
+        let (generated, checked, code) = split(
+            "./lib.yaml#/components/schemas/Holder",
+            &LIB.replace("PREFIX", prefix),
+        );
+        runs.push((spelling, generated, checked, code));
+    }
+    let root = format!(
+        "openapi: 3.1.0\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\n\
+         paths:\n  \
+         /u:\n    \
+         get:\n      \
+         operationId: getU\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json:\n              \
+         schema: {{ $ref: '#/components/schemas/Holder' }}\n{}",
+        LIB.replace("PREFIX", "").trim_start_matches('\n')
+    );
+    let (generated, code) = generate_with_code(&root);
+    runs.push(("root", generated, check(&root), code));
+    for (spelling, generated, checked, code) in &runs {
+        for (entry, report) in [("generate", generated), ("check", checked)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}/{entry}: a property back-edge is recursion a type boxes: {report:#?}"
+            );
+            assert!(
+                !has_code(report, Code::AllOfIrreconcilable),
+                "{spelling}/{entry}: {report:#?}"
+            );
+        }
+        assert_eq!(
+            declared_fields(&types_module(code), "Holder"),
+            ["children"],
+            "{spelling}: `Holder` carries `NodeBase`'s property: {code}"
+        );
+    }
+}
+
+/// A long, acyclic chain of file-referenced `allOf` members through alias and `allOf` targets is
+/// bounded by the depth cap, as a long `$ref` chain is, rather than by the stack.
+#[test]
+fn a_long_file_referenced_all_of_member_chain_still_exceeds_the_depth_cap() {
+    let depth = 200;
+    let mut lib = String::from("components:\n  schemas:\n");
+    for level in 0..depth {
+        let next = format!("./lib.yaml#/components/schemas/L{}", level + 1);
+        if level % 2 == 0 {
+            lib.push_str(&format!("    L{level}: {{ $ref: '{next}' }}\n"));
+        } else {
+            lib.push_str(&format!(
+                "    L{level}: {{ allOf: [{{ $ref: '{next}' }}] }}\n"
+            ));
+        }
+    }
+    lib.push_str(&format!(
+        "    L{depth}:\n      type: object\n      properties: {{ id: {{ type: string }} }}\n"
+    ));
+    lib.push_str("    Holder: { allOf: [{ $ref: './lib.yaml#/components/schemas/L0' }] }\n");
+    let (generated, checked, _) = split("./lib.yaml#/components/schemas/Holder", &lib);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(report, Code::SchemaNestingTooDeep),
+            "{entry}: {report:#?}"
+        );
+    }
+}
+
 /// One schema that is both a file-referenced `allOf` member and a direct `$ref` is lowered twice —
 /// once to its own type by `ensure_resolved`, once flattened as a member — and the two copies must
 /// not compete for one name.
