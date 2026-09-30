@@ -5810,6 +5810,34 @@ paths:
             )],
             ..PLAIN
         },
+        // #317: an inheriting line takes only `workspace`, `features`, `default-features` and
+        // `optional` (plus `public`); Cargo warns about any other key and ignores it. Only the
+        // root's `package` renames an inherited dependency, and only the root's `version` bounds it.
+        Case {
+            name: "a member `package` beside `workspace = true` is ignored by Cargo",
+            member: &[(
+                "bytes",
+                r#"bytes = { workspace = true, package = "bytes-fork" }"#,
+            )],
+            ..PLAIN
+        },
+        Case {
+            name: "the same ignored member `package`, on edition 2024",
+            member: &[(
+                "bytes",
+                r#"bytes = { workspace = true, package = "bytes-fork" }"#,
+            )],
+            package: "edition = \"2024\"\n",
+            ..PLAIN
+        },
+        Case {
+            name: "a member `version` beside `workspace = true` is ignored by Cargo",
+            member: &[(
+                "bytes",
+                r#"bytes = { workspace = true, version = "0.0.1" }"#,
+            )],
+            ..PLAIN
+        },
         Case {
             name: "a required crate the member does not inherit",
             member: &[("secrecy", "")],

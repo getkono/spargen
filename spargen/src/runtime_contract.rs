@@ -1415,12 +1415,14 @@ fn check_declaration<'v>(
     // A rename is a `package` that differs from the key. Cargo's `package` defaults to the key, so
     // `bytes = { package = "bytes", … }` is the fully-qualified spelling of an ordinary dependency
     // and renames nothing (#168). A non-string `package` is not a spelling Cargo accepts, so it is
-    // not given the benefit of the doubt.
-    if [Some(declaration), workspace_declaration]
-        .into_iter()
-        .flatten()
-        .filter_map(|value| value.get("package"))
-        .any(|package| package.as_str() != Some(dependency.name))
+    // not given the benefit of the doubt. An inheriting line's own `package` is not read: Cargo
+    // warns that it is an unused key and resolves the root's declaration, so only the root's
+    // `package` renames an inherited dependency (#317) — the same reason the version above comes
+    // from the root alone.
+    if workspace_declaration
+        .unwrap_or(declaration)
+        .get("package")
+        .is_some_and(|package| package.as_str() != Some(dependency.name))
     {
         diagnostics.push(diagnostic(check.audited, format!(
             "`{}` cannot be renamed because generated code references that canonical crate name{location}",
@@ -3993,9 +3995,10 @@ serde_json.workspace = true
 
     #[test]
     fn a_runtime_crate_renamed_in_the_workspace_root_is_rejected() {
-        // "A renamed runtime crate" is an advertised `E023` trigger, and the check reads `package`
-        // from the member *and* the root — generated code names the canonical crate either way.
-        // Every other rename fixture renames in the member's own table, so this is the root half.
+        // "A renamed runtime crate" is an advertised `E023` trigger, and for an inheriting member
+        // the check reads `package` from the root, where Cargo reads it (a `package` on the
+        // member's own `workspace = true` line is an unused key Cargo ignores, #317). Every other
+        // rename fixture renames in the member's own table, so this is the root half.
         // `bytes-fork` is an actual rename: the key `bytes` would bind a different package.
         let diagnostics = workspace_root_bytes_package_diagnostics("bytes-fork");
         assert_eq!(diagnostics.len(), 1, "{diagnostics:#?}");
