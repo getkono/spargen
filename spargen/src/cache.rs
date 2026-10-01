@@ -5,12 +5,12 @@ use std::io::Write as _;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
-use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, Span};
+use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
 use crate::runtime_contract::RuntimeRequirements;
 use crate::source::{sha256_hex, InputBundle};
 use crate::{Build, Code, OmitRule, Spec};
 
-const CACHE_FORMAT: u32 = 2;
+const CACHE_FORMAT: u32 = 3;
 const INPUT_PREFIX: &str = "// input-sha256: ";
 const CONTENT_PREFIX: &str = "// content-sha256: ";
 
@@ -273,6 +273,7 @@ fn cache_diagnostic(message: String) -> Diagnostic {
         message,
         remedy: None,
         interpretation: None,
+        claim: OutcomeClaim::of(Code::InvalidInput.severity()),
     }
 }
 
@@ -293,6 +294,9 @@ struct CachedDiagnostic {
     message: String,
     remedy: Option<String>,
     interpretation: Option<u16>,
+    /// Persisted rather than re-derived from the code's severity, so a replayed diagnostic makes
+    /// the claim the fresh run's diagnostic made.
+    claim: OutcomeClaim,
 }
 
 impl From<&Diagnostic> for CachedDiagnostic {
@@ -304,6 +308,7 @@ impl From<&Diagnostic> for CachedDiagnostic {
             message: value.message.clone(),
             remedy: value.remedy.clone(),
             interpretation: value.interpretation.map(|id| id.0),
+            claim: value.claim,
         }
     }
 }
@@ -319,6 +324,7 @@ impl CachedDiagnostic {
             message: self.message,
             remedy: self.remedy,
             interpretation: self.interpretation.map(InterpId),
+            claim: self.claim,
         })
     }
 }
@@ -379,7 +385,10 @@ impl CachedLoc {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_path, finalized, rerun_directives, verified_output, InputSnapshot};
+    use super::{
+        cache_path, finalized, rerun_directives, verified_output, CachedDiagnostic, Diagnostic,
+        InputSnapshot, JsonPointer, OutcomeClaim,
+    };
     use crate::{Build, CargoIntegration, OmitRule, Outcome, Spec};
     use camino::Utf8PathBuf;
 
@@ -441,6 +450,24 @@ components:
             rerun_directives(&crafted, None),
             ["cargo:rerun-if-changed=/work/out/api.rs"]
         );
+    }
+
+    #[test]
+    fn a_replayed_diagnostic_makes_the_claim_the_fresh_one_made() {
+        // A cache hit replays the fresh run's warnings under `Outcome::Cached`. The claim is not
+        // re-derived from the code, so one that differs from its severity's survives the replay.
+        for claim in [OutcomeClaim::Independent, OutcomeClaim::Generated] {
+            let fresh = Diagnostic {
+                claim,
+                ..Diagnostic::warning(
+                    crate::Code::AlternativeMediaIgnored,
+                    crate::diag::Provenance::new(JsonPointer::root(), None),
+                )
+                .build()
+            };
+            let replayed = CachedDiagnostic::from(&fresh).into_diagnostic().unwrap();
+            assert_eq!(replayed.claim, claim);
+        }
     }
 
     #[test]

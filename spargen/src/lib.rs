@@ -56,7 +56,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 pub use compat::{ComponentKind, Omit, OmitMethod, OmitRule, UnknownOmitToken};
 pub use config::{Build, CargoIntegration, ConfigError, Spec};
-pub use diag::{Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, Severity, Span, UnknownCode};
+pub use diag::{
+    Code, Diagnostic, FileId, InterpId, JsonPointer, Loc, OutcomeClaim, Severity, Span, UnknownCode,
+};
 pub use runtime_contract::{RequiredDependency, Requirements};
 #[cfg(feature = "remote-fetch")]
 pub use source::{VendorReport, VendoredRef};
@@ -96,6 +98,20 @@ impl Outcome {
     /// Whether this run actually rewrote the output file. A cache hit did not.
     pub fn wrote_output(self) -> bool {
         matches!(self, Outcome::Generated)
+    }
+
+    /// Whether a diagnostic that makes `claim` about its run can be true on a run with this
+    /// outcome.
+    ///
+    /// A diagnostic's [`Diagnostic::claim`] records what its message asserts. Every diagnostic a
+    /// run reports must make a claim its outcome admits, through `check` and through `generate`
+    /// alike. Any other combination is a message that says something false about the run.
+    pub fn admits(self, claim: OutcomeClaim) -> bool {
+        match claim {
+            OutcomeClaim::Independent => true,
+            OutcomeClaim::Rejected => self == Outcome::Rejected,
+            OutcomeClaim::Generated => matches!(self, Outcome::Generated | Outcome::Cached),
+        }
     }
 }
 
