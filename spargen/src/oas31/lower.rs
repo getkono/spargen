@@ -5989,8 +5989,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The declared `contentType` is a wire *header*; how the value is rendered into bytes is
         // decided by the property's own lowered type. That is what lets a part declare
         // `application/sdp` (which spargen has no codec for) over a string property and still be
-        // sent correctly, with the declared header attached.
-        let codec = match classify_media(media_essence(&content_type)).map(|(codec, _)| codec) {
+        // sent correctly, with the declared header attached. Media types are case-insensitive
+        // (RFC 9110 § 8.3.1) and the classifier's arms are spelled in lowercase, so the essence is
+        // classified lowercased: `Application/JSON` selects the codec `application/json` does,
+        // here and in the refusal below.
+        let classified = classify_media(&media_essence(&content_type).to_ascii_lowercase())
+            .map(|(codec, _)| codec);
+        let codec = match classified {
             Some(codec @ (MediaType::Json | MediaType::Text | MediaType::OctetStream)) => codec,
             _ => self.natural_codec(field_ty),
         };
@@ -6000,8 +6005,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // whatever it declares, so a declaration that is not JSON (`application/xml` over an
         // object, `text/csv` over an array, or a type with no codec at all) would put JSON under
         // a header naming another syntax — bytes no reader of the document predicts. Refused.
-        // Media types are case-insensitive (RFC 9110 § 8.3.1), and the classifier's JSON arms are
-        // spelled in lowercase, so `Application/JSON` is judged as the JSON it is.
+        // `classified` is the lowercased classification, so `Application/JSON` is judged as the
+        // JSON it is.
         //
         // A form-urlencoded field has no header, so the argument there is not the same one, but it
         // reaches the same rule: its `contentType` is the only statement of the syntax the field's
@@ -6014,9 +6019,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if matches!(media, MediaType::Multipart | MediaType::FormUrlEncoded)
             && explicit.is_some()
             && self.natural_codec(field_ty) == MediaType::Json
-            && classify_media(&media_essence(&content_type).to_ascii_lowercase())
-                .map(|(codec, _)| codec)
-                != Some(MediaType::Json)
+            && classified != Some(MediaType::Json)
         {
             Diagnostic::error(
                 Code::UnsupportedMediaType,

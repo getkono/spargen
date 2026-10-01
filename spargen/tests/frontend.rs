@@ -16995,6 +16995,17 @@ fn a_form_urlencoded_field_keeps_a_declared_content_type_it_is_serialized_in() {
         ("{ type: string }", "text/plain", "FormMode::Text"),
         ("{ type: string }", "application/xml", "FormMode::Text"),
         ("{ type: integer }", "application/json", "FormMode::Json"),
+        // #399: the codec is chosen from the declared media type case-insensitively, as the
+        // refusal above judges it, so a scalar declaring `Application/JSON` is the JSON value its
+        // lowercase spelling is, not the text its natural codec would make it.
+        ("{ type: integer }", "Application/JSON", "FormMode::Json"),
+        ("{ type: object }", "Application/JSON", "FormMode::Json"),
+        (
+            "{ type: string }",
+            "Application/Vnd.Api+JSON",
+            "FormMode::Json",
+        ),
+        ("{ type: string }", "TEXT/PLAIN", "FormMode::Text"),
     ];
     for (schema, declared, rendering) in cases {
         let spec = form_field_declaring(schema, declared);
