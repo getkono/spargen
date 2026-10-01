@@ -335,13 +335,17 @@ pub(crate) enum UnionStrategy {
     /// A `discriminator` → a custom `Deserialize`/`Serialize` that reads/writes the tag field on a
     /// buffered `serde_json::Value` (NOT serde's `#[serde(tag = ...)]`, which would consume the tag
     /// out of the buffer and break variants that declare the discriminator as a required property).
-    /// Object variants carry the tag value that selects them. A non-object variant may coexist
+    /// Object variants carry the tag values that select them. A non-object variant may coexist
     /// when its JSON category is unique (for example an array beside tagged objects).
     Discriminated {
         /// The discriminator `propertyName` — the tag field read from / written into the object.
         tag_field: String,
-        /// The object tag value per variant, parallel to [`Union::variants`].
-        tags: Vec<Option<String>>,
+        /// Every tag value that selects each variant, parallel to [`Union::variants`], in dispatch
+        /// order: each `mapping` key naming the variant's member in document order, then its
+        /// implicit component name unless a `mapping` key claims that value. Deserialization
+        /// accepts every entry; serialization writes the first. Empty for a variant routed by
+        /// `categories`, and for an object variant reached only as the `default_variant` fallback.
+        tags: Vec<Vec<String>>,
         /// The JSON category per non-object variant, parallel to [`Union::variants`].
         categories: Vec<Option<JsonCategory>>,
         /// OpenAPI 3.2 `defaultMapping`: the variant used when the tag is absent or unrecognized.

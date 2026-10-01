@@ -7899,13 +7899,235 @@ fn a_discriminator_mapping_naming_every_member_in_any_spelling_generates_its_tag
             "the mapped tag {tag} must dispatch:\n{code}"
         );
     }
-    assert!(
-        !code.contains("\"Dog\""),
-        "`Dog` has an explicit tag:\n{code}"
+    // The explicit tag is the one written back; the component name still selects the member
+    // (#263), since no mapping key claims it.
+    let arms = discriminated_arms(&code, "Pet");
+    assert_eq!(
+        arms.decode,
+        [
+            ("Cat", vec!["kitty", "Cat"]),
+            ("Dog", vec!["doggo", "Dog"]),
+            ("Fish", vec!["fishy", "Fish"]),
+        ]
+        .map(|(variant, tags)| (
+            variant.to_owned(),
+            tags.into_iter().map(str::to_owned).collect()
+        ))
+        .to_vec(),
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        [("Cat", "kitty"), ("Dog", "doggo"), ("Fish", "fishy")]
+            .map(|(variant, tag)| (variant.to_owned(), Some(tag.to_owned())))
+            .to_vec(),
+        "{code}"
     );
     let checked = check(&spec);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(checked.diagnostics().is_empty(), "{checked:#?}");
+}
+
+/// The dispatch a discriminated union `name` emits, read back from the generated source: per
+/// decode arm, the variant and every tag its pattern matches, and per encode arm, the variant and
+/// the tag serialization writes (`None` for one it writes no tag for).
+struct DiscriminatedArms {
+    decode: Vec<(String, Vec<String>)>,
+    encode: Vec<(String, Option<String>)>,
+}
+
+fn discriminated_arms(code: &str, name: &str) -> DiscriminatedArms {
+    let de_impl = code
+        .split(&format!("impl<'de> serde::Deserialize<'de> for {name} {{"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no Deserialize for {name}:\n{code}"));
+    // Layout is the formatter's business, so read whitespace-collapsed text.
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let de_body = de_impl
+        .split("match tag.as_str() {")
+        .nth(1)
+        .and_then(|rest| rest.split("_ =>").next())
+        .map(flat)
+        .unwrap_or_else(|| panic!("no tag dispatch for {name}:\n{code}"));
+    let pieces: Vec<&str> = de_body
+        .split(&format!("serde_json::from_value(value) .map({name}::"))
+        .collect();
+    let decode = pieces
+        .windows(2)
+        .map(|pair| {
+            let pattern = pair[0].rsplit_once(" =>").map_or(pair[0], |(head, _)| head);
+            let pattern = pattern.rsplit(['}', ',']).next().unwrap_or(pattern);
+            let tags = pattern
+                .split('|')
+                .map(|tag| tag.trim().trim_matches('"').to_owned())
+                .filter(|tag| !tag.is_empty())
+                .collect();
+            let variant = pair[1].split(')').next().unwrap_or_default().to_owned();
+            (variant, tags)
+        })
+        .collect();
+    let ser_impl = code
+        .split(&format!("impl serde::Serialize for {name} {{"))
+        .nth(1)
+        .and_then(|rest| rest.split("if let Some(tag) = tag").next())
+        .map(flat)
+        .unwrap_or_else(|| panic!("no Serialize for {name}:\n{code}"));
+    let pieces: Vec<&str> = ser_impl.split("(inner) =>").collect();
+    let encode = pieces
+        .windows(2)
+        .map(|pair| {
+            let variant = pair[0]
+                .rsplit(&format!("{name}::"))
+                .next()
+                .unwrap_or_default();
+            let tag = pair[1]
+                .split_once("?,")
+                .and_then(|(_, rest)| rest.split(',').next())
+                .unwrap_or_default()
+                .trim();
+            let tag = tag
+                .strip_prefix("Some(")
+                .map(|tag| tag.trim_end_matches(')').trim_matches('"').to_owned());
+            (variant.trim().to_owned(), tag)
+        })
+        .collect();
+    DiscriminatedArms { decode, encode }
+}
+
+/// Issue #263: a member several discriminator values name dispatched on only the first. Every
+/// `mapping` key naming it selects it, and so does its component name, which no key claims;
+/// serialization writes the first key.
+#[test]
+fn every_discriminator_value_naming_a_member_selects_it() {
+    let spec = discriminated_pet(
+        "3.1.0",
+        CAT_AND_DOG,
+        "        propertyName: kind\n        mapping:\n          \
+         a: Cat\n          \
+         d: Dog\n          \
+         a2: '#/components/schemas/Cat'\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let arms = discriminated_arms(&code, "Pet");
+    assert_eq!(
+        arms.decode,
+        vec![
+            (
+                "Cat".to_owned(),
+                vec!["a".to_owned(), "a2".to_owned(), "Cat".to_owned()]
+            ),
+            ("Dog".to_owned(), vec!["d".to_owned(), "Dog".to_owned()]),
+        ],
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        vec![
+            ("Cat".to_owned(), Some("a".to_owned())),
+            ("Dog".to_owned(), Some("d".to_owned())),
+        ],
+        "{code}"
+    );
+    let checked = check(&spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
+}
+
+/// A component name is read as one only "unless a `mapping` is present for that value": a key
+/// equal to `Cat` that names `Dog` makes the value `Cat` select `Dog`, and takes it away from
+/// `Cat`, which keeps the key that names it.
+#[test]
+fn a_mapping_key_equal_to_a_component_name_claims_that_value() {
+    let spec = discriminated_pet(
+        "3.1.0",
+        CAT_AND_DOG,
+        "        propertyName: kind\n        mapping:\n          \
+         Cat: Dog\n          \
+         kitty: Cat\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let arms = discriminated_arms(&code, "Pet");
+    assert_eq!(
+        arms.decode,
+        vec![
+            ("Cat".to_owned(), vec!["kitty".to_owned()]),
+            ("Dog".to_owned(), vec!["Cat".to_owned(), "Dog".to_owned()]),
+        ],
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        vec![
+            ("Cat".to_owned(), Some("kitty".to_owned())),
+            ("Dog".to_owned(), Some("Cat".to_owned())),
+        ],
+        "{code}"
+    );
+}
+
+/// The claim above leaves a member nothing to be selected by when no key names it: the generated
+/// decoder would have no arm for it, and the tag it serializes would decode as the other member.
+/// That is refused (`E007`) at the entry that claims the name, in `check` as in `generate` —
+/// unless `defaultMapping` names the member, whose fallback still reaches it.
+#[test]
+fn a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry() {
+    let spec = discriminated_pet(
+        "3.1.0",
+        CAT_AND_DOG,
+        "        propertyName: kind\n        mapping:\n          \
+         Cat: Dog\n",
+    );
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let e007: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::NonDisjointUnion)
+            .collect();
+        assert_eq!(e007.len(), 1, "{report:#?}");
+        assert_eq!(
+            e007[0].pointer.as_str(),
+            "/components/schemas/Pet/discriminator/mapping/Cat",
+            "{report:#?}"
+        );
+        assert!(
+            e007[0]
+                .message
+                .contains("no discriminator value selects it"),
+            "{report:#?}"
+        );
+    }
+
+    let fallback = discriminated_pet(
+        "3.2.0",
+        CAT_AND_DOG,
+        "        propertyName: kind\n        mapping:\n          \
+         Cat: Dog\n        \
+         defaultMapping: Cat\n",
+    );
+    let (report, code) = generate_with_code(&fallback);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let arms = discriminated_arms(&code, "Pet");
+    assert_eq!(
+        arms.decode,
+        vec![("Dog".to_owned(), vec!["Cat".to_owned(), "Dog".to_owned()])],
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        vec![
+            ("Cat".to_owned(), None),
+            ("Dog".to_owned(), Some("Cat".to_owned())),
+        ],
+        "{code}"
+    );
+    let checked = check(&fallback);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
 /// A Discriminator Object whose fields have the wrong shape was read leniently and the bad part
@@ -8012,9 +8234,18 @@ components:
                 "{target} {entry}: {report:#?}"
             );
         }
-        for tag in ["\"payload\" => {", "\"dog\" => {"] {
-            assert!(code.contains(tag), "{target}: {tag}\n{code}");
-        }
+        // The pointer member has no component name to be selected by as well; `Dog` does (#263).
+        let tags: Vec<Vec<String>> = discriminated_arms(&code, "Pet")
+            .decode
+            .into_iter()
+            .map(|(_, tags)| tags)
+            .collect();
+        assert_eq!(
+            tags,
+            [vec!["payload"], vec!["dog", "Dog"]]
+                .map(|tags| tags.into_iter().map(str::to_owned).collect::<Vec<_>>()),
+            "{target}\n{code}"
+        );
     }
 }
 
@@ -8127,8 +8358,15 @@ components:
                 "{member} / {target} {entry}: {report:#?}"
             );
         }
+        // The mapped tag leads the member's arm, so it is the one serialization writes; a
+        // component member also keeps its name (#263), a file member has none to keep.
+        let expected = match member {
+            "cat.yaml" => vec!["meow".to_owned()],
+            _ => vec!["meow".to_owned(), "Cat".to_owned()],
+        };
+        let arms = discriminated_arms(&code, "Pet");
         assert!(
-            code.contains("\"meow\" => {"),
+            arms.decode.iter().any(|(_, tags)| *tags == expected),
             "{member} / {target}: the mapped tag must dispatch\n{code}"
         );
     }

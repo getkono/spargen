@@ -2275,16 +2275,40 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     Some(variant)
                 }
             };
-            self.discriminated_strategy(
+            let discriminated = self.discriminated_strategy(
                 &variants,
                 &ref_names,
                 &variant_members,
                 &discriminator.property_name,
                 resolved,
                 default_variant,
-            )
-            .or_else(|| self.disjoint_strategy(&variants))
-            .unwrap_or_else(|| self.trial_strategy(&variants, mode))
+            );
+            if let Some(UnionStrategy::Discriminated {
+                tags,
+                categories,
+                default_variant,
+                ..
+            }) = &discriminated
+            {
+                let unselectable = (0..variants.len()).find(|&index| {
+                    categories[index].is_none()
+                        && tags[index].is_empty()
+                        && *default_variant != Some(index)
+                });
+                if let Some(index) = unselectable {
+                    return self.reject_unselectable_discriminated_variant(
+                        schema,
+                        discriminator,
+                        variant_members[index],
+                        ref_names[index]
+                            .as_deref()
+                            .unwrap_or(&variants[index].name_hint),
+                    );
+                }
+            }
+            discriminated
+                .or_else(|| self.disjoint_strategy(&variants))
+                .unwrap_or_else(|| self.trial_strategy(&variants, mode))
         } else {
             self.disjoint_strategy(&variants)
                 .unwrap_or_else(|| self.trial_strategy(&variants, mode))
@@ -2744,9 +2768,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its
-    /// unique JSON category. The tag value comes from the first `discriminator.mapping` entry naming
-    /// the variant's member when there is one, otherwise from the variant's own `$ref` component
-    /// name.
+    /// unique JSON category. An object variant is selected by every `discriminator.mapping` key
+    /// naming its member, in document order, and then by its own `$ref` component name unless a
+    /// mapping key claims that value; the first is the tag serialization writes. A variant left
+    /// with no tag is [`Self::reject_unselectable_discriminated_variant`]'s to refuse.
     fn discriminated_strategy(
         &self,
         variants: &[UnionVariant],
@@ -2767,21 +2792,40 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if category == JsonCategory::Object || categories.contains(&Some(category)) {
                     return None;
                 }
-                tags.push(None);
+                tags.push(Vec::new());
                 categories.push(Some(category));
                 continue;
             }
-            // Prefer an explicit mapping entry naming this variant's member — already resolved by
-            // identity, so its spelling does not matter; fall back to the component name (implicit
-            // mapping), then to the variant's own hint.
-            let tag = discriminator
+            // Every explicit mapping entry naming this variant's member — already resolved by
+            // identity, so its spelling does not matter — selects it. So does its component name,
+            // because the specification reads a value as a component name "unless a `mapping` is
+            // present for that value": a key equal to it claims it, for this member or another.
+            let mut accepted: Vec<String> = discriminator
                 .mapping
                 .iter()
-                .find(|(_, named)| named == member)
+                .filter(|(_, named)| named == member)
                 .map(|(tag, _)| tag.clone())
-                .or_else(|| ref_name.clone())
-                .unwrap_or_else(|| variant.name_hint.clone());
-            tags.push(Some(tag));
+                .collect();
+            let component = ref_name
+                .as_deref()
+                .filter(|name| is_schema_component_name(name));
+            match component {
+                Some(name) => {
+                    if !discriminator.mapping.iter().any(|(tag, _)| tag == name) {
+                        accepted.push(name.to_owned());
+                    }
+                }
+                // A member that is no component — inline, or a deeper pointer — has no implicit
+                // value. One no mapping key names keeps the tag it has always had: the pointer
+                // text it is named from, else the variant's own hint.
+                None if accepted.is_empty() => accepted.push(
+                    ref_name
+                        .clone()
+                        .unwrap_or_else(|| variant.name_hint.clone()),
+                ),
+                None => {}
+            }
+            tags.push(accepted);
             categories.push(None);
         }
         Some(UnionStrategy::Discriminated {
@@ -2975,6 +3019,45 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .remedy(
                 "split the applicators into separate schemas, make every discriminator mapping name \
                  a member of the union, or omit this API segment with spargen::omit!",
+            )
+            .emit(self.diags);
+        None
+    }
+
+    /// A discriminated object member no discriminator value selects: no `mapping` key names it, and
+    /// a key equal to its component name claims that value for another member, so the dispatch has
+    /// no arm that decodes into it, and the tag it would serialize decodes as that other member.
+    /// Reported at the entry that claims the name. A member `defaultMapping` names is still reached
+    /// by the fallback and never comes here.
+    fn reject_unselectable_discriminated_variant<T>(
+        &mut self,
+        schema: &Schema,
+        discriminator: &super::Discriminator,
+        member: usize,
+        implicit: &str,
+    ) -> Option<T> {
+        let claim = discriminator.mapping.get_key_value(implicit);
+        let (provenance, message) = match claim {
+            Some((tag, target)) => (
+                target.provenance.clone(),
+                format!(
+                    "`discriminator.mapping` entry `{tag}` claims the component name of union \
+                     member {member} for `{}`, and no entry names member {member}, so no \
+                     discriminator value selects it",
+                    target.value
+                ),
+            ),
+            None => (
+                schema.provenance.clone(),
+                format!("no discriminator value selects union member {member}"),
+            ),
+        };
+        // E007 case: unrepresentable-applicators
+        Diagnostic::error(Code::NonDisjointUnion, provenance)
+            .message(message)
+            .remedy(
+                "add a `discriminator.mapping` entry naming the member, rename the entry that \
+                 claims its component name, or remove the member from the union",
             )
             .emit(self.diags);
         None
