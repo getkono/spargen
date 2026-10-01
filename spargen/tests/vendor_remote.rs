@@ -486,6 +486,44 @@ fn a_redirected_documents_relative_self_resolves_against_the_url_it_was_retrieve
     assert_eq!(server.hits().len(), 3, "generation must not fetch");
 }
 
+/// A fetched document whose `$self` names another directory resolves its relative `$ref`s from
+/// that identity, in `spargen lock` as in the build (#426): `$self: ../b/pet.yaml` inside
+/// `/a/pet.yaml` makes `tag.yaml` the document at `/b/tag.yaml`. `/a/tag.yaml` exists too, with
+/// a different shape, so a lock that resolved from the retrieval URL would succeed, pin the wrong
+/// document, and leave the build rejecting `/b/tag.yaml` as unpinned (`E003`).
+#[test]
+fn a_remote_documents_self_in_another_directory_is_the_base_lock_resolves_from() {
+    const SELF_ELSEWHERE_PET_YAML: &str = "$self: ../b/pet.yaml\n\
+                                           type: object\n\
+                                           required: [id]\n\
+                                           properties:\n  \
+                                           id: { type: integer, format: int64 }\n  \
+                                           tag: { $ref: 'tag.yaml' }\n";
+    const DECOY_TAG_YAML: &str = "type: object\n\
+                                  required: [decoy]\n\
+                                  properties:\n  \
+                                  decoy: { type: string }\n";
+    let server = MockServer::start(&[
+        ("/a/pet.yaml", Reply::Body(SELF_ELSEWHERE_PET_YAML)),
+        ("/a/tag.yaml", Reply::Body(DECOY_TAG_YAML)),
+        ("/b/tag.yaml", Reply::Body(TAG_YAML)),
+    ]);
+    let pet_url = server.url("/a/pet.yaml");
+    let (_temp, spec_path) = workspace(&pet_url);
+
+    let report =
+        spargen::vendor(&Spec::new(spec_path.clone())).unwrap_or_else(|r| panic!("{r:#?}"));
+
+    assert_eq!(server.hits(), ["/a/pet.yaml", "/b/tag.yaml"]);
+    assert_eq!(pinned_urls(&report), [pet_url, server.url("/b/tag.yaml")]);
+    let code = generate_offline(&spec_path);
+    assert!(code.contains("pub label"), "{code}");
+    assert!(!code.contains("pub decoy"), "{code}");
+    let checked = spargen::check(&Spec::new(spec_path));
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert_eq!(server.hits().len(), 2, "generation must not fetch");
+}
+
 #[test]
 fn a_refused_connection_is_e025_naming_the_url() {
     // Bind and release a port so nothing is listening on it.
