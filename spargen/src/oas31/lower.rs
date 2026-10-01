@@ -2318,7 +2318,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         variant_members[index],
                         ref_names[index]
                             .as_deref()
-                            .unwrap_or(&variants[index].name_hint),
+                            .filter(|name| is_schema_component_name(name)),
                     );
                 }
             }
@@ -2890,21 +2890,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let component = ref_name
                 .as_deref()
                 .filter(|name| is_schema_component_name(name));
-            match component {
-                Some(name) => {
-                    if !discriminator.mapping.iter().any(|(tag, _)| tag == name) {
-                        accepted.push(name.to_owned());
-                    }
+            // A member that is no component — inline, or a deeper pointer — has no implicit value
+            // ("inline `oneOf` or `anyOf` subschemas are not considered"), so only a mapping key
+            // selects it. With none it keeps no tag at all: anything else would be one spargen
+            // made up and no server sends, and the caller refuses a member left unselectable.
+            if let Some(name) = component {
+                if !discriminator.mapping.iter().any(|(tag, _)| tag == name) {
+                    accepted.push(name.to_owned());
                 }
-                // A member that is no component — inline, or a deeper pointer — has no implicit
-                // value. One no mapping key names keeps the tag it has always had: the pointer
-                // text it is named from, else the variant's own hint.
-                None if accepted.is_empty() => accepted.push(
-                    ref_name
-                        .clone()
-                        .unwrap_or_else(|| variant.name_hint.clone()),
-                ),
-                None => {}
             }
             tags.push(accepted);
             categories.push(None);
@@ -3106,18 +3099,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// A discriminated object member no discriminator value selects: no `mapping` key names it, and
-    /// a key equal to its component name claims that value for another member, so the dispatch has
-    /// no arm that decodes into it, and the tag it would serialize decodes as that other member.
-    /// Reported at the entry that claims the name. A member `defaultMapping` names is still reached
-    /// by the fallback and never comes here.
+    /// it has no implicit value — it is no schema component (`component` is `None`: inline, or a
+    /// pointer into another schema), or a key equal to its component name claims that value for
+    /// another member. The dispatch has no arm that decodes into it, and any tag it serialized
+    /// would be invented or decode as that other member. A claimed name is reported at the entry
+    /// that claims it, anything else at the union. A member `defaultMapping` names is still
+    /// reached by the fallback and never comes here.
     fn reject_unselectable_discriminated_variant<T>(
         &mut self,
         schema: &Schema,
         discriminator: &super::Discriminator,
         member: usize,
-        implicit: &str,
+        component: Option<&str>,
     ) -> Option<T> {
-        let claim = discriminator.mapping.get_key_value(implicit);
+        let claim = component.and_then(|name| discriminator.mapping.get_key_value(name));
         let (provenance, message) = match claim {
             Some((tag, target)) => (
                 target.provenance.clone(),
@@ -3126,6 +3121,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      member {member} for `{}`, and no entry names member {member}, so no \
                      discriminator value selects it",
                     target.value
+                ),
+            ),
+            None if component.is_none() => (
+                schema.provenance.clone(),
+                format!(
+                    "union member {member} is no schema component — it is inline, or a pointer \
+                     into another schema — so it has no implicit discriminator value, and no \
+                     `discriminator.mapping` entry names it, so no discriminator value selects it"
                 ),
             ),
             None => (
@@ -3137,8 +3140,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Diagnostic::error(Code::NonDisjointUnion, provenance)
             .message(message)
             .remedy(
-                "add a `discriminator.mapping` entry naming the member, rename the entry that \
-                 claims its component name, or remove the member from the union",
+                "add a `discriminator.mapping` entry naming the member, move it to a schema \
+                 component of its own, rename the entry that claims its component name, or remove \
+                 the member from the union",
             )
             .emit(self.diags);
         None
@@ -7310,12 +7314,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// or a tag from, exactly as the same pointer written against a relative file has none, and neither
 /// has any file reference.
 ///
-/// Written in a sub-file, the same spelling keeps the name it has always had. That route resolved
-/// through the resolver before same-file deep pointers did in the root, and its members were named
-/// from the pointer text (`Envelope/properties/cat` → variant `EnvelopePropertiesCat`, implicit tag
-/// `Envelope/properties/cat`). Dropping the name there would rename those variants and their
-/// implicit tags in documents that generate today; the root-only filter confines the change to what
-/// previously rejected.
+/// Written in a sub-file, the same spelling keeps the variant name it has always had. That route
+/// resolved through the resolver before same-file deep pointers did in the root, and its members
+/// were named from the pointer text (`Envelope/properties/cat` → variant `EnvelopePropertiesCat`).
+/// Dropping the name there would rename those variants in documents that generate today; the
+/// root-only filter confines the change to what previously rejected. The name is no component
+/// name, so it supplies no implicit discriminator tag ([`is_schema_component_name`]).
 fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option<&str> {
     let SchemaOr::Schema(schema) = member else {
         return None;
