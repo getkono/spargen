@@ -3042,7 +3042,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 target.provenance.clone(),
                 format!(
                     "`discriminator.mapping` entry `{tag}` claims the component name of union \
-                     member {member} for `{}`, and no other entry names member {member}, so no \
+                     member {member} for `{}`, and no entry names member {member}, so no \
                      discriminator value selects it",
                     target.value
                 ),
