@@ -5,8 +5,8 @@ use indexmap::{IndexMap, IndexSet};
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
     AdditionalProps, Api, ApiKeyLoc, BodyEncoding, DefaultValue, Delimiter, DisjointFeature, Docs,
-    EncodingMode, Field, FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Operation,
-    OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
+    EncodingMode, Field, FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Openness,
+    Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
     PropertyEncoding, PropertyName, RequestBody, Response, ResponseHeader, Responses, ScalarEnum,
     ScalarRepr, ScalarValue, SchemeId, SecurityScheme, SecuritySchemeDef, Server, StatusSpec,
     Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy,
@@ -4291,7 +4291,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Where `open_narrowing` is out of effect (inside a union, which `intersect_union`
             // reaches with a set the response already opened) the meet is closed: two variants
             // that each held an unlisted string would both match it, and the trial union would
-            // refuse every value.
+            // refuse every value. A locked set (one narrowed against a `uuid` or date string) locks
+            // the meet, open side or not, which is again order-independent: the format's domain
+            // holds no unlisted string for the open side to keep.
             (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
                 let variants: Vec<ScalarValue> = left
                     .variants
@@ -4299,25 +4301,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .filter(|value| right.variants.contains(value))
                     .cloned()
                     .collect();
-                let open = self.narrowing_opens && (left.open || right.open);
+                let openness =
+                    if left.openness == Openness::Locked || right.openness == Openness::Locked {
+                        Openness::Locked
+                    } else if self.narrowing_opens && (left.is_open() || right.is_open()) {
+                        Openness::Open
+                    } else {
+                        Openness::Closed
+                    };
                 if variants.is_empty() {
                     // Both value sets are finite and listed in full, so sharing no value is proof.
                     Err(NoMeet::Empty)
-                } else if variants == left.variants && open == left.open {
+                } else if variants == left.variants && openness == left.openness {
                     Ok(non_nullable(a))
-                } else if variants == right.variants && open == right.open {
+                } else if variants == right.variants && openness == right.openness {
                     Ok(non_nullable(b))
-                } else if open && variants == left.variants {
-                    Ok(self.opened_set(a, left))
-                } else if open && variants == right.variants {
-                    Ok(self.opened_set(b, right))
+                } else if variants == left.variants {
+                    Ok(self.reopened_set(a, left, openness, hint))
+                } else if variants == right.variants {
+                    Ok(self.reopened_set(b, right, openness, hint))
                 } else {
                     Ok(self.insert_type(
                         hint,
                         TypeKind::Enum(ScalarEnum {
                             repr: left.repr,
                             variants,
-                            open,
+                            openness,
                         }),
                         Docs::default(),
                         None,
@@ -4427,7 +4436,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// target, or from another intersection, may be reached from where it must stay closed).
     ///
     /// Only a plain `string` widens it: `uuid` and the date formats have a decoded representation
-    /// of their own that an arbitrary string is not.
+    /// of their own that an arbitrary string is not. Under `open_narrowing` (in a response body's
+    /// own schema or not), a string set meeting one of them is [`Openness::Locked`] instead, so no
+    /// plain `string` met before or after opens it: the set an `allOf` lowers to does not depend
+    /// on where its formatted member sits.
     ///
     /// A set the response already opened, met where [`Self::narrowing_opens`] does not hold (a
     /// union variant `intersect_union` meets it with), is a new closed copy under `hint`, for the
@@ -4439,38 +4451,69 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         primitive: Prim,
         hint: &str,
     ) -> Ty {
-        if set.open && !self.narrowing_opens {
-            return self.insert_type(
-                hint,
-                TypeKind::Enum(ScalarEnum {
-                    open: false,
-                    ..set.clone()
-                }),
-                Docs::default(),
-                None,
-            );
-        }
-        let opens = self.narrowing_opens
-            && set.repr == ScalarRepr::String
-            && !set.open
-            && primitive == Prim::String;
-        if !opens {
+        let openness = match (set.openness, primitive) {
+            _ if set.repr != ScalarRepr::String => set.openness,
+            (_, Prim::Uuid | Prim::Date | Prim::DateTime) if self.open_narrowing => {
+                Openness::Locked
+            }
+            (Openness::Closed, Prim::String) if self.narrowing_opens => Openness::Open,
+            (Openness::Open, _) if !self.narrowing_opens => Openness::Closed,
+            (openness, _) => openness,
+        };
+        self.reopened_set(enum_ty, set, openness, hint)
+    }
+
+    /// The set `set` (whose type is `enum_ty`) with `openness`: the set itself when it already has
+    /// it, the set opened as [`Self::opened_set`] does, and otherwise a closed or locked one. That
+    /// is the set itself, changed in place, when it is one of [`Self::open_candidates`] met where
+    /// [`Self::narrowing_opens`] holds, and a new copy under `hint` otherwise, since a set reached
+    /// from anywhere else may be reached from where it must keep its own openness.
+    fn reopened_set(
+        &mut self,
+        enum_ty: Ty,
+        set: &ScalarEnum,
+        openness: Openness,
+        hint: &str,
+    ) -> Ty {
+        if openness == set.openness {
             return non_nullable(enum_ty);
         }
-        self.opened_set(enum_ty, set)
+        if openness == Openness::Open {
+            return self.opened_set(enum_ty, set);
+        }
+        if self.narrowing_opens && self.reopen_in_place(enum_ty, openness) {
+            return non_nullable(enum_ty);
+        }
+        self.insert_type(
+            hint,
+            TypeKind::Enum(ScalarEnum {
+                openness,
+                ..set.clone()
+            }),
+            Docs::default(),
+            None,
+        )
+    }
+
+    /// Give the set `enum_ty` `openness` in place, when it is one of [`Self::open_candidates`]:
+    /// whether it was.
+    fn reopen_in_place(&mut self, enum_ty: Ty, openness: Openness) -> bool {
+        if !self.open_candidates.contains(&enum_ty.id) {
+            return false;
+        }
+        if let Some(TypeKind::Enum(own)) = self.graph.get_mut(enum_ty.id).map(|def| &mut def.kind) {
+            own.openness = openness;
+            return true;
+        }
+        false
     }
 
     /// The closed set `set` (whose type is `enum_ty`), opened: in place when it is one of
     /// [`Self::open_candidates`], and as a new open copy otherwise, as [`Self::narrowed_string`]
     /// describes.
     fn opened_set(&mut self, enum_ty: Ty, set: &ScalarEnum) -> Ty {
-        if self.open_candidates.contains(&enum_ty.id) {
-            if let Some(TypeKind::Enum(own)) =
-                self.graph.get_mut(enum_ty.id).map(|def| &mut def.kind)
-            {
-                own.open = true;
-                return non_nullable(enum_ty);
-            }
+        if self.reopen_in_place(enum_ty, Openness::Open) {
+            return non_nullable(enum_ty);
         }
         // Named for the closed set it opens, which stays in the graph where it came from.
         let (name_hint, docs, provenance) = match self.graph.get(enum_ty.id) {
@@ -4486,7 +4529,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             TypeKind::Enum(ScalarEnum {
                 repr: ScalarRepr::String,
                 variants: set.variants.clone(),
-                open: true,
+                openness: Openness::Open,
             }),
             docs,
             provenance,
@@ -4944,13 +4987,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate that
         // preserves the component-root last-insert invariant asserted in `ensure_component`.
         let repr = repr.unwrap_or(ScalarRepr::String);
+        // A string set whose own schema names a `uuid` or date format is narrowed against that
+        // format exactly as an `allOf` member declaring it would narrow it (`narrowed_string`).
+        let formatted = matches!(
+            schema.format.as_deref(),
+            Some("uuid" | "date" | "date-time")
+        );
+        let openness = if self.open_narrowing && repr == ScalarRepr::String && formatted {
+            Openness::Locked
+        } else {
+            Openness::Closed
+        };
         let mut ty = self.insert_schema_type(
             schema,
             hint,
             TypeKind::Enum(ScalarEnum {
                 repr,
                 variants,
-                open: false,
+                openness,
             }),
         );
         if self.narrowing_opens && repr == ScalarRepr::String {

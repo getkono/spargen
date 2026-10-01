@@ -2755,7 +2755,7 @@ fn emit_type_def(
                     .expect("variant name allocated");
                 quote! { #ident::#variant_ident => #value, }
             });
-            if enumeration.open {
+            if enumeration.is_open() {
                 return emit_open_string_enum(
                     id,
                     ident,
