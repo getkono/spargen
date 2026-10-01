@@ -232,11 +232,10 @@ Standing invariants:
   only writer"), or leave the sentence out. Behavioural claims such as "never sent" do not count;
   their tests are the ordinary ones. An absence claim is true on the day it is written, and the
   change that makes it false is a feature landing correctly, which rewrites no prose. The rule
-  was written from two such claims (#201), and each has its test. `attach_auth`'s insert-only
-  paragraph, embedded into every generated client, is held by
-  `the_shipped_insert_only_credential_claim_still_holds` in `support-runtime/src/dispatch.rs`.
-  That test also checks for its sentence, so removing the sentence fails it until the test is
-  removed too. `Responses::success`'s "`default` is never among them" is held by its doctest.
+  was written from two such claims (#201). `attach_auth`'s insert-only paragraph, embedded into
+  every generated client, was held by a test that also checked for its sentence; when
+  `ClientCore::remove_credential` landed (#142) the paragraph was rewritten and that test retired
+  with it, as below. `Responses::success`'s "`default` is never among them" is held by its doctest.
   That doctest does not check for the sentence, so it would outlive it. When such a test fails, rewrite the
   sentence and retire the test with it; do not widen the test. Review enforces this rule, not a
   gate. There is deliberately no compile-fail (`trybuild`) harness. It could prove that a

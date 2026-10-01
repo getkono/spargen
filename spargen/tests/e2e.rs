@@ -373,6 +373,8 @@ paths:
     get: { operationId: core, responses: { "204": { description: ok } } }
   /with-credential:
     get: { operationId: withCredential, responses: { "204": { description: ok } } }
+  /without-credential:
+    get: { operationId: withoutCredential, responses: { "204": { description: ok } } }
   /inner:
     get: { operationId: inner, responses: { "204": { description: ok } } }
 "#;
@@ -399,6 +401,7 @@ fn an_operation_named_after_a_client_method_still_compiles() {
         "with_backend",
         "core",
         "with_credential",
+        "without_credential",
         "inner",
     ] {
         assert!(
@@ -928,6 +931,54 @@ fn blocking_method_round_trips_against_a_mock() {
     server.join().unwrap();
 }
 
+// Selection never falls through past a chosen alternative whose credential fails, so the remedy
+// is to unregister it: `without_credential` on the same client reaches the later, fully registered
+// alternative over real HTTP, and the request carries that alternative's credential alone.
+#[test]
+fn without_credential_falls_through_to_a_later_alternative() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]).to_ascii_lowercase();
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        stream.flush().unwrap();
+        request
+    });
+    let failing_bearer = basic_client::Credential::Provider(std::sync::Arc::new(|| {
+        Box::pin(async { Err(basic_client::AuthError::new("idp down")) })
+            as basic_client::TokenFuture
+    }));
+    // `getConjunction` is `tenant + bearer`, or `apiKey`, or `mtls + tenant`: all three registered
+    // selects the first, whose bearer provider fails before anything is sent — so the mock sees
+    // no connection from this call.
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}"))
+        .unwrap()
+        .with_credential("tenant", basic_client::Credential::ApiKey(basic_client::SecretString::from("acme")))
+        .with_credential("bearer", failing_bearer)
+        .with_credential("apiKey", basic_client::Credential::ApiKey(basic_client::SecretString::from("k3y")));
+    match client.get_conjunction() {
+        Err(basic_client::Error::RequestConstruction(
+            basic_client::RequestError::CredentialProvider { scheme, .. },
+        )) => assert_eq!(scheme, "bearer"),
+        other => panic!("expected the selected alternative's provider failure, got {other:?}"),
+    }
+
+    let client = client.without_credential("bearer");
+    let response = client.get_conjunction().expect("the apiKey alternative is selected and sent");
+    assert_eq!(response.status(), 204);
+    let request = server.join().unwrap();
+    // The second alternative is `apiKey` alone: the still-registered `tenant` belongs only to
+    // alternatives that were not selected, so it must not ride along, and neither may a bearer.
+    assert!(request.contains("x-api-key: k3y\r\n"), "{request}");
+    assert!(!request.contains("x-tenant"), "{request}");
+    assert!(!request.contains("authorization"), "{request}");
+}
+
 /// A resolver whose lookup never completes. reqwest's `connect_timeout` bounds the whole connector
 /// call, name resolution included, so a lookup that hangs is a connect that hangs: it reaches the
 /// same `TimedOut` inside the same connect error a blackholed TCP handshake does, without needing a
@@ -1103,6 +1154,60 @@ fn every_parameter_style_serializes_onto_the_wire() {
             vec!["x".to_owned(), "y".to_owned()],
             "a/b?c#d%e".to_owned(),
             Some(params),
+        )
+        .unwrap();
+
+    server.join().unwrap();
+}
+
+/// `content:`-typed path and header parameters on the wire.
+///
+/// A path value is rendered through its media codec and then percent-encoded as one opaque segment,
+/// exactly as a schema-typed one is: neither the text value's `/` nor the JSON string member's
+/// `/`, `?`, or `#` may leave the segment it is spliced into, so the request stays under the
+/// client's base path. Header values are sent verbatim, as every header value is.
+#[test]
+fn content_typed_path_and_header_parameters_reach_the_wire() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 4096];
+        let read = stream.read(&mut buf).unwrap();
+        let request = String::from_utf8_lossy(&buf[..read]);
+        let request_line = request.lines().next().unwrap();
+
+        assert_eq!(
+            request_line,
+            "GET /v1/content-params/x%2F..%2F..%2Fadmin/\
+             %7B%22kind%22%3A%22a%2F..%2Fb%3Fc%23d%22%2C%22limit%22%3A3%7D HTTP/1.1",
+            "{request}"
+        );
+        assert!(request.contains("x-text: x/../../admin\r\n"), "{request}");
+        assert!(
+            request.contains("x-json: {\"kind\":\"a/../b?c#d\",\"limit\":3}\r\n"),
+            "{request}"
+        );
+
+        stream
+            .write_all(
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        stream.flush().unwrap();
+    });
+
+    let filter = || basic_client::types::DeepFilter {
+        kind: "a/../b?c#d".to_owned(),
+        limit: Some(3),
+    };
+    let client = basic_client::BlockingClient::new(&format!("http://{addr}/v1")).unwrap();
+    client
+        .serialize_content_params(
+            "x/../../admin".to_owned(),
+            filter(),
+            "x/../../admin".to_owned(),
+            filter(),
         )
         .unwrap();
 
@@ -2632,6 +2737,34 @@ fn a_missing_credential_is_a_typed_request_construction_error() {
     }
 }
 
+// `without_credential` on the async client reaches dispatch: a client derived from a registered
+// one by unregistering its only credential is back to reporting that scheme as missing, and the
+// client it was cloned from keeps its registration.
+#[test]
+fn without_credential_unregisters_a_scheme_on_a_derived_client() {
+    use std::future::Future;
+    let registered = basic_client::Client::new("http://127.0.0.1:1")
+        .unwrap()
+        .with_credential(
+            "bearer",
+            basic_client::Credential::Bearer(basic_client::SecretString::from("t0k")),
+        );
+    let derived = registered.clone().without_credential("bearer").without_credential("never");
+    assert!(registered.core().credential("bearer").is_some());
+    assert!(derived.core().credential("bearer").is_none());
+    let mut call = std::pin::pin!(derived.get_user("1", None));
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let std::task::Poll::Ready(result) = call.as_mut().poll(&mut cx) else {
+        panic!("a missing credential must fail before anything is sent");
+    };
+    match result {
+        Err(basic_client::Error::RequestConstruction(
+            basic_client::RequestError::MissingCredential { alternatives },
+        )) => assert_eq!(alternatives, [vec!["bearer"], vec!["apiKey"]]),
+        other => panic!("expected MissingCredential, got {other:?}"),
+    }
+}
+
 // The reason the payload is `Vec<Vec<&str>>` and not the flat `Vec<&str>` the issue proposed: an
 // alternative is a conjunction, and flattening loses which schemes must be presented *together*.
 // This is the only place a generated client is driven to produce that shape. It also pins the two
@@ -3257,6 +3390,49 @@ fn oas32_constructs_reach_the_wire() {
     let headers = oas32_client::ListRecordsStatus200Headers::from_response(&response).unwrap();
     assert_eq!(headers.x_total_count, 42);
     assert_eq!(response.into_inner()[0].id, "r1");
+
+    server.join().unwrap();
+}
+
+/// `in: querystring` with a JSON `content:` entry owns the whole query string: the serialized
+/// value, percent-encoded as one token, so none of its `&`, `=`, or `#` splits or ends the query.
+/// An absent optional value sends no query at all.
+#[test]
+fn a_json_querystring_parameter_is_one_encoded_query() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        for expected in [
+            "GET /lookup?%7B%22term%22%3A%22a%26b%3Dc%23d%22%7D HTTP/1.1",
+            "POST /lookup?%7B%22term%22%3A%22x%20y%22%7D HTTP/1.1",
+            "POST /lookup HTTP/1.1",
+        ] {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 4096];
+            let read = stream.read(&mut buf).unwrap();
+            let request = String::from_utf8_lossy(&buf[..read]);
+            let request_line = request.lines().next().unwrap();
+
+            assert_eq!(request_line, expected, "{request}");
+
+            stream
+                .write_all(
+                    b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            stream.flush().unwrap();
+        }
+    });
+
+    let query = |term: &str| oas32_client::types::Query { term: Some(term.to_owned()) };
+    let client = oas32_client::BlockingClient::new(&format!("http://{addr}")).unwrap();
+    client.lookup_records(query("a&b=c#d")).unwrap();
+    client
+        .lookup_records_maybe(Some(
+            oas32_client::LookupRecordsMaybeParams::default().filter(query("x y")),
+        ))
+        .unwrap();
+    client.lookup_records_maybe(None).unwrap();
 
     server.join().unwrap();
 }
@@ -4418,6 +4594,38 @@ paths:
           schema: { type: string }
       responses:
         "204": { description: No Content }
+  # `content:`-typed path and header parameters, one per codec. A path value is rendered through its
+  # media codec and then percent-encoded as one opaque segment, so a `/`, `?`, or `#` inside it (a
+  # JSON string member included) can never re-target the request; a header value is sent verbatim,
+  # as every header value is.
+  /content-params/{text}/{json}:
+    get:
+      operationId: serializeContentParams
+      parameters:
+        - name: text
+          in: path
+          required: true
+          content:
+            text/plain: { schema: { type: string } }
+        - name: json
+          in: path
+          required: true
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeepFilter" }
+        - name: X-Text
+          in: header
+          required: true
+          content:
+            text/plain: { schema: { type: string } }
+        - name: X-Json
+          in: header
+          required: true
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeepFilter" }
+      responses:
+        "204": { description: No Content }
   # An `application/x-www-form-urlencoded` body with an Encoding Object per property. `tags` opts
   # into RFC 6570 mode (`style` present ⇒ `contentType` is inert); `blob` stays in media-type mode
   # and is JSON-encoded because its declared content type says so.
@@ -5122,6 +5330,33 @@ servers:
       version:
         default: v1
 paths:
+  # `in: querystring` with a JSON `content:` entry: the whole query string is the serialized value,
+  # percent-encoded as one opaque token. Required and optional set the raw query differently (an
+  # initializer against a conditional assignment), so both are compile-verified.
+  /lookup:
+    get:
+      operationId: lookupRecords
+      parameters:
+        - name: filter
+          in: querystring
+          required: true
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Query"
+      responses:
+        "204": { description: No Content }
+    post:
+      operationId: lookupRecordsMaybe
+      parameters:
+        - name: filter
+          in: querystring
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Query"
+      responses:
+        "204": { description: No Content }
   /records:
     get:
       operationId: listRecords

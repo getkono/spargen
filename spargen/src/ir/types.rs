@@ -456,6 +456,12 @@ pub(crate) struct Field {
     /// XML representation hints (`xml.name` / `xml.attribute`) applied when the field's owning type
     /// is serialized as XML. Default (no hint) leaves the field's normal wire name and element form.
     pub(crate) xml: XmlField,
+    /// Whether no `properties` entry declares this field: the object carries it only because its
+    /// `required` names the key. Such a field has no metadata of its own, and its type is what the
+    /// object says of a key it does not declare, so an intersection that meets a declaration of
+    /// the property takes that declaration instead, and one that meets another object's
+    /// `additionalProperties` value schema narrows the field by it.
+    pub(crate) undeclared: bool,
 }
 
 /// The supported XML representation hints for a struct field, lowered from the OpenAPI `xml` object.

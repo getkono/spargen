@@ -94,7 +94,10 @@ the version it emits, and the idioms spargen handles.
   `RequestError::MissingCredential`, listing for each security alternative the schemes with no
   registered credential; a credential of a kind its scheme cannot carry as
   `RequestError::CredentialMismatch`; and a failed token provider as
-  `RequestError::CredentialProvider` — never a silent 401.
+  `RequestError::CredentialProvider` — never a silent 401. A failure inside the selected
+  alternative never falls through to a later one; `Client::without_credential(scheme)`
+  unregisters a scheme, so a client derived with it (`client.clone().without_credential("oauth")`)
+  selects the next fully registered alternative.
 - A closed error taxonomy, identical across all spargen output: request-construction
   (`Error::RequestConstruction`, carrying a `RequestError` — one of the three credential causes
   above, or `RequestError::Other` for every other cause), transport (`Error::Transport`), timeout

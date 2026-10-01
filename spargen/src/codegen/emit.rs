@@ -185,6 +185,17 @@ pub(crate) fn emit_client(api: &Api, names: &Names, options: &CodegenOptions) ->
                 self
             }
 
+            /// Unregister the credential for a named security scheme; a scheme never registered
+            /// is left as it is. Operations pick the first `security` alternative whose schemes
+            /// are all registered and never fall through past it when attaching fails, so this
+            /// is how a caller reaches a later alternative: `client.clone().without_credential(..)`
+            /// derives a client that no longer selects the earlier one.
+            #[must_use]
+            pub fn without_credential(mut self, scheme: &str) -> Self {
+                self.core.remove_credential(scheme);
+                self
+            }
+
             #(#methods)*
         }
     }
@@ -271,24 +282,37 @@ pub(crate) fn emit_operation(
         .params
         .iter()
         .any(|parameter| parameter.location == ParamLoc::QueryString);
-    let uses_json_querystring = operation.params.iter().any(|parameter| {
+    // Lowering admits at most one `in: querystring` parameter per operation, so this is that one.
+    let json_querystring = operation.params.iter().find(|parameter| {
         parameter.location == ParamLoc::QueryString
             && matches!(
                 &parameter.style,
                 crate::ir::ParamStyle::Content(MediaType::Json)
             )
     });
-    let raw_query_init = uses_querystring.then(|| {
-        if uses_json_querystring {
-            quote! { let mut #raw_query_binding: Option<String> = None; }
-        } else {
-            quote! { let #raw_query_binding: Option<String> = None; }
+    // Only a JSON whole-query value sets the raw query. A required one always does, so it is the
+    // binding's initializer rather than an assignment: a `None` it always overwrites would be an
+    // `unused_assignments` warning in every consumer's build.
+    let raw_query_init = uses_querystring.then(|| match json_querystring {
+        Some(parameter) if parameter.required => {
+            let ident = param_ident(parameter, crate::name::IdentRole::Param);
+            let encoded = json_querystring_tokens(quote! { &#ident });
+            quote! { let #raw_query_binding: Option<String> = Some(#encoded); }
         }
+        Some(_) => quote! { let mut #raw_query_binding: Option<String> = None; },
+        None => quote! { let #raw_query_binding: Option<String> = None; },
     });
     let required_querystring = operation
         .params
         .iter()
         .filter(|parameter| parameter.required && parameter.location == ParamLoc::QueryString)
+        // A required JSON whole-query value is already the raw query's initializer.
+        .filter(|parameter| {
+            !matches!(
+                &parameter.style,
+                crate::ir::ParamStyle::Content(MediaType::Json)
+            )
+        })
         .map(|parameter| {
             let ident = param_ident(parameter, crate::name::IdentRole::Param);
             querystring_param_tokens(
@@ -1131,6 +1155,13 @@ pub(crate) fn emit_blocking_client(
                 self
             }
 
+            /// Unregister the credential for a named security scheme (mirrors the async client).
+            #[must_use]
+            pub fn without_credential(mut self, scheme: &str) -> Self {
+                self.inner = self.inner.without_credential(scheme);
+                self
+            }
+
                 #(#methods)*
             }
         }
@@ -1754,11 +1785,16 @@ fn delimiter_tokens(delimiter: crate::ir::Delimiter) -> TokenStream {
 /// Render a path/header parameter value from a borrowed expression. Schema-typed parameters use
 /// their declared OpenAPI style; `content`-typed parameters retain their media codec.
 ///
-/// Path values are percent-encoded here, at serialization time. Splicing a raw value into the
-/// path template would let a value containing `/`, `?`, or `#` silently re-target the request.
+/// Path values are percent-encoded here, at serialization time, whether schema- or
+/// `content`-typed. Splicing a raw value into the path template would let a value containing `/`,
+/// `?`, or `#` silently re-target the request.
+///
+/// Every other location's `content` value is returned as the codec rendered it: a header or
+/// cookie is sent verbatim, and the query call site encodes the rendered value itself, so encoding
+/// it here too would encode it twice.
 fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStream) -> TokenStream {
     if let crate::ir::ParamStyle::Content(media) = &param.style {
-        return match media {
+        let rendered = match media {
             MediaType::Json => quote! {
                 serde_json::to_string(#value).map_err(support::Error::request_construction)?
             },
@@ -1769,6 +1805,13 @@ fn param_value_tokens(param: &crate::ir::Parameter, value: TokenStream) -> Token
                     .map_err(support::Error::request_construction)?
             },
         };
+        if param.location != ParamLoc::Path {
+            return rendered;
+        }
+        // The rendered representation is one opaque path segment value: every byte the path's
+        // encoding set does not admit is escaped, which for every path set includes `/`, `?`, `#`.
+        let encoding = percent_encoding_tokens(param);
+        return quote! { support::encode(&#rendered, #encoding) };
     }
     let explode = param.explode;
     let encoding = percent_encoding_tokens(param);
@@ -1841,6 +1884,18 @@ fn query_param_tokens(
     }
 }
 
+/// A JSON whole-query value: one opaque, fully-encoded token.
+fn json_querystring_tokens(value: TokenStream) -> TokenStream {
+    quote! {
+        support::encode(
+            &serde_json::to_string(#value).map_err(support::Error::request_construction)?,
+            support::PercentEncoding::Form,
+        )
+    }
+}
+
+/// Emit serialization of an optional `in: querystring` value, or a required one that is not JSON
+/// (a required JSON value initializes the raw query directly).
 fn querystring_param_tokens(
     param: &crate::ir::Parameter,
     value: TokenStream,
@@ -1848,14 +1903,10 @@ fn querystring_param_tokens(
     raw_query_binding: &crate::name::Ident,
 ) -> TokenStream {
     match &param.style {
-        // A JSON whole-query value is one opaque, fully-encoded token.
-        crate::ir::ParamStyle::Content(MediaType::Json) => quote! {
-            #raw_query_binding = Some(support::encode(
-                &serde_json::to_string(#value)
-                    .map_err(support::Error::request_construction)?,
-                support::PercentEncoding::Form,
-            ));
-        },
+        crate::ir::ParamStyle::Content(MediaType::Json) => {
+            let encoded = json_querystring_tokens(value);
+            quote! { #raw_query_binding = Some(#encoded); }
+        }
         crate::ir::ParamStyle::Content(MediaType::FormUrlEncoded) => quote! {
             #query_binding.extend(
                 support::serialize_form("", #value, true, support::PercentEncoding::Form)
