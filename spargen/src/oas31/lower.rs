@@ -5573,6 +5573,43 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(parameter.provenance.clone()),
             )
         };
+        if let Some((path, kind)) = uninhabited_parameter_part(&self.graph, ty) {
+            // `false`, or an `allOf` whose members meet empty, admits no value at all (#407).
+            // Nothing is nested, so "nested arrays or objects" would describe nothing the author
+            // wrote; name the schema that admits nothing instead. A union with such a member
+            // still admits its other members' values, so only the member is called uninhabited.
+            let at = format!("{}{path}", parameter.name);
+            let (message, remedy) = match kind {
+                Uninhabited::Whole => (
+                    format!(
+                        "parameter schema `{at}` is uninhabited: no value satisfies it (`false`, \
+                         or an `allOf` whose members conflict), so simple/form/deepObject \
+                         serialization has no token for it"
+                    ),
+                    format!("give `{at}` a schema some value satisfies, or remove it"),
+                ),
+                Uninhabited::Member => (
+                    format!(
+                        "parameter schema `{at}` has a `oneOf`/`anyOf` member that is \
+                         uninhabited: no value satisfies that member (`false`, or an `allOf` \
+                         whose members conflict), so simple/form/deepObject serialization has no \
+                         token for it"
+                    ),
+                    format!(
+                        "remove the uninhabited member from `{at}`, or give it a schema some \
+                         value satisfies"
+                    ),
+                ),
+            };
+            Diagnostic::error(
+                Code::UnsupportedParameterStyle,
+                parameter.provenance.clone(),
+            )
+            .message(message)
+            .remedy(remedy)
+            .emit(self.diags);
+            return None;
+        }
         if let Some(property) = unconstrained_parameter_property(&self.graph, ty) {
             // Most often a `required` name no `properties` entry declares, which is a required
             // field typed by `additionalProperties` and unconstrained without one (#140). An
@@ -7459,6 +7496,84 @@ fn unconstrained_parameter_property(graph: &TypeGraph, ty: Ty) -> Option<String>
         .iter()
         .find(|field| matches!(graph.get(field.ty.id).map(|d| &d.kind), Some(TypeKind::Any)))
         .map(|field| field.name.wire.clone())
+}
+
+/// How a parameter position fails to be inhabited, as [`uninhabited_parameter_part`] finds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Uninhabited {
+    /// The schema at the position admits no value: [`TypeKind::Never`], or a union every one of
+    /// whose members admits none.
+    Whole,
+    /// The schema is a union that admits some value, but at least one of its members admits none
+    /// (`oneOf: [{type: string}, false]`). The position itself is inhabited, so only the member
+    /// may be called uninhabited.
+    Member,
+}
+
+/// The path, relative to the parameter, of the first schema at a position simple/form/deepObject
+/// serialization would otherwise accept that is uninhabited, or is a union holding an uninhabited
+/// ([`TypeKind::Never`]) member, together with which of the two it is. [`parameter_shape_supported`]
+/// refuses both, because no value of the uninhabited schema has a token. The path is `""` for the
+/// parameter itself, `.name` for an object property, `.*` for its `additionalProperties`, `[]` for
+/// an array's items, and `[i]` for a tuple's. Only those positions are searched, so an uninhabited
+/// schema below a nested array or object stays reported as the nesting. `None` when there is no
+/// such schema.
+fn uninhabited_parameter_part(graph: &TypeGraph, ty: Ty) -> Option<(String, Uninhabited)> {
+    fn classify(graph: &TypeGraph, ty: Ty, visiting: &mut HashSet<TypeId>) -> Option<Uninhabited> {
+        if !visiting.insert(ty.id) {
+            return None;
+        }
+        let found = match graph.get(ty.id).map(|definition| &definition.kind) {
+            Some(TypeKind::Never) => Some(Uninhabited::Whole),
+            Some(TypeKind::Union(union)) => {
+                let members: Vec<_> = union
+                    .variants
+                    .iter()
+                    .map(|variant| classify(graph, variant.ty, visiting))
+                    .collect();
+                if !members.is_empty()
+                    && members
+                        .iter()
+                        .all(|member| *member == Some(Uninhabited::Whole))
+                {
+                    Some(Uninhabited::Whole)
+                } else if members.iter().any(Option::is_some) {
+                    Some(Uninhabited::Member)
+                } else {
+                    None
+                }
+            }
+            // A reservation's shape is unknown, so nothing proves it admits no value; it is left
+            // to `parameter_shape_supported`, which refuses it.
+            Some(TypeKind::Reserved) => None,
+            _ => None,
+        };
+        visiting.remove(&ty.id);
+        found
+    }
+    let mut visiting = HashSet::new();
+    if let Some(kind) = classify(graph, ty, &mut visiting) {
+        return Some((String::new(), kind));
+    }
+    let mut at = |path: String, ty: Ty| classify(graph, ty, &mut visiting).map(|kind| (path, kind));
+    match &graph.get(ty.id)?.kind {
+        TypeKind::Array(item) => at("[]".to_owned(), **item),
+        TypeKind::Tuple(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(index, item)| at(format!("[{index}]"), *item)),
+        TypeKind::Struct(object) => object
+            .fields
+            .iter()
+            .find_map(|field| at(format!(".{}", field.name.wire), field.ty))
+            .or_else(|| match &object.additional {
+                AdditionalProps::Typed(value) => at(".*".to_owned(), **value),
+                AdditionalProps::Deny | AdditionalProps::Allow => None,
+            }),
+        // The parameter itself was classified above; a reservation has no parts to search.
+        TypeKind::Reserved => None,
+        _ => None,
+    }
 }
 
 fn parameter_shape_supported(graph: &TypeGraph, ty: Ty) -> bool {

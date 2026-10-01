@@ -10855,6 +10855,116 @@ ADDITIONAL      responses:
     }
 }
 
+/// A `simple`/`form`/`deepObject` parameter whose schema, or a property or item schema at a
+/// position the style serializes, admits no value — `false`, or an `allOf` whose members give a
+/// property disjoint types — rejects with `E010` naming that schema as uninhabited (#407). Before,
+/// the only message was the generic "nested arrays or objects", which describes nothing the author
+/// wrote. An uninhabited schema below a genuinely nested object is still reported as the nesting,
+/// since that is the shape the style cannot serialize whatever the inner schema says.
+#[test]
+fn a_parameter_with_an_uninhabited_schema_is_reported_as_uninhabited() {
+    const TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: f
+          in: query
+          style: STYLE
+          schema: SCHEMA
+      responses:
+        "204": { description: No Content }
+"##;
+    let conflicting = "{ allOf: [{ properties: { a: { type: string } } }, \
+                       { properties: { a: { type: integer } } }] }";
+    let cases = [
+        ("deepObject", "false", "`f`"),
+        ("form", "false", "`f`"),
+        ("deepObject", conflicting, "`f.a`"),
+        ("form", conflicting, "`f.a`"),
+        (
+            "deepObject",
+            "{ type: object, additionalProperties: false, properties: { a: false } }",
+            "`f.a`",
+        ),
+        ("form", "{ type: array, items: false }", "`f[]`"),
+    ];
+    for (style, schema, named) in cases {
+        let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{style} {schema}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+            assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+            assert!(
+                messages[0].contains(named)
+                    && messages[0].contains("uninhabited")
+                    && !messages[0].contains("nested arrays or objects"),
+                "{style} {schema}: {messages:?}"
+            );
+        }
+    }
+    // A union with an uninhabited member still admits its other members' values, so it is not
+    // uninhabited; only the member is, and the message names that member rather than the union.
+    let partly = [
+        ("form", "{ oneOf: [{ type: string }, false] }", "`f`"),
+        (
+            "deepObject",
+            "{ type: object, properties: { a: { anyOf: [{ type: integer }, false] } } }",
+            "`f.a`",
+        ),
+    ];
+    for (style, schema, named) in partly {
+        let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+            assert_eq!(messages.len(), 1, "{schema}: {report:#?}");
+            assert!(
+                messages[0].contains(&format!(
+                    "{named} has a `oneOf`/`anyOf` member that is uninhabited"
+                )) && !messages[0].contains(&format!("{named} is uninhabited"))
+                    && !messages[0].contains("nested arrays or objects"),
+                "{schema}: {messages:?}"
+            );
+        }
+    }
+    // One `E010` per parameter, for the first cause in a fixed order: an uninhabited part, then
+    // an unconstrained property, then nesting. So an uninhabited property is reported while a
+    // nested sibling is not, and the sibling surfaces once the first is fixed.
+    let both = TEMPLATE.replace("STYLE", "deepObject").replace(
+        "SCHEMA",
+        "{ type: object, properties: { a: false, b: { type: object } } }",
+    );
+    for report in [generate(&both), check(&both)] {
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("`f.a` is uninhabited")
+                && !messages[0].contains("nested arrays or objects"),
+            "{messages:?}"
+        );
+    }
+    let nested = TEMPLATE.replace("STYLE", "deepObject").replace(
+        "SCHEMA",
+        "{ type: object, properties: { a: { type: object, properties: { b: false } } } }",
+    );
+    for report in [generate(&nested), check(&nested)] {
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("nested arrays or objects")
+                && !messages[0].contains("uninhabited"),
+            "{messages:?}"
+        );
+    }
+}
+
 #[test]
 fn matrix_and_label_path_styles_generate() {
     let spec = r##"
