@@ -8478,6 +8478,73 @@ fn a_union_beside_all_of_keeps_the_branches_and_null_the_composition_admits() {
     }
 }
 
+/// Issue #419: a union of two or more non-null branches plus `null` stays a nullable union when
+/// an untyped `allOf` member refines it, as it does when the same keywords sit beside a `$ref`
+/// to it or beside the union itself. The untyped keywords say nothing about `null`, so the union's
+/// `null` branch survives the refinement. The branch-by-branch meet built a new union without it,
+/// and a required property reaching the schema was typed `Pet`, refusing the `null` the
+/// description accepts.
+#[test]
+fn an_untyped_all_of_member_keeps_a_multi_branch_unions_null() {
+    let owner = "    Owner:\n      type: object\n      required: [p]\n      \
+                 properties: { p: { $ref: '#/components/schemas/Pet' } }\n";
+    let union =
+        "oneOf: [ { type: string }, { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]";
+    let cases = [
+        (
+            "an untyped `required` allOf member",
+            format!("    Pet:\n      allOf: [ {{ required: [kind] }} ]\n      {union}\n"),
+        ),
+        (
+            "an untyped `properties` allOf member",
+            format!(
+                "    Pet:\n      allOf: [ {{ properties: {{ name: {{ type: string }} }} }} ]\n      \
+                 {union}\n"
+            ),
+        ),
+        (
+            "two untyped allOf members",
+            format!(
+                "    Pet:\n      allOf: [ {{ required: [kind] }}, \
+                 {{ properties: {{ name: {{ type: string }} }} }} ]\n      {union}\n"
+            ),
+        ),
+        (
+            "the schema's own `required` beside an annotation-only allOf",
+            format!(
+                "    Pet:\n      required: [kind]\n      allOf: [ {{ description: a pet }} ]\n      \
+                 {union}\n"
+            ),
+        ),
+        (
+            "the same keywords beside a `$ref` to the union",
+            format!(
+                "    Pet:\n      $ref: '#/components/schemas/U'\n      required: [kind]\n    \
+                 U:\n      {union}\n"
+            ),
+        ),
+    ];
+    for (what, schemas) in cases {
+        let spec = with_schemas("3.1.0", &format!("{owner}{schemas}"));
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let types = types_module(&code);
+        let p = field_type(&types, "pub p:").unwrap_or_else(|| panic!("{what}: no `p`\n{types}"));
+        assert_eq!(
+            p, "Option<Pet>",
+            "{what}: `null` satisfies both, so `p` is nullable:\n{types}"
+        );
+        let variants = enum_variants(&types, "Pet");
+        assert_eq!(
+            variants.len(),
+            2,
+            "{what}: both non-null branches survive: {variants:?}\n{types}"
+        );
+        let checked = check(&spec);
+        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
+    }
+}
+
 /// Issue #419: an untyped `allOf` member beside a union is reported as the same keywords are
 /// beside a `$ref` to it. Reaching no branch of its category it constrains nothing the union
 /// accepts (`W011` at the member, and the union generates); object and array keywords together

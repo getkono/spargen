@@ -2543,12 +2543,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         let half = match &kind {
             TypeKind::Union(union) => {
-                let enclosing = self.narrowing_opens;
-                let mut ty = self.closed_narrowing(|ctx| {
-                    ctx.intersect_union(branch, union, refiner, hint, enclosing, reach)
-                })?;
-                ty.nullable = branch.nullable && scoped.admits_null;
-                return Ok(ty);
+                return self.meet_scoped_refiner_with_union(branch, union, refiner, hint, reach);
             }
             TypeKind::Struct(_) => {
                 reach.object |= scoped.object.is_some();
@@ -2685,7 +2680,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
     }
 
-    /// [`Self::meet_scoped_refiner`] for a `target` whose kind is `union`.
+    /// [`Self::meet_scoped_refiner`] for a `target` whose kind is `union`. The meet admits `null`
+    /// exactly when `target` and `refiner` both do: [`Self::intersect_union`] builds its result
+    /// from the non-null branches alone, and a union's `null` branch is its outer nullability,
+    /// so it is carried across here rather than lost with the rebuilt union.
     fn meet_scoped_refiner_with_union(
         &mut self,
         target: Ty,
@@ -2695,9 +2693,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         reach: &mut ScopeReach,
     ) -> Result<Ty, NoMeet> {
         let enclosing = self.narrowing_opens;
-        self.closed_narrowing(|ctx| {
+        let mut ty = self.closed_narrowing(|ctx| {
             ctx.intersect_union(target, union, refiner, hint, enclosing, reach)
-        })
+        })?;
+        ty.nullable = target.nullable && self.refiner_accepts_null(refiner);
+        Ok(ty)
     }
 
     /// Whether a union branch met with `refiner` may still be `null`, for a union whose every
