@@ -66,8 +66,20 @@ pub fn build_url_on(
 }
 
 /// Whether `segment` is a `.` or `..` path segment under the URL Standard: `.` or `%2E`, or
-/// `..`, `.%2E`, `%2E.` or `%2E%2E`, each `%2E` matched ASCII case-insensitively.
+/// `..`, `.%2E`, `%2E.` or `%2E%2E`, each `%2E` matched ASCII case-insensitively. The URL parser
+/// deletes every ASCII tab, LF and CR before it reads a segment, so `.\t.` is `..` to it; they are
+/// deleted here first too.
 fn is_dot_segment(segment: &str) -> bool {
+    let stripped: String;
+    let segment = if segment.contains(['\t', '\n', '\r']) {
+        stripped = segment
+            .chars()
+            .filter(|c| !matches!(c, '\t' | '\n' | '\r'))
+            .collect();
+        stripped.as_str()
+    } else {
+        segment
+    };
     let rest = segment
         .strip_prefix('.')
         .or_else(|| strip_encoded_dot(segment));
@@ -1593,6 +1605,44 @@ mod tests {
         ".", "%2e", "%2E", "..", ".%2e", ".%2E", "%2e.", "%2E.", "%2e%2e", "%2E%2E", "%2e%2E",
         "%2E%2e",
     ];
+
+    /// Dot segments spelled with the ASCII tab, LF and CR the URL parser deletes before it reads
+    /// a segment, so `set_path` removes each of them as it does `.` or `..`.
+    const WHITESPACE_DOT_SEGMENTS: [&str; 9] = [
+        ".\t.", "..\n", "\r..", ".\n", "\t.", "%2\tE", ".%2\re", "%\n2e%2E", "\t.\n.\r",
+    ];
+
+    #[test]
+    fn dot_segments_spelled_with_tab_lf_or_cr_are_what_set_path_removes() {
+        let mut url = reqwest::Url::parse("https://example.com/").unwrap();
+        for segment in WHITESPACE_DOT_SEGMENTS {
+            url.set_path(&format!("/a/{segment}/b"));
+            assert!(
+                url.path() == "/b" || url.path() == "/a/b",
+                "{segment:?}: {}",
+                url.path()
+            );
+            assert!(is_dot_segment(segment), "{segment:?}");
+        }
+        // Deleting the whitespace leaves no dot segment, so these are not refused.
+        for segment in ["\t", ".\t..", "a\n.", "%2\tE%2E."] {
+            assert!(!is_dot_segment(segment), "{segment:?}");
+        }
+    }
+
+    #[test]
+    fn build_url_refuses_template_text_that_forms_a_dot_segment_once_whitespace_is_deleted() {
+        let core = core_at("https://api.example.com/v1/");
+        for segment in WHITESPACE_DOT_SEGMENTS {
+            let error =
+                build_url(&core, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
+            assert!(
+                matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+                "{segment:?}: {error:?}"
+            );
+            build_url(&core, &format!("/users/{segment}"), &[]).expect_err(segment);
+        }
+    }
 
     #[test]
     fn dot_segment_spellings_are_exactly_what_set_path_removes() {
