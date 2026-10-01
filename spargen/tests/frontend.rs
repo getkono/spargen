@@ -7928,6 +7928,177 @@ fn a_discriminator_mapping_naming_every_member_in_any_spelling_generates_its_tag
     assert!(checked.diagnostics().is_empty(), "{checked:#?}");
 }
 
+/// A document whose `components.schemas` are `schemas`, beside a declared `Cat`.
+fn with_schemas(version: &str, schemas: &str) -> String {
+    format!(
+        "openapi: {version}\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         paths: {{}}\n\
+         components:\n  \
+         schemas:\n{schemas}    \
+         Cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }} }} }}\n"
+    )
+}
+
+/// The places a `discriminator` can sit with no `oneOf`/`anyOf` of its own, each with the pointer
+/// of the Discriminator Object. `mapping` is the body of its `mapping`, spliced in at the depth
+/// each placement needs.
+fn standalone_discriminators(mapping: &str) -> Vec<(&'static str, String, &'static str)> {
+    vec![
+        (
+            "allOf parent",
+            with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pet:\n      type: object\n      required: [kind]\n      \
+                     properties: {{ kind: {{ type: string }} }}\n      \
+                     discriminator:\n        propertyName: kind\n        \
+                     mapping: {{ {mapping} }}\n    \
+                     Kitten:\n      allOf:\n        - $ref: '#/components/schemas/Pet'\n        \
+                     - {{ properties: {{ meow: {{ type: boolean }} }} }}\n"
+                ),
+            ),
+            "/components/schemas/Pet/discriminator",
+        ),
+        (
+            "inline allOf member",
+            with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pet:\n      allOf:\n        \
+                     - type: object\n          properties: {{ kind: {{ type: string }} }}\n          \
+                     discriminator: {{ propertyName: kind, mapping: {{ {mapping} }} }}\n"
+                ),
+            ),
+            "/components/schemas/Pet/allOf/0/discriminator",
+        ),
+        (
+            "beside a $ref",
+            with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pet:\n      $ref: '#/components/schemas/Cat'\n      \
+                     discriminator: {{ propertyName: kind, mapping: {{ {mapping} }} }}\n"
+                ),
+            ),
+            "/components/schemas/Pet/discriminator",
+        ),
+        (
+            "on a union's $ref member",
+            with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pet:\n      oneOf:\n        \
+                     - $ref: '#/components/schemas/Cat'\n          \
+                     discriminator: {{ propertyName: kind, mapping: {{ {mapping} }} }}\n        \
+                     - {{ type: string }}\n"
+                ),
+            ),
+            "/components/schemas/Pet/oneOf/0/discriminator",
+        ),
+        (
+            "multi-type array",
+            with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pet:\n      type: [object, string]\n      \
+                     discriminator: {{ propertyName: kind, mapping: {{ {mapping} }} }}\n"
+                ),
+            ),
+            "/components/schemas/Pet/discriminator",
+        ),
+    ]
+}
+
+/// Issue #264: a `discriminator` on a schema with no `oneOf`/`anyOf` of its own — the `allOf`
+/// polymorphism form above all — was ignored with no diagnostic. spargen dispatches by tag only
+/// across a union's members, and no keyword of a parent lists the children that reach it through
+/// `allOf`, so the form is not generated: the schema lowers by its other keywords, and the
+/// discriminator is acknowledged as `W011` at its own site. A mapping naming declared schemas is
+/// otherwise fine — with no union there is no membership to check, so no `E007` either.
+#[test]
+fn a_discriminator_beside_no_union_is_w011_at_the_discriminator() {
+    for (what, spec, pointer) in standalone_discriminators("cat: Cat") {
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: {report:#?}\n{spec}"
+        );
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            let w011: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .collect();
+            assert_eq!(
+                w011.len(),
+                1,
+                "{what} via {entry}: one W011, at the discriminator: {report:#?}"
+            );
+            assert_eq!(w011[0].pointer.as_str(), pointer, "{what} via {entry}");
+            assert!(
+                w011[0].message.contains("`discriminator`"),
+                "{what} via {entry}: {:?}",
+                w011[0].message
+            );
+            assert!(
+                !has_code(report, Code::UnresolvedRef) && !has_code(report, Code::NonDisjointUnion),
+                "{what} via {entry}: every mapping target is declared: {report:#?}"
+            );
+        }
+        assert!(
+            !code.contains("\"cat\""),
+            "{what}: an inert discriminator dispatches on nothing:\n{code}"
+        );
+    }
+}
+
+/// The #124 rule, carried to the discriminator #264 found unchecked: a `mapping` or
+/// `defaultMapping` value naming no schema is an unresolved reference (`E004`) at the entry,
+/// whether or not a union sits beside the discriminator. The `allOf`-parent case is the issue's
+/// own reproduction, which `check` used to call clean.
+#[test]
+fn a_discriminator_beside_no_union_naming_an_undeclared_schema_is_e004_at_the_entry() {
+    let mut cases: Vec<_> =
+        standalone_discriminators("cat: Cat, c: '#/components/schemas/MissingC'")
+            .into_iter()
+            .map(|(what, spec, pointer)| (what, spec, format!("{pointer}/mapping/c")))
+            .collect();
+    cases.push((
+        "3.2 defaultMapping",
+        with_schemas(
+            "3.2.0",
+            "    Pet:\n      type: object\n      \
+             discriminator: { propertyName: kind, defaultMapping: MissingC }\n",
+        ),
+        "/components/schemas/Pet/discriminator/defaultMapping".to_owned(),
+    ));
+    for (what, spec, pointer) in cases {
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::UnresolvedRef
+                        && d.pointer.as_str() == pointer
+                        && d.message.contains("MissingC")),
+                "{what} via {entry}: E004 must sit at `{pointer}` and name `MissingC`: \
+                 {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::NonDisjointUnion),
+                "{what} via {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
 /// The dispatch a discriminated union `name` emits, read back from the generated source: per
 /// decode arm, the variant and every tag its pattern matches, and per encode arm, the variant and
 /// the tag serialization writes (`None` for one it writes no tag for).
