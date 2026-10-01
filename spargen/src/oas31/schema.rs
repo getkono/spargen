@@ -206,9 +206,13 @@ pub(crate) enum JsonType {
 
 /// An OAS `discriminator` object, consumed by discriminated-union lowering to build an
 /// internally-tagged enum: `property_name` is the serde tag field and `mapping` supplies each
-/// variant's tag value (falling back to the variant's `$ref` component name).
+/// variant's tag value (falling back to the variant's `$ref` component name). One on a schema with
+/// no `oneOf`/`anyOf` of its own selects nothing; lowering still resolves its targets and reports
+/// it as `W011`.
 #[derive(Debug, Clone)]
 pub(crate) struct Discriminator {
+    /// Where the Discriminator Object itself sits (`…/discriminator`).
+    pub(crate) provenance: Provenance,
     /// `propertyName`.
     pub(crate) property_name: String,
     /// `mapping`: discriminator value → the schema it names.

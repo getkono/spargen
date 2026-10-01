@@ -1288,6 +1288,7 @@ fn parse_discriminator(
         return None;
     }
     Some(Discriminator {
+        provenance: provenance(pointer, value),
         property_name: property_name.to_owned(),
         default_mapping,
         mapping,

@@ -582,6 +582,15 @@ fn is_schema_component_name(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
+/// How a diagnostic names one Discriminator Object target: the `mapping` entry with tag `tag`, or
+/// `defaultMapping` for `None`.
+fn discriminator_entry(tag: Option<&String>) -> String {
+    match tag {
+        Some(tag) => format!("`discriminator.mapping` entry `{tag}`"),
+        None => "`discriminator.defaultMapping`".to_owned(),
+    }
+}
+
 /// A union's Discriminator Object resolved against the union's own members: every `mapping`
 /// entry's tag with the index (into the union's real, non-null members) of the member it names, in
 /// document order, and the member `defaultMapping` names. Built by
@@ -826,6 +835,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let mut sibling = schema.clone();
             sibling.reference = None;
             if !schema_has_shape_constraint(&sibling) {
+                // The alias never reaches `lower_schema_inner`, which reports this elsewhere.
+                self.diagnose_standalone_discriminator(schema);
                 if let Some(default) = &schema.default {
                     let at = crate::diag::Provenance::new(
                         schema.provenance.pointer.push("default"),
@@ -1512,6 +1523,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn lower_schema_inner(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        // Before any arm can return: a discriminator beside no union is dropped by every one of
+        // them (a `$ref` with no other sibling, `allOf`, a type array, a plain object).
+        self.diagnose_standalone_discriminator(schema);
         if let Some(value) = schema.boolean {
             let kind = if value {
                 TypeKind::Any
@@ -2636,6 +2650,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let ty = if schema_has_shape_constraint(&sibling) {
                 self.lower_schema_or(member, hint)?
             } else {
+                // The member itself never reaches `lower_schema_inner`, which reports this.
+                self.diagnose_standalone_discriminator(schema);
                 self.ensure_component(name, schema.reference.as_deref(), &schema.provenance)?
             };
             return Some((ty, Some(name.to_owned())));
@@ -2691,29 +2707,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         };
         let mut failed = false;
         for (tag, target) in entries {
-            let entry = match tag {
-                Some(tag) => format!("`discriminator.mapping` entry `{tag}`"),
-                None => "`discriminator.defaultMapping`".to_owned(),
-            };
+            let entry = discriminator_entry(tag);
             let value = &target.value;
-            let reference = if is_schema_component_name(value) {
-                format!("#/components/schemas/{value}")
-            } else {
-                value.clone()
-            };
-            let Some(identity) = self
-                .schema_reference_identity(&reference, &target.provenance)
-                .filter(|(file, pointer)| self.resolver.node_at(*file, pointer).is_some())
-            else {
-                // E004 case: discriminator-target
-                Diagnostic::error(Code::UnresolvedRef, target.provenance.clone())
-                    .message(format!(
-                        "{entry} names `{value}`, which is not a schema in the loaded description"
-                    ))
-                    .remedy(
-                        "declare the schema, correct the name or reference, or remove the entry",
-                    )
-                    .emit(self.diags);
+            let Some(identity) = self.discriminator_target_identity(&entry, target) else {
                 failed = true;
                 continue;
             };
@@ -2745,6 +2741,89 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
         (!failed).then_some(resolved)
+    }
+
+    /// The `file#pointer` of the schema one Discriminator Object `target` names, or `E004` at the
+    /// target when the loaded description holds no schema there. `entry` describes the target in
+    /// the message ([`discriminator_entry`]).
+    ///
+    /// A value is a component name or a URI reference. The specification recommends reading a value
+    /// that could be either as a name, and a name is exactly a Components Object key, so a value
+    /// made only of key characters is `#/components/schemas/<value>` and anything else is a
+    /// reference, written relative to the file the discriminator sits in.
+    fn discriminator_target_identity(
+        &mut self,
+        entry: &str,
+        target: &super::schema::DiscriminatorTarget,
+    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+        let value = &target.value;
+        let reference = if is_schema_component_name(value) {
+            format!("#/components/schemas/{value}")
+        } else {
+            value.clone()
+        };
+        let identity = self
+            .schema_reference_identity(&reference, &target.provenance)
+            .filter(|(file, pointer)| self.resolver.node_at(*file, pointer).is_some());
+        if identity.is_none() {
+            // E004 case: discriminator-target
+            Diagnostic::error(Code::UnresolvedRef, target.provenance.clone())
+                .message(format!(
+                    "{entry} names `{value}`, which is not a schema in the loaded description"
+                ))
+                .remedy("declare the schema, correct the name or reference, or remove the entry")
+                .emit(self.diags);
+        }
+        identity
+    }
+
+    /// Give a `discriminator` on a schema with no `oneOf`/`anyOf` of its own a disposition (#264).
+    ///
+    /// spargen dispatches by discriminator only across the members of the union it sits beside,
+    /// so here it selects nothing: the schema lowers by its other keywords, and the `allOf`
+    /// polymorphism form — children reaching this schema through `allOf`, decoded by the tag into
+    /// whichever child it names — is not generated, since no keyword of the parent lists its
+    /// children. That is `W011` at the Discriminator Object. Every `mapping` and `defaultMapping`
+    /// value is still a reference to a schema, so each is resolved as a union's would be, and one
+    /// naming no schema is `E004` at the entry; with no union, there is no membership to check.
+    /// Called wherever a schema is lowered or gathered as an `allOf` member by its keywords, and
+    /// idempotent there: a repeated report at one site is the same diagnostic, which
+    /// [`Diagnostics`] keeps once.
+    fn diagnose_standalone_discriminator(&mut self, schema: &Schema) {
+        let Some(discriminator) = &schema.discriminator else {
+            return;
+        };
+        if !schema.one_of.is_empty() || !schema.any_of.is_empty() {
+            return;
+        }
+        let entries = discriminator
+            .mapping
+            .iter()
+            .map(|(tag, target)| (Some(tag), target))
+            .chain(
+                discriminator
+                    .default_mapping
+                    .iter()
+                    .map(|target| (None, target)),
+            );
+        for (tag, target) in entries {
+            self.discriminator_target_identity(&discriminator_entry(tag), target);
+        }
+        // W011 case: standalone-discriminator
+        Diagnostic::warning(
+            Code::DeclarationHasNoEffect,
+            discriminator.provenance.clone(),
+        )
+        .message(
+            "this `discriminator` has no `oneOf` or `anyOf` beside it, so it selects nothing: the \
+             schema lowers by its other keywords alone, and the `allOf` polymorphism form, which \
+             decodes a payload into whichever child schema its tag names, is not generated",
+        )
+        .remedy(
+            "list every schema the tag can select in a `oneOf` beside the discriminator, or remove \
+             the discriminator",
+        )
+        .emit(self.diags);
     }
 
     /// The `file#pointer` a schema `$ref` written at `at` resolves to, answered the way lowering
@@ -3564,6 +3643,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             SchemaOr::Schema(schema) => schema.as_ref(),
         };
+        // An inline member, or a non-component target expanded in place, is read by its keywords
+        // here rather than lowered through `lower_schema_inner`, which would report this.
+        self.diagnose_standalone_discriminator(schema);
 
         if let Some(reference) = &schema.reference {
             self.gather_ref_target(schema, reference, hint, out)?;
