@@ -141,15 +141,22 @@ red with nothing committed. Four things hold the audit to the committed artefact
   filtered out at every feature scope. Cargo locks the target of a weak `dep?/feature` without
   enabling it — reqwest's `quinn?/ring` put quinn, `rand 0.10` and a yanked `chacha20` into
   `Cargo.lock`, 17 of its 278 entries that cargo-deny never checked (#187). So `deny` also runs
-  `cargo audit --deny warnings` over **every entry** of each committed lockfile (and
-  `deny-published` over the shipped one), with `--ignore` exactly `deny.toml`'s `[advisories]
+  `cargo audit --deny warnings` over **every entry** of each lockfile — the root one as
+  committed, each example's after the unlocked `cargo fetch` below re-resolves it (rewriting at
+  least its stale `spargen` stamp), so as the example gates resolve it (and `deny-published`
+  over the shipped one), with `--ignore` exactly `deny.toml`'s `[advisories]
   ignore`; `the_lockfile_audit_reads_every_committed_lockfile` holds that shape. A yank or advisory
   on such an entry is fixed as "anywhere else" below: nothing compiles it.
 - Each run records the advisory-database revision it judged against: `cargo deny fetch db` clones
   RustSec into `deny.toml`'s `db-path` (`target/advisory-dbs/`), the next command logs that
   checkout's commit, and every `cargo audit` reads it with `--no-fetch`. A past green is read
   against that logged revision, not against today's database. (The `cargo deny check`s after it
-  fetch again, so theirs is that revision or a later one.)
+  fetch again, so theirs is that revision or a later one.) `--no-fetch` also stops cargo-audit
+  updating the crates.io index, so its yank check reads only Cargo's local index cache, which is
+  empty on a fresh runner: it printed "couldn't check if the package is yanked" for every entry
+  and exited 0 (#414). So each `cargo audit` follows a `cargo fetch` of its workspace, which
+  refreshes that cache for every entry, and ends in a guard (`AUDIT_GUARD` in
+  `corpus_manifest.rs`) that fails an audit which exited 0 but printed an error or warning.
 - `deny.yml` runs it daily on `master` (and on `workflow_dispatch`), so the repository finds a new
   advisory before a contributor's unrelated pull request does. GitHub sends a failed scheduled run
   to whoever last changed the workflow's `cron`, and disables a schedule after 60 days without

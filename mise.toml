@@ -80,15 +80,29 @@ run = [
 # just fetched into `deny.toml`'s `db-path`, without fetching, after the command that prints that
 # checkout's commit: the log of every run names the database revision its advisory verdict was
 # reached against. (The `cargo deny check`s after it fetch again, so theirs is that revision or a
-# later one.) `the_lockfile_audit_reads_every_committed_lockfile` pins this shape.
+# later one.) `--no-fetch` also stops cargo-audit updating the crates.io index (it updates the index
+# only when it fetches the database), so its yank check reads only Cargo's local sparse-index
+# cache, and on an empty cache, as on every CI runner, it printed "couldn't check if the package is
+# yanked" for every entry and exited 0 (#414). So a `cargo fetch` of each lockfile's workspace
+# refreshes that cache from the registry for every entry first (`--locked` where the audit beside
+# it is), and each audit fails when it printed any error or warning, so a yank it could not check
+# fails the run instead of passing it. An example's fetch is unlocked, like its `cargo deny check`,
+# so it rewrites that example's lockfile in place before the audit reads it (at least the stale
+# `spargen` stamp): the root audit reads the committed `Cargo.lock`, and each example audit reads
+# its lockfile as the example gates resolve it, not the committed bytes. Its stderr goes through `target/cargo-audit.stderr`, which is
+# printed either way. `the_lockfile_audit_reads_every_committed_lockfile` pins this shape.
 description = "Supply-chain audit (licenses, advisories, bans, sources) of every committed lockfile"
 run = [
   "cargo deny fetch db",
   "git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'",
-  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file Cargo.lock",
-  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/github-api/Cargo.lock",
-  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore/Cargo.lock",
-  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore-macro/Cargo.lock",
+  "cargo fetch --locked",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file Cargo.lock 2>target/cargo-audit.stderr || { cat target/cargo-audit.stderr >&2; exit 1; }; cat target/cargo-audit.stderr >&2; if grep -qE 'error|warning' target/cargo-audit.stderr; then echo 'cargo audit exited 0 but printed an error or warning above, so it did not check every entry' >&2; exit 1; fi",
+  "cargo fetch --manifest-path examples/github-api/Cargo.toml",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/github-api/Cargo.lock 2>target/cargo-audit.stderr || { cat target/cargo-audit.stderr >&2; exit 1; }; cat target/cargo-audit.stderr >&2; if grep -qE 'error|warning' target/cargo-audit.stderr; then echo 'cargo audit exited 0 but printed an error or warning above, so it did not check every entry' >&2; exit 1; fi",
+  "cargo fetch --manifest-path examples/petstore/Cargo.toml",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore/Cargo.lock 2>target/cargo-audit.stderr || { cat target/cargo-audit.stderr >&2; exit 1; }; cat target/cargo-audit.stderr >&2; if grep -qE 'error|warning' target/cargo-audit.stderr; then echo 'cargo audit exited 0 but printed an error or warning above, so it did not check every entry' >&2; exit 1; fi",
+  "cargo fetch --manifest-path examples/petstore-macro/Cargo.toml",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file examples/petstore-macro/Cargo.lock 2>target/cargo-audit.stderr || { cat target/cargo-audit.stderr >&2; exit 1; }; cat target/cargo-audit.stderr >&2; if grep -qE 'error|warning' target/cargo-audit.stderr; then echo 'cargo audit exited 0 but printed an error or warning above, so it did not check every entry' >&2; exit 1; fi",
   "cargo deny --all-features --locked check",
   "cargo deny --manifest-path examples/github-api/Cargo.toml --config deny.toml --all-features check",
   "cargo deny --manifest-path examples/petstore/Cargo.toml --config deny.toml --all-features check",
@@ -108,7 +122,8 @@ run = [
 # failing one on it would only block the release that carries the fix.
 # `the_published_lockfile_audit_covers_every_shipped_binary` pins its shape. As in `deny`, cargo-deny
 # checks only the activated graph, so `cargo audit` also reads every entry of the shipped lockfile
-# (`cargo install --locked` warns on a yanked one), against the printed database revision (#187).
+# (`cargo install --locked` warns on a yanked one), against the printed database revision (#187),
+# after a `cargo fetch` refreshes the index cache its yank check reads, as in `deny` (#414).
 description = "Advisory audit of the Cargo.lock the latest spargen release ships on crates.io"
 run = [
   '''
@@ -123,7 +138,8 @@ echo "auditing the Cargo.lock published in spargen $version"
 ''',
   "cargo deny fetch db",
   "git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'",
-  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file target/deny-published/spargen/Cargo.lock",
+  "cargo fetch --locked --manifest-path target/deny-published/spargen/Cargo.toml",
+  "cargo audit --db target/advisory-dbs/advisory-db-3157b0e258782691 --no-fetch --deny warnings --file target/deny-published/spargen/Cargo.lock 2>target/cargo-audit.stderr || { cat target/cargo-audit.stderr >&2; exit 1; }; cat target/cargo-audit.stderr >&2; if grep -qE 'error|warning' target/cargo-audit.stderr; then echo 'cargo audit exited 0 but printed an error or warning above, so it did not check every entry' >&2; exit 1; fi",
   "cargo deny --manifest-path target/deny-published/spargen/Cargo.toml --config deny.toml --all-features --locked check advisories",
 ]
 
