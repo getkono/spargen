@@ -3162,8 +3162,8 @@ serde_json.workspace = true
         // `optional` is read from the member, so a member that adds `optional = true` to a crate
         // generated code names unconditionally must be rejected — the inheritance resolving is not
         // the same thing as the declaration being acceptable. Every other test that reaches this
-        // rule declares its crate directly, so nothing held it on the inheritance path, which is
-        // the path this branch is about.
+        // rule declares its crate directly, so this is the one that holds it on the inheritance
+        // path.
         let messages = inherited_reqwest_default_feature_diagnostics(
             RootDefaults::Off,
             "reqwest = { workspace = true, optional = true }",
@@ -4142,9 +4142,9 @@ serde_json.workspace = true
 
     #[test]
     fn a_root_declaring_optional_does_not_make_an_inherited_crate_optional() {
-        // The `package` rule reads both the member's and the root's declaration, and this branch
-        // added the root half deliberately. The `optional` rule reads the member only, and nothing
-        // held it there: making it read the root as well leaves every other test green.
+        // The `package` rule reads both the member's and the root's declaration. The `optional`
+        // rule reads the member only, and this test is what holds it there: making it read the
+        // root as well leaves every other test green.
         //
         // Like `a_self_declared_workspace_wins_over_package_workspace`, this pins spargen's answer
         // to a manifest **Cargo will not load** — `optional` is not an accepted key in
