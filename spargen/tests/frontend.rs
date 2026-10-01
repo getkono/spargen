@@ -8304,11 +8304,13 @@ fn a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry() {
 /// Issue #403: a member that is no schema component — inline, or a pointer into another schema —
 /// has no implicit discriminator value ("inline `oneOf` or `anyOf` subschemas are not considered").
 /// With no `mapping` entry naming it, the generated client dispatched on a tag spargen made up —
-/// the pointer text `Envelope/properties/cat`, or the hint `PetVariant1` — which no server sends.
-/// No discriminator value selects such a member, so it is `E007` at the union, in `check` as in
-/// `generate`; a `mapping` entry naming it, or `defaultMapping` falling back to it, reaches it.
+/// the pointer text `Envelope/properties/cat`, or the hint `PetVariant1` — which no server sends,
+/// and serialized that tag into the payload. No discriminator value selects such a member, so the
+/// discriminator dispatches nothing: `W011` at the discriminator, in `check` as in `generate`, and
+/// the union is decoded by its members' schemas with no tag dispatch at all. A `mapping` entry
+/// naming it, or `defaultMapping` falling back to it, reaches it and keeps the tag dispatch.
 #[test]
-fn a_member_with_no_component_name_and_no_mapping_entry_is_e007() {
+fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag() {
     let spec = |members: &str, discriminator: &str, version: &str| {
         format!(
             "openapi: {version}\n\
@@ -8331,31 +8333,60 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_e007() {
                 - { $ref: '#/components/schemas/Dog' }\n";
     let inline = "        - { $ref: '#/components/schemas/Dog' }\n        \
                   - { type: object, required: [kind, fins], properties: { kind: { type: string }, fins: { type: integer } } }\n";
-    for (what, members, member) in [("deep pointer", deep, 0), ("inline", inline, 1)] {
+    // GitHub's `POST /repos/{owner}/{repo}/check-runs` body: two inline members, each pinning the
+    // discriminating property with an `enum` the discriminator never reads.
+    let both_inline = "        - { type: object, required: [kind, done], properties: { kind: { enum: [completed] }, done: { type: boolean } } }\n        \
+                       - { type: object, properties: { kind: { enum: [queued, in_progress] } } }\n";
+    for (what, members, subject) in [
+        (
+            "deep pointer",
+            deep,
+            "union member 0 is no schema component",
+        ),
+        ("inline", inline, "union member 1 is no schema component"),
+        (
+            "both inline",
+            both_inline,
+            "union members 0, 1 are no schema components",
+        ),
+    ] {
         let spec = spec(members, "", "3.1.0");
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
+        let (generated, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
                 report.outcome(),
                 Outcome::Rejected,
                 "{what} {entry}: {report:#?}"
             );
-            let e007: Vec<_> = report
+            assert!(
+                !has_code(&report, Code::NonDisjointUnion),
+                "{what} {entry}: {report:#?}"
+            );
+            let w011: Vec<_> = report
                 .diagnostics()
                 .iter()
-                .filter(|d| d.code == Code::NonDisjointUnion)
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
                 .collect();
-            assert_eq!(e007.len(), 1, "{what} {entry}: {report:#?}");
+            assert_eq!(w011.len(), 1, "{what} {entry}: {report:#?}");
             assert_eq!(
-                e007[0].pointer.as_str(),
-                "/components/schemas/Pet",
+                w011[0].pointer.as_str(),
+                "/components/schemas/Pet/discriminator",
                 "{what} {entry}: {report:#?}"
             );
             assert!(
-                e007[0]
-                    .message
-                    .contains(&format!("union member {member} is no schema component")),
+                w011[0].message.contains(subject),
                 "{what} {entry}: {report:#?}"
             );
+        }
+        // No tag dispatch, so no tag at all: neither the pointer text nor a variant hint.
+        let de_impl = code
+            .split("impl<'de> serde::Deserialize<'de> for Pet {")
+            .nth(1)
+            .unwrap_or_else(|| panic!("{what}: no Deserialize for Pet\n{code}"));
+        let de_impl = de_impl.split("\nimpl").next().unwrap_or(de_impl);
+        assert!(!de_impl.contains("match tag"), "{what}\n{de_impl}");
+        for invented in ["\"Envelope/properties/cat\"", "\"PetVariant"] {
+            assert!(!code.contains(invented), "{what}: {invented}\n{code}");
         }
     }
 
@@ -8647,8 +8678,9 @@ components:
 /// deep pointers resolved, and it keeps the output it had: each member is named from its pointer
 /// text, and a `mapping` value spelled the same way resolves, relative to the sub-file it is
 /// written in, to that member and supplies its tag. A deep pointer is no schema component, so
-/// without that `mapping` the members have no tag at all, and the union is refused (`E007`, issue
-/// #403) rather than dispatched on the pointer text, which no server sends.
+/// without that `mapping` the members have no tag at all (issue #403): the discriminator
+/// dispatches nothing (`W011`) rather than on the pointer text, which no server sends, and the
+/// members keep their names.
 #[test]
 fn a_sub_file_union_of_deep_pointer_members_keeps_its_names_and_mapping() {
     let root = r##"
@@ -8720,22 +8752,35 @@ MAPPING
     }
     assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
 
-    let (_temp, _dir, generated, checked) = write("");
+    let (_temp, dir, generated, checked) = write("");
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        let e007: Vec<_> = report
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::NonDisjointUnion),
+            "{entry}: {report:#?}"
+        );
+        let w011: Vec<_> = report
             .diagnostics()
             .iter()
-            .filter(|d| d.code == Code::NonDisjointUnion)
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
             .collect();
-        assert_eq!(e007.len(), 1, "{entry}: {report:#?}");
+        assert_eq!(w011.len(), 1, "{entry}: {report:#?}");
         assert!(
-            e007[0]
+            w011[0]
                 .message
-                .contains("union member 0 is no schema component"),
+                .contains("union members 0, 1 are no schema components"),
             "{entry}: {report:#?}"
         );
     }
+    let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
+    for expected in [
+        "EnvelopePropertiesCat(Box<Cat>)",
+        "EnvelopePropertiesDog(Box<Dog>)",
+    ] {
+        assert!(code.contains(expected), "{expected}\n{code}");
+    }
+    assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
+    assert!(!code.contains("\"Envelope/properties/dog\""), "{code}");
 }
 
 #[test]

@@ -2291,7 +2291,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     Some(variant)
                 }
             };
-            let discriminated = self.discriminated_strategy(
+            let mut discriminated = self.discriminated_strategy(
                 &variants,
                 &ref_names,
                 &variant_members,
@@ -2306,20 +2306,45 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 ..
             }) = &discriminated
             {
-                let unselectable = (0..variants.len()).find(|&index| {
-                    categories[index].is_none()
-                        && tags[index].is_empty()
-                        && *default_variant != Some(index)
-                });
-                if let Some(index) = unselectable {
+                let unselectable: Vec<usize> = (0..variants.len())
+                    .filter(|&index| {
+                        categories[index].is_none()
+                            && tags[index].is_empty()
+                            && *default_variant != Some(index)
+                    })
+                    .collect();
+                let component = |index: usize| {
+                    ref_names[index]
+                        .as_deref()
+                        .filter(|name| is_schema_component_name(name))
+                };
+                // A component member whose implicit value a mapping key claims for another
+                // member: the document routes that member's own name elsewhere, which no
+                // dispatch can honour.
+                if let Some(&index) = unselectable
+                    .iter()
+                    .find(|&&index| component(index).is_some())
+                {
+                    let implicit = component(index).unwrap_or_default().to_owned();
                     return self.reject_unselectable_discriminated_variant(
                         schema,
                         discriminator,
                         variant_members[index],
-                        ref_names[index]
-                            .as_deref()
-                            .filter(|name| is_schema_component_name(name)),
+                        &implicit,
                     );
+                }
+                // A member that is no component — inline, or a pointer into another schema — has
+                // no implicit value, and with no mapping entry naming it no tag selects it. The
+                // discriminator then cannot dispatch this union, and inventing a tag for it would
+                // be one no server sends; the members' own schemas still can, as for a union
+                // with no discriminator at all.
+                if !unselectable.is_empty() {
+                    let members: Vec<usize> = unselectable
+                        .iter()
+                        .map(|&index| variant_members[index])
+                        .collect();
+                    self.warn_untagged_discriminated_members(discriminator, &members);
+                    discriminated = None;
                 }
             }
             discriminated
@@ -3099,20 +3124,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// A discriminated object member no discriminator value selects: no `mapping` key names it, and
-    /// it has no implicit value — it is no schema component (`component` is `None`: inline, or a
-    /// pointer into another schema), or a key equal to its component name claims that value for
-    /// another member. The dispatch has no arm that decodes into it, and any tag it serialized
-    /// would be invented or decode as that other member. A claimed name is reported at the entry
-    /// that claims it, anything else at the union. A member `defaultMapping` names is still
-    /// reached by the fallback and never comes here.
+    /// a key equal to its component name claims that value for another member, so the dispatch has
+    /// no arm that decodes into it, and the tag it would serialize decodes as that other member.
+    /// Reported at the entry that claims the name. A member `defaultMapping` names is still reached
+    /// by the fallback and never comes here.
     fn reject_unselectable_discriminated_variant<T>(
         &mut self,
         schema: &Schema,
         discriminator: &super::Discriminator,
         member: usize,
-        component: Option<&str>,
+        implicit: &str,
     ) -> Option<T> {
-        let claim = component.and_then(|name| discriminator.mapping.get_key_value(name));
+        let claim = discriminator.mapping.get_key_value(implicit);
         let (provenance, message) = match claim {
             Some((tag, target)) => (
                 target.provenance.clone(),
@@ -3121,14 +3144,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      member {member} for `{}`, and no entry names member {member}, so no \
                      discriminator value selects it",
                     target.value
-                ),
-            ),
-            None if component.is_none() => (
-                schema.provenance.clone(),
-                format!(
-                    "union member {member} is no schema component — it is inline, or a pointer \
-                     into another schema — so it has no implicit discriminator value, and no \
-                     `discriminator.mapping` entry names it, so no discriminator value selects it"
                 ),
             ),
             None => (
@@ -3140,12 +3155,61 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Diagnostic::error(Code::NonDisjointUnion, provenance)
             .message(message)
             .remedy(
-                "add a `discriminator.mapping` entry naming the member, move it to a schema \
-                 component of its own, rename the entry that claims its component name, or remove \
-                 the member from the union",
+                "add a `discriminator.mapping` entry naming the member, rename the entry that \
+                 claims its component name, or remove the member from the union",
             )
             .emit(self.diags);
         None
+    }
+
+    /// Discriminated object members that are no schema component — inline, or a pointer into
+    /// another schema — and that no `mapping` entry or `defaultMapping` names. The specification
+    /// gives them no implicit value ("inline `oneOf` or `anyOf` subschemas are not considered"),
+    /// so no discriminator value selects them and the discriminator cannot dispatch the union. The
+    /// caller dispatches it by its members' schemas instead, as a union with no discriminator,
+    /// rather than on a tag spargen would have to invent; this says so at the discriminator.
+    fn warn_untagged_discriminated_members(
+        &mut self,
+        discriminator: &super::Discriminator,
+        members: &[usize],
+    ) {
+        let list = members
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (subject, pronoun) = if members.len() == 1 {
+            (
+                format!(
+                    "union member {list} is no schema component — inline, or a pointer into \
+                     another schema — so it has no implicit discriminator value"
+                ),
+                "it",
+            )
+        } else {
+            (
+                format!(
+                    "union members {list} are no schema components — inline, or pointers into \
+                     another schema — so they have no implicit discriminator value"
+                ),
+                "them",
+            )
+        };
+        // W011 case: untagged-discriminated-member
+        Diagnostic::warning(
+            Code::DeclarationHasNoEffect,
+            discriminator.provenance.clone(),
+        )
+        .message(format!(
+            "{subject}, and no `discriminator.mapping` entry names {pronoun}: no discriminator \
+             value selects {pronoun}, so this `discriminator` dispatches nothing and the union is \
+             decoded by its members' schemas"
+        ))
+        .remedy(
+            "add a `discriminator.mapping` entry naming each such member (a URI reference to it \
+             works), move it to a schema component of its own, or remove the discriminator",
+        )
+        .emit(self.diags);
     }
 
     /// A union that resolves to itself, so its generated `Deserialize` would re-enter itself on the
