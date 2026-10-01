@@ -488,12 +488,140 @@ fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
 /// Whether `name` is a TLS crate, by the same rule the `example` gate applies to each example
 /// lockfile in `mise.toml` and `ci.yml`: it names `rustls`, `native-tls`, `openssl` or `webpki`,
 /// or ends in `-tls`. The two share a rule so that "no TLS crate" there and "a TLS crate" here
-/// mean the same set.
+/// mean the same set; `is_tls_crate_classifies_exactly_what_the_example_gate_greps` holds the two
+/// copies of the rule equal.
 fn is_tls_crate(name: &str) -> bool {
     ["rustls", "native-tls", "openssl", "webpki"]
         .iter()
         .any(|family| name.contains(family))
         || name.ends_with("-tls")
+}
+
+/// The extended regular expression the `example` gate's lockfile step passes to `grep -En` in
+/// `file`, read from the file itself. Exactly one such call must be there: a second would be a
+/// second rule this test does not compare, and none means the step moved out from under it.
+fn example_gate_tls_pattern(file: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join(file);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let patterns: Vec<&str> = text
+        .match_indices("grep -En '")
+        .map(|(at, call)| {
+            let rest = &text[at + call.len()..];
+            &rest[..rest.find('\'').expect("the grep pattern's quote closes")]
+        })
+        .collect();
+    assert_eq!(
+        patterns.len(),
+        1,
+        "{file} must carry exactly one `grep -En '…'` (the example gate's TLS-crate rule), found \
+         {patterns:?}"
+    );
+    patterns[0].to_owned()
+}
+
+/// The `example` gate's TLS-crate regex (`mise.toml`, and its CI copy in `ci.yml`) and
+/// `is_tls_crate` are two spellings of one rule; this runs both over the same names and requires
+/// they agree on every one, so neither can drift alone (#411). The regex runs through `grep -E`
+/// itself, the engine the gate uses, over lines shaped as `Cargo.lock` writes them, since the
+/// regex is anchored on that shape.
+///
+/// The names are every package in the four committed lockfiles plus edge cases each half of the
+/// rule turns on (a family inside a longer name, a `-tls` suffix, `tls` without the hyphen or not
+/// at the end). The set must carry names on both sides of the rule, or agreement proves nothing.
+#[test]
+fn is_tls_crate_classifies_exactly_what_the_example_gate_greps() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let mut names = std::collections::BTreeSet::new();
+    for lock in [
+        "Cargo.lock",
+        "examples/petstore/Cargo.lock",
+        "examples/petstore-macro/Cargo.lock",
+        "examples/github-api/Cargo.lock",
+    ] {
+        let text = std::fs::read_to_string(root.join(lock)).unwrap();
+        names.extend(
+            text.lines()
+                .filter_map(|line| line.strip_prefix("name = \"")?.strip_suffix('"'))
+                .map(str::to_owned),
+        );
+    }
+    names.extend(
+        [
+            "rustls",
+            "tokio-rustls",
+            "rustls-pki-types",
+            "native-tls",
+            "tokio-native-tls",
+            "openssl",
+            "openssl-sys",
+            "webpki-roots",
+            "rustls-webpki",
+            "async-tls",
+            "tls",
+            "tls-foo",
+            "mytls",
+            "foo-tlsx",
+            "native_tls",
+            "serde",
+        ]
+        .map(str::to_owned),
+    );
+    let tls: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| is_tls_crate(name))
+        .collect();
+    assert!(
+        !tls.is_empty() && tls.len() < names.len(),
+        "the compared names must include TLS crates and non-TLS crates alike"
+    );
+
+    let input: String = names
+        .iter()
+        .map(|name| format!("name = \"{name}\"\n"))
+        .collect();
+    for file in ["mise.toml", ".github/workflows/ci.yml"] {
+        let pattern = example_gate_tls_pattern(file);
+        let mut grep = Command::new("grep")
+            .args(["-E", &pattern])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            grep.stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+        }
+        let output = grep.wait_with_output().unwrap();
+        // 0 is a match and 1 no match; anything else (2) is grep rejecting the pattern.
+        assert!(
+            matches!(output.status.code(), Some(0 | 1)),
+            "`grep -E` rejected {file}'s pattern {pattern:?}: {:?}",
+            output.status
+        );
+        let grepped: Vec<&str> = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                line.strip_prefix("name = \"")
+                    .and_then(|line| line.strip_suffix('"'))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            grepped, tls,
+            "{file}'s TLS-crate regex {pattern:?} and `is_tls_crate` classify different crates"
+        );
+    }
 }
 
 /// The distinct package names in this workspace's resolved graph, from `Cargo.lock` as committed
