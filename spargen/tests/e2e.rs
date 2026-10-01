@@ -2016,12 +2016,23 @@ fn a_narrowing_meet_retypes_or_drops_its_members_default() {
     // spellings of the meet; `bad` and `fraction` admit no default of the narrowed type.
     let merged: basic_client::types::NarrowDefault = serde_json::from_str("{}").unwrap();
     let sibling: basic_client::types::NarrowDefaultSibling = serde_json::from_str("{}").unwrap();
+    // The two spellings name their enums differently, so each is compared through its wire form.
     for (valid, bad, ratio, fraction) in [
-        (merged.valid, merged.bad, merged.ratio, merged.fraction),
-        (sibling.valid, sibling.bad, sibling.ratio, sibling.fraction),
+        (
+            serde_json::to_value(&merged.valid).unwrap(),
+            serde_json::to_value(&merged.bad).unwrap(),
+            merged.ratio,
+            merged.fraction,
+        ),
+        (
+            serde_json::to_value(&sibling.valid).unwrap(),
+            serde_json::to_value(&sibling.bad).unwrap(),
+            sibling.ratio,
+            sibling.fraction,
+        ),
     ] {
-        assert_eq!(serde_json::to_string(&valid).unwrap(), r#""a""#);
-        assert!(bad.is_none());
+        assert_eq!(valid, serde_json::json!("a"));
+        assert!(bad.is_null());
         assert_eq!(ratio, Some(3_i64));
         assert!(fraction.is_none());
     }

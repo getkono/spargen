@@ -5176,8 +5176,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let raw = schema.default.as_ref()?;
         let classified = classify_default(raw);
         let kind = self.graph.get(ty.id).map(|def| &def.kind);
-        let provenance =
-            Provenance::new(schema.provenance.pointer.push("default"), Some(raw.span));
+        let provenance = Provenance::new(schema.provenance.pointer.push("default"), Some(raw.span));
         match representable_default(&classified, kind) {
             Some(value) => {
                 let display = default_display(&value);
@@ -8274,7 +8273,9 @@ fn reclassify_default(value: &DefaultValue) -> RawDefault {
             RawDefault::Int(*value as i64)
         }
         DefaultValue::Float(value) => RawDefault::Float(*value),
-        DefaultValue::Str(value) | DefaultValue::EnumVariant(value) => RawDefault::Str(value.clone()),
+        DefaultValue::Str(value) | DefaultValue::EnumVariant(value) => {
+            RawDefault::Str(value.clone())
+        }
     }
 }
 
