@@ -8478,6 +8478,71 @@ fn a_union_beside_all_of_keeps_the_branches_and_null_the_composition_admits() {
     }
 }
 
+/// Issue #419: an untyped `allOf` member beside a union is reported as the same keywords are
+/// beside a `$ref` to it. Reaching no branch of its category it constrains nothing the union
+/// accepts (`W011` at the member, and the union generates); object and array keywords together
+/// against a branch that states no category are `E013` at the member; and a meet with the one
+/// object branch that leaves no value is `E013` at the schema carrying both keywords.
+#[test]
+fn an_untyped_all_of_member_beside_a_union_is_reported_as_a_ref_sibling_is() {
+    let unreached = with_schemas(
+        "3.1.0",
+        "    Pet:\n      allOf: [ { required: [kind] } ]\n      \
+         oneOf: [ { type: string }, { type: integer } ]\n",
+    );
+    for (entry, report) in [
+        ("generate", generate(&unreached)),
+        ("check", check(&unreached)),
+    ] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "via {entry}: {report:#?}"
+        );
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::DeclarationHasNoEffect
+                    && d.pointer.as_str() == "/components/schemas/Pet/allOf/0"),
+            "via {entry}: W011 must sit at the member: {report:#?}"
+        );
+    }
+
+    let rejected = [
+        (
+            "both kinds against a branch that states no category",
+            "    Pet:\n      allOf: [ { required: [kind], items: { type: string } } ]\n      \
+             oneOf: [ { type: string }, { description: anything } ]\n",
+            "/components/schemas/Pet/allOf/0",
+        ),
+        (
+            "a property type the object branch contradicts",
+            "    Pet:\n      \
+             allOf: [ { required: [kind], properties: { kind: { type: integer } } } ]\n      \
+             oneOf: [ { $ref: '#/components/schemas/Cat' } ]\n",
+            "/components/schemas/Pet",
+        ),
+    ];
+    for (what, schemas, pointer) in rejected {
+        let spec = with_schemas("3.1.0", schemas);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer),
+                "{what} via {entry}: E013 must sit at `{pointer}`: {report:#?}"
+            );
+        }
+    }
+}
+
 /// The dispatch a discriminated union `name` emits, read back from the generated source: per
 /// decode arm, the variant and every tag its pattern matches, and per encode arm, the variant and
 /// the tag serialization writes (`None` for one it writes no tag for).
