@@ -2258,6 +2258,29 @@ fn discriminated_union_round_trips_with_tag() {
     let json = serde_json::to_value(&dog).unwrap();
     assert_eq!(json["petType"], "dog");
     assert_eq!(json["bark"], true);
+
+    // Every value that names a member selects it (#263): the second mapping key `kitty`, and each
+    // component name, which no mapping key claims. Cat keeps the tag it was decoded with in its own
+    // field; Dog re-serializes with its first mapping key, `dog`.
+    for tag in ["kitty", "Cat"] {
+        let pet: basic_client::types::Pet = serde_json::from_value(
+            serde_json::json!({"petType": tag, "name": "Whiskers"}),
+        )
+        .unwrap();
+        match &pet {
+            basic_client::types::Pet::Cat(cat) => assert_eq!(cat.pet_type, tag),
+            other => panic!("{tag}: expected Cat variant, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&pet).unwrap()["petType"], tag);
+    }
+    let dog: basic_client::types::Pet =
+        serde_json::from_str(r#"{"petType": "Dog", "bark": false}"#).unwrap();
+    assert!(matches!(dog, basic_client::types::Pet::Dog(_)));
+    assert_eq!(serde_json::to_value(&dog).unwrap()["petType"], "dog");
+    assert!(
+        serde_json::from_str::<basic_client::types::Pet>(r#"{"petType": "cow", "bark": true}"#)
+            .is_err()
+    );
 }
 
 #[test]
@@ -5019,9 +5042,11 @@ components:
         - $ref: "#/components/schemas/Dog"
       discriminator:
         propertyName: petType
+        # Two keys name `Cat`; `cat`, the first, is the one serialization writes.
         mapping:
           cat: "#/components/schemas/Cat"
           dog: "#/components/schemas/Dog"
+          kitty: Cat
     # Disjoint by JSON type category: a bare string or a list of strings. Serializes WITHOUT any tag
     # or wrapper — the active variant's inner value is emitted directly.
     StringOrList:

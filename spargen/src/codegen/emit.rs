@@ -2871,24 +2871,26 @@ fn emit_type_def(
                         .variants
                         .iter()
                         .zip(tags)
-                        .filter_map(|(variant, tag)| {
-                            let tag = tag.as_ref()?;
+                        .filter(|(_, accepted)| !accepted.is_empty())
+                        .map(|(variant, accepted)| {
                             let variant_ident = names
                                 .variants
                                 .get(&(id, variant.name_hint.clone()))
                                 .expect("union variant name allocated");
-                            Some(quote! {
-                                #tag => serde_json::from_value(value)
+                            // One arm per variant, matching every tag that selects it.
+                            quote! {
+                                #(#accepted)|* => serde_json::from_value(value)
                                     .map(#ident::#variant_ident)
                                     .map_err(serde::de::Error::custom),
-                            })
+                            }
                         });
-                    let ser_arms = union.variants.iter().zip(tags).map(|(variant, tag)| {
+                    let ser_arms = union.variants.iter().zip(tags).map(|(variant, accepted)| {
                         let variant_ident = names
                             .variants
                             .get(&(id, variant.name_hint.clone()))
                             .expect("union variant name allocated");
-                        let tag = match tag {
+                        // The first accepted tag is the canonical one written back.
+                        let tag = match accepted.first() {
                             Some(tag) => quote! { Some(#tag) },
                             None => quote! { None },
                         };
