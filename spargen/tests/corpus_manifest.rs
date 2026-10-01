@@ -122,6 +122,21 @@ fn every_case_meets_its_declared_expectation() {
             // batch can hide the terminal rejection code the manifest names.
             .batch_cap(usize::MAX);
         let report = spargen::check(&spec);
+        // Every diagnostic's declared claim must be one the run's outcome admits (#413). This
+        // checks the declared claim only, not the message prose: a message that states an outcome
+        // its claim does not declare (#174's "is generated", which was built `Independent`) passes
+        // here. `frontend.rs`'s `claim_violations` reads the prose and is what catches that shape.
+        let contradicted: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| !report.outcome().admits(diagnostic.claim))
+            .collect();
+        assert!(
+            contradicted.is_empty(),
+            "`{}` reported diagnostics whose claim its `{}` outcome contradicts: {contradicted:#?}",
+            case.id,
+            report.outcome()
+        );
 
         match case.rejection_code() {
             None => assert_ne!(

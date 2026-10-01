@@ -12,7 +12,7 @@ use cfg_expr::{Expression, Predicate, TargetPredicate};
 use semver::{Op, Version, VersionReq};
 use serde::{Deserialize, Serialize};
 
-use crate::diag::Diagnostic;
+use crate::diag::{Diagnostic, OutcomeClaim};
 use crate::ir::{Api, MediaType, Prim, TypeGraph, TypeId, TypeKind};
 use crate::{Code, JsonPointer, Spec};
 
@@ -1504,6 +1504,7 @@ fn diagnostic(audited: &Utf8Path, mut message: String) -> Diagnostic {
         message,
         remedy: Some("declare the generated client's runtime dependencies in the consuming package's Cargo.toml using the documented supported ranges and features".to_owned()),
         interpretation: None,
+        claim: OutcomeClaim::of(Code::RuntimeDependencyContract.severity()),
     }
 }
 

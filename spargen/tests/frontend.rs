@@ -4,9 +4,14 @@
 //! about one case: every fixture there must reach the same accept/reject verdict and report the
 //! same codes through both entry points, and a companion test keeps that set spanning rejections,
 //! warnings and clean runs so it cannot pass vacuously.
+//!
+//! Every run any fixture makes goes through `run_generate` or `run_check`, which hold each
+//! diagnostic's declared `OutcomeClaim` to the run's own outcome (#413).
 
 use camino::Utf8PathBuf;
-use spargen::{Build, CargoIntegration, Code, Outcome, Report, Severity, Spec};
+use spargen::{
+    Build, CargoIntegration, Code, Diagnostic, Outcome, OutcomeClaim, Report, Severity, Spec,
+};
 
 /// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
 /// tempdir (and any written output) is discarded once the report — which owns its data — is built.
@@ -17,12 +22,99 @@ fn build(spec: Utf8PathBuf, out: Utf8PathBuf) -> Build {
     Spec::new(spec).build(out).cargo(CargoIntegration::Off)
 }
 
+/// `spargen::generate`, then [`assert_claims_hold`] on the report. Every fixture here reaches
+/// `generate` through this function, so every diagnostic any fixture provokes is held to its run.
+fn run_generate(build: &Build) -> Report {
+    let report = spargen::generate(build);
+    assert_claims_hold(&report);
+    report
+}
+
+/// `spargen::check`, then [`assert_claims_hold`] on the report, as [`run_generate`].
+fn run_check(spec: &Spec) -> Report {
+    let report = spargen::check(spec);
+    assert_claims_hold(&report);
+    report
+}
+
+/// Fail unless every diagnostic in `report` makes a claim its run's outcome admits (#413).
+fn assert_claims_hold(report: &Report) {
+    let violations = claim_violations(report.outcome(), report.diagnostics());
+    assert!(
+        violations.is_empty(),
+        "a `{}` run reported diagnostics whose claims are false of it: {violations:#?}",
+        report.outcome()
+    );
+}
+
+/// Each diagnostic in `diagnostics` that says something false about a run whose outcome is
+/// `outcome`, with the reason.
+///
+/// A message is composed where it is emitted, before the outcome is known, and `check` and
+/// `generate` emit the same diagnostics. A message that asserted an outcome was false on every run
+/// that ended differently, such as `W014`'s old "is generated" on a `check` run (#174). Two things
+/// are checked. The declared [`OutcomeClaim`] must be one `outcome` admits. And a message that
+/// states an outcome in so many words ([`stated_claim`]) must declare that claim, so the first
+/// check reads what the message says.
+fn claim_violations(outcome: Outcome, diagnostics: &[Diagnostic]) -> Vec<String> {
+    diagnostics
+        .iter()
+        .filter_map(|diagnostic| {
+            let claim = diagnostic.claim;
+            let stated = stated_claim(&diagnostic.message);
+            if !outcome.admits(claim) {
+                Some(format!(
+                    "{claim:?} is false of a `{outcome}` run: {diagnostic:?}"
+                ))
+            } else if stated.is_some_and(|stated| stated != claim) {
+                Some(format!(
+                    "the message states {stated:?} but the claim is {claim:?}: {diagnostic:?}"
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The outcome a message states in so many words, if it states one: an unnegated "is generated"
+/// or "is rejected" (or "are", "be", "been").
+///
+/// This reads prose, so it is a backstop and not the check. [`claim_violations`] is the check,
+/// and it trusts the declared [`OutcomeClaim`]. This catches the case where the two disagree: a
+/// message that asserts an outcome while its diagnostic declares a different claim. That is the
+/// shape of `W014`'s old "`{media}` is generated", whose claim was never declared (#174). A
+/// rephrasing it does not recognise ("gets emitted") gets past it. Backticked spans are dropped
+/// first, so a quoted name cannot supply the predicate or the negation.
+fn stated_claim(message: &str) -> Option<OutcomeClaim> {
+    let prose: String = message
+        .split('`')
+        .step_by(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    prose.split([';', ':', ',', '.']).find_map(|clause| {
+        let words: Vec<&str> = clause.split_whitespace().collect();
+        words.windows(2).enumerate().find_map(|(at, pair)| {
+            let claim = match pair {
+                ["is" | "are" | "be" | "been", "generated"] => OutcomeClaim::Generated,
+                ["is" | "are" | "be" | "been", "rejected"] => OutcomeClaim::Rejected,
+                _ => return None,
+            };
+            let negated = words[..at]
+                .iter()
+                .any(|word| matches!(*word, "no" | "not" | "never" | "nothing" | "none"));
+            (!negated).then_some(claim)
+        })
+    })
+}
+
 fn generate(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
     let out = temp.path().join("client.rs");
-    spargen::generate(&build(
+    run_generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out).unwrap(),
     ))
@@ -33,7 +125,7 @@ fn check(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
-    spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
+    run_check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
 }
 
 fn generate_with_code(spec: &str) -> (Report, String) {
@@ -41,7 +133,7 @@ fn generate_with_code(spec: &str) -> (Report, String) {
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&build(
+    let report = run_generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
@@ -1161,7 +1253,7 @@ components:
     .unwrap();
 
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
     let code = std::fs::read_to_string(&out).unwrap();
@@ -1171,7 +1263,7 @@ components:
     assert!(code.contains("pub id"), "{code}");
 
     // `check` must agree — it runs the same lowering.
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
 }
@@ -1206,9 +1298,9 @@ fn split(target: &str, lib: &str) -> (Report, Report, String) {
     .unwrap();
     std::fs::write(dir.join("lib.yaml"), lib).unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     (generated, checked, code)
 }
 
@@ -2006,7 +2098,7 @@ paths:
         )
         .unwrap();
         let out = dir.join("client.rs");
-        let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
         (report, code)
     };
@@ -2120,7 +2212,7 @@ components:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap();
 
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
@@ -2412,7 +2504,7 @@ fn generate_two_file_shapes(b_first: bool) -> String {
     std::fs::write(dir.join("a.yaml"), SHAPE_ALPHA_YAML).unwrap();
     std::fs::write(dir.join("b.yaml"), SHAPE_BETA_YAML).unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     std::fs::read_to_string(&out).unwrap()
 }
@@ -2469,7 +2561,7 @@ fn a_contested_type_name_ranks_a_file_outside_the_root_directory_by_its_full_loa
         std::fs::write(root_dir.join("a.yaml"), SHAPE_BETA_YAML).unwrap();
         std::fs::write(dir.join("z.yaml"), SHAPE_ALPHA_YAML).unwrap();
         let out = dir.join("client.rs");
-        let report = spargen::generate(&build(root_dir.join("openapi.yaml"), out.clone()));
+        let report = run_generate(&build(root_dir.join("openapi.yaml"), out.clone()));
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         let code = std::fs::read_to_string(&out).unwrap();
         assert_eq!(
@@ -3209,8 +3301,8 @@ components:
         )
         .unwrap();
         let out = dir.join("client.rs");
-        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
-        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
         for (run, report) in [("generate", &generated), ("check", &checked)] {
             assert!(
                 !has_code(report, Code::AllOfIrreconcilable),
@@ -3284,7 +3376,7 @@ components:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(&out).unwrap();
 
@@ -4323,7 +4415,7 @@ paths:
     std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
     std::fs::write(&vendored, &node).unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
     assert_ne!(report.outcome(), Outcome::Rejected, "remote: {report:#?}");
     let control = field_type(&code, "pub n:").expect("remote: `W.n` is emitted");
@@ -4430,8 +4522,8 @@ paths:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let routed = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
-    let routed_checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let routed = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let routed_checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for (entry, report) in [
         ("routed/generate", &routed),
         ("routed/check", &routed_checked),
@@ -4480,7 +4572,7 @@ paths:
     std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
     std::fs::write(&vendored, &lib).unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "remote: {report:#?}");
     assert_optional("remote", &std::fs::read_to_string(&out).unwrap_or_default());
 }
@@ -4878,9 +4970,9 @@ components:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
         assert!(
@@ -4966,9 +5058,9 @@ components:
         std::fs::write(dir.join("openapi.yaml"), root).unwrap();
         std::fs::write(dir.join("lib.yaml"), lib(spelling)).unwrap();
         let out = dir.join("client.rs");
-        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
-        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
 
         for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_ne!(
@@ -5071,9 +5163,9 @@ components:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
 
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
@@ -5683,9 +5775,9 @@ components:
     .unwrap();
 
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
         let shadow = report
@@ -5826,9 +5918,9 @@ components:
         std::fs::write(dir.join("openapi.yaml"), root).unwrap();
         std::fs::write(dir.join("lib.yaml"), lib(spelling, declares_shared)).unwrap();
         let out = dir.join("client.rs");
-        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
-        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
 
         for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_ne!(
@@ -6093,7 +6185,7 @@ Pet:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
@@ -6170,7 +6262,7 @@ Pet:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
@@ -6211,8 +6303,8 @@ components:
     .unwrap();
     let spec = dir.join("openapi.yaml");
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(spec.clone(), out.clone()));
-    let checked = spargen::check(&Spec::new(spec));
+    let generated = run_generate(&build(spec.clone(), out.clone()));
+    let checked = run_check(&Spec::new(spec));
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
         assert!(
@@ -6281,9 +6373,9 @@ mod remote {
         let out = dir.join("client.rs");
         let spec = Spec::new(dir.join("openapi.yaml"));
         let report = if check_only {
-            spargen::check(&spec)
+            run_check(&spec)
         } else {
-            spargen::generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
+            run_generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
         };
         (report, temp, out)
     }
@@ -6374,9 +6466,9 @@ mod remote {
         let out = dir.join("client.rs");
         let spec = Spec::new(dir.join("openapi.yaml"));
         let report = if check_only {
-            spargen::check(&spec)
+            run_check(&spec)
         } else {
-            spargen::generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
+            run_generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
         };
         (report, temp, out)
     }
@@ -8729,8 +8821,8 @@ components:
         )
         .unwrap();
         std::fs::write(dir.join("cat.yaml"), cat).unwrap();
-        let generated = spargen::generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
-        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let generated = run_generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
+        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
         let code = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
         (generated, checked, code)
     };
@@ -8849,8 +8941,8 @@ MAPPING
         let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
         std::fs::write(dir.join("openapi.yaml"), root).unwrap();
         std::fs::write(dir.join("lib.yaml"), lib.replace("MAPPING", with)).unwrap();
-        let generated = spargen::generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
-        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let generated = run_generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
+        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
         (temp, dir, generated, checked)
     };
 
@@ -11565,9 +11657,9 @@ fn all_of_member_layout(member: &str) -> (Report, Report, String) {
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     (generated, checked, code)
 }
 
@@ -13899,9 +13991,9 @@ components:
                 .unwrap();
                 std::fs::write(dir.join("lib.yaml"), lib).unwrap();
                 let out = dir.join("client.rs");
-                let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+                let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
                 let code = std::fs::read_to_string(&out).unwrap_or_default();
-                let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+                let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
                 (generated, checked, code)
             };
             let what = format!(
@@ -14687,7 +14779,7 @@ components:
     )
     .unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&build(
+    let report = run_generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
@@ -14770,7 +14862,7 @@ components:
     )
     .unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&build(
+    let report = run_generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
@@ -15639,7 +15731,7 @@ paths:
     )
     .unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&build(
+    let report = run_generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out).unwrap(),
     ));
@@ -19342,19 +19434,9 @@ paths:
     }
 }
 
-#[test]
-fn w014_on_a_document_rejected_elsewhere_claims_only_the_selection() {
-    // `/page` passes every one of its own gates, so its `W014` is emitted; `/doc` is rejected, so
-    // the run generates nothing — and `check` never generates on any document. The message must
-    // therefore assert only what its emission site decides, the selection, and never that anything
-    // "is generated" (#174). The `openai_openapi` corpus snapshot carries this shape at scale:
-    // `Rejected` with `E009` beside many `W014`s.
-    //
-    // This pins the wording, not the principle: `Diagnostic` has no structured field recording what
-    // its message asserts about the run, so nothing here compares a message's claim against the
-    // outcome, and a different outcome claim in a future rewording would have to be caught by
-    // whoever rewrites this expected string.
-    let spec = r##"
+/// A document whose `/page` selects `text/plain` over `text/html` and passes every gate of its
+/// own, so it emits `W014`, while `/doc` is rejected (`E009`).
+const W014_REJECTED_ELSEWHERE: &str = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths:
@@ -19376,6 +19458,153 @@ paths:
           content:
             application/pdf: { schema: {} }
 "##;
+
+/// [`W014_REJECTED_ELSEWHERE`] without the rejected `/doc`.
+const W014_CLEAN: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /page:
+    get:
+      operationId: getPage
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain: { schema: { type: string } }
+            text/html: { schema: { type: string } }
+"##;
+
+/// `W014`'s message before #319. It claimed generation, which was false on every `check` run and
+/// on every run rejected elsewhere (#174).
+const W014_GENERATION_WORDING: &str =
+    "`text/plain` is generated; the alternative media type(s) `text/html` are not";
+
+#[test]
+fn a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false() {
+    // #174's four axes reduce to two outcomes for this message: `check`, which generates nothing
+    // on any document, and a run rejected on another path. On each, a `W014` that declared the
+    // generation its old wording asserted is refused by the claim check, and the old wording,
+    // left undeclared, is caught by the prose backstop. Only a run that generates admits the
+    // claim. So the check distinguishes runs; it does not refuse the claim outright.
+    let refusing = [
+        (check(W014_CLEAN), Outcome::Clean),
+        (check(W014_REJECTED_ELSEWHERE), Outcome::Rejected),
+        (generate(W014_REJECTED_ELSEWHERE), Outcome::Rejected),
+    ];
+    for (report, outcome) in &refusing {
+        assert_eq!(report.outcome(), *outcome, "{report:#?}");
+        let w014 = report
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code == Code::AlternativeMediaIgnored)
+            .unwrap_or_else(|| panic!("{report:#?}"));
+        // As emitted: the selection, which every outcome admits.
+        assert_eq!(w014.claim, OutcomeClaim::Independent, "{w014:#?}");
+        assert!(claim_violations(*outcome, std::slice::from_ref(w014)).is_empty());
+        // As #174 found it, with the claim declared: the outcome refuses it.
+        let declared = Diagnostic {
+            message: W014_GENERATION_WORDING.to_owned(),
+            claim: OutcomeClaim::Generated,
+            ..w014.clone()
+        };
+        // As #174 found it, undeclared: the message states a claim the field does not carry.
+        let undeclared = Diagnostic {
+            message: W014_GENERATION_WORDING.to_owned(),
+            ..w014.clone()
+        };
+        for diagnostic in [declared, undeclared] {
+            assert_eq!(
+                claim_violations(*outcome, std::slice::from_ref(&diagnostic)).len(),
+                1,
+                "{outcome}: {diagnostic:#?}"
+            );
+        }
+    }
+
+    // A run that generates admits the declared claim, so the check tells runs apart rather than
+    // refusing the claim outright.
+    let generated = generate(W014_CLEAN);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    let w014 = generated
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == Code::AlternativeMediaIgnored)
+        .unwrap_or_else(|| panic!("{generated:#?}"));
+    let declared = Diagnostic {
+        message: W014_GENERATION_WORDING.to_owned(),
+        claim: OutcomeClaim::Generated,
+        ..w014.clone()
+    };
+    assert!(claim_violations(Outcome::Generated, &[declared]).is_empty());
+}
+
+#[test]
+fn every_outcome_admits_exactly_the_claims_true_of_it() {
+    for outcome in [
+        Outcome::Generated,
+        Outcome::Cached,
+        Outcome::Clean,
+        Outcome::Rejected,
+    ] {
+        assert!(outcome.admits(OutcomeClaim::Independent), "{outcome}");
+        assert_eq!(
+            outcome.admits(OutcomeClaim::Rejected),
+            outcome == Outcome::Rejected,
+            "{outcome}"
+        );
+        assert_eq!(
+            outcome.admits(OutcomeClaim::Generated),
+            matches!(outcome, Outcome::Generated | Outcome::Cached),
+            "{outcome}"
+        );
+    }
+}
+
+#[test]
+fn the_prose_backstop_reads_only_an_unnegated_outcome_predicate() {
+    for (message, stated) in [
+        (W014_GENERATION_WORDING, Some(OutcomeClaim::Generated)),
+        ("the body is rejected", Some(OutcomeClaim::Rejected)),
+        ("these would be generated", Some(OutcomeClaim::Generated)),
+        // Negated in its own clause: true on every run.
+        (
+            "webhooks describe server-initiated calls; no client code is generated for them",
+            None,
+        ),
+        (
+            "a header that is not a single value, so no typed accessor is generated",
+            None,
+        ),
+        ("the polymorphism form is not generated", None),
+        // A negation in an earlier clause does not reach a later one.
+        (
+            "nothing is selected; the rest is generated",
+            Some(OutcomeClaim::Generated),
+        ),
+        // A quoted name supplies neither the predicate nor the negation.
+        ("`is generated` names a schema", None),
+        ("`no` is generated", Some(OutcomeClaim::Generated)),
+        // An adjective is not a predicate.
+        ("the generated item is shared across every use", None),
+        ("`text/plain` is selected; the alternatives are not", None),
+    ] {
+        assert_eq!(stated_claim(message), stated, "{message}");
+    }
+}
+
+#[test]
+fn w014_on_a_document_rejected_elsewhere_claims_only_the_selection() {
+    // `/page` passes every one of its own gates, so its `W014` is emitted; `/doc` is rejected, so
+    // the run generates nothing — and `check` never generates on any document. The message must
+    // therefore assert only what its emission site decides, the selection, and never that anything
+    // "is generated" (#174). The `openai_openapi` corpus snapshot carries this shape at scale:
+    // `Rejected` with `E009` beside many `W014`s.
+    //
+    // This pins the wording. The principle is held by `run_generate`/`run_check`, which compare
+    // each diagnostic's structured `claim` with the run's outcome (#413); see
+    // `a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false`.
+    let spec = W014_REJECTED_ELSEWHERE;
     for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
@@ -19660,7 +19889,7 @@ PetBody:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
     let code = std::fs::read_to_string(&out).unwrap();
@@ -19765,12 +19994,12 @@ fn a_report_that_hit_the_batch_cap_says_it_is_truncated() {
     std::fs::write(&path, &spec).unwrap();
     let spec_path = Utf8PathBuf::from_path_buf(path).unwrap();
 
-    let uncapped = spargen::check(&Spec::new(spec_path.clone()).batch_cap(100));
+    let uncapped = run_check(&Spec::new(spec_path.clone()).batch_cap(100));
     assert!(!uncapped.truncated(), "{uncapped:#?}");
     let all = uncapped.diagnostics().len();
     assert!(all > 3, "need more than the cap to prove truncation: {all}");
 
-    let capped = spargen::check(&Spec::new(spec_path).batch_cap(3));
+    let capped = run_check(&Spec::new(spec_path).batch_cap(3));
     assert!(capped.truncated(), "{capped:#?}");
     assert_eq!(capped.diagnostics().len(), 3, "{capped:#?}");
     assert!(
@@ -20311,8 +20540,8 @@ item:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out));
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for report in [&generated, &checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(report, Code::InvalidInput), "{report:#?}");
@@ -20349,8 +20578,8 @@ item:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out));
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for report in [&generated, &checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(report, Code::InvalidInput), "{report:#?}");
@@ -20515,8 +20744,8 @@ fn generate_and_check_refd_path_item_with_code(path_item: &str) -> (Report, Repo
     .unwrap();
     std::fs::write(dir.join("pet.yaml"), path_item).unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
     (generated, checked, code)
 }
@@ -20890,8 +21119,8 @@ fn generate_and_check_files(files: &[(&str, &str)]) -> (Report, Report, String) 
     }
     let root = dir.join(files[0].0);
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(root.clone(), out.clone()));
-    let checked = spargen::check(&Spec::new(root));
+    let generated = run_generate(&build(root.clone(), out.clone()));
+    let checked = run_check(&Spec::new(root));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
     (generated, checked, code)
 }
@@ -22499,7 +22728,7 @@ fn a_component_and_an_inline_schema_agree_about_null() {
             std::fs::write(&path, content).unwrap();
         }
         let out = dir.join("client.rs");
-        let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
         (report, code)
     }
@@ -23008,9 +23237,9 @@ fn run_placement_with_client(files: &[(&str, serde_json::Value)]) -> (Report, Re
     for (name, value) in files {
         std::fs::write(dir.join(name), serde_json::to_vec_pretty(value).unwrap()).unwrap();
     }
-    let generated = spargen::generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
+    let generated = run_generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
     let client = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.json")));
+    let checked = run_check(&Spec::new(dir.join("openapi.json")));
     (generated, checked, client)
 }
 
@@ -23225,9 +23454,9 @@ fn e004_a_chained_object_reference_is_followed_by_target_not_by_spelling() {
         ] {
             std::fs::write(dir.join(name), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
         }
-        let generated = spargen::generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
+        let generated = run_generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
         let client = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
-        let checked = spargen::check(&Spec::new(dir.join("openapi.json")));
+        let checked = run_check(&Spec::new(dir.join("openapi.json")));
         for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_ne!(
                 report.outcome(),
@@ -23650,9 +23879,9 @@ components:
     ] {
         std::fs::write(&root, spec(&reference)).unwrap();
         let out = dir.join("client.rs");
-        let generated = spargen::generate(&build(root.clone(), out.clone()));
+        let generated = run_generate(&build(root.clone(), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
-        let checked = spargen::check(&Spec::new(root.clone()));
+        let checked = run_check(&Spec::new(root.clone()));
         for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_ne!(
                 report.outcome(),
