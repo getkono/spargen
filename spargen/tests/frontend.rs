@@ -16673,9 +16673,20 @@ fn e009_a_form_urlencoded_string_property_declaring_a_binary_family_content_type
     // property whose `contentType` names `image/png` is binary, which a form body cannot carry —
     // the disposition `application/octet-stream` already has there — and the message names what
     // was declared, since the schema itself is a plain string a reader cannot call binary.
-    let spec = r##"
+    //
+    // #399: the classification is case-insensitive, so `Application/Octet-Stream` is the binary
+    // declaration its lowercase spelling is. Before, the mixed-case spelling missed every
+    // classifier arm, fell through to the string's natural codec, and was generated as
+    // `FormMode::Text`.
+    for declared in [
+        "image/png",
+        "application/octet-stream",
+        "Application/Octet-Stream",
+    ] {
+        let spec = format!(
+            r##"
 openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
+info: {{ title: T, version: 1.0.0 }}
 paths:
   /profile:
     post:
@@ -16686,22 +16697,28 @@ paths:
             schema:
               type: object
               properties:
-                pic: { type: string }
+                pic: {{ type: string }}
             encoding:
-              pic: { contentType: image/png }
+              pic: {{ contentType: {declared} }}
       responses:
-        '204': { description: ok }
-"##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedMediaType
-                    && d.message.contains("`pic`")
-                    && d.message.contains("`contentType: image/png`")
-            }),
-            "{report:#?}"
+        '204': {{ description: ok }}
+"##
         );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{declared}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::UnsupportedMediaType
+                        && d.message.contains("`pic`")
+                        && d.message.contains(&format!("`contentType: {declared}`"))
+                }),
+                "{declared}: {report:#?}"
+            );
+        }
     }
 }
 
@@ -16741,6 +16758,34 @@ paths:
                     && !d.message.contains("declares `contentType:")
             }),
             "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_form_urlencoded_binary_property_declaring_text_is_judged_case_insensitively() {
+    // #399: a binary property's declared `contentType` is classified lowercased, so `Text/Plain`
+    // reaches the outcome `text/plain` does. Before, the mixed-case spelling missed the `text/`
+    // arm, fell through to the property's natural octet-stream codec, and was rejected `E009`
+    // while its lowercase spelling generated.
+    let binary = "{ type: string, contentEncoding: base64 }";
+    for declared in ["text/plain", "Text/Plain", "TEXT/PLAIN"] {
+        let spec = form_field_declaring(binary, declared);
+        assert_ne!(check(&spec).outcome(), Outcome::Rejected, "{declared}");
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{declared}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{declared}: {report:#?}"
+        );
+        let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("name: \"part\", mode: support::FormMode::Text"),
+            "{declared}: {flat}"
         );
     }
 }
@@ -16995,6 +17040,17 @@ fn a_form_urlencoded_field_keeps_a_declared_content_type_it_is_serialized_in() {
         ("{ type: string }", "text/plain", "FormMode::Text"),
         ("{ type: string }", "application/xml", "FormMode::Text"),
         ("{ type: integer }", "application/json", "FormMode::Json"),
+        // #399: the codec is chosen from the declared media type case-insensitively, as the
+        // refusal above judges it, so a scalar declaring `Application/JSON` is the JSON value its
+        // lowercase spelling is, not the text its natural codec would make it.
+        ("{ type: integer }", "Application/JSON", "FormMode::Json"),
+        ("{ type: object }", "Application/JSON", "FormMode::Json"),
+        (
+            "{ type: string }",
+            "Application/Vnd.Api+JSON",
+            "FormMode::Json",
+        ),
+        ("{ type: string }", "TEXT/PLAIN", "FormMode::Text"),
     ];
     for (schema, declared, rendering) in cases {
         let spec = form_field_declaring(schema, declared);
