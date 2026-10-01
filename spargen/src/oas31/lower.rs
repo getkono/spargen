@@ -4126,13 +4126,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if !self.open_candidates.contains(&enum_ty.id) {
             return false;
         }
-        match self.graph.get_mut(enum_ty.id).map(|def| &mut def.kind) {
-            Some(TypeKind::Enum(own)) => {
-                own.openness = openness;
-                true
-            }
-            _ => false,
+        if let Some(TypeKind::Enum(own)) = self.graph.get_mut(enum_ty.id).map(|def| &mut def.kind) {
+            own.openness = openness;
+            return true;
         }
+        false
     }
 
     /// The closed set `set` (whose type is `enum_ty`), opened: in place when it is one of
