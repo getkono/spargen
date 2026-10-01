@@ -2630,17 +2630,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let scoped = self.lower_scoped_refiners(sibling, true, None, hint)?;
         let refiner = Refiner::Scoped(scoped);
         let mut reach = ScopeReach::default();
-        let enclosing = self.narrowing_opens;
-        let met = self.closed_narrowing(|ctx| {
-            ctx.intersect_union(
-                referenced,
-                union,
-                refiner,
-                &format!("{hint}ReferenceIntersection"),
-                enclosing,
-                &mut reach,
-            )
-        });
+        let met = self.meet_scoped_refiner_with_union(
+            referenced,
+            union,
+            refiner,
+            &format!("{hint}ReferenceIntersection"),
+            &mut reach,
+        );
         if met.is_err() && reach.uncategorised {
             return self.reject_ref_sibling_category(
                 schema,
@@ -2665,6 +2661,43 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         ty.nullable = referenced.nullable;
         ty.boxed = met.boxed;
         Some(ty)
+    }
+
+    /// Meet `target` with the untyped applicators `refiner` carries: branch by branch where
+    /// `target` is a union, keeping every branch of another category, and as that one branch
+    /// otherwise. [`Self::refine_union_target`]'s meet, for a target that need not be a union.
+    fn meet_scoped_refiner(
+        &mut self,
+        target: Ty,
+        refiner: Refiner,
+        hint: &str,
+        reach: &mut ScopeReach,
+    ) -> Result<Ty, NoMeet> {
+        match self.graph.get(target.id).map(|def| &def.kind) {
+            Some(TypeKind::Union(union)) => {
+                let union = union.clone();
+                self.meet_scoped_refiner_with_union(target, &union, refiner, hint, reach)
+            }
+            // A placeholder's body is not known yet, so nothing can be said of its category,
+            // exactly as `meet_refiner` answers for one.
+            Some(TypeKind::Reserved) => Err(NoMeet::Unrepresentable),
+            _ => self.closed_narrowing(|ctx| ctx.meet_refiner(target, refiner, reach, hint)),
+        }
+    }
+
+    /// [`Self::meet_scoped_refiner`] for a `target` whose kind is `union`.
+    fn meet_scoped_refiner_with_union(
+        &mut self,
+        target: Ty,
+        union: &Union,
+        refiner: Refiner,
+        hint: &str,
+        reach: &mut ScopeReach,
+    ) -> Result<Ty, NoMeet> {
+        let enclosing = self.narrowing_opens;
+        self.closed_narrowing(|ctx| {
+            ctx.intersect_union(target, union, refiner, hint, enclosing, reach)
+        })
     }
 
     /// Whether a union branch met with `refiner` may still be `null`, for a union whose every
@@ -3465,37 +3498,108 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// Lower a schema carrying `allOf` and `oneOf`/`anyOf` together (issue #419). Both apply to
-    /// every instance, so the schema is their conjunction: the `allOf` composition (with every
-    /// sibling but the union and its `discriminator`) met with the union (with every sibling but
-    /// the `allOf`, so its object keywords refine the branches as they do with no `allOf` beside
-    /// it). The meet is the one a `$ref` and its union-valued target take: each branch is
-    /// intersected with the composition, a branch it excludes drops out, and a union left with no
-    /// branch is `E013`. Dispatching to the `allOf` arm alone dropped the union and its
-    /// discriminator with no diagnostic.
+    /// every instance, so the schema is their conjunction: the union (the schema without its
+    /// `allOf`, so the schema's own keywords refine its branches as they do with no `allOf` beside
+    /// it) met with the `allOf` members branch by branch. A branch a member excludes drops out,
+    /// and a union left with no branch is `E013`. Dispatching to the `allOf` arm alone dropped the
+    /// union and its discriminator with no diagnostic.
     ///
-    /// A composition that constrains nothing (every member `true`, `{}` or an annotation) is not
-    /// met at all: [`Self::combine_all_of`] types it as an open object, which would drop every
-    /// non-object branch, so the union alone is the schema's type, under the schema's own hint.
+    /// The schema's own keywords are the union's siblings only. Folded into the composition as
+    /// well, as [`Self::gather_all_of`] folds them beside a bare `allOf`, untyped ones would make
+    /// it an object and drop every branch of another category, and every `null` branch.
+    ///
+    /// Each member of untyped object or array applicators alone (one
+    /// [`implied_applicator_category`] answers for) refines the branches of its own category and
+    /// leaves the rest, as the same keywords do as siblings of a `$ref` to a union
+    /// ([`Self::refine_union_target`]). The other members are combined as an `allOf` and met
+    /// with the union through [`Self::intersect_types`], the meet that `$ref` arm applies to a typed
+    /// sibling; the composition admits `null` exactly when every one of them does. Members that
+    /// constrain nothing (`true`, `{}`, an annotation) take part in neither: with none of either
+    /// kind left the union alone is the schema's type, under the schema's own hint, as it is with
+    /// no `allOf` at all.
     fn lower_all_of_beside_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let mut composition = schema.clone();
         composition.one_of.clear();
         composition.any_of.clear();
         composition.discriminator = None;
+        // Everything `gather_all_of` and `combine_all_of` read beside `all_of`: the fold of the
+        // schema's own object keywords and its `null`.
+        composition.types = super::TypeSet::default();
+        composition.properties.clear();
+        composition.pattern_properties.clear();
+        composition.additional_properties = None;
+        composition.required.clear();
+        let (scoped, combined): (Vec<SchemaOr>, Vec<SchemaOr>) =
+            schema.all_of.iter().cloned().partition(|member| {
+                matches!(member, SchemaOr::Schema(member) if implied_applicator_category(member).is_some())
+            });
+        composition.all_of = combined;
         let mut union = schema.clone();
         union.all_of.clear();
 
         let composition_hint = format!("{hint}Composition");
         let mut contributions = Vec::new();
         self.gather_all_of(&composition, &composition_hint, &mut contributions)?;
-        if contributions.is_empty() {
+        if contributions.is_empty() && scoped.is_empty() {
             return self.lower_union(&union, hint);
         }
-        let composed = self.combine_all_of(&composition, &composition_hint, &contributions)?;
+        let composed = if contributions.is_empty() {
+            None
+        } else {
+            let mut composed =
+                self.combine_all_of(&composition, &composition_hint, &contributions)?;
+            composed.nullable = contributions.iter().all(Contribution::admits_null);
+            Some(composed)
+        };
+        let mut refiners = Vec::new();
+        for (index, member) in scoped.iter().enumerate() {
+            let SchemaOr::Schema(member) = member else {
+                continue;
+            };
+            let scoped =
+                self.lower_scoped_refiners(member, true, None, &format!("{hint}Member{index}"))?;
+            refiners.push((member.as_ref(), Refiner::Scoped(scoped)));
+        }
         let union = self.lower_schema(&union, &format!("{hint}Union"))?;
         let mark = self.graph_mark();
-        let Ok(meet) = self.intersect_types(composed, union, &format!("{hint}Intersection")) else {
-            return self.reject_all_of_beside_union(schema);
-        };
+        let mut meet = union;
+        if let Some(composed) = composed {
+            let Ok(met) = self.intersect_types(composed, meet, &format!("{hint}Intersection"))
+            else {
+                return self.reject_all_of_beside_union(schema);
+            };
+            meet = met;
+        }
+        for (index, (member, refiner)) in refiners.into_iter().enumerate() {
+            let mut reach = ScopeReach::default();
+            let met = self.meet_scoped_refiner(
+                meet,
+                refiner,
+                &format!("{hint}Refined{index}"),
+                &mut reach,
+            );
+            if met.is_err() && reach.uncategorised {
+                return self.reject_unscoped_union_sibling(
+                    member,
+                    "a branch of the union beside this `allOf` states no JSON category, and this \
+                     member's untyped keywords are both object keywords and array keywords with \
+                     no `type` to choose between them, so no single Rust type represents what \
+                     they constrain of it",
+                );
+            }
+            for keywords in unreached_halves(refiner, &reach) {
+                let message = format!(
+                    "this `allOf` member's untyped {keywords} constrain only the instances of \
+                     their own category, and no branch of the union beside the `allOf` has that \
+                     category, so they apply to no value the union accepts"
+                );
+                self.warn_unreached_union_sibling(member, message);
+            }
+            let Ok(met) = met else {
+                return self.reject_all_of_beside_union(schema);
+            };
+            meet = met;
+        }
         let kind = self.graph.get(meet.id)?.kind.clone();
         self.discard_meet_intermediates(mark, &kind);
         let mut ty = self.insert_schema_type(schema, hint, kind);
@@ -3578,6 +3682,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fields: member_fields,
                 additional: member_additional,
                 required: member_required,
+                ..
             } = contribution
             else {
                 continue;
@@ -3792,6 +3897,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fields: member_fields,
                 additional: member_additional,
                 required: schema.required.clone(),
+                nullable: schema.types.types.contains(&JsonType::Null),
             });
         }
         Some(())
@@ -4055,6 +4161,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     fields,
                     additional,
                     required,
+                    nullable: ty.nullable,
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -4077,6 +4184,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fields,
                 additional,
                 required: schema.required.clone(),
+                nullable: schema.types.types.contains(&JsonType::Null),
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
@@ -9456,8 +9564,22 @@ enum Contribution {
         fields: Vec<Field>,
         additional: AdditionalProps,
         required: Vec<String>,
+        /// Whether the member admits `null` (a `"null"` in its type array, or a nullable `$ref`
+        /// target). Read only beside a union ([`LowerCtx::lower_all_of_beside_union`]), where it
+        /// decides whether the union's `null` survives the meet.
+        nullable: bool,
     },
     Scalar(Ty),
+}
+
+impl Contribution {
+    /// Whether the member this contribution came from admits `null`.
+    fn admits_null(&self) -> bool {
+        match self {
+            Contribution::Object { nullable, .. } => *nullable,
+            Contribution::Scalar(ty) => ty.nullable,
+        }
+    }
 }
 
 /// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`

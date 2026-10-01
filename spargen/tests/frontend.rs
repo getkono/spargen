@@ -8193,9 +8193,10 @@ fn a_discriminator_beside_no_union_naming_an_undeclared_schema_is_e004_at_the_en
 
 /// Issue #419: a schema carrying `allOf` and `oneOf`/`anyOf` together lowered through the `allOf`
 /// arm alone, which never read the union, so the union — and a `discriminator` beside it — was
-/// dropped and `check` called the document clean. The two are a conjunction: the rest of the
-/// schema, union included, is one more member of the composition, exactly as if it were written as
-/// a further `allOf` entry. Where that conjunction has no single type it is `E013` at the schema.
+/// dropped and `check` called the document clean. The two are a conjunction: the `allOf`
+/// composition is met with the union branch by branch, as a `$ref` is met with a union target, so
+/// a branch the composition excludes drops out. Where no branch is left, or a meet has no single
+/// type, it is `E013` at the schema.
 #[test]
 fn a_union_beside_all_of_that_contradicts_it_is_rejected() {
     let cases = [
@@ -8388,6 +8389,93 @@ fn a_union_beside_all_of_composes_with_it() {
         types.contains("pub type Pet = i32;"),
         "only the integer branch meets `type: integer`:\n{types}"
     );
+}
+
+/// Issue #419: an `allOf` beside the schema's own `oneOf`/`anyOf` excludes only the branches it
+/// constrains away. The schema's own keywords beside both are the union's siblings, refining its
+/// branches of their own category, and are not also an object member of the composition; an
+/// untyped `allOf` member is refined into the union the same way, as a `$ref` to a union refines
+/// with untyped siblings. Either, read as an object of the composition, dropped every string and
+/// `null` branch, so the generated client refused values the description accepts. A typed member
+/// that admits `null` keeps the union's `null` branch.
+#[test]
+fn a_union_beside_all_of_keeps_the_branches_and_null_the_composition_admits() {
+    let mixed = [
+        (
+            "the schema's own `required` beside an annotation-only allOf",
+            "    Pet:\n      required: [kind]\n      allOf: [ { description: a pet } ]\n      \
+             oneOf: [ { type: string }, { $ref: '#/components/schemas/Cat' } ]\n",
+        ),
+        (
+            "an untyped `required` allOf member",
+            "    Pet:\n      allOf: [ { required: [kind] } ]\n      \
+             oneOf: [ { type: string }, { $ref: '#/components/schemas/Cat' } ]\n",
+        ),
+    ];
+    for (what, schemas) in mixed {
+        let spec = with_schemas("3.1.0", schemas);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let types = types_module(&code);
+        assert!(
+            !types.contains("pub struct Pet "),
+            "{what}: the string branch must survive:\n{types}"
+        );
+        let variants = enum_variants(&types, "Pet");
+        assert_eq!(variants.len(), 2, "{what}: {variants:?}\n{types}");
+        assert!(
+            variants.iter().any(|variant| {
+                variant
+                    .split_once("(Box<")
+                    .and_then(|(_, rest)| rest.strip_suffix(">)"))
+                    .is_some_and(|payload| types.contains(&format!("pub type {payload} = String;")))
+            }),
+            "{what}: one variant is the string branch: {variants:?}\n{types}"
+        );
+        let checked = check(&spec);
+        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
+    }
+
+    let owner = "    Owner:\n      type: object\n      required: [p]\n      \
+                 properties: { p: { $ref: '#/components/schemas/Pet' } }\n";
+    let nullable = [
+        (
+            "the schema's own `properties` beside an annotation-only allOf",
+            "    Pet:\n      properties: { name: { type: string } }\n      \
+             allOf: [ { description: a pet } ]\n      \
+             oneOf: [ { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]\n",
+        ),
+        (
+            "an untyped `properties` allOf member",
+            "    Pet:\n      allOf: [ { properties: { name: { type: string } } } ]\n      \
+             oneOf: [ { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]\n",
+        ),
+        (
+            "a typed allOf member admitting null",
+            "    Pet:\n      \
+             allOf: [ { type: [object, 'null'], properties: { name: { type: string } } } ]\n      \
+             oneOf: [ { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]\n",
+        ),
+    ];
+    for (what, schemas) in nullable {
+        let spec = with_schemas("3.1.0", &format!("{owner}{schemas}"));
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let types = types_module(&code);
+        let p = field_type(&types, "pub p:").unwrap_or_else(|| panic!("{what}: no `p`\n{types}"));
+        assert!(
+            p.starts_with("Option<"),
+            "{what}: `null` satisfies both, so `p` is nullable, not `{p}`:\n{types}"
+        );
+        let fields = declared_fields(&types, "Pet");
+        assert!(
+            fields.iter().any(|field| field == "name")
+                && fields.iter().any(|field| field == "kind"),
+            "{what}: the object branch is `Cat` refined by `name`: {fields:?}\n{types}"
+        );
+        let checked = check(&spec);
+        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
+    }
 }
 
 /// The dispatch a discriminated union `name` emits, read back from the generated source: per
