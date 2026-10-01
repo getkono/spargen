@@ -7543,6 +7543,9 @@ fn uninhabited_parameter_part(graph: &TypeGraph, ty: Ty) -> Option<(String, Unin
                     None
                 }
             }
+            // A reservation's shape is unknown, so nothing proves it admits no value; it is left
+            // to `parameter_shape_supported`, which refuses it.
+            Some(TypeKind::Reserved) => None,
             _ => None,
         };
         visiting.remove(&ty.id);
@@ -7567,6 +7570,8 @@ fn uninhabited_parameter_part(graph: &TypeGraph, ty: Ty) -> Option<(String, Unin
                 AdditionalProps::Typed(value) => at(".*".to_owned(), **value),
                 AdditionalProps::Deny | AdditionalProps::Allow => None,
             }),
+        // The parameter itself was classified above; a reservation has no parts to search.
+        TypeKind::Reserved => None,
         _ => None,
     }
 }
