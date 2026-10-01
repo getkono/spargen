@@ -10479,6 +10479,76 @@ paths:
     }
 }
 
+/// An object parameter's `required` name that no `properties` entry declares is a required field
+/// (#140), typed by `additionalProperties`. With no value schema that field is unconstrained, and
+/// an unconstrained JSON value has no `name[key]=value` or `key=value` serialization, so the
+/// parameter rejects with `E010` — naming the property and why, rather than the generic "nested
+/// arrays or objects", which describes nothing the author wrote. A value schema that is a scalar
+/// gives the field a serialization, and the parameter generates.
+#[test]
+fn an_object_parameters_undeclared_required_name_needs_a_scalar_value_schema() {
+    const TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          style: STYLE
+          explode: true
+          schema:
+            type: object
+            properties: { b: { type: string } }
+            required: [a]
+ADDITIONAL      responses:
+        "204": { description: No Content }
+"##;
+    let spec = |style: &str, additional: &str| {
+        TEMPLATE
+            .replace("STYLE", style)
+            .replace("ADDITIONAL", additional)
+    };
+    for style in ["deepObject", "form"] {
+        for additional in ["", "            additionalProperties: true\n"] {
+            let spec = spec(style, additional);
+            for report in [generate(&spec), check(&spec)] {
+                assert_eq!(report.outcome(), Outcome::Rejected, "{style}: {report:#?}");
+                let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+                assert_eq!(messages.len(), 1, "{style}: {report:#?}");
+                assert!(
+                    messages[0].contains("`a`")
+                        && messages[0].contains("no schema constrains its value")
+                        && !messages[0].contains("nested arrays or objects"),
+                    "{style}: {messages:?}"
+                );
+            }
+        }
+        let spec = spec(
+            style,
+            "            additionalProperties: { type: integer }\n",
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{style}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnsupportedParameterStyle),
+            "{report:#?}"
+        );
+        let types = types_module(&code);
+        assert!(
+            types
+                .lines()
+                .any(|line| line.trim() == "pub a: FilterAdditional,")
+                && types
+                    .lines()
+                    .any(|line| line.trim() == "pub type FilterAdditional = i64;"),
+            "{style}: the required name lost its field or its value type:\n{types}"
+        );
+        assert_ne!(check(&spec).outcome(), Outcome::Rejected, "{style}");
+    }
+}
+
 #[test]
 fn matrix_and_label_path_styles_generate() {
     let spec = r##"
@@ -11716,6 +11786,22 @@ SIBLING
             "{ type: string }",
             "patternProperties: { '^a': { type: string } }",
         ),
+        // The four refining keywords, each ALONE: no `type`, no `properties`. They used to clear
+        // `schema_has_shape_constraint` and then lower to `TypeKind::Any`, which intersects as
+        // identity, so each was discarded with no diagnostic (#140). Each now establishes the
+        // category it applies to, so against a string it empties the intersection.
+        ("required", "{ type: string }", "required: [a]"),
+        (
+            "additionalProperties",
+            "{ type: string }",
+            "additionalProperties: false",
+        ),
+        ("items", "{ type: string }", "items: { type: integer }"),
+        (
+            "prefixItems",
+            "{ type: string }",
+            "prefixItems: [{ type: integer }]",
+        ),
         ("enum", "{ type: integer }", "enum: ['a']"),
         ("const", "{ type: integer }", "const: 'a'"),
         (
@@ -11772,38 +11858,44 @@ SIBLING
          the keyword the explain names: {spurious:?}"
     );
 
-    // The other half of the published rule: the four refining keywords do NOT constrain alone,
-    // because each lowers to `TypeKind::Any` without a `type`/`properties` to give it a shape. If
-    // one of these ever starts rejecting, the explain's second clause has become wrong in the
-    // opposite direction and must move with it.
-    for (keyword, sibling) in [
-        ("required", "required: [a]"),
-        ("additionalProperties", "additionalProperties: false"),
-        ("items", "items: { type: integer }"),
-        ("prefixItems", "prefixItems: [{ type: integer }]"),
-    ] {
-        let spec = format!(
-            "{HEAD}components:\n  schemas:\n    Target: {{ type: string }}\n    Sibling:\n      \
-             $ref: '#/components/schemas/Target'\n      {sibling}\n"
-        );
-        let report = generate(&spec);
-        assert_ne!(
-            report.outcome(),
-            Outcome::Rejected,
-            "a bare `{keyword}` sibling now constrains, so the explain's \"refine a shape rather \
-             than establish one\" clause is no longer true: {report:#?}"
-        );
-    }
-
-    // And the third clause, which says WHICH establishing keyword each refiner needs. Neither tier
-    // above can check it: tier one pairs every refiner with a `type` against a target of a
-    // different category, where the `type` alone already rejects, so the keyword beside it is never
-    // load-bearing. This tier is a differential instead — the same document with and without the
-    // refining keyword, against a target the paired `type` AGREES with, so the only thing that can
-    // move the lowering is the keyword itself.
+    // Tier one proves each refiner constrains against a target of ANOTHER category, where an empty
+    // intersection is the only possible verdict. It cannot see a refiner that establishes its
+    // category and then refines nothing — a `required` that became an empty open struct would
+    // still reject against a string. This tier is a differential instead — the same document with
+    // and without the refining keyword, against a target of the category it applies to, so the
+    // only thing that can move the lowering is the keyword itself. The rows with nothing beside the
+    // refiner are #140's leak; the rows with an establishing keyword pin that the category a
+    // `type`/`properties` gives it is the same one it now implies alone.
     //
-    // (keyword, the establishing keywords beside it, the target it agrees with, must it participate)
+    // (keyword, the establishing keywords beside it, the refiner, the target it agrees with)
     let refiners: &[(&str, &str, &str, &str)] = &[
+        (
+            "required",
+            "",
+            "required: [a]",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        // A name the target does not declare either: the requirement is the key's presence, and
+        // it must survive as a required field rather than vanish for want of a property to mark.
+        ("required", "", "required: [a]", "{ type: object }"),
+        (
+            "additionalProperties",
+            "",
+            "additionalProperties: false",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        (
+            "items",
+            "",
+            "items: { type: integer }",
+            "{ type: array, items: { type: number } }",
+        ),
+        (
+            "prefixItems",
+            "",
+            "prefixItems: [{ type: integer }]",
+            "{ type: array, items: { type: number } }",
+        ),
         (
             "additionalProperties",
             "type: object",
@@ -11814,19 +11906,28 @@ SIBLING
             "items",
             "type: array",
             "items: { type: integer }",
-            "{ type: array, items: { type: string } }",
+            "{ type: array, items: { type: number } }",
         ),
         (
             "prefixItems",
             "type: array",
             "prefixItems: [{ type: integer }]",
-            "{ type: array, items: { type: string } }",
+            "{ type: array, items: { type: number } }",
         ),
         // `required` beside `properties` participates: `object_body` consumes it per declared
         // property, and the property is declared.
         (
             "required",
             "properties: { a: { type: string } }",
+            "required: [a]",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        // And beside a bare `type: object`, which declares no property for it to mark. It used to
+        // be dropped there — `object_body` consumed `required` only as a per-property flag — so
+        // the generated type accepted and could emit `{}`, which the description forbids.
+        (
+            "required",
+            "type: object",
             "required: [a]",
             "{ type: object, properties: { a: { type: string } } }",
         ),
@@ -11894,34 +11995,441 @@ SIBLING
         (report.outcome(), definition)
     };
     for (keyword, establishing, refiner, target) in refiners {
+        let with = lowering(establishing, &format!("      {refiner}\n"), target);
+        let without = lowering(establishing, "", target);
+        // Every target here AGREES with the refiner's category, so a rejection is not the
+        // refiner taking part — it is the refiner being mistaken for a contradiction. Without
+        // this, a rejection would satisfy the differential below by yielding no item at all.
         assert_ne!(
-            lowering(establishing, &format!("      {refiner}\n"), target),
-            lowering(establishing, "", target),
+            with.0,
+            Outcome::Rejected,
+            "`{keyword}` beside `{establishing}` rejected against `{target}`, a target of the \
+             category it applies to"
+        );
+        assert_ne!(
+            with, without,
             "`{keyword}` beside `{establishing}` changed nothing about the lowering, so the \
-             explain's claim that it then takes part is not true"
+             explain's claim that it takes part is not true"
+        );
+    }
+}
+
+/// #140's two remaining halves of the category rule `E013`'s explain states for an untyped `$ref`
+/// sibling. The object and array applicators say nothing about `null` — in 2020-12 they are
+/// vacuously satisfied by it — so a nullable target stays nullable through the intersection; and a
+/// sibling carrying both kinds with no `type` to pick one is rejected rather than lowered to either
+/// category, which would silently discard the other kind's keywords.
+#[test]
+fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null() {
+    const HEAD: &str = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: \
+                        'https://e.com' }]\npaths: {}\ncomponents:\n  schemas:\n";
+    let holder =
+        "    Holder:\n      type: object\n      required: [p]\n      properties:\n        \
+                  p: { $ref: '#/components/schemas/Sibling' }\n";
+
+    for (keyword, target, sibling) in [
+        (
+            "required",
+            "{ type: [object, 'null'], properties: { a: { type: string } } }",
+            "required: [a]",
+        ),
+        (
+            "properties",
+            "{ type: [object, 'null'], properties: { a: { type: string } } }",
+            "properties: { b: { type: integer } }",
+        ),
+        (
+            "items",
+            "{ type: [array, 'null'], items: { type: number } }",
+            "items: { type: integer }",
+        ),
+    ] {
+        let spec = format!(
+            "{HEAD}    Target: {target}\n    Sibling:\n      $ref: \
+             '#/components/schemas/Target'\n      {sibling}\n{holder}"
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{keyword}: {report:#?}"
+        );
+        let types = types_module(&code);
+        assert!(
+            types.contains("pub p: Option<Sibling>"),
+            "an untyped `{keyword}` sibling dropped the nullable target's `null`, though the \
+             keyword says nothing about it:\n{types}"
         );
     }
 
-    // The clause that round 1 got wrong in the other direction: `required` does NOT take part
-    // beside a bare `type: object`. `object_body` materialises fields only from `properties` and
-    // consumes `required` as a per-field flag, so a sibling that declares no property has no field
-    // to mark and the requirement is dropped — the generated type accepts and can emit `{}`, which
-    // the description forbids. That is #140's territory to repair; the published text must not
-    // claim it is already handled.
-    assert_eq!(
-        lowering(
-            "type: object",
-            "      required: [a]\n",
-            "{ type: object, properties: { a: { type: string } } }"
+    // Keeping the target's `null` must not rescue a category contradiction. Against a nullable
+    // target of ANOTHER category the inferred `[category, null]` shares only `null` with it, and
+    // typing that as the exact JSON null (`pub type Sibling = ();`) would silently replace a
+    // nullable string with a type that decodes nothing else. It is the empty intersection the
+    // same sibling has against a non-null string, so it rejects the same way; an untyped
+    // `properties` sibling rejected here before the category was inferred at all.
+    for (keyword, target, sibling) in [
+        ("required", "{ type: [string, 'null'] }", "required: [q]"),
+        (
+            "properties",
+            "{ type: [string, 'null'] }",
+            "properties: { b: { type: integer } }",
         ),
-        lowering(
-            "type: object",
-            "",
-            "{ type: object, properties: { a: { type: string } } }"
+        (
+            "items",
+            "{ type: [string, 'null'] }",
+            "items: { type: integer }",
         ),
-        "`required` beside a bare `type: object` now changes the lowering, so the explain's \
-         \"only beside the sibling's own `properties`\" clause has become wrong and must move"
+        (
+            "additionalProperties",
+            "{ type: [array, 'null'], items: { type: string } }",
+            "additionalProperties: { type: integer }",
+        ),
+    ] {
+        let spec = format!(
+            "{HEAD}    Target: {target}\n    Sibling:\n      $ref: \
+             '#/components/schemas/Target'\n      {sibling}\n{holder}"
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "an untyped `{keyword}` sibling against a nullable target of another category \
+                 did not reject: {report:#?}"
+            );
+            assert_eq!(
+                messages_for(&report, Code::AllOfIrreconcilable).len(),
+                1,
+                "{keyword}: {report:#?}"
+            );
+        }
+    }
+
+    // The exemption from the rule above: a target that is itself exactly `null`. There the
+    // intersection's `null` is the target's whole type, not a remnant of a contradiction, and the
+    // untyped applicators are vacuously satisfied by `null`, so the sibling keeps the target's type
+    // rather than rejecting.
+    let spec = format!(
+        "{HEAD}    Target: {{ type: 'null' }}\n    Sibling:\n      $ref: \
+         '#/components/schemas/Target'\n      required: [q]\n{holder}"
     );
+    for report in [generate(&spec), check(&spec)] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "an untyped `required` sibling on a `$ref` to an exactly-`null` target rejected: \
+             {report:#?}"
+        );
+        assert!(
+            messages_for(&report, Code::AllOfIrreconcilable).is_empty(),
+            "{report:#?}"
+        );
+    }
+    let (_, code) = generate_with_code(&spec);
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub type Sibling = ();"),
+        "an untyped `required` sibling changed an exactly-`null` target's type:\n{types}"
+    );
+
+    // A union target whose branches do not all share the inferred category. Intersecting branch by
+    // branch drops every branch of another category (the string one here), so `Sibling` would
+    // become a struct that rejects the strings `Target` accepts, with no diagnostic. Whether an
+    // untyped refiner beside a mixed-category union is vacuous for the other branches is #282's
+    // open design question, so the `$ref` spelling rejects rather than choosing silently.
+    for (keyword, target, sibling) in [
+        (
+            "required",
+            "{ oneOf: [{ type: string }, { type: object, properties: { a: { type: string } } }] }",
+            "required: [a]",
+        ),
+        (
+            "items",
+            "{ oneOf: [{ type: string }, { type: array, items: { type: number } }] }",
+            "items: { type: integer }",
+        ),
+    ] {
+        let spec = format!(
+            "{HEAD}    Target: {target}\n    Sibling:\n      $ref: \
+             '#/components/schemas/Target'\n      {sibling}\n{holder}"
+        );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "an untyped `{keyword}` sibling silently dropped a union target's branch of \
+                 another category: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::AllOfIrreconcilable);
+            assert_eq!(messages.len(), 1, "{keyword}: {report:#?}");
+            assert!(messages[0].contains("branch"), "{keyword}: {messages:?}");
+        }
+    }
+    // A union whose every branch has the inferred category loses no branch, so it still composes.
+    let spec = format!(
+        "{HEAD}    A: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }}, \
+         a: {{ type: string }} }} }}\n    B: {{ type: object, required: [kind], properties: {{ \
+         kind: {{ type: string }}, a: {{ type: string }} }} }}\n    Target:\n      oneOf: [{{ \
+         $ref: '#/components/schemas/A' }}, {{ $ref: '#/components/schemas/B' }}]\n      \
+         discriminator: {{ propertyName: kind }}\n    Sibling:\n      $ref: \
+         '#/components/schemas/Target'\n      required: [a]\n{holder}"
+    );
+    let report = generate(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+
+    let spec = format!(
+        "{HEAD}    Target: {{ type: object, properties: {{ a: {{ type: string }} }} }}\n    \
+         Sibling:\n      $ref: '#/components/schemas/Target'\n      required: [a]\n      \
+         items: {{ type: integer }}\n"
+    );
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("both object keywords") && messages[0].contains("array keywords"),
+            "{messages:?}"
+        );
+    }
+}
+
+/// `object_body` consumed `required` only as a per-property flag, so a `required` name that no
+/// `properties` entry declares was dropped and the generated type accepted, and could emit, an
+/// object without that key (#140). It is carried as a required field, typed by what the object
+/// says of an undeclared key.
+#[test]
+fn a_required_name_no_property_declares_is_still_required() {
+    const HEAD: &str = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: \
+                        'https://e.com' }]\npaths: {}\ncomponents:\n  schemas:\n";
+    let field = |schema: &str, name: &str| {
+        let (report, code) = generate_with_code(&format!("{HEAD}    Thing: {schema}\n"));
+        assert_ne!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        let types = types_module(&code);
+        let prefix = format!("pub {name}: ");
+        let ty = types
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("`{schema}` generated no `{name}` field:\n{types}"))
+            .trim_end_matches(',')
+            .to_owned();
+        // The field is written through its own named alias; report what that alias names.
+        let alias = format!("pub type {ty} = ");
+        let resolved = types
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix(&alias))
+            .map_or(ty.clone(), |rest| rest.trim_end_matches(';').to_owned());
+        format!("pub {name}: {resolved},")
+    };
+
+    // Unconstrained: absent `additionalProperties`, `true`, and `patternProperties` whose patterns
+    // cannot be matched against the name at generation time.
+    for schema in [
+        "{ type: object, required: [a] }",
+        "{ type: object, additionalProperties: true, required: [a] }",
+        "{ type: object, patternProperties: { '^x': { type: integer } }, required: [a] }",
+        "{ type: object, properties: { b: { type: string } }, required: [a, b] }",
+    ] {
+        assert_eq!(field(schema, "a"), "pub a: serde_json::Value,", "{schema}");
+    }
+    // Typed by the `additionalProperties` schema, which is what the key's value must satisfy.
+    assert_eq!(
+        field(
+            "{ type: object, additionalProperties: { type: integer }, required: [a] }",
+            "a"
+        ),
+        "pub a: i64,"
+    );
+    // A value schema that closes a cycle back to the object: the map drops the `Box` its own
+    // indirection makes unnecessary, and a plain required field has none, so it is boxed again.
+    assert_eq!(
+        field(
+            "{ type: object, additionalProperties: { $ref: '#/components/schemas/Thing' }, \
+             required: [child] }",
+            "child"
+        ),
+        "pub child: Box<Thing>,"
+    );
+    // `additionalProperties: false` closes the object to the fields the type declares, as it does
+    // everywhere else in lowering, and the required name is one of them.
+    assert_eq!(
+        field(
+            "{ type: object, additionalProperties: false, required: [a] }",
+            "a"
+        ),
+        "pub a: serde_json::Value,"
+    );
+    // So the closed `allOf` spelling of "require a property the base declares" keeps generating,
+    // with the base's type for it.
+    assert_eq!(
+        field(
+            "{ allOf: [{ type: object, properties: { a: { type: string } } }, \
+             { additionalProperties: false, required: [a] }] }",
+            "a"
+        ),
+        "pub a: String,"
+    );
+
+    // A member that only requires the name comes FIRST here, so its metadata-less field is the one
+    // the merge meets first. The later declaration's metadata must still reach the field.
+    let (report, code) = generate_with_code(&format!(
+        "{HEAD}    Thing:\n      allOf:\n        - {{ type: object, required: [a] }}\n        - \
+         {{ type: object, properties: {{ a: {{ type: string, deprecated: true }} }} }}\n"
+    ));
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    let lines: Vec<&str> = types.lines().map(str::trim).collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("pub a: "))
+        .unwrap_or_else(|| panic!("no `a` field:\n{types}"));
+    assert!(
+        lines[..at]
+            .iter()
+            .rev()
+            .take_while(|line| line.starts_with("#[") || line.starts_with("///"))
+            .any(|line| line.contains("Deprecated per the spec")),
+        "the declaring member's `deprecated` was lost to the requiring member's placeholder:\n{types}"
+    );
+    assert!(!lines[at].contains("Option<"), "{types}");
+
+    // The `allOf` spelling reaches the same `object_body`, so a member's undeclared requirement
+    // survives the merge too.
+    assert_eq!(
+        field(
+            "{ allOf: [{ type: object, properties: { b: { type: string } } }, \
+             { type: object, required: [a] }] }",
+            "a"
+        ),
+        "pub a: serde_json::Value,"
+    );
+}
+
+/// A field an object carries only because its `required` names the key is no declaration of the
+/// property, so in a composition it takes its type from the other sides as well: a side's
+/// `additionalProperties` value schema constrains every key that side does not declare, and a
+/// side that declares the property supplies its type and metadata outright, exactly as it does for
+/// the same composition with no `required` in it. Before, the placeholder's own type (unconstrained,
+/// or the requiring side's `additionalProperties` value) was intersected like a declaration: a typed
+/// `additionalProperties` on the other side never reached it, so a string-valued key became
+/// `serde_json::Value`; and a declaration on the other side was intersected with the requiring
+/// side's value schema, which rejected a composition the same document without the `required`
+/// generates.
+#[test]
+fn a_required_only_field_takes_its_type_from_every_side_of_a_composition() {
+    const HEAD: &str = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: \
+                        'https://e.com' }]\npaths: {}\ncomponents:\n  schemas:\n    Labels: { \
+                        type: object, additionalProperties: { type: string } }\n    Base: { type: \
+                        object, properties: { id: { type: integer } } }\n    Req: { type: object, \
+                        required: [a] }\n";
+    let types_for = |schema: &str| {
+        let spec = format!("{HEAD}    Thing: {schema}\n");
+        let checked = check(&spec);
+        assert_ne!(
+            checked.outcome(),
+            Outcome::Rejected,
+            "{schema}: {checked:#?}"
+        );
+        assert!(
+            !has_code(&checked, Code::AllOfIrreconcilable),
+            "{schema}: {checked:#?}"
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+        types_module(&code)
+    };
+    // The field of `Thing` itself: `Req` carries an `a` of its own.
+    let thing_field = |types: &str, name: &str| {
+        let prefix = format!("pub {name}: ");
+        types
+            .lines()
+            .map(str::trim)
+            .skip_while(|line| !line.starts_with("pub struct Thing "))
+            .take_while(|line| *line != "}")
+            .find_map(|line| line.strip_prefix(&prefix).map(str::to_owned))
+    };
+    let field = |schema: &str, name: &str| {
+        let types = types_for(schema);
+        let ty = thing_field(&types, name)
+            .unwrap_or_else(|| panic!("`{schema}` generated no `{name}` field:\n{types}"))
+            .trim_end_matches(',')
+            .to_owned();
+        // The field is written through its own named alias; report what that alias names.
+        let alias = format!("pub type {ty} = ");
+        let resolved = types
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix(&alias))
+            .map_or(ty.clone(), |rest| rest.trim_end_matches(';').to_owned());
+        format!("pub {name}: {resolved},")
+    };
+
+    // The other side's typed `additionalProperties` reaches the required key, in the `$ref`
+    // spelling and in both orders of the `allOf` spelling.
+    for schema in [
+        "{ $ref: '#/components/schemas/Labels', required: [a] }",
+        "{ allOf: [{ $ref: '#/components/schemas/Labels' }, { required: [a] }] }",
+        "{ allOf: [{ required: [a] }, { $ref: '#/components/schemas/Labels' }] }",
+        "{ allOf: [{ $ref: '#/components/schemas/Labels' }, { $ref: '#/components/schemas/Req' }] }",
+    ] {
+        assert_eq!(field(schema, "a"), "pub a: String,", "{schema}");
+    }
+
+    // The other side's declaration is the property's type (required, so no `Option`), and the
+    // requiring side's value schema does not reach it, as it does not without the `required`.
+    for schema in [
+        "{ allOf: [{ $ref: '#/components/schemas/Base' }, { type: object, additionalProperties: \
+         { type: string }, required: [id] }] }",
+        "{ allOf: [{ type: object, additionalProperties: { type: string }, required: [id] }, \
+         { $ref: '#/components/schemas/Base' }] }",
+        "{ $ref: '#/components/schemas/Base', additionalProperties: { type: string }, \
+         required: [id] }",
+    ] {
+        assert_eq!(field(schema, "id"), "pub id: i64,", "{schema}");
+    }
+
+    // A component's required-only field keeps giving way when the component is copied into an
+    // `allOf`: the later member's declaration supplies the metadata.
+    let types = types_for(
+        "{ allOf: [{ $ref: '#/components/schemas/Req' }, { type: object, properties: { a: { \
+         type: string, deprecated: true } } }] }",
+    );
+    let lines: Vec<&str> = types
+        .lines()
+        .map(str::trim)
+        .skip_while(|line| !line.starts_with("pub struct Thing "))
+        .collect();
+    let at = lines
+        .iter()
+        .position(|line| line.starts_with("pub a: "))
+        .unwrap_or_else(|| panic!("no `a` field:\n{types}"));
+    assert!(
+        lines[..at]
+            .iter()
+            .rev()
+            .take_while(|line| line.starts_with("#[") || line.starts_with("///"))
+            .any(|line| line.contains("Deprecated per the spec")),
+        "the declaring member's `deprecated` was lost to the component's placeholder:\n{types}"
+    );
+
+    // Every side constrains the undeclared key, so value schemas that share no value leave no
+    // value for the required key, even where `additionalProperties: false` keeps the two maps
+    // themselves from being intersected.
+    let spec = format!(
+        "{HEAD}    Thing: {{ allOf: [{{ $ref: '#/components/schemas/Labels' }}, {{ type: object, \
+         additionalProperties: false }}, {{ type: object, additionalProperties: {{ type: integer \
+         }}, required: [a] }}] }}\n"
+    );
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("property `a` is required but no `allOf` member declares it"),
+            "{messages:?}"
+        );
+    }
 }
 
 /// Site B widened `E007`'s emission set, so its message has to describe the construct that actually
@@ -12037,8 +12545,27 @@ fn the_composition_explain_covers_every_cause_that_reports_it() {
         explain.contains("A sibling bears a shape of its own through"),
         "{explain}"
     );
+    // The category rule for untyped applicators, and the two consequences
+    // `a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null` and
+    // `a_required_name_no_property_declares_is_still_required` pin against the code.
     assert!(
-        explain.contains("refine a shape rather than establish one"),
+        explain.contains("establish an object and the array keywords"),
+        "{explain}"
+    );
+    assert!(
+        explain.contains("the target's nullability stands"),
+        "{explain}"
+    );
+    assert!(
+        explain.contains("Beside a `$ref` to a union, such a sibling is rejected"),
+        "{explain}"
+    );
+    assert!(
+        explain.contains("A `required` name no `properties` entry declares is still a requirement"),
+        "{explain}"
+    );
+    assert!(
+        explain.contains("In a composition such a field is no declaration of the property"),
         "{explain}"
     );
 
