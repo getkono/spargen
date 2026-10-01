@@ -22653,6 +22653,293 @@ fn e004_a_chained_object_reference_is_followed_by_target_not_by_spelling() {
     }
 }
 
+/// One `#/components/<kind>/` position lowering resolves itself (#397): a valid inline document,
+/// the pointer of the object to move out of it, the `components` key of its kind, and a decoy of
+/// that kind whose client differs from the moved object's.
+struct ComponentScope {
+    kind: &'static str,
+    document: serde_json::Value,
+    split_at: &'static str,
+    key: &'static str,
+    decoy: serde_json::Value,
+}
+
+fn component_scopes() -> Vec<ComponentScope> {
+    use serde_json::json;
+    let placed = |split_at: &str| {
+        placement_fixtures()
+            .into_iter()
+            .find(|fixture| !fixture.rejects && fixture.split_at == split_at)
+            .unwrap_or_else(|| panic!("no valid placement fixture at {split_at}"))
+            .document
+    };
+    let integer_text = json!({ "text/plain": { "schema": { "type": "integer" } } });
+    vec![
+        ComponentScope {
+            kind: "parameter",
+            document: placed("/paths/~1pet/get/parameters/0"),
+            split_at: "/paths/~1pet/get/parameters/0",
+            key: "parameters",
+            decoy: json!({ "name": "rootOnly", "in": "header", "schema": { "type": "string" } }),
+        },
+        ComponentScope {
+            kind: "request body",
+            document: placed("/paths/~1pet/get/requestBody"),
+            split_at: "/paths/~1pet/get/requestBody",
+            key: "requestBodies",
+            decoy: json!({ "content": integer_text }),
+        },
+        ComponentScope {
+            kind: "response",
+            document: placed("/paths/~1pet/get/responses/200"),
+            split_at: "/paths/~1pet/get/responses/200",
+            key: "responses",
+            decoy: json!({ "description": "decoy", "content": integer_text }),
+        },
+        ComponentScope {
+            kind: "header",
+            document: placed("/paths/~1pet/get/responses/200/headers/X-Rate"),
+            split_at: "/paths/~1pet/get/responses/200/headers/X-Rate",
+            key: "headers",
+            decoy: json!({ "schema": { "type": "boolean" } }),
+        },
+        ComponentScope {
+            kind: "Media Type Object",
+            document: placement_document(
+                "3.2.0",
+                json!({ "operationId": "getPet", "responses": { "200": { "description": "ok",
+                "content": { "application/json": { "schema": { "type": "string" } } } } } }),
+                json!({}),
+            ),
+            split_at: "/paths/~1pet/get/responses/200/content/application~1json",
+            key: "mediaTypes",
+            decoy: json!({ "schema": { "type": "integer" } }),
+        },
+    ]
+}
+
+impl ComponentScope {
+    /// The inline document with `name` declared in the root's own `components.<key>`.
+    fn with_root_component(&self, name: &str, value: &serde_json::Value) -> serde_json::Value {
+        let mut document = self.document.clone();
+        document
+            .as_object_mut()
+            .unwrap()
+            .entry("components")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .unwrap()
+            .insert(self.key.to_owned(), serde_json::json!({ name: value }));
+        document
+    }
+
+    /// `document` with the object at `split_at` replaced by a `$ref` to `reference`.
+    fn referencing(&self, document: &serde_json::Value, reference: &str) -> serde_json::Value {
+        let mut document = document.clone();
+        *document.pointer_mut(self.split_at).unwrap() = serde_json::json!({ "$ref": reference });
+        document
+    }
+
+    /// The moved object.
+    fn moved(&self) -> serde_json::Value {
+        self.document.pointer(self.split_at).unwrap().clone()
+    }
+}
+
+/// A `#/components/<kind>/` reference written inside a referenced file addresses that file's own
+/// components, as a JSON Pointer fragment addresses the document it appears in (#397). Header,
+/// Parameter, Request Body, Response and Media Type references read the **root** document's
+/// components instead: a sub-file chain `A` → `#/components/<kind>/B` was rejected with `E004`
+/// when the root declared no `B`, and silently generated the root's `B` when it did. Both reach
+/// the client the inline document generates, through `generate` and `check` alike — and the root's
+/// decoy `B`, read in its place, is shown to generate a different one, so the comparison can fail.
+#[test]
+fn a_component_ref_in_a_sub_file_reads_that_files_components() {
+    let mut divergent = Vec::new();
+    for scope in component_scopes() {
+        let kind = scope.kind;
+        let reference = format!("./other.json#/components/{}/A", scope.key);
+        let other = serde_json::json!({ "components": { scope.key: {
+            "A": { "$ref": format!("#/components/{}/B", scope.key) },
+            "B": scope.moved(),
+        } } });
+        for (label, inline) in [
+            ("the root declares no `B`", scope.document.clone()),
+            (
+                "the root declares a decoy `B`",
+                scope.with_root_component("B", &scope.decoy),
+            ),
+        ] {
+            let (_, _, inline_client) =
+                run_placement_with_client(&[("openapi.json", inline.clone())]);
+            assert!(!inline_client.is_empty(), "{kind}/{label}: inline");
+            if label.contains("decoy") {
+                let (_, _, decoyed) = run_placement_with_client(&[(
+                    "openapi.json",
+                    scope.referencing(&inline, &format!("#/components/{}/B", scope.key)),
+                )]);
+                assert_ne!(
+                    client_body(&decoyed),
+                    client_body(&inline_client),
+                    "{kind}: the decoy must generate a different client than the moved object"
+                );
+            }
+            let (generated, checked, client) = run_placement_with_client(&[
+                ("openapi.json", scope.referencing(&inline, &reference)),
+                ("other.json", other.clone()),
+            ]);
+            for (entry, report) in [("generate", &generated), ("check", &checked)] {
+                if report.outcome() == Outcome::Rejected || has_code(report, Code::UnresolvedRef) {
+                    divergent.push(format!("{kind}/{label}/{entry}: {report:#?}"));
+                }
+            }
+            if client_body(&client) != client_body(&inline_client) {
+                divergent.push(format!(
+                    "{kind}/{label}: the sub-file's `B` must be the one generated\n\
+                     split:\n{client}\ninline:\n{inline_client}"
+                ));
+            }
+        }
+    }
+    assert!(divergent.is_empty(), "{}", divergent.join("\n\n"));
+}
+
+/// The other direction of #397: a `#/components/<kind>/B` written inside a referenced file that
+/// declares no `B` is unresolved, even where the root document declares one — the fragment names
+/// the file it is written in, so reading the root's would answer a reference nobody wrote. It is
+/// `E004`'s absent-target case in that kind's words, and its remedy says how to reach the root's.
+#[test]
+fn e004_a_component_ref_in_a_sub_file_does_not_read_the_roots_components() {
+    for scope in component_scopes() {
+        let kind = scope.kind;
+        let root = scope.referencing(
+            &scope.with_root_component("B", &scope.moved()),
+            &format!("./other.json#/components/{}/A", scope.key),
+        );
+        let other = serde_json::json!({ "components": { scope.key: {
+            "A": { "$ref": format!("#/components/{}/B", scope.key) },
+        } } });
+        let (generated, checked) = run_placement(&[("openapi.json", root), ("other.json", other)]);
+        let wanted = format!(
+            "{kind} reference target `#/components/{}/B` was not found in the input bundle",
+            scope.key
+        );
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{kind}/{entry}: {report:#?}"
+            );
+            let found: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::UnresolvedRef && d.message == wanted)
+                .collect();
+            assert_eq!(found.len(), 1, "{kind}/{entry}: {report:#?}");
+            assert!(
+                found[0].remedy.as_deref().is_some_and(
+                    |remedy| remedy.contains("the root document declares `#/components/")
+                ),
+                "{kind}/{entry}: the remedy must point at the root's declaration: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A Media Type Object chain's cycle check keys on the target each hop resolves to (#397), as the
+/// Parameter, Request Body, Response and Header chains' do. A real cycle — through the root's
+/// `components.mediaTypes`, or across a referenced file — is `E004`'s cycle case in Media Type
+/// words. `#/components/mediaTypes/A` written in the root and again in a sub-file names two
+/// targets, so a chain through both is followed to the sub-file's `A` rather than reported as a
+/// cycle, and reaches the client the inline document generates.
+#[test]
+fn e004_a_media_type_chain_is_followed_by_target_not_by_spelling() {
+    use serde_json::json;
+    let with_content = |content: serde_json::Value, extra: serde_json::Value| {
+        placement_document(
+            "3.2.0",
+            json!({ "operationId": "getPet", "responses": { "200": { "description": "ok",
+            "content": { "application/json": content } } } }),
+            extra,
+        )
+    };
+
+    for (label, files) in [
+        (
+            "through the root's components",
+            vec![(
+                "openapi.json",
+                with_content(
+                    json!({ "$ref": "#/components/mediaTypes/A" }),
+                    json!({ "components": { "mediaTypes": {
+                        "A": { "$ref": "#/components/mediaTypes/B" },
+                        "B": { "$ref": "#/components/mediaTypes/A" },
+                    } } }),
+                ),
+            )],
+        ),
+        (
+            "across a referenced file",
+            vec![
+                (
+                    "openapi.json",
+                    with_content(json!({ "$ref": "./c.json#/A" }), json!({})),
+                ),
+                (
+                    "c.json",
+                    json!({ "A": { "$ref": "#/B" }, "B": { "$ref": "#/A" } }),
+                ),
+            ],
+        ),
+    ] {
+        let (generated, checked) = run_placement(&files);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: {report:#?}"
+            );
+            assert!(
+                messages_for(report, Code::UnresolvedRef)
+                    .contains(&"media type reference cycle cannot be resolved"),
+                "{label}/{entry}: a media type cycle must say it is a cycle: {report:#?}"
+            );
+        }
+    }
+
+    // `#/components/mediaTypes/A` is written twice: in the root (naming the root's `A`, which
+    // hops to the sub-file) and in the sub-file (naming the sub-file's own `A`, the object).
+    let root = with_content(
+        json!({ "$ref": "#/components/mediaTypes/A" }),
+        json!({ "components": { "mediaTypes": {
+            "A": { "$ref": "./other.json#/components/mediaTypes/B" },
+        } } }),
+    );
+    let other = json!({ "components": { "mediaTypes": {
+        "B": { "$ref": "#/components/mediaTypes/A" },
+        "A": { "schema": { "type": "integer" } },
+    } } });
+    let (generated, checked, client) =
+        run_placement_with_client(&[("openapi.json", root), ("other.json", other)]);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::UnresolvedRef),
+            "{entry}: one spelling written in two files is not a cycle: {report:#?}"
+        );
+    }
+    let (_, _, inline) = run_placement_with_client(&[(
+        "openapi.json",
+        with_content(json!({ "schema": { "type": "integer" } }), json!({})),
+    )]);
+    assert!(!inline.is_empty(), "the inline document must generate");
+    assert_eq!(
+        client_body(&client),
+        client_body(&inline),
+        "the chain must reach the sub-file's `A`"
+    );
+}
+
 /// A `summary`/`description` on a Reference Object written in a sub-file, at the second hop of a
 /// Parameter, Request Body or Response chain, is `W011`'s reference-docs case, located in that
 /// sub-file. Before bundle chains were followed (#274) the second hop was parsed as the object and
