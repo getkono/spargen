@@ -8301,6 +8301,257 @@ fn a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry() {
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
 }
 
+/// Issue #403: a member that is no schema component — inline, or a pointer into another schema —
+/// has no implicit discriminator value ("inline `oneOf` or `anyOf` subschemas are not considered").
+/// With no `mapping` entry naming it, the generated client dispatched on a tag spargen made up —
+/// the pointer text `Envelope/properties/cat`, or the hint `PetVariant1` — which no server sends,
+/// and serialized that tag into the payload. No discriminator value selects such a member: `W011`
+/// at the discriminator, in `check` as in `generate`. Beside a tagged member the tag dispatch stays
+/// for the tagged one and the untagged one takes no tag; with no tagged member at all the union is
+/// decoded by its members' schemas with no tag dispatch. A `mapping` entry naming it, or
+/// `defaultMapping` falling back to it, reaches it with no warning.
+#[test]
+fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag() {
+    let spec = |members: &str, discriminator: &str, version: &str| {
+        format!(
+            "openapi: {version}\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths: {{}}\n\
+             components:\n  \
+             schemas:\n    \
+             Pet:\n      \
+             oneOf:\n{members}      \
+             discriminator:\n        \
+             propertyName: kind\n{discriminator}    \
+             Envelope:\n      \
+             type: object\n      \
+             properties:\n        \
+             cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }}, purr: {{ type: string }} }} }}\n    \
+             Dog: {{ type: object, required: [kind, bark], properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }} }}\n"
+        )
+    };
+    let deep = "        - { $ref: '#/components/schemas/Envelope/properties/cat' }\n        \
+                - { $ref: '#/components/schemas/Dog' }\n";
+    let inline = "        - { $ref: '#/components/schemas/Dog' }\n        \
+                  - { type: object, required: [kind, fins], properties: { kind: { type: string }, fins: { type: integer } } }\n";
+    // GitHub's `POST /repos/{owner}/{repo}/check-runs` body: two inline members, each pinning the
+    // discriminating property with an `enum` the discriminator never reads.
+    let both_inline = "        - { type: object, required: [kind, done], properties: { kind: { enum: [completed] }, done: { type: boolean } } }\n        \
+                       - { type: object, properties: { kind: { enum: [queued, in_progress] } } }\n";
+    // Beside the tagged `Dog`, the untagged member keeps Dog's dispatch (`dispatches`); with no
+    // tagged member at all, the discriminator dispatches nothing.
+    for (what, members, subject, dispatches) in [
+        (
+            "deep pointer",
+            deep,
+            "union member 0 is no schema component",
+            true,
+        ),
+        (
+            "inline",
+            inline,
+            "union member 1 is no schema component",
+            true,
+        ),
+        (
+            "both inline",
+            both_inline,
+            "union members 0, 1 are no schema components",
+            false,
+        ),
+    ] {
+        let spec = spec(members, "", "3.1.0");
+        let (generated, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::NonDisjointUnion),
+                "{what} {entry}: {report:#?}"
+            );
+            let w011: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .collect();
+            assert_eq!(w011.len(), 1, "{what} {entry}: {report:#?}");
+            assert_eq!(
+                w011[0].pointer.as_str(),
+                "/components/schemas/Pet/discriminator",
+                "{what} {entry}: {report:#?}"
+            );
+            assert!(
+                w011[0].message.contains(subject),
+                "{what} {entry}: {report:#?}"
+            );
+            let consequence = if dispatches {
+                "the tag dispatches only to the members a value names"
+            } else {
+                "this `discriminator` dispatches nothing"
+            };
+            assert!(
+                w011[0].message.contains(consequence),
+                "{what} {entry}: {report:#?}"
+            );
+        }
+        if dispatches {
+            // `Dog` keeps its implicit tag both ways; the untagged member is selected by no tag
+            // and written with none.
+            let arms = discriminated_arms(&code, "Pet");
+            assert_eq!(
+                arms.decode,
+                vec![("Dog".to_owned(), vec!["Dog".to_owned()])],
+                "{what}\n{code}"
+            );
+            let written: Vec<_> = arms
+                .encode
+                .iter()
+                .filter_map(|(_, tag)| tag.clone())
+                .collect();
+            assert_eq!(written, ["Dog"], "{what}\n{code}");
+            assert_eq!(arms.encode.len(), 2, "{what}\n{code}");
+        } else {
+            let de_impl = code
+                .split("impl<'de> serde::Deserialize<'de> for Pet {")
+                .nth(1)
+                .unwrap_or_else(|| panic!("{what}: no Deserialize for Pet\n{code}"));
+            let de_impl = de_impl.split("\nimpl").next().unwrap_or(de_impl);
+            assert!(!de_impl.contains("match tag"), "{what}\n{de_impl}");
+        }
+        // Either way no tag is invented: neither the pointer text nor a variant hint.
+        for invented in ["\"Envelope/properties/cat\"", "\"PetVariant"] {
+            assert!(!code.contains(invented), "{what}: {invented}\n{code}");
+        }
+    }
+
+    // A mapping entry naming the deep-pointer member gives it the declared tag and nothing else.
+    let mapped = spec(
+        deep,
+        "        mapping:\n          \
+         cat: '#/components/schemas/Envelope/properties/cat'\n",
+        "3.1.0",
+    );
+    let (report, code) = generate_with_code(&mapped);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let tags: Vec<Vec<String>> = discriminated_arms(&code, "Pet")
+        .decode
+        .into_iter()
+        .map(|(_, tags)| tags)
+        .collect();
+    assert_eq!(
+        tags,
+        [vec!["cat".to_owned()], vec!["Dog".to_owned()]],
+        "{code}"
+    );
+
+    // `defaultMapping` falling back to it reaches it with no tag of its own.
+    let fallback = spec(
+        deep,
+        "        defaultMapping: '#/components/schemas/Envelope/properties/cat'\n",
+        "3.2.0",
+    );
+    let (report, code) = generate_with_code(&fallback);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let tags: Vec<Vec<String>> = discriminated_arms(&code, "Pet")
+        .decode
+        .into_iter()
+        .map(|(_, tags)| tags)
+        .collect();
+    assert_eq!(tags, [vec!["Dog".to_owned()]], "{code}");
+    assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
+    let checked = check(&fallback);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+}
+
+/// An untagged member beside tagged ones must not cost the tagged ones their dispatch. Dropping the
+/// discriminator for the whole union made `anyOf [Cat, Dog, inline]` decode by priority, then source
+/// order, so `{"kind": "Dog", …}` that `Cat` also accepts decoded as `Cat` against its own tag, and
+/// `Dog` lost the tag serialization re-inserts. The tag still selects `Cat` and `Dog`, which still
+/// write it; the inline member is tried by its schema, with the applicator's semantics, only when
+/// the tag is absent or names neither. (`e2e.rs` drives the decoded values.)
+#[test]
+fn an_untagged_discriminated_member_keeps_the_tag_dispatch_of_the_tagged_ones() {
+    let members = "        - { $ref: '#/components/schemas/Cat' }\n        \
+                   - { $ref: '#/components/schemas/Dog' }\n        \
+                   - { type: object, required: [kind, fins], properties: { kind: { type: string }, fins: { type: integer } } }\n";
+    for (applicator, valid) in [("oneOf", "match_count == 1"), ("anyOf", "match_count >= 1")] {
+        let spec = discriminated_pet("3.1.0", members, "        propertyName: kind\n").replacen(
+            "oneOf:",
+            &format!("{applicator}:"),
+            1,
+        );
+        let (generated, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{applicator} {entry}: {report:#?}"
+            );
+            let w011: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .collect();
+            assert_eq!(w011.len(), 1, "{applicator} {entry}: {report:#?}");
+            assert!(
+                w011[0]
+                    .message
+                    .contains("union member 2 is no schema component")
+                    && w011[0]
+                        .message
+                        .contains("the tag dispatches only to the members a value names"),
+                "{applicator} {entry}: {report:#?}"
+            );
+        }
+        let arms = discriminated_arms(&code, "Pet");
+        assert_eq!(
+            arms.decode,
+            vec![
+                ("Cat".to_owned(), vec!["Cat".to_owned()]),
+                ("Dog".to_owned(), vec!["Dog".to_owned()]),
+            ],
+            "{applicator}\n{code}"
+        );
+        assert_eq!(
+            arms.encode,
+            vec![
+                ("Cat".to_owned(), Some("Cat".to_owned())),
+                ("Dog".to_owned(), Some("Dog".to_owned())),
+                ("PetVariant2".to_owned(), None),
+            ],
+            "{applicator}\n{code}"
+        );
+        // The untagged member is the only one tried, after the tag finds no arm, and with the
+        // applicator's own match rule.
+        let de_impl = code
+            .split("impl<'de> serde::Deserialize<'de> for Pet {")
+            .nth(1)
+            .and_then(|rest| rest.split("impl serde::Serialize for Pet").next())
+            .unwrap_or_else(|| panic!("no Deserialize for Pet:\n{code}"));
+        let flat = de_impl.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            flat.matches("serde_json::from_value::<").count(),
+            2,
+            "{applicator}: one attempt in each of the absent and unknown tag paths\n{flat}"
+        );
+        assert!(flat.contains(valid), "{applicator}\n{flat}");
+        let tried = flat
+            .split("match tag.as_str() {")
+            .nth(1)
+            .and_then(|rest| rest.split("_ =>").nth(1))
+            .unwrap_or_else(|| panic!("{applicator}: no unknown-tag arm\n{flat}"));
+        assert!(
+            tried.contains("Pet::PetVariant2(inner)") && !tried.contains("Pet::Cat(inner)"),
+            "{applicator}\n{flat}"
+        );
+    }
+}
+
 /// A Discriminator Object whose fields have the wrong shape was read leniently and the bad part
 /// thrown away: a missing `propertyName` became the empty tag field, a non-string mapping value
 /// vanished from the map, a non-object `mapping` became no mapping at all. Each is a malformed
@@ -8547,7 +8798,10 @@ components:
 /// (`#/components/schemas/Envelope/properties/cat`) generated before the root document's same-file
 /// deep pointers resolved, and it keeps the output it had: each member is named from its pointer
 /// text, and a `mapping` value spelled the same way resolves, relative to the sub-file it is
-/// written in, to that member and supplies its tag.
+/// written in, to that member and supplies its tag. A deep pointer is no schema component, so
+/// without that `mapping` the members have no tag at all (issue #403): the discriminator
+/// dispatches nothing (`W011`) rather than on the pointer text, which no server sends, and the
+/// members keep their names.
 #[test]
 fn a_sub_file_union_of_deep_pointer_members_keeps_its_names_and_mapping() {
     let root = r##"
@@ -8590,38 +8844,64 @@ MAPPING
     let mapping = "        mapping:\n          \
                    meow: '#/components/schemas/Envelope/properties/cat'\n          \
                    woof: '#/components/schemas/Envelope/properties/dog'";
-    // With the mapping, its tags; without, the implicit tags the pointer text has always given.
-    for (with, cat_tag, dog_tag) in [
-        (mapping, "meow", "woof"),
-        ("", "Envelope/properties/cat", "Envelope/properties/dog"),
-    ] {
+    let write = |with: &str| {
         let temp = tempfile::tempdir().unwrap();
         let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
         std::fs::write(dir.join("openapi.yaml"), root).unwrap();
         std::fs::write(dir.join("lib.yaml"), lib.replace("MAPPING", with)).unwrap();
         let generated = spargen::generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
         let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{cat_tag} {entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(report, Code::NonDisjointUnion),
-                "{cat_tag} {entry}: {report:#?}"
-            );
-        }
-        let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
-        for expected in [
-            "EnvelopePropertiesCat(Box<Cat>)".to_owned(),
-            "EnvelopePropertiesDog(Box<Dog>)".to_owned(),
-            format!("\"{cat_tag}\" => {{"),
-            format!("\"{dog_tag}\" => {{"),
-        ] {
-            assert!(code.contains(&expected), "{cat_tag}: {expected}\n{code}");
-        }
+        (temp, dir, generated, checked)
+    };
+
+    let (_temp, dir, generated, checked) = write(mapping);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::NonDisjointUnion),
+            "{entry}: {report:#?}"
+        );
     }
+    let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
+    for expected in [
+        "EnvelopePropertiesCat(Box<Cat>)",
+        "EnvelopePropertiesDog(Box<Dog>)",
+        "\"meow\" => {",
+        "\"woof\" => {",
+    ] {
+        assert!(code.contains(expected), "{expected}\n{code}");
+    }
+    assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
+
+    let (_temp, dir, generated, checked) = write("");
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::NonDisjointUnion),
+            "{entry}: {report:#?}"
+        );
+        let w011: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .collect();
+        assert_eq!(w011.len(), 1, "{entry}: {report:#?}");
+        assert!(
+            w011[0]
+                .message
+                .contains("union members 0, 1 are no schema components"),
+            "{entry}: {report:#?}"
+        );
+    }
+    let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
+    for expected in [
+        "EnvelopePropertiesCat(Box<Cat>)",
+        "EnvelopePropertiesDog(Box<Dog>)",
+    ] {
+        assert!(code.contains(expected), "{expected}\n{code}");
+    }
+    assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
+    assert!(!code.contains("\"Envelope/properties/dog\""), "{code}");
 }
 
 #[test]

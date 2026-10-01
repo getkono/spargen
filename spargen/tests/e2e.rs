@@ -2284,6 +2284,35 @@ fn discriminated_union_round_trips_with_tag() {
 }
 
 #[test]
+fn an_untagged_discriminated_member_leaves_the_tagged_dispatch_in_place() {
+    use basic_client::types::LooseAnimal;
+    // `Cat` (two required fields) outranks `Dog` in a trial, and accepts this payload too; the tag
+    // names `Dog`, so `Dog` it is.
+    let dog: LooseAnimal =
+        serde_json::from_str(r#"{"petType": "Dog", "name": "Rex", "bark": true}"#).unwrap();
+    assert!(matches!(dog, LooseAnimal::Dog(_)), "{dog:?}");
+    // `Dog` declares no `petType`, so serialization re-inserts its tag.
+    assert_eq!(serde_json::to_value(&dog).unwrap()["petType"], "Dog");
+    let cat: LooseAnimal =
+        serde_json::from_str(r#"{"petType": "Cat", "name": "Tom"}"#).unwrap();
+    assert!(matches!(cat, LooseAnimal::Cat(_)), "{cat:?}");
+    // A tag naming a tagged member never falls through to the untagged one.
+    assert!(
+        serde_json::from_str::<LooseAnimal>(r#"{"petType": "Dog", "fins": 3}"#).is_err()
+    );
+    // An unrecognized or absent tag tries the untagged member by its schema, and it writes no tag
+    // of its own beyond the field it holds.
+    let fish: LooseAnimal =
+        serde_json::from_str(r#"{"petType": "Shark", "fins": 3}"#).unwrap();
+    assert!(matches!(fish, LooseAnimal::LooseAnimalVariant2(_)), "{fish:?}");
+    assert_eq!(
+        serde_json::to_value(&fish).unwrap(),
+        serde_json::json!({"petType": "Shark", "fins": 3})
+    );
+    assert!(serde_json::from_str::<LooseAnimal>(r#"{"bark": true}"#).is_err());
+}
+
+#[test]
 fn nullable_variant_union_resolves_null_at_option() {
     // A `null` payload resolves at the outer `Option` (variant nullability hoisted to the union),
     // and non-null string/array content routes to the right disjoint variant and re-serializes as a
@@ -4997,6 +5026,8 @@ components:
         # Discriminated union: an internally-tagged enum over object `$ref` variants.
         pet:
           $ref: "#/components/schemas/Pet"
+        animal:
+          $ref: "#/components/schemas/LooseAnimal"
         # Undiscriminated but provably-disjoint union (string vs array JSON category): an enum with a
         # content-inspecting custom Deserialize/Serialize — no wrapper on the wire.
         alias:
@@ -5047,6 +5078,19 @@ components:
           cat: "#/components/schemas/Cat"
           dog: "#/components/schemas/Dog"
           kitty: Cat
+    # An inline member no mapping entry names has no discriminator value (W011); Cat and Dog keep
+    # their implicit tags, and the inline member is tried only when the tag names neither.
+    LooseAnimal:
+      anyOf:
+        - $ref: "#/components/schemas/Cat"
+        - $ref: "#/components/schemas/Dog"
+        - type: object
+          required: [petType, fins]
+          properties:
+            petType: { type: string }
+            fins: { type: integer }
+      discriminator:
+        propertyName: petType
     # Disjoint by JSON type category: a bare string or a list of strings. Serializes WITHOUT any tag
     # or wrapper — the active variant's inner value is emitted directly.
     StringOrList:

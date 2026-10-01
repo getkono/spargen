@@ -2291,35 +2291,76 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     Some(variant)
                 }
             };
-            let discriminated = self.discriminated_strategy(
+            let mut discriminated = self.discriminated_strategy(
                 &variants,
                 &ref_names,
                 &variant_members,
                 &discriminator.property_name,
                 resolved,
                 default_variant,
+                mode,
             );
             if let Some(UnionStrategy::Discriminated {
                 tags,
                 categories,
                 default_variant,
+                untagged,
                 ..
-            }) = &discriminated
+            }) = &mut discriminated
             {
-                let unselectable = (0..variants.len()).find(|&index| {
-                    categories[index].is_none()
-                        && tags[index].is_empty()
-                        && *default_variant != Some(index)
-                });
-                if let Some(index) = unselectable {
+                let unselectable: Vec<usize> = (0..variants.len())
+                    .filter(|&index| {
+                        categories[index].is_none()
+                            && tags[index].is_empty()
+                            && *default_variant != Some(index)
+                    })
+                    .collect();
+                let component = |index: usize| {
+                    ref_names[index]
+                        .as_deref()
+                        .filter(|name| is_schema_component_name(name))
+                };
+                // A component member whose implicit value a mapping key claims for another
+                // member: the document routes that member's own name elsewhere, which no
+                // dispatch can honour.
+                if let Some(&index) = unselectable
+                    .iter()
+                    .find(|&&index| component(index).is_some())
+                {
+                    let implicit = component(index).unwrap_or_default().to_owned();
                     return self.reject_unselectable_discriminated_variant(
                         schema,
                         discriminator,
                         variant_members[index],
-                        ref_names[index]
-                            .as_deref()
-                            .unwrap_or(&variants[index].name_hint),
+                        &implicit,
                     );
+                }
+                // A member that is no component — inline, or a pointer into another schema — has
+                // no implicit value, and with no mapping entry naming it no tag selects it;
+                // inventing a tag for it would be one no server sends. Where no variant carries a
+                // tag at all, the discriminator dispatches nothing, and the members' own schemas
+                // decode the union, as for one with no discriminator. Otherwise the tagged
+                // members keep their dispatch — a tag that names one selects it, exactly as the
+                // document says — and the untagged ones are tried by their schemas only when the
+                // tag is absent or names no tagged member. Dropping the dispatch for the whole
+                // union instead would let an `anyOf` trial pick a tagged member the payload's own
+                // tag does not name.
+                if !unselectable.is_empty() {
+                    let members: Vec<usize> = unselectable
+                        .iter()
+                        .map(|&index| variant_members[index])
+                        .collect();
+                    let dispatches = tags.iter().any(|accepted| !accepted.is_empty());
+                    self.warn_untagged_discriminated_members(discriminator, &members, dispatches);
+                    if dispatches {
+                        for &index in &unselectable {
+                            untagged[index] = Some(
+                                self.type_specificity(variants[index].ty, &mut HashSet::new()),
+                            );
+                        }
+                    } else {
+                        discriminated = None;
+                    }
                 }
             }
             discriminated
@@ -2851,8 +2892,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its
     /// unique JSON category. An object variant is selected by every `discriminator.mapping` key
     /// naming its member, in document order, and then by its own `$ref` component name unless a
-    /// mapping key claims that value; the first is the tag serialization writes. A variant left
-    /// with no tag is [`Self::reject_unselectable_discriminated_variant`]'s to refuse.
+    /// mapping key claims that value; the first is the tag serialization writes. Every variant
+    /// starts with no `untagged` priority: the caller refuses a component variant left with no
+    /// tag ([`Self::reject_unselectable_discriminated_variant`]) and decides how any other is
+    /// reached.
+    #[allow(clippy::too_many_arguments)]
     fn discriminated_strategy(
         &self,
         variants: &[UnionVariant],
@@ -2861,6 +2905,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         tag_field: &str,
         discriminator: &DiscriminatorMembers,
         default_variant: Option<usize>,
+        mode: UnionMode,
     ) -> Option<UnionStrategy> {
         let mut tags = Vec::new();
         let mut categories = Vec::new();
@@ -2890,30 +2935,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let component = ref_name
                 .as_deref()
                 .filter(|name| is_schema_component_name(name));
-            match component {
-                Some(name) => {
-                    if !discriminator.mapping.iter().any(|(tag, _)| tag == name) {
-                        accepted.push(name.to_owned());
-                    }
+            // A member that is no component — inline, or a deeper pointer — has no implicit value
+            // ("inline `oneOf` or `anyOf` subschemas are not considered"), so only a mapping key
+            // selects it. With none it keeps no tag at all: anything else would be one spargen
+            // made up and no server sends. The caller decides how such a member is reached.
+            if let Some(name) = component {
+                if !discriminator.mapping.iter().any(|(tag, _)| tag == name) {
+                    accepted.push(name.to_owned());
                 }
-                // A member that is no component — inline, or a deeper pointer — has no implicit
-                // value. One no mapping key names keeps the tag it has always had: the pointer
-                // text it is named from, else the variant's own hint.
-                None if accepted.is_empty() => accepted.push(
-                    ref_name
-                        .clone()
-                        .unwrap_or_else(|| variant.name_hint.clone()),
-                ),
-                None => {}
             }
             tags.push(accepted);
             categories.push(None);
         }
         Some(UnionStrategy::Discriminated {
             tag_field: tag_field.to_owned(),
+            untagged: vec![None; tags.len()],
             tags,
             categories,
             default_variant,
+            mode,
         })
     }
 
@@ -3142,6 +3182,73 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             )
             .emit(self.diags);
         None
+    }
+
+    /// Discriminated object members that are no schema component — inline, or a pointer into
+    /// another schema — and that no `mapping` entry or `defaultMapping` names. The specification
+    /// gives them no implicit value ("inline `oneOf` or `anyOf` subschemas are not considered"),
+    /// so no discriminator value selects them. Where another variant carries a tag (`dispatches`),
+    /// the caller keeps the tag dispatch for those and tries these by their schemas when the tag
+    /// is absent or names no tagged member; otherwise the discriminator dispatches nothing and the
+    /// union is decoded by its members' schemas, as one with no discriminator. Either way no tag
+    /// is invented for them; this says so at the discriminator.
+    fn warn_untagged_discriminated_members(
+        &mut self,
+        discriminator: &super::Discriminator,
+        members: &[usize],
+        dispatches: bool,
+    ) {
+        let list = members
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (subject, pronoun) = if members.len() == 1 {
+            (
+                format!(
+                    "union member {list} is no schema component — inline, or a pointer into \
+                     another schema — so it has no implicit discriminator value"
+                ),
+                "it",
+            )
+        } else {
+            (
+                format!(
+                    "union members {list} are no schema components — inline, or pointers into \
+                     another schema — so they have no implicit discriminator value"
+                ),
+                "them",
+            )
+        };
+        let consequence = if dispatches {
+            let (verb, possessive) = if members.len() == 1 {
+                ("it is", "its")
+            } else {
+                ("they are", "their")
+            };
+            format!(
+                "so the tag dispatches only to the members a value names, and {verb} matched by \
+                 {possessive} own schema when the tag is absent or names no such member"
+            )
+        } else {
+            "so this `discriminator` dispatches nothing and the union is decoded by its members' \
+             schemas"
+                .to_owned()
+        };
+        // W011 case: untagged-discriminated-member
+        Diagnostic::warning(
+            Code::DeclarationHasNoEffect,
+            discriminator.provenance.clone(),
+        )
+        .message(format!(
+            "{subject}, and no `discriminator.mapping` entry names {pronoun}: no discriminator \
+             value selects {pronoun}, {consequence}"
+        ))
+        .remedy(
+            "add a `discriminator.mapping` entry naming each such member (a URI reference to it \
+             works), move it to a schema component of its own, or remove the discriminator",
+        )
+        .emit(self.diags);
     }
 
     /// A union that resolves to itself, so its generated `Deserialize` would re-enter itself on the
@@ -4961,10 +5068,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 tags,
                 categories,
                 default_variant,
+                untagged,
+                mode,
             } => UnionStrategy::Discriminated {
                 tag_field: tag_field.clone(),
                 tags: retained.iter().map(|index| tags[*index].clone()).collect(),
                 categories: retained.iter().map(|index| categories[*index]).collect(),
+                untagged: retained.iter().map(|index| untagged[*index]).collect(),
+                mode: *mode,
                 // The fallback variant's index moves with the retained set; if the fallback itself
                 // was dropped, the union simply has no fallback any more.
                 default_variant: default_variant
@@ -7310,12 +7421,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 /// or a tag from, exactly as the same pointer written against a relative file has none, and neither
 /// has any file reference.
 ///
-/// Written in a sub-file, the same spelling keeps the name it has always had. That route resolved
-/// through the resolver before same-file deep pointers did in the root, and its members were named
-/// from the pointer text (`Envelope/properties/cat` → variant `EnvelopePropertiesCat`, implicit tag
-/// `Envelope/properties/cat`). Dropping the name there would rename those variants and their
-/// implicit tags in documents that generate today; the root-only filter confines the change to what
-/// previously rejected.
+/// Written in a sub-file, the same spelling keeps the variant name it has always had. That route
+/// resolved through the resolver before same-file deep pointers did in the root, and its members
+/// were named from the pointer text (`Envelope/properties/cat` → variant `EnvelopePropertiesCat`).
+/// Dropping the name there would rename those variants in documents that generate today; the
+/// root-only filter confines the change to what previously rejected. The name is no component
+/// name, so it supplies no implicit discriminator tag ([`is_schema_component_name`]).
 fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option<&str> {
     let SchemaOr::Schema(schema) = member else {
         return None;
