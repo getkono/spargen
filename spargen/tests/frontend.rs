@@ -8545,6 +8545,80 @@ fn an_untyped_all_of_member_keeps_a_multi_branch_unions_null() {
     }
 }
 
+/// Issue #419, the `$ref` spelling of an `allOf` member beside a union (decision 10): the member
+/// is never a scoped refiner, so the union meets the target's lowered component type. A target
+/// holding only `required` lowers to an untyped schema, which excludes no branch, so the string
+/// branch and the `null` both survive, as with the inline spelling. A target holding `properties`
+/// lowers to an object, so the meet keeps only the object branch: the string branch and the `null`
+/// drop, and no diagnostic says so. This pins today's behaviour of both, so a change to either is
+/// a visible diff.
+#[test]
+fn a_ref_all_of_member_beside_a_union_meets_its_targets_lowered_type() {
+    let owner = "    Owner:\n      type: object\n      required: [p]\n      \
+                 properties: { p: { $ref: '#/components/schemas/Pet' } }\n";
+    let with_string =
+        "oneOf: [ { type: string }, { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]";
+    let without_string = "oneOf: [ { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]";
+    // (target, union, `p`'s type, `Pet`'s variant count: 0 where it is not an enum).
+    let cases = [
+        (
+            "    HasKind:\n      required: [kind]\n",
+            with_string,
+            "Option<Pet>",
+            2,
+        ),
+        (
+            "    HasKind:\n      required: [kind]\n",
+            without_string,
+            "Option<Pet>",
+            0,
+        ),
+        (
+            "    HasName:\n      properties: { name: { type: string } }\n",
+            with_string,
+            "Pet",
+            0,
+        ),
+        (
+            "    HasName:\n      properties: { name: { type: string } }\n",
+            without_string,
+            "Pet",
+            0,
+        ),
+    ];
+    for (target, union, p_type, variant_count) in cases {
+        let name = target.trim().split(':').next().unwrap_or_default();
+        let what = format!("{name} beside {union}");
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "{owner}{target}    Pet:\n      \
+                 allOf: [ {{ $ref: '#/components/schemas/{name}' }} ]\n      {union}\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{what}: {report:#?}");
+        assert!(report.diagnostics().is_empty(), "{what}: {report:#?}");
+        let types = types_module(&code);
+        let p = field_type(&types, "pub p:").unwrap_or_else(|| panic!("{what}: no `p`\n{types}"));
+        assert_eq!(p, p_type, "{what}:\n{types}");
+        let variants = enum_variants(&types, "Pet");
+        assert_eq!(
+            variants.len(),
+            variant_count,
+            "{what}: {variants:?}\n{types}"
+        );
+        if name == "HasName" {
+            assert!(
+                types.contains("pub struct Pet {"),
+                "{what}: the meet keeps only the object branch:\n{types}"
+            );
+        }
+        let checked = check(&spec);
+        assert!(checked.diagnostics().is_empty(), "{what}: {checked:#?}");
+    }
+}
+
 /// Issue #419: an untyped `allOf` member beside a union is reported as the same keywords are
 /// beside a `$ref` to it. Reaching no branch of its category it constrains nothing the union
 /// accepts (`W011` at the member, and the union generates); object and array keywords together
