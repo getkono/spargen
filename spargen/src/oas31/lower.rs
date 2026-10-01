@@ -1690,6 +1690,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         if !schema.all_of.is_empty() {
+            if schema_has_union(schema) {
+                return self.lower_all_of_beside_union(schema, hint);
+            }
             return self.lower_all_of(schema, hint);
         }
 
@@ -3458,7 +3461,56 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn lower_all_of(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let mut contributions = Vec::new();
         self.gather_all_of(schema, hint, &mut contributions)?;
+        self.combine_all_of(schema, hint, &contributions)
+    }
 
+    /// Lower a schema carrying `allOf` and `oneOf`/`anyOf` together (issue #419). Both apply to
+    /// every instance, so the schema is their conjunction: the `allOf` composition (with every
+    /// sibling but the union and its `discriminator`) met with the union (with every sibling but
+    /// the `allOf`, so its object keywords refine the branches as they do with no `allOf` beside
+    /// it). The meet is the one a `$ref` and its union-valued target take: each branch is
+    /// intersected with the composition, a branch it excludes drops out, and a union left with no
+    /// branch is `E013`. Dispatching to the `allOf` arm alone dropped the union and its
+    /// discriminator with no diagnostic.
+    ///
+    /// A composition that constrains nothing (every member `true`, `{}` or an annotation) is not
+    /// met at all: [`Self::combine_all_of`] types it as an open object, which would drop every
+    /// non-object branch, so the union alone is the schema's type, under the schema's own hint.
+    fn lower_all_of_beside_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        let mut composition = schema.clone();
+        composition.one_of.clear();
+        composition.any_of.clear();
+        composition.discriminator = None;
+        let mut union = schema.clone();
+        union.all_of.clear();
+
+        let composition_hint = format!("{hint}Composition");
+        let mut contributions = Vec::new();
+        self.gather_all_of(&composition, &composition_hint, &mut contributions)?;
+        if contributions.is_empty() {
+            return self.lower_union(&union, hint);
+        }
+        let composed = self.combine_all_of(&composition, &composition_hint, &contributions)?;
+        let union = self.lower_schema(&union, &format!("{hint}Union"))?;
+        let mark = self.graph_mark();
+        let Ok(meet) = self.intersect_types(composed, union, &format!("{hint}Intersection")) else {
+            return self.reject_all_of_beside_union(schema);
+        };
+        let kind = self.graph.get(meet.id)?.kind.clone();
+        self.discard_meet_intermediates(mark, &kind);
+        let mut ty = self.insert_schema_type(schema, hint, kind);
+        ty.nullable = meet.nullable;
+        ty.boxed = meet.boxed;
+        Some(ty)
+    }
+
+    /// Combine the gathered members of an `allOf` into its type; see [`Self::lower_all_of`].
+    fn combine_all_of(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        contributions: &[Contribution],
+    ) -> Option<Ty> {
         let has_object = contributions
             .iter()
             .any(|c| matches!(c, Contribution::Object { .. }));
@@ -3521,7 +3573,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut additional = AdditionalProps::Allow;
         // Repeated properties whose types have no common value, in first-seen order.
         let mut uninhabited: IndexSet<String> = IndexSet::new();
-        for contribution in &contributions {
+        for contribution in contributions {
             let Contribution::Object {
                 fields: member_fields,
                 additional: member_additional,
@@ -3641,7 +3693,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `additionalProperties` value schema constrains it, not only the requiring member's own:
         // `allOf: [{$ref: Labels}, {required: [a]}]` with string-valued `Labels` makes `a` a
         // string, not an unconstrained value. The requiring member already applied its own.
-        for contribution in &contributions {
+        for contribution in contributions {
             let Contribution::Object {
                 fields: member_fields,
                 additional: member_additional,
@@ -3784,8 +3836,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             );
         }
 
-        if !schema.all_of.is_empty() {
+        if !schema.all_of.is_empty() && !schema_has_union(schema) {
             // Nested allOf: flatten its members (and its own siblings) into the same accumulator.
+            // One with a union beside it is that composition met with the union, which only
+            // lowering computes, so `gather_inline` lowers it as the scalar it then is.
             return self.gather_all_of(schema, hint, out);
         }
 
@@ -4014,7 +4068,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
-        if schema_is_object_like(schema) {
+        // A member carrying its own `oneOf`/`anyOf` is that union, its object keywords refining the
+        // branches as `lower_union` refines them; read as an object by its keywords, the union was
+        // dropped with no diagnostic (issue #419).
+        if schema_is_object_like(schema) && !schema_has_union(schema) {
             let (fields, additional) = self.object_body(schema, hint)?;
             out.push(Contribution::Object {
                 fields,
@@ -4205,6 +4262,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                  unrepresentable intersection",
             )
             .remedy(REF_SIBLING_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// Report that a schema's `allOf` composition and the `oneOf`/`anyOf` beside it have no single
+    /// typed intersection (see [`Self::lower_all_of_beside_union`]): no branch meets the
+    /// composition, or one does in a way no single Rust type represents.
+    fn reject_all_of_beside_union(&mut self, schema: &Schema) -> Option<Ty> {
+        // E013 case: scalar-members, required-property, additional-values, object-scalar-mix, unrepresentable-meet
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(
+                "this schema's `allOf` and the `oneOf`/`anyOf` beside it both apply, and their \
+                 intersection is empty or unrepresentable",
+            )
+            .remedy(ALL_OF_REMEDY)
             .emit(self.diags);
         None
     }
@@ -9397,6 +9469,11 @@ fn schema_is_object_like(schema: &Schema) -> bool {
         || schema.additional_properties.is_some()
         || !schema.required.is_empty()
         || schema.types.types.contains(&JsonType::Object)
+}
+
+/// Whether a schema carries a `oneOf` or an `anyOf` of its own.
+fn schema_has_union(schema: &Schema) -> bool {
+    !schema.one_of.is_empty() || !schema.any_of.is_empty()
 }
 
 /// The `required` names a schema's own `properties` do not declare, deduplicated, in source order.

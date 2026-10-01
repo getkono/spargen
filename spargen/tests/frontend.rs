@@ -8191,6 +8191,205 @@ fn a_discriminator_beside_no_union_naming_an_undeclared_schema_is_e004_at_the_en
     }
 }
 
+/// Issue #419: a schema carrying `allOf` and `oneOf`/`anyOf` together lowered through the `allOf`
+/// arm alone, which never read the union, so the union — and a `discriminator` beside it — was
+/// dropped and `check` called the document clean. The two are a conjunction: the rest of the
+/// schema, union included, is one more member of the composition, exactly as if it were written as
+/// a further `allOf` entry. Where that conjunction has no single type it is `E013` at the schema.
+#[test]
+fn a_union_beside_all_of_that_contradicts_it_is_rejected() {
+    let cases = [
+        (
+            "issue reproduction (oneOf)",
+            "    Pet:\n      \
+             allOf: [ { type: object, properties: { id: { type: integer } } } ]\n      \
+             oneOf: [ { type: string } ]\n",
+            "/components/schemas/Pet",
+        ),
+        (
+            "anyOf",
+            "    Pet:\n      \
+             allOf: [ { type: object, properties: { id: { type: integer } } } ]\n      \
+             anyOf: [ { type: string } ]\n",
+            "/components/schemas/Pet",
+        ),
+        (
+            "scalar allOf against a disjoint union",
+            "    Pet:\n      \
+             allOf: [ { type: integer } ]\n      \
+             oneOf: [ { type: string }, { type: boolean } ]\n",
+            "/components/schemas/Pet",
+        ),
+        (
+            "nested allOf member carrying a union",
+            "    Pet:\n      allOf:\n        \
+             - allOf: [ { type: object, properties: { id: { type: integer } } } ]\n          \
+             oneOf: [ { type: string } ]\n",
+            "/components/schemas/Pet/allOf/0",
+        ),
+    ];
+    for (what, schemas, pointer) in cases {
+        let spec = with_schemas("3.1.0", schemas);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer),
+                "{what} via {entry}: E013 must sit at `{pointer}`: {report:#?}"
+            );
+        }
+    }
+}
+
+/// Issue #419, the inline-member spelling: an `allOf` member carrying object keywords beside its
+/// own `oneOf` was read as an object by its keywords and its union dropped. The member is lowered
+/// as the union it is, its object keywords refining the branches of their own category, so an
+/// explicit `type: object` beside a string-only union leaves no branch and is reported, and untyped
+/// `properties` beside it constrain nothing the union accepts.
+#[test]
+fn an_all_of_member_with_its_own_union_beside_object_keywords_keeps_the_union() {
+    let typed = with_schemas(
+        "3.1.0",
+        "    Pet:\n      allOf:\n        \
+         - type: object\n          properties: { id: { type: integer } }\n          \
+         oneOf: [ { type: string } ]\n",
+    );
+    for (entry, report) in [("generate", generate(&typed)), ("check", check(&typed))] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "via {entry}: an object no string is: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::NonDisjointUnion),
+            "via {entry}: {report:#?}"
+        );
+    }
+
+    let untyped = with_schemas(
+        "3.1.0",
+        "    Pet:\n      allOf:\n        \
+         - properties: { id: { type: integer } }\n          \
+         oneOf: [ { type: string } ]\n",
+    );
+    let (report, code) = generate_with_code(&untyped);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub type Pet = String;"),
+        "the member is a string, not a struct with `id`:\n{types}"
+    );
+    assert!(
+        !types.contains("pub struct Pet "),
+        "the union must not be dropped for the object keywords:\n{types}"
+    );
+}
+
+/// Issue #419: the `discriminator` beside a union that `allOf` shadowed went unread, so a `mapping`
+/// naming no schema was never reported. It belongs to the union, and is checked as the union's own.
+#[test]
+fn a_discriminator_beside_all_of_and_a_union_has_its_mapping_checked() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    Pet:\n      allOf: [ { description: a pet } ]\n      \
+         oneOf: [ { $ref: '#/components/schemas/Cat' } ]\n      \
+         discriminator: { propertyName: kind, mapping: { x: Nope } }\n",
+    );
+    for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "via {entry}: {report:#?}"
+        );
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::UnresolvedRef
+                    && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/x"
+                    && d.message.contains("Nope")),
+            "via {entry}: E004 must sit at the mapping entry and name `Nope`: {report:#?}"
+        );
+    }
+}
+
+/// Issue #419: where the conjunction has a type, it is the union narrowed by the `allOf`, not the
+/// `allOf` alone. An annotation-only `allOf` leaves the discriminated union exactly as the same
+/// schema without it generates; a scalar `allOf` narrows the union to the branches it admits.
+#[test]
+fn a_union_beside_all_of_composes_with_it() {
+    let union = "      oneOf: [ { $ref: '#/components/schemas/Cat' }, { type: string } ]\n      \
+                 discriminator: { propertyName: kind, mapping: { cat: Cat } }\n";
+    let bare = with_schemas("3.1.0", &format!("    Pet:\n{union}"));
+    let shadowed = with_schemas(
+        "3.1.0",
+        &format!("    Pet:\n      allOf: [ {{ description: a pet }} ]\n{union}"),
+    );
+    let (bare_report, bare_code) = generate_with_code(&bare);
+    assert_ne!(bare_report.outcome(), Outcome::Rejected, "{bare_report:#?}");
+    assert_eq!(
+        enum_variants(&bare_code, "Pet"),
+        ["Cat(Box<Cat>)", "PetVariant1(Box<PetVariant1>)"],
+        "{bare_code}"
+    );
+    let (report, code) = generate_with_code(&shadowed);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    assert_eq!(types_module(&code), types_module(&bare_code));
+    assert!(
+        code.contains("\"cat\""),
+        "the discriminator still dispatches:\n{code}"
+    );
+    let checked = check(&shadowed);
+    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
+
+    // The `allOf` polymorphism parent spelled beside its own union: every branch is met with the
+    // shared base, so each variant carries the base's `id` as well as its own fields.
+    let based = with_schemas(
+        "3.1.0",
+        "    Base: { type: object, required: [id], properties: { id: { type: integer } } }\n    \
+         Dog: { type: object, required: [kind], properties: { kind: { type: string }, bark: { type: boolean } } }\n    \
+         Pet:\n      allOf: [ { $ref: '#/components/schemas/Base' } ]\n      \
+         oneOf: [ { $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' } ]\n      \
+         discriminator: { propertyName: kind }\n",
+    );
+    let (report, code) = generate_with_code(&based);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    let variants = enum_variants(&types, "Pet");
+    assert_eq!(variants.len(), 2, "{types}");
+    for variant in &variants {
+        let payload = variant
+            .split_once("(Box<")
+            .and_then(|(_, rest)| rest.strip_suffix(">)"))
+            .unwrap_or_else(|| panic!("{variant}: {types}"));
+        let fields = declared_fields(&types, payload);
+        assert!(
+            fields.iter().any(|field| field == "id") && fields.iter().any(|field| field == "kind"),
+            "{payload} must carry the base's `id` beside its own `kind`: {fields:?}\n{types}"
+        );
+    }
+
+    let narrowed = with_schemas(
+        "3.1.0",
+        "    Pet:\n      allOf: [ { type: integer } ]\n      \
+         oneOf: [ { type: string }, { type: integer, format: int32 } ]\n",
+    );
+    let (report, code) = generate_with_code(&narrowed);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub type Pet = i32;"),
+        "only the integer branch meets `type: integer`:\n{types}"
+    );
+}
+
 /// The dispatch a discriminated union `name` emits, read back from the generated source: per
 /// decode arm, the variant and every tag its pattern matches, and per encode arm, the variant and
 /// the tag serialization writes (`None` for one it writes no tag for).
