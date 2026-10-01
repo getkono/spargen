@@ -12154,6 +12154,60 @@ fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
         );
     }
 
+    // Where the sibling carries both halves and neither reaches a branch of its category, each
+    // half is acknowledged with a `W011` of its own: reporting only the object half dropped the
+    // array keywords in silence. All three sites that meet a scoped sibling are covered: a
+    // multi-variant union, a sole non-null member, and a `$ref` to a union.
+    for (case, schema, needle) in [
+        (
+            "multi-variant union",
+            "    U:\n      oneOf: [{ type: string }, { type: integer }]\n      required: [a]\n      \
+             items: { type: integer }\n",
+            "no branch of its union has that category",
+        ),
+        (
+            "sole non-null member",
+            "    U:\n      oneOf: [{ type: string }, { type: 'null' }]\n      required: [a]\n      \
+             items: { type: integer }\n",
+            "no branch of its union has that category",
+        ),
+        (
+            "`$ref` to a union",
+            "    Target: { oneOf: [{ type: string }, { type: integer }] }\n    U:\n      $ref: \
+             '#/components/schemas/Target'\n      required: [a]\n      items: { type: integer }\n",
+            "no branch of its target union has that category",
+        ),
+    ] {
+        let spec = format!("{HEAD}{schema}");
+        for report in [check(&spec), generate(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{case}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+            assert_eq!(
+                messages.len(),
+                2,
+                "{case}: one W011 per unreached half: {report:#?}"
+            );
+            assert!(
+                messages.iter().all(|message| message.contains(needle)),
+                "{case}: {messages:?}"
+            );
+            for keywords in ["`required`", "`items`"] {
+                assert_eq!(
+                    messages
+                        .iter()
+                        .filter(|message| message.contains(keywords))
+                        .count(),
+                    1,
+                    "{case}: exactly one W011 names {keywords}: {messages:?}"
+                );
+            }
+        }
+    }
+
     // A branch that states no category can be given none when object and array keywords come
     // together, or when a multi-type `type` array beside them admits another category too: that is
     // rejected through both entry points rather than generated without them.

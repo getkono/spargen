@@ -2067,7 +2067,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          they constrain of it",
                     );
                 }
-                if let Some(keywords) = unreached_half(sibling.refiner, &reach) {
+                for keywords in unreached_halves(sibling.refiner, &reach) {
                     self.warn_unreached_union_sibling(schema, unreached_message(keywords));
                 }
                 let Ok(constrained) = met else {
@@ -2222,9 +2222,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             variant_members.push(index);
         }
 
-        if let Some(keywords) = sibling.and_then(|sibling| unreached_half(sibling.refiner, &reach))
-        {
-            self.warn_unreached_union_sibling(schema, unreached_message(keywords));
+        if let Some(sibling) = sibling {
+            for keywords in unreached_halves(sibling.refiner, &reach) {
+                self.warn_unreached_union_sibling(schema, unreached_message(keywords));
+            }
         }
         if variants.is_empty() {
             // The same blind spot as the sole-member site above, on the pre-existing path: every
@@ -2560,7 +2561,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                  choose between them, so no single Rust type represents what they constrain of it",
             );
         }
-        if let Some(keywords) = unreached_half(refiner, &reach) {
+        for keywords in unreached_halves(refiner, &reach) {
             let message = format!(
                 "this `$ref`'s untyped sibling {keywords} constrain only the instances of their \
                  own category, and no branch of its target union has that category, so they \
@@ -7260,25 +7261,27 @@ const UNION_SIBLING_REMEDY: &str = "give the sibling keywords a `type`, move the
                                     branches they constrain, or omit this API segment with \
                                     spargen::omit!";
 
-/// The keyword set of a [`Refiner::Scoped`] sibling that reached no branch of its category, or
-/// `None` where every set the sibling carries reached one (or the sibling is not scoped).
-fn unreached_half(refiner: Refiner, reach: &ScopeReach) -> Option<&'static str> {
+/// The keyword set of every half of a [`Refiner::Scoped`] sibling that reached no branch of its
+/// category, object half first; empty where every half the sibling carries reached one (or the
+/// sibling is not scoped). Each entry is reported with a `W011` of its own.
+fn unreached_halves(refiner: Refiner, reach: &ScopeReach) -> Vec<&'static str> {
     let Refiner::Scoped(scoped) = refiner else {
-        return None;
+        return Vec::new();
     };
+    let mut halves = Vec::new();
     if scoped.object.is_some() && !reach.object {
-        Some(
+        halves.push(
             "object keywords (`properties`, `patternProperties`, `required`, \
              `additionalProperties`)",
-        )
-    } else if scoped.array.is_some() && !reach.array {
-        Some("array keywords (`items`, `prefixItems`)")
-    } else {
-        None
+        );
     }
+    if scoped.array.is_some() && !reach.array {
+        halves.push("array keywords (`items`, `prefixItems`)");
+    }
+    halves
 }
 
-/// The message for a scoped sibling half [`unreached_half`] names.
+/// The message for a scoped sibling half [`unreached_halves`] names.
 fn unreached_message(keywords: &str) -> String {
     format!(
         "this schema's untyped {keywords} constrain only the instances of their own category, \
