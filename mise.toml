@@ -86,7 +86,10 @@ run = [
 # yanked" for every entry and exited 0 (#414). So a `cargo fetch` of each lockfile's workspace
 # refreshes that cache from the registry for every entry first (`--locked` where the audit beside
 # it is), and each audit fails when it printed any error or warning, so a yank it could not check
-# fails the run instead of passing it. Its stderr goes through `target/cargo-audit.stderr`, which is
+# fails the run instead of passing it. An example's fetch is unlocked, like its `cargo deny check`,
+# so it rewrites that example's lockfile in place before the audit reads it (at least the stale
+# `spargen` stamp): the root audit reads the committed `Cargo.lock`, and each example audit reads
+# its lockfile as the example gates resolve it, not the committed bytes. Its stderr goes through `target/cargo-audit.stderr`, which is
 # printed either way. `the_lockfile_audit_reads_every_committed_lockfile` pins this shape.
 description = "Supply-chain audit (licenses, advisories, bans, sources) of every committed lockfile"
 run = [

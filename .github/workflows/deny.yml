@@ -40,13 +40,16 @@ jobs:
       # (`every_mise_task_runs_exactly_what_its_ci_job_runs`).
       # cargo-deny filters out every lockfile entry no feature activates (a yanked `chacha20`
       # reached `Cargo.lock` only through a weak `quinn?/ring` feature and was never checked), so
-      # `cargo audit` reads every entry of each committed lockfile, over the RustSec checkout
+      # `cargo audit` reads every entry of each lockfile, over the RustSec checkout
       # `cargo deny fetch db` just made, after the step that logs its commit: the log names the
       # database revision the verdict was reached against (#187).
       # `--no-fetch` also leaves the crates.io index unupdated, and this runner's index cache starts
       # empty, so the yank check could check no entry and still exited 0 (#414): each `cargo fetch`
       # refreshes that cache for every entry of the lockfile audited after it, and each audit fails
-      # on any error or warning it printed, so an unchecked yank fails instead of passing.
+      # on any error or warning it printed, so an unchecked yank fails instead of passing. The root
+      # audit reads the committed `Cargo.lock` (its fetch is `--locked`); an example's fetch is
+      # unlocked, like its `cargo deny check`, so it rewrites that lockfile (at least the stale
+      # `spargen` stamp) and the example audit reads it as the example gates resolve it.
       # `the_lockfile_audit_reads_every_committed_lockfile` pins these steps' shape.
       - run: cargo deny fetch db
       - run: git -C target/advisory-dbs/advisory-db-3157b0e258782691 log -1 --format='advisory database revision %H (committed %cI)'
