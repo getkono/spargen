@@ -80,7 +80,7 @@ fn claim_violations(outcome: Outcome, diagnostics: &[Diagnostic]) -> Vec<String>
 /// The outcome a message states in so many words, if it states one: an unnegated "is generated"
 /// or "is rejected" (or "are", "be", "been").
 ///
-/// This reads prose, so it is a backstop and not the check. [`contradicted_claims`] is the check,
+/// This reads prose, so it is a backstop and not the check. [`claim_violations`] is the check,
 /// and it trusts the declared [`OutcomeClaim`]. This catches the case where the two disagree: a
 /// message that asserts an outcome while its diagnostic declares a different claim. That is the
 /// shape of `W014`'s old "`{media}` is generated", whose claim was never declared (#174). A
