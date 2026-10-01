@@ -6565,9 +6565,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "header");
                     }
-                    let alias = reference
-                        .reference
-                        .strip_prefix("#/components/headers/")
+                    let alias = self
+                        .root_component_name(&reference, "#/components/headers/")
                         .map(|name| self.document.components.headers.get(name).cloned());
                     match alias {
                         Some(Some(target)) => current = target,
@@ -6578,10 +6577,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 &reference.reference,
                             );
                         }
-                        // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle exactly as a Parameter or
-                        // Response Object reference already does — and may itself be a Reference,
-                        // followed from the file it is written in.
+                        // Not a root component alias: a multi-file description may reference a
+                        // whole file, or a sub-file's own components, which resolve through the
+                        // input bundle exactly as a Parameter or Response Object reference already
+                        // does — and may itself be a Reference, followed from the file it is
+                        // written in.
                         None => {
                             current = self.follow_bundle_reference(
                                 &reference,
@@ -6623,11 +6623,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "parameter");
                     }
-                    let Some(name) = reference.reference.strip_prefix("#/components/parameters/")
+                    let Some(name) =
+                        self.root_component_name(&reference, "#/components/parameters/")
                     else {
-                        // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref` —
-                        // and may itself be a Reference, followed from the file it is written in.
+                        // Not a root component alias: a multi-file description may reference a
+                        // whole file, or a sub-file's own components, which resolve through the
+                        // input bundle like a schema `$ref` — and may itself be a Reference,
+                        // followed from the file it is written in.
                         current = self.follow_bundle_reference(
                             &reference,
                             "parameter",
@@ -6662,13 +6664,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "request body");
                     }
-                    let Some(name) = reference
-                        .reference
-                        .strip_prefix("#/components/requestBodies/")
+                    let Some(name) =
+                        self.root_component_name(&reference, "#/components/requestBodies/")
                     else {
-                        // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref` —
-                        // and may itself be a Reference, followed from the file it is written in.
+                        // Not a root component alias: a multi-file description may reference a
+                        // whole file, or a sub-file's own components, which resolve through the
+                        // input bundle like a schema `$ref` — and may itself be a Reference,
+                        // followed from the file it is written in.
                         current = self.follow_bundle_reference(
                             &reference,
                             "request body",
@@ -6700,11 +6702,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "response");
                     }
-                    let Some(name) = reference.reference.strip_prefix("#/components/responses/")
+                    let Some(name) =
+                        self.root_component_name(&reference, "#/components/responses/")
                     else {
-                        // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref` —
-                        // and may itself be a Reference, followed from the file it is written in.
+                        // Not a root component alias: a multi-file description may reference a
+                        // whole file, or a sub-file's own components, which resolve through the
+                        // input bundle like a schema `$ref` — and may itself be a Reference,
+                        // followed from the file it is written in.
                         current = self.follow_bundle_reference(
                             &reference,
                             "response",
@@ -6762,6 +6766,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.resolver
             .reference_identity(&reference.reference, &reference.provenance)
             .ok_or_else(|| reference.reference.clone())
+    }
+
+    /// The `<name>` of a `#/components/<kind>/<name>` reference (`prefix` is
+    /// `#/components/<kind>/`) that addresses the **root** document's component map — one written
+    /// in the root document, or with no span to say otherwise.
+    ///
+    /// A JSON Pointer fragment addresses the document it appears in, so the same spelling written
+    /// inside a referenced file names that file's components (#397). Reading the root's map for it
+    /// rejected the reference when the root declared no such name and silently substituted the
+    /// root's declaration when it did; `None` sends it to the bundle, which resolves it from the
+    /// file it is written in.
+    fn root_component_name<'r>(
+        &self,
+        reference: &'r super::Reference,
+        prefix: &str,
+    ) -> Option<&'r str> {
+        let root = self.resolver.root_id();
+        let written_in = reference.provenance.span.map_or(root, |span| span.file);
+        if written_in != root {
+            return None;
+        }
+        reference.reference.strip_prefix(prefix)
     }
 
     /// Acknowledge a Reference Object `summary`/`description`.
@@ -6837,15 +6863,42 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             ComponentMiss::AbsentTarget => {
                 // E004 case: absent-target
-                Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+                let mut diagnostic = Diagnostic::error(Code::UnresolvedRef, provenance.clone())
                     .message(format!(
                         "{kind} reference target `{reference}` was not found in the input bundle"
-                    ))
-                    .emit(self.diags);
+                    ));
+                // A bare fragment written in a referenced file addresses that file (#397); when
+                // the root declares what it names, that is almost certainly what was meant.
+                if let Some(remedy) = self.root_declares_the_fragment(provenance, reference) {
+                    diagnostic = diagnostic.remedy(remedy);
+                }
+                diagnostic.emit(self.diags);
             }
             ComponentMiss::Unparsable => {}
         }
         None
+    }
+
+    /// The remedy for a bare `#…` fragment written in a referenced file whose own document holds
+    /// nothing at it while the root document does: the fragment addresses the file it is written
+    /// in, so the root's declaration is reached only by naming the root document.
+    fn root_declares_the_fragment(
+        &self,
+        provenance: &crate::diag::Provenance,
+        reference: &str,
+    ) -> Option<String> {
+        let root = self.resolver.root_id();
+        let written_in = provenance.span.map(|span| span.file)?;
+        if written_in == root || !reference.starts_with('#') {
+            return None;
+        }
+        let (file, pointer) = self.resolver.reference_identity_from(reference, root)?;
+        self.resolver.node_at(file, &pointer)?;
+        Some(format!(
+            "the root document declares `{reference}`, but a `#` fragment addresses the file it \
+             is written in; name the root document before the fragment to reference the root's \
+             declaration, or declare it in this file"
+        ))
     }
 
     /// Resolve a Media Type Object through any `$ref` hops and give every position-independent
@@ -6867,18 +6920,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // generated item shared across every use cannot express — the same disposition the
             // Parameter, Response, and Request Body paths already give it.
             self.note_reference_docs(&reference);
-            if !seen.insert(reference.reference.clone()) {
+            // Keyed on the target each hop resolves to, as the Parameter, Response, Request Body
+            // and Header chains are: `#/components/mediaTypes/A` written in two files is two hops.
+            if !seen.insert(self.hop_identity(&reference)) {
                 return self.reject_alias_cycle(&reference.provenance, "media type");
             }
-            let Some(name) = reference.reference.strip_prefix("#/components/mediaTypes/") else {
-                // Not a component alias: a multi-file description may reference a whole file,
-                // which resolves through the input bundle exactly as a Parameter or Response
-                // Object reference already does.
+            let Some(name) = self.root_component_name(&reference, "#/components/mediaTypes/")
+            else {
+                // Not a root component alias: a multi-file description may reference a whole
+                // file, or a sub-file's own components, which resolve through the input bundle
+                // exactly as a Parameter or Response Object reference already does.
                 let from = reference
                     .provenance
                     .span
-                    .map(|span| span.file)
-                    .unwrap_or(crate::diag::FileId(0));
+                    .map_or_else(|| self.resolver.root_id(), |span| span.file);
                 let resolved = self.resolver.resolve_component(
                     &reference.reference,
                     from,
