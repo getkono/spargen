@@ -1109,8 +1109,10 @@ fn an_open_enums_catch_all_is_a_variant_of_its_surface() {
 }
 
 /// A `404` body whose required `kind` property is the `allOf` of `members`, one member per entry,
-/// beside a `Listed` component that is the closed set `[x, listed-only]`, and a `UuidListed`
-/// component that is the same set declared as a `uuid` string.
+/// beside a `Listed` component that is the closed set `[x, listed-only]`, and three components that
+/// are that set narrowed against a `uuid` string outside any response body: `UuidListed` declares
+/// it as a `uuid` string, `UntypedUuidListed` names the format without `type: string`, and
+/// `UuidNarrowed` is the `allOf` of `Listed` and a `uuid` string.
 fn kind_meeting(members: &[&str]) -> String {
     let members: String = members
         .iter()
@@ -1143,6 +1145,14 @@ fn kind_meeting(members: &[&str]) -> String {
       type: string
       format: uuid
       enum: [x, listed-only]
+    UntypedUuidListed:
+      format: uuid
+      enum: [x, listed-only]
+    UuidNarrowed:
+      allOf:
+        - $ref: '#/components/schemas/Listed'
+        - type: string
+          format: uuid
 ",
     )
 }
@@ -1271,6 +1281,9 @@ fn open_narrowing_never_opens_a_set_narrowed_against_a_formatted_string() {
         let formatted = formatted.as_str();
         let formatted_x = format!("{{ type: string, format: {format}, const: x }}");
         let formatted_x = formatted_x.as_str();
+        // The same own-schema set without `type: string`: `format` alone names the format.
+        let untyped_x = format!("{{ format: {format}, const: x }}");
+        let untyped_x = untyped_x.as_str();
         let mut orders: Vec<Vec<&str>> = vec![
             vec![string, x, formatted],
             vec![string, formatted, x],
@@ -1280,12 +1293,14 @@ fn open_narrowing_never_opens_a_set_narrowed_against_a_formatted_string() {
             vec![formatted, x, string],
         ];
         // An open set (a nested narrowing of a plain `string`) meeting the formatted string, and a
-        // set narrowed against the format in one schema meeting a plain `string` or an open set,
-        // in both orders.
+        // set narrowed against the format in one schema (with or without `type: string`) meeting a
+        // plain `string` or an open set, in both orders.
         for [left, right] in [
             [open_x, formatted],
             [formatted_x, string],
             [formatted_x, open_x],
+            [untyped_x, string],
+            [untyped_x, open_x],
         ] {
             orders.push(vec![left, right]);
             orders.push(vec![right, left]);
@@ -1296,7 +1311,10 @@ fn open_narrowing_never_opens_a_set_narrowed_against_a_formatted_string() {
             .collect();
         // A `$ref` target, which is lowered closed and then meets the format and a plain `string`
         // in all six orders (a locked copy of the target where the format meets it first), and a
-        // target locked by its own schema's format meeting a plain `string`, in both orders.
+        // component locked outside the response body meeting a plain `string`, in both orders:
+        // one locked by its own schema's format (spelled with and without `type: string`), and
+        // one whose `allOf` narrows `Listed` against a `uuid` string, which is lowered where
+        // narrowing does not open a set.
         let listed_values: &[&str] = &["X,", "ListedOnly,"];
         let listed = "{ $ref: '#/components/schemas/Listed' }";
         for order in [
@@ -1310,9 +1328,14 @@ fn open_narrowing_never_opens_a_set_narrowed_against_a_formatted_string() {
             cases.push((order.to_vec(), listed_values));
         }
         if format == "uuid" {
-            let uuid_listed = "{ $ref: '#/components/schemas/UuidListed' }";
-            cases.push((vec![uuid_listed, string], listed_values));
-            cases.push((vec![string, uuid_listed], listed_values));
+            for target in [
+                "{ $ref: '#/components/schemas/UuidListed' }",
+                "{ $ref: '#/components/schemas/UntypedUuidListed' }",
+                "{ $ref: '#/components/schemas/UuidNarrowed' }",
+            ] {
+                cases.push((vec![target, string], listed_values));
+                cases.push((vec![string, target], listed_values));
+            }
         }
         for (order, expected) in cases {
             let variants = open_kind_variants(&kind_meeting(&order));
