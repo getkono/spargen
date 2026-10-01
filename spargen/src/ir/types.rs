@@ -562,14 +562,37 @@ pub(crate) struct ScalarEnum {
     pub(crate) repr: ScalarRepr,
     /// The variant wire values, in declared order.
     pub(crate) variants: Vec<ScalarValue>,
-    /// Whether the set is **open**: a string enum whose values name the members the description
-    /// lists, beside one more variant that holds any other string. Only `open_narrowing` produces
-    /// one, for a string `enum`/`const` that narrows a property another `allOf` member (or the
-    /// `$ref` it sits beside) declares as a plain `string`, inside a response body's own schema.
-    /// The open set's domain is that wider declaration's, so it is still exactly what the
-    /// description admits there, minus the narrowing. Always `false` for an integer or boolean
+    /// Whether the set is open, closed, or closed for good. Only an [`Openness::Open`] set emits
+    /// a variant beyond the listed values. Always [`Openness::Closed`] for an integer or boolean
     /// set.
-    pub(crate) open: bool,
+    pub(crate) openness: Openness,
+}
+
+impl ScalarEnum {
+    /// Whether the set is [`Openness::Open`]: it emits a variant holding any unlisted string.
+    pub(crate) fn is_open(&self) -> bool {
+        self.openness == Openness::Open
+    }
+}
+
+/// How a [`ScalarEnum`]'s value set relates to the strings beyond it. Only `open_narrowing`
+/// produces anything but [`Openness::Closed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Openness {
+    /// The listed values and nothing else. A plain `string` it narrows inside a response body's
+    /// own schema opens it under `open_narrowing`.
+    Closed,
+    /// A string enum whose values name the members the description lists, beside one more
+    /// variant that holds any other string: a string `enum`/`const` that narrows a property
+    /// another `allOf` member (or the `$ref` it sits beside) declares as a plain `string`, inside
+    /// a response body's own schema. The open set's domain is that wider declaration's, so it is
+    /// still exactly what the description admits there, minus the narrowing.
+    Open,
+    /// The listed values and nothing else, narrowed against a `uuid`, `date`, or `date-time`
+    /// string (in its own schema, or in a schema it met). That format admits no arbitrary string,
+    /// so no plain `string` it later meets opens it, and an open set meeting it closes: the set
+    /// stays closed whichever order an `allOf` lists its members in.
+    Locked,
 }
 
 /// The scalar kind backing a [`ScalarEnum`].

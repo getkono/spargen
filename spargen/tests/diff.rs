@@ -1109,7 +1109,8 @@ fn an_open_enums_catch_all_is_a_variant_of_its_surface() {
 }
 
 /// A `404` body whose required `kind` property is the `allOf` of `members`, one member per entry,
-/// beside a `Listed` component that is the closed set `[x, listed-only]`.
+/// beside a `Listed` component that is the closed set `[x, listed-only]`, and a `UuidListed`
+/// component that is the same set declared as a `uuid` string.
 fn kind_meeting(members: &[&str]) -> String {
     let members: String = members
         .iter()
@@ -1137,6 +1138,10 @@ fn kind_meeting(members: &[&str]) -> String {
         ),
         "    Listed:
       type: string
+      enum: [x, listed-only]
+    UuidListed:
+      type: string
+      format: uuid
       enum: [x, listed-only]
 ",
     )
@@ -1248,4 +1253,73 @@ fn open_narrowing_meets_the_same_set_in_every_member_order() {
             |spec| spec
         )),
     );
+}
+
+/// Under `open_narrowing`, a set narrowed against a `uuid` or date string stays closed whatever
+/// order the members are written in: only a plain `string` admits the unlisted string an open set
+/// holds, and an `allOf` with a formatted member admits only what that format does. Each meet
+/// keeps its operands' order-independence (#400): the format is remembered by the set it narrowed,
+/// so a later or earlier plain `string` cannot open it, and an already-open set it meets closes.
+#[test]
+fn open_narrowing_never_opens_a_set_narrowed_against_a_formatted_string() {
+    let string = "{ type: string }";
+    let x = "{ const: x }";
+    let open_x = "{ allOf: [{ type: string }, { const: x }] }";
+    let mut opened = Vec::new();
+    for format in ["uuid", "date", "date-time"] {
+        let formatted = format!("{{ type: string, format: {format} }}");
+        let formatted = formatted.as_str();
+        let formatted_x = format!("{{ type: string, format: {format}, const: x }}");
+        let formatted_x = formatted_x.as_str();
+        let mut orders: Vec<Vec<&str>> = vec![
+            vec![string, x, formatted],
+            vec![string, formatted, x],
+            vec![x, string, formatted],
+            vec![x, formatted, string],
+            vec![formatted, string, x],
+            vec![formatted, x, string],
+        ];
+        // An open set (a nested narrowing of a plain `string`) meeting the formatted string, and a
+        // set narrowed against the format in one schema meeting a plain `string` or an open set,
+        // in both orders.
+        for [left, right] in [
+            [open_x, formatted],
+            [formatted_x, string],
+            [formatted_x, open_x],
+        ] {
+            orders.push(vec![left, right]);
+            orders.push(vec![right, left]);
+        }
+        let mut cases: Vec<(Vec<&str>, &[&str])> = orders
+            .into_iter()
+            .map(|order| (order, &["X,"][..]))
+            .collect();
+        // A `$ref` target, which is lowered closed and then meets the format and a plain `string`
+        // in all six orders (a locked copy of the target where the format meets it first), and a
+        // target locked by its own schema's format meeting a plain `string`, in both orders.
+        let listed_values: &[&str] = &["X,", "ListedOnly,"];
+        let listed = "{ $ref: '#/components/schemas/Listed' }";
+        for order in [
+            [string, listed, formatted],
+            [string, formatted, listed],
+            [listed, string, formatted],
+            [listed, formatted, string],
+            [formatted, string, listed],
+            [formatted, listed, string],
+        ] {
+            cases.push((order.to_vec(), listed_values));
+        }
+        if format == "uuid" {
+            let uuid_listed = "{ $ref: '#/components/schemas/UuidListed' }";
+            cases.push((vec![uuid_listed, string], listed_values));
+            cases.push((vec![string, uuid_listed], listed_values));
+        }
+        for (order, expected) in cases {
+            let variants = open_kind_variants(&kind_meeting(&order));
+            if variants != expected {
+                opened.push((order.join(" & "), variants));
+            }
+        }
+    }
+    assert!(opened.is_empty(), "opened against a format: {opened:#?}");
 }
