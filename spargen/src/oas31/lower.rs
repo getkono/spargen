@@ -6562,6 +6562,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match current {
                 RefOr::Item(header) => return Some(header),
                 RefOr::Ref(reference) => {
+                    self.note_reference_docs(&reference);
                     if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "header");
                     }

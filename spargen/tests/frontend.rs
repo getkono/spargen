@@ -19391,6 +19391,56 @@ components:
     }
 }
 
+/// A Header Object `$ref` with its own `summary`/`description` is `W011`'s reference-docs case,
+/// like a Parameter, Request Body or Response reference (#398). The header resolver once skipped
+/// the note, so the override was dropped with nothing said, at both places a header is resolved:
+/// a response's `headers` and a multipart `encoding` entry's `headers`. Each documented reference
+/// is reported exactly once, and an undocumented one not at all.
+#[test]
+fn w011_header_reference_summary_documents_the_use_site() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: { type: object, properties: { a: { type: string } } }
+            encoding:
+              a:
+                headers:
+                  X-Part: { $ref: '#/components/headers/Part', summary: the part tag }
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Rate: { $ref: '#/components/headers/Rate', description: per-minute budget }
+            X-Plain: { $ref: '#/components/headers/Plain' }
+components:
+  headers:
+    Rate: { schema: { type: integer } }
+    Plain: { schema: { type: integer } }
+    Part: { schema: { type: string, const: tag } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let noted = |target: &str| {
+            let wanted = format!("the `summary`/`description` on the reference to `{target}`");
+            report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .filter(|d| d.message.starts_with(&wanted))
+                .count()
+        };
+        assert_eq!(noted("#/components/headers/Rate"), 1, "{report:#?}");
+        assert_eq!(noted("#/components/headers/Part"), 1, "{report:#?}");
+        assert_eq!(noted("#/components/headers/Plain"), 0, "{report:#?}");
+    }
+}
+
 #[test]
 fn w011_prefix_encoding_on_form_urlencoded_has_no_effect() {
     // The specification scopes `prefixEncoding`/`itemEncoding` to `multipart`, so on a form body
