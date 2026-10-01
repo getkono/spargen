@@ -389,6 +389,10 @@ fn lower_pass(
         }
     }
 
+    // An intersection narrows a field's type after its `default` was checked against the type the
+    // declaring member gave it, so the applied defaults are checked again against the final graph.
+    retype_field_defaults(&mut ctx.graph, ctx.diags);
+
     // `xml.name`/`xml.attribute` become a format-agnostic serde `rename`, so they may only be applied
     // to a schema used *exclusively* as an XML body — otherwise the rename would corrupt the JSON
     // wire format. Suppress (and warn `W006` on) the rename for any shared/non-XML-reachable type.
@@ -5172,6 +5176,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let raw = schema.default.as_ref()?;
         let classified = classify_default(raw);
         let kind = self.graph.get(ty.id).map(|def| &def.kind);
+        let provenance = Provenance::new(schema.provenance.pointer.push("default"), Some(raw.span));
         match representable_default(&classified, kind) {
             Some(value) => {
                 let display = default_display(&value);
@@ -5183,6 +5188,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(FieldDefault {
                     doc_note: format!("Default: `{display}`."),
                     applied,
+                    provenance,
                 })
             }
             None => {
@@ -5199,6 +5205,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(FieldDefault {
                     doc_note: format!("Default (not applied): `{}`.", raw_display(raw)),
                     applied: None,
+                    provenance,
                 })
             }
         }
@@ -8189,6 +8196,95 @@ fn security_scheme_docs(name: &str, scheme: &super::SecuritySchemeObject) -> Vec
         }
     }
     docs
+}
+
+/// Re-type every applied field `default` against the type its field ends lowering with (#404).
+///
+/// [`LowerCtx::field_default`] decides a default against the type the declaring property lowers
+/// to, but an intersection — `allOf` members repeating the property, or a `$ref` whose sibling
+/// `properties` repeat it — then narrows that type: a `string` met with `enum: [a, b]` is the enum,
+/// a `number` met with `integer` is the integer. A default the narrowed type still admits becomes a
+/// value of it (the enum variant, the integer); one it does not admit is no value of the field, so
+/// it is documented as not applied and reported (`W005`) at the `default` that wrote it, naming
+/// the type whose field drops it. Running once over the finished graph reaches every meet, and
+/// only the types that are emitted: a meet's discarded intermediates are gone by now.
+fn retype_field_defaults(graph: &mut TypeGraph, diags: &mut Diagnostics) {
+    let mut retyped: Vec<(TypeId, usize, Option<DefaultValue>)> = Vec::new();
+    for (id, def) in graph.iter() {
+        let TypeKind::Struct(object) = &def.kind else {
+            continue;
+        };
+        for (index, field) in object.fields.iter().enumerate() {
+            let Some(applied) = field.default.as_ref().and_then(|d| d.applied.as_ref()) else {
+                continue;
+            };
+            let kind = graph.get(field.ty.id).map(|target| &target.kind);
+            let value = representable_default(&reclassify_default(applied), kind);
+            if value.as_ref() != Some(applied) {
+                retyped.push((id, index, value));
+            }
+        }
+    }
+    for (id, index, value) in retyped {
+        let Some(def) = graph.get_mut(id) else {
+            continue;
+        };
+        let TypeKind::Struct(object) = &mut def.kind else {
+            continue;
+        };
+        let field = &mut object.fields[index];
+        let Some(default) = field.default.as_mut() else {
+            continue;
+        };
+        if value.is_none() {
+            let written = default
+                .applied
+                .as_ref()
+                .map(written_default_display)
+                .unwrap_or_default();
+            Diagnostic::warning(Code::SchemaDefaultNotApplied, default.provenance.clone())
+                .message(format!(
+                    "schema `default` `{written}` of property `{}` is not a value of the type an \
+                     intersection narrows the property to in `{}`; it is documented in rustdoc \
+                     there but not applied as a deserialization default",
+                    field.name.wire, def.provenance.pointer
+                ))
+                .remedy(
+                    "use a default every intersected schema of the property admits, or set the \
+                     value explicitly at each call site",
+                )
+                .emit(diags);
+            default.doc_note = format!("Default (not applied): `{written}`.");
+        }
+        default.applied = value;
+    }
+}
+
+/// Recover the JSON value a representable default was decided from, so it can be decided again
+/// against another type. An integral float is classified as the integer JSON Schema says it is: a
+/// `number` field's `3` is carried as `3.0`, and the `integer` it narrows to admits it.
+fn reclassify_default(value: &DefaultValue) -> RawDefault {
+    match value {
+        DefaultValue::Bool(value) => RawDefault::Bool(*value),
+        DefaultValue::Int(value) => RawDefault::Int(*value),
+        DefaultValue::Float(value)
+            if value.fract() == 0.0 && *value >= i64::MIN as f64 && *value < i64::MAX as f64 =>
+        {
+            RawDefault::Int(*value as i64)
+        }
+        DefaultValue::Float(value) => RawDefault::Float(*value),
+        DefaultValue::Str(value) | DefaultValue::EnumVariant(value) => {
+            RawDefault::Str(value.clone())
+        }
+    }
+}
+
+/// Render a representable default as [`raw_display`] renders the JSON it came from.
+fn written_default_display(value: &DefaultValue) -> String {
+    match value {
+        DefaultValue::Str(value) | DefaultValue::EnumVariant(value) => format!("{value:?}"),
+        other => default_display(other),
+    }
 }
 
 /// Suppress `xml.name`/`xml.attribute` renames on any type that is not XML-dedicated, warning `W006`.

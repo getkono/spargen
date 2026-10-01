@@ -14129,6 +14129,106 @@ components:
     );
 }
 
+/// Issue #404: an intersection that narrows a property's type re-types the `default` a member
+/// declared for the wider type. Every spelling of the meet is held — `allOf` members over `$ref`s,
+/// a `$ref` with sibling `properties`, and two object-typed properties met inside an `allOf` — and
+/// so is a `number` narrowed to `integer`. A default the narrowed type still admits is applied as a value
+/// of it (an enum variant, not the string it was written as); one it no longer admits is reported
+/// at the `default` that wrote it (`W005`) rather than wired into code that cannot compile.
+const NARROWED_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Base:
+      type: object
+      properties:
+        valid: { type: string, default: a }
+        bad: { type: string, default: zzz }
+        ratio: { type: number, default: 3 }
+        fraction: { type: number, default: 2.5 }
+    Narrow:
+      type: object
+      properties:
+        valid: { enum: [a, b] }
+        bad: { enum: [a, b] }
+        ratio: { type: integer }
+        fraction: { type: integer }
+    Both:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - $ref: '#/components/schemas/Narrow'
+    Nested:
+      type: object
+      properties:
+        inner:
+          type: object
+          properties:
+            bad: { type: string, default: zzz }
+    NestedNarrow:
+      type: object
+      properties:
+        inner:
+          type: object
+          properties:
+            bad: { enum: [a, b] }
+    NestedBoth:
+      allOf:
+        - $ref: '#/components/schemas/Nested'
+        - $ref: '#/components/schemas/NestedNarrow'
+    Sibling:
+      $ref: '#/components/schemas/Base'
+      properties:
+        valid: { enum: [a, b] }
+        bad: { enum: [a, b] }
+"##;
+
+#[test]
+fn a_default_an_intersection_narrows_away_is_reported_not_applied() {
+    for (entry, report) in [
+        ("generate", generate(NARROWED_DEFAULT_SPEC)),
+        ("check", check(NARROWED_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let mut pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        pointers.sort_unstable();
+        pointers.dedup();
+        // `bad` and `fraction` lose their defaults; `valid` and `ratio` keep theirs, re-typed. The
+        // nested `bad` is narrowed by the meet of two object-typed properties, not by flattening.
+        assert_eq!(
+            pointers,
+            [
+                "/components/schemas/Base/properties/bad/default",
+                "/components/schemas/Base/properties/fraction/default",
+                "/components/schemas/Nested/properties/inner/properties/bad/default",
+            ],
+            "{entry}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+        for narrowed in ["/components/schemas/Both", "/components/schemas/Sibling"] {
+            assert!(
+                messages.iter().any(|message| message.contains(narrowed)),
+                "{entry}: `{narrowed}` drops `bad`'s default and must say so: {messages:#?}"
+            );
+        }
+    }
+
+    let (report, code) = generate_with_code(NARROWED_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    // The string literal survives only where the field is still a string: `Base` itself.
+    assert_eq!(
+        code.matches("Some(\"a\".to_owned())").count(),
+        1,
+        "only `Base.valid` is still a `String`: {code}"
+    );
+}
+
 /// A parameter `default` is documented in rustdoc (never serde-wired) — generation is clean and
 /// must NOT raise W005 (parameters always have a documentation home).
 #[test]

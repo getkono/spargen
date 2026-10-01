@@ -2010,6 +2010,39 @@ fn an_uninhabited_optional_field_drops_its_members_default() {
     );
 }
 
+#[test]
+fn a_narrowing_meet_retypes_or_drops_its_members_default() {
+    // Absent, `valid` takes the default as the enum's variant and `ratio` as an integer, on both
+    // spellings of the meet; `bad` and `fraction` admit no default of the narrowed type.
+    let merged: basic_client::types::NarrowDefault = serde_json::from_str("{}").unwrap();
+    let sibling: basic_client::types::NarrowDefaultSibling = serde_json::from_str("{}").unwrap();
+    // The two spellings name their enums differently, so each is compared through its wire form.
+    for (valid, bad, ratio, fraction) in [
+        (
+            serde_json::to_value(&merged.valid).unwrap(),
+            serde_json::to_value(&merged.bad).unwrap(),
+            merged.ratio,
+            merged.fraction,
+        ),
+        (
+            serde_json::to_value(&sibling.valid).unwrap(),
+            serde_json::to_value(&sibling.bad).unwrap(),
+            sibling.ratio,
+            sibling.fraction,
+        ),
+    ] {
+        assert_eq!(valid, serde_json::json!("a"));
+        assert!(bad.is_null());
+        assert_eq!(ratio, Some(3_i64));
+        assert!(fraction.is_none());
+    }
+    // The wider member keeps its own defaults as it wrote them.
+    let base: basic_client::types::NarrowDefaultBase = serde_json::from_str("{}").unwrap();
+    assert_eq!(base.valid.as_deref(), Some("a"));
+    assert_eq!(base.bad.as_deref(), Some("zzz"));
+    assert_eq!(base.fraction, Some(2.5));
+}
+
 // An optional uninhabited field is `Option<Never>`, and serde's `Option<T>` maps a JSON `null` to
 // `None` without ever calling `T::deserialize` — so without a field-level deserializer the
 // uninhabited type is never consulted and `{"x": null}`, which no schema here admits, decodes and
@@ -4913,6 +4946,35 @@ components:
       $ref: "#/components/schemas/ConflictDefaultTarget"
       properties:
         x: { type: integer }
+    # Issue #404: a meet that narrows an optional property re-types the default a member wrote for
+    # the wider type. `valid` becomes the enum's variant and `ratio` an integer; `bad` and
+    # `fraction` are no value of the narrowed type and lose their default (`W005`). A provider
+    # returning `"a".to_owned()` for an enum field, or `2.5` for an `i64`, does not compile.
+    NarrowDefaultBase:
+      type: object
+      properties:
+        valid: { type: string, default: a }
+        bad: { type: string, default: zzz }
+        ratio: { type: number, default: 3 }
+        fraction: { type: number, default: 2.5 }
+    NarrowDefaultEnum:
+      type: object
+      properties:
+        valid: { enum: [a, b] }
+        bad: { enum: [a, b] }
+        ratio: { type: integer }
+        fraction: { type: integer }
+    NarrowDefault:
+      allOf:
+        - $ref: "#/components/schemas/NarrowDefaultBase"
+        - $ref: "#/components/schemas/NarrowDefaultEnum"
+    NarrowDefaultSibling:
+      $ref: "#/components/schemas/NarrowDefaultBase"
+      properties:
+        valid: { enum: [a, b] }
+        bad: { enum: [a, b] }
+        ratio: { type: integer }
+        fraction: { type: integer }
     # The direct spelling of an uninhabited optional property: a `false` subschema. Absence is the
     # only valid form, `null` included among the rejected values.
     ForbiddenProperty:

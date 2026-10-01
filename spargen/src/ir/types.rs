@@ -530,6 +530,10 @@ pub(crate) struct FieldDefault {
     /// The scalar to wire through a generated serde default provider, when the default is
     /// representable *and* the field is a plain optional (non-required, non-nullable) scalar.
     pub(crate) applied: Option<DefaultValue>,
+    /// The `default` keyword that declared the value, so a disposition decided after the field's
+    /// own lowering — an intersection that narrows the field's type to one the value is not a
+    /// member of — is reported where the value was written.
+    pub(crate) provenance: crate::diag::Provenance,
 }
 
 /// A representable scalar `default`, carried so codegen can render it as a correct Rust literal for
