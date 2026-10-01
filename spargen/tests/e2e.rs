@@ -436,6 +436,112 @@ fn a_one_element_array_decodes_into_a_one_position_tuple() {
     assert!(status.success(), "the tuple fixture must lint clean");
 }
 
+const ALL_OF_BESIDE_UNION_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /holder:
+    get:
+      operationId: getHolder
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Holder' }
+components:
+  schemas:
+    Cat: { type: object, required: [kind], properties: { kind: { type: string } } }
+    Member:
+      allOf: [{ required: [kind] }]
+      oneOf: [{ type: string }, { $ref: '#/components/schemas/Cat' }]
+    Sibling:
+      required: [kind]
+      allOf: [{ description: a pet }]
+      oneOf: [{ type: string }, { $ref: '#/components/schemas/Cat' }]
+    Untyped:
+      allOf: [{ properties: { name: { type: string } } }]
+      oneOf: [{ $ref: '#/components/schemas/Cat' }, { type: 'null' }]
+    Typed:
+      allOf: [{ type: [object, 'null'], properties: { name: { type: string } } }]
+      oneOf: [{ $ref: '#/components/schemas/Cat' }, { type: 'null' }]
+    Holder:
+      type: object
+      required: [member, sibling, untyped, typed]
+      properties:
+        member: { $ref: '#/components/schemas/Member' }
+        sibling: { $ref: '#/components/schemas/Sibling' }
+        untyped: { $ref: '#/components/schemas/Untyped' }
+        typed: { $ref: '#/components/schemas/Typed' }
+"#;
+
+/// Issue #419: an `allOf` beside the schema's own `oneOf`/`anyOf` keeps every branch it does not
+/// constrain away. An untyped `allOf` member and the schema's own keywords refine only the object
+/// branch, so a string still decodes; where the union has a `null` branch and the `allOf` admits
+/// `null` (an untyped member says nothing of it, a typed one lists it), `null` still decodes. The
+/// fixture's own test decodes each wire shape through the generated types.
+#[test]
+fn an_all_of_beside_a_union_decodes_every_value_both_accept() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, ALL_OF_BESIDE_UNION_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "all_of_union_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/all_of_union.rs"),
+        r##"
+use all_of_union_client::types::Holder;
+
+#[test]
+fn strings_and_nulls_decode_beside_the_refined_object_branch() {
+    let scalars = serde_json::json!({
+        "member": "plain", "sibling": "plain", "untyped": null, "typed": null
+    });
+    let holder: Holder = serde_json::from_value(scalars.clone()).unwrap();
+    assert!(holder.untyped.is_none());
+    assert!(holder.typed.is_none());
+    assert_eq!(serde_json::to_value(&holder).unwrap(), scalars);
+
+    let objects = serde_json::json!({
+        "member": { "kind": "cat" },
+        "sibling": { "kind": "cat" },
+        "untyped": { "kind": "cat", "name": "a" },
+        "typed": { "kind": "cat", "name": "b" }
+    });
+    let holder: Holder = serde_json::from_value(objects.clone()).unwrap();
+    assert!(holder.untyped.is_some());
+    assert!(holder.typed.is_some());
+    assert_eq!(serde_json::to_value(&holder).unwrap(), objects);
+
+    // The object branch is still `Cat`: its required `kind` is enforced.
+    let kindless = serde_json::json!({
+        "member": {}, "sibling": "plain", "untyped": null, "typed": null
+    });
+    assert!(serde_json::from_value::<Holder>(kindless).is_err());
+}
+"##,
+    )
+    .unwrap();
+
+    let status = fixture_cargo(&out).arg("test").status().unwrap();
+    assert!(
+        status.success(),
+        "every value both the `allOf` and the union accept must decode"
+    );
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the allOf-beside-union fixture must lint clean"
+    );
+}
+
 /// One operation per fixed inherent method of `Client` and `BlockingClient` (issue #286). The spec
 /// declares a server, so `with_default_server` is emitted too, and the fixture is checked with the
 /// `blocking` feature on, so the `BlockingClient` methods (`inner` among them) are compiled.
