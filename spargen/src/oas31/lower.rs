@@ -474,19 +474,100 @@ fn append_response_docs(target: &mut Option<String>, status: &str, response: &Re
     }
 }
 
-/// A union's shape-bearing sibling: the lowered type, plus whether the sibling's own keywords say
-/// anything about `null`.
+/// A union's shape-bearing sibling: what each branch is met with, plus whether the sibling's own
+/// keywords say anything about `null`.
 ///
-/// The second field exists because the lowered [`Ty`] cannot answer it. A `properties`-only sibling
-/// and a `type: object` + `properties` sibling both lower to a non-nullable `Struct`, yet only the
-/// second denies `null` — the first is an object applicator, vacuously satisfied by every
-/// non-object. The question has to be asked of the schema, and asked of the SIBLING rather than of
-/// the schema that encloses it: those differ whenever a multi-type array is deleted for lowering,
-/// and whenever the sibling speaks through `enum`/`const` instead of `type`.
+/// The second field exists because the lowered type cannot answer it. A `properties`-only sibling
+/// and a `type: object` + `properties` sibling both refine objects, yet only the second denies
+/// `null` — the first is an object applicator, vacuously satisfied by every non-object. The
+/// question has to be asked of the schema, and asked of the SIBLING rather than of the schema that
+/// encloses it: those differ whenever a multi-type array is deleted for lowering, and whenever the
+/// sibling speaks through `enum`/`const` instead of `type`.
 #[derive(Clone, Copy)]
 struct UnionSibling {
-    ty: Ty,
+    refiner: Refiner,
     speaks_about_null: bool,
+}
+
+/// What a union's branches are met with: a union's own sibling keywords, or the sibling keywords
+/// of a `$ref` whose target is a union.
+#[derive(Clone, Copy)]
+enum Refiner {
+    /// A sibling that establishes a shape of its own (`type`, `enum`, `const`, `$ref`, `allOf`, a
+    /// binary encoding): every branch is intersected with it.
+    Whole(Ty),
+    /// A sibling of untyped object or array applicators alone (see
+    /// [`implied_applicator_category`]). In 2020-12 those are vacuously satisfied by an instance
+    /// of another category, so each set refines only the branches of its own category (#282).
+    Scoped(ScopedRefiners),
+}
+
+/// The two halves of a [`Refiner::Scoped`] sibling, each lowered as its category with `null`
+/// admitted where the sibling does not deny it.
+#[derive(Clone, Copy)]
+struct ScopedRefiners {
+    /// The object applicators (`properties`, `patternProperties`, `required`,
+    /// `additionalProperties`), lowered as an object: met with every object branch.
+    object: Option<Ty>,
+    /// The array applicators (`items`, `prefixItems`), lowered as an array: met with every array
+    /// branch.
+    array: Option<Ty>,
+    /// Whether the sibling admits `null`. The applicators say nothing about it, so this is false
+    /// only where a multi-type array deleted for lowering omitted `null`; a branch neither half
+    /// reaches still loses its `null` then, as it would against the deleted array.
+    admits_null: bool,
+    /// The categories a multi-type array deleted for lowering admits, where there was one: a
+    /// branch of any other category is excluded, as it would be against the array.
+    allowed: Option<CategoryMask>,
+}
+
+/// A set of JSON categories, the non-null members of a `type` array. `integer` and `number` both
+/// admit [`JsonCategory::Number`], the category a lowered numeric branch reports.
+#[derive(Clone, Copy)]
+struct CategoryMask(u8);
+
+impl CategoryMask {
+    fn of(types: &[JsonType]) -> Self {
+        Self(types.iter().fold(0, |mask, kind| {
+            mask | match kind {
+                JsonType::Null => 0,
+                JsonType::Boolean => Self::bit(JsonCategory::Boolean),
+                JsonType::Object => Self::bit(JsonCategory::Object),
+                JsonType::Array => Self::bit(JsonCategory::Array),
+                JsonType::Number | JsonType::Integer => Self::bit(JsonCategory::Number),
+                JsonType::String => Self::bit(JsonCategory::String),
+            }
+        }))
+    }
+
+    fn bit(category: JsonCategory) -> u8 {
+        match category {
+            JsonCategory::String => 1,
+            JsonCategory::Number => 2,
+            JsonCategory::Boolean => 4,
+            JsonCategory::Array => 8,
+            JsonCategory::Object => 16,
+        }
+    }
+
+    fn admits(self, category: JsonCategory) -> bool {
+        self.0 & Self::bit(category) != 0
+    }
+
+    /// Whether the set admits a category other than `category`.
+    fn admits_besides(self, category: JsonCategory) -> bool {
+        self.0 & !Self::bit(category) != 0
+    }
+}
+
+/// What a [`Refiner::Scoped`] meeting found across the branches it visited: which halves reached
+/// a branch of their category, and whether both halves met a branch that states no category, which
+/// leaves no single category to establish for it.
+#[derive(Default)]
+struct ScopeReach {
+    object: bool,
+    array: bool,
+    uncategorised: bool,
 }
 
 /// Whether a Discriminator Object value is a schema *name* rather than a URI reference: a
@@ -1523,8 +1604,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // diagnostic (#140). The applicators establish the category they apply to, as an
             // untyped `properties` already does, and say nothing about `null` (the same reading
             // `lower_union_sibling` takes), so the target's nullability survives the intersection.
+            //
+            // Against a union target that reading would drop every branch of another category in
+            // silence — `oneOf: [string, Obj]` with a `required` sibling would become `Obj` alone
+            // and reject the strings the target accepts. There the applicators refine the branches
+            // of their own category, as they do beside an inline union (#282).
+            let category = implied_applicator_category(&sibling);
+            if category.is_some() {
+                if let TypeKind::Union(union) = &self.graph.get(referenced.id)?.kind {
+                    let union = union.clone();
+                    return self.refine_union_target(schema, hint, referenced, &union, &sibling);
+                }
+            }
             let mut inferred_category = false;
-            match implied_applicator_category(&sibling) {
+            match category {
                 Some(ImpliedCategory::Only(category)) => {
                     sibling.types.types = vec![category, JsonType::Null];
                     inferred_category = true;
@@ -1568,34 +1661,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     "this `$ref`'s untyped sibling keywords establish a category its target does \
                      not have, so the only value both accept is `null`; the intersection is empty \
                      but for the target's nullability",
-                );
-            }
-            // Against a union target the intersection is taken branch by branch, and a branch the
-            // inferred category excludes is dropped without a word: `oneOf: [string, Obj]` with a
-            // `required` sibling would become `Obj` alone and reject the strings the target
-            // accepts. Whether an untyped refiner is instead vacuous for the other branches is the
-            // same undecided question the inline union sibling raises (#282), so the loss is
-            // reported rather than chosen. Every branch surviving is the only outcome kept.
-            let target_branches = match &self.graph.get(referenced.id)?.kind {
-                TypeKind::Union(target) => Some(target.variants.len()),
-                // A target still being lowered was refused above as a back edge, and it would
-                // have failed the intersection besides; either way it has no branches to keep.
-                TypeKind::Reserved => None,
-                _ => None,
-            };
-            if inferred_category
-                && target_branches.is_some_and(|branches| {
-                    !matches!(
-                        &kind,
-                        TypeKind::Union(result) if result.variants.len() == branches
-                    )
-                })
-            {
-                return self.reject_ref_sibling_category(
-                    schema,
-                    "this `$ref`'s untyped sibling keywords establish a category some branch of \
-                     its target union does not have, so intersecting would drop that branch and \
-                     reject values the target accepts",
                 );
             }
             let mut ty = self.insert_schema_type(schema, hint, kind);
@@ -1985,9 +2050,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // and it already reaches the intersection on the sibling side, where it belongs —
                 // it can narrow what the result accepts, never create something to accept.
                 inner.nullable = inner.nullable || null_from_member;
-                let Ok(constrained) =
-                    self.intersect_types(inner, sibling.ty, &format!("{hint}Constrained"))
-                else {
+                let mut reach = ScopeReach::default();
+                let met = self.meet_refiner(
+                    inner,
+                    sibling.refiner,
+                    &mut reach,
+                    &format!("{hint}Constrained"),
+                );
+                if met.is_err() && reach.uncategorised {
+                    return self.reject_unscoped_union_sibling(
+                        schema,
+                        "the union's sole non-null member states no JSON category, and the \
+                         enclosing schema's untyped sibling keywords settle none for it — they are \
+                         both object keywords and array keywords, or its `type` array admits \
+                         another category beside theirs — so no single Rust type represents what \
+                         they constrain of it",
+                    );
+                }
+                for keywords in unreached_halves(sibling.refiner, &reach) {
+                    self.warn_unreached_union_sibling(schema, unreached_message(keywords));
+                }
+                let Ok(constrained) = met else {
                     // Neither side admits null and the non-null shapes do not meet, so nothing is
                     // left to collapse to. The terminal code matches the multi-variant path below,
                     // which rejects with `E007` once every variant has been excluded — but only the
@@ -2033,6 +2116,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // variant's position is not its member's.
         let mut variant_members: Vec<usize> = Vec::new();
         let mut used_hints: HashSet<String> = HashSet::new();
+        let mut reach = ScopeReach::default();
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
@@ -2069,9 +2153,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             if let Some(sibling) = sibling {
-                ty = match self.intersect_types(
+                ty = match self.meet_refiner(
                     ty,
-                    sibling.ty,
+                    sibling.refiner,
+                    &mut reach,
                     &format!("{hint}Variant{index}Constrained"),
                 ) {
                     Ok(intersection) => intersection,
@@ -2090,6 +2175,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         ))
                         .emit(self.diags);
                         continue;
+                    }
+                    // Object and array applicators together beside a branch that states no
+                    // category (`{}`) have no single category to establish for it.
+                    Err(NoMeet::Unrepresentable) if reach.uncategorised => {
+                        let message = format!(
+                            "union member {index} states no JSON category, and the enclosing \
+                             schema's untyped sibling keywords settle none for it — they are both \
+                             object keywords and array keywords, or its `type` array admits \
+                             another category beside theirs — so no single Rust type represents \
+                             what they constrain of it"
+                        );
+                        return self.reject_unscoped_union_sibling(schema, &message);
                     }
                     // The branch does admit values the siblings admit, but no Rust type holds
                     // them, so it can be neither kept nor dropped without refusing them.
@@ -2125,6 +2222,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             variant_members.push(index);
         }
 
+        if let Some(sibling) = sibling {
+            for keywords in unreached_halves(sibling.refiner, &reach) {
+                self.warn_unreached_union_sibling(schema, unreached_message(keywords));
+            }
+        }
         if variants.is_empty() {
             // The same blind spot as the sole-member site above, on the pre-existing path: every
             // REAL variant is impossible, but a null-only member's branch was stripped out before
@@ -2133,7 +2235,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // exact JSON null type is the answer — the same type the all-null-members branch above
             // returns for the same reason. Again only the MEMBER-derived flag can rescue: a
             // `"null"` in the enclosing `type` array leaves nothing for `null` to match.
-            if null_from_member && sibling.is_none_or(|sibling| self.ty_accepts_null(sibling.ty)) {
+            if null_from_member
+                && sibling.is_none_or(|sibling| self.refiner_accepts_null(sibling.refiner))
+            {
                 return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
             }
             return self.reject_branchless_union(
@@ -2229,6 +2333,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if !schema_has_shape_constraint(&sibling) {
             return Some(None);
         }
+        // Untyped object or array applicators alone name no `type`, so `lower_schema` would lower
+        // them to `TypeKind::Any`, which intersects as identity and drops them from every branch
+        // in silence (#282). Nor do they establish their category for the whole union, as they do
+        // beside a `$ref` to a single schema: `required: [a]` beside `oneOf: [string, Obj]` is
+        // vacuous for the strings, and reading it as an object would drop that branch. Each set
+        // refines the branches of its own category instead.
+        //
+        // A multi-type array deleted above still says which categories the union admits, so it
+        // goes with them: the branches of the categories it omits are excluded as they would be
+        // against it.
+        if implied_applicator_category(&sibling).is_some() {
+            let admits_null = !types_deleted || declared_types_admit_null;
+            let allowed = types_deleted.then(|| CategoryMask::of(&schema.types.types));
+            let scoped = self.lower_scoped_refiners(&sibling, admits_null, allowed, hint)?;
+            return Some(Some(UnionSibling {
+                refiner: Refiner::Scoped(scoped),
+                speaks_about_null,
+            }));
+        }
         let mut ty = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
         if types_deleted {
             // Restore the one piece of the deleted array that still has a faithful representation.
@@ -2237,9 +2360,232 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ty.nullable = declared_types_admit_null;
         }
         Some(Some(UnionSibling {
-            ty,
+            refiner: Refiner::Whole(ty),
             speaks_about_null,
         }))
+    }
+
+    /// Lower a sibling of untyped object or array applicators (one [`implied_applicator_category`]
+    /// answers for) into the [`ScopedRefiners`] its two halves refine. Each half is the sibling
+    /// with the other half's keywords removed and its own category as `type`, with `null` admitted
+    /// where `admits_null` says the sibling does not deny it. `allowed` is the categories of a
+    /// multi-type array deleted for lowering, where there was one.
+    fn lower_scoped_refiners(
+        &mut self,
+        sibling: &Schema,
+        admits_null: bool,
+        allowed: Option<CategoryMask>,
+        hint: &str,
+    ) -> Option<ScopedRefiners> {
+        // `types` is empty here, so this is exactly the object applicators.
+        let object_like = schema_is_object_like(sibling);
+        let array_like = sibling.items.is_some() || !sibling.prefix_items.is_empty();
+        let category = |kind: JsonType| {
+            if admits_null {
+                vec![kind, JsonType::Null]
+            } else {
+                vec![kind]
+            }
+        };
+        let object = if object_like {
+            let mut half = sibling.clone();
+            half.items = None;
+            half.prefix_items.clear();
+            half.types.types = category(JsonType::Object);
+            Some(self.lower_schema(&half, &format!("{hint}Constraint"))?)
+        } else {
+            None
+        };
+        let array = if array_like {
+            let mut half = sibling.clone();
+            half.properties.clear();
+            half.pattern_properties.clear();
+            half.required.clear();
+            half.additional_properties = None;
+            half.types.types = category(JsonType::Array);
+            let name = if object_like {
+                "ArrayConstraint"
+            } else {
+                "Constraint"
+            };
+            Some(self.lower_schema(&half, &format!("{hint}{name}"))?)
+        } else {
+            None
+        };
+        Some(ScopedRefiners {
+            object,
+            array,
+            admits_null,
+            allowed,
+        })
+    }
+
+    /// Meet one union branch with `refiner`. A [`Refiner::Whole`] sibling is intersected with it.
+    /// A [`Refiner::Scoped`] one meets an object branch with its object half and an array branch
+    /// with its array half, recording in `reach` which half reached one; a branch of another
+    /// category is left as it is, but for a `null` the sibling denies. A nested union is met
+    /// branch by branch. A branch of a category [`ScopedRefiners::allowed`] omits is excluded. A
+    /// branch that states no category (`{}`) takes the one the sibling establishes, as an untyped
+    /// `$ref` target does; where the sibling carries both kinds, or `allowed` admits another
+    /// category too, there is none to establish, and the meet is [`NoMeet::Unrepresentable`] with
+    /// `reach.uncategorised` set.
+    fn meet_refiner(
+        &mut self,
+        branch: Ty,
+        refiner: Refiner,
+        reach: &mut ScopeReach,
+        hint: &str,
+    ) -> Result<Ty, NoMeet> {
+        let scoped = match refiner {
+            Refiner::Whole(ty) => return self.intersect_types(branch, ty, hint),
+            Refiner::Scoped(scoped) => scoped,
+        };
+        let Some(kind) = self.graph.get(branch.id).map(|def| def.kind.clone()) else {
+            return Err(NoMeet::Unrepresentable);
+        };
+        // A branch of a category the deleted `type` array omits is excluded, as against the array.
+        if let (Some(allowed), Some(category)) = (scoped.allowed, value_category(&kind)) {
+            if !allowed.admits(category) {
+                return if branch.nullable && scoped.admits_null {
+                    Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+                } else {
+                    Err(NoMeet::Empty)
+                };
+            }
+        }
+        let half = match &kind {
+            TypeKind::Union(union) => {
+                let enclosing = self.narrowing_opens;
+                let mut ty = self.closed_narrowing(|ctx| {
+                    ctx.intersect_union(branch, union, refiner, hint, enclosing, reach)
+                })?;
+                ty.nullable = branch.nullable && scoped.admits_null;
+                return Ok(ty);
+            }
+            TypeKind::Struct(_) => {
+                reach.object |= scoped.object.is_some();
+                scoped.object
+            }
+            TypeKind::Array(_) | TypeKind::Tuple(_) => {
+                reach.array |= scoped.array.is_some();
+                scoped.array
+            }
+            // A branch that states no category (`{}`, or `{required: [x]}` alone) is the untyped
+            // target the `$ref` arm meets: there the applicators establish their category, so
+            // `properties` beside `anyOf: [{required: [a]}, {required: [b]}]` is an object in
+            // every branch. Both kinds at once have no single category to establish, and nor
+            // does one kind beside a deleted `type` array that admits another category too.
+            TypeKind::Any => {
+                let (half, category) = match (scoped.object, scoped.array) {
+                    (Some(object), None) => (object, JsonCategory::Object),
+                    (None, Some(array)) => (array, JsonCategory::Array),
+                    _ => {
+                        reach.uncategorised = true;
+                        return Err(NoMeet::Unrepresentable);
+                    }
+                };
+                match scoped.allowed {
+                    Some(allowed) if allowed.admits_besides(category) => {
+                        reach.uncategorised = true;
+                        return Err(NoMeet::Unrepresentable);
+                    }
+                    Some(allowed) if !allowed.admits(category) => {
+                        return if branch.nullable && scoped.admits_null {
+                            Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+                        } else {
+                            Err(NoMeet::Empty)
+                        };
+                    }
+                    _ => {}
+                }
+                if category == JsonCategory::Object {
+                    reach.object = true;
+                } else {
+                    reach.array = true;
+                }
+                Some(half)
+            }
+            // A placeholder's body is not known yet, so nothing can be said of its category. The
+            // callers refuse a reservation before they get here; this keeps the refusal for one
+            // that does not.
+            TypeKind::Reserved => return Err(NoMeet::Unrepresentable),
+            TypeKind::Primitive(_)
+            | TypeKind::Enum(_)
+            | TypeKind::Bytes
+            | TypeKind::Null
+            | TypeKind::Never => None,
+        };
+        match half {
+            Some(half) => self.intersect_types(branch, half, hint),
+            None => {
+                let mut ty = branch;
+                ty.nullable = branch.nullable && scoped.admits_null;
+                Ok(ty)
+            }
+        }
+    }
+
+    /// The `$ref` arm's answer for a `$ref` to the union `union` (its target, `referenced`) whose
+    /// siblings are untyped object or array applicators alone: each set refines the target's
+    /// branches of its own category, and the rest are kept as they are. Such siblings say nothing
+    /// about `null`, so the target's nullability stands. A set that reaches no branch of its
+    /// category is vacuous, and `W011`; a branch that states no category with no single one to
+    /// establish for it, and a meet that leaves no branch, are `E013`.
+    fn refine_union_target(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        referenced: Ty,
+        union: &Union,
+        sibling: &Schema,
+    ) -> Option<Ty> {
+        let scoped = self.lower_scoped_refiners(sibling, true, None, hint)?;
+        let refiner = Refiner::Scoped(scoped);
+        let mut reach = ScopeReach::default();
+        let enclosing = self.narrowing_opens;
+        let met = self.closed_narrowing(|ctx| {
+            ctx.intersect_union(
+                referenced,
+                union,
+                refiner,
+                &format!("{hint}ReferenceIntersection"),
+                enclosing,
+                &mut reach,
+            )
+        });
+        if met.is_err() && reach.uncategorised {
+            return self.reject_ref_sibling_category(
+                schema,
+                "a branch of this `$ref`'s target union states no JSON category, and the untyped \
+                 sibling keywords are both object keywords and array keywords with no `type` to \
+                 choose between them, so no single Rust type represents what they constrain of it",
+            );
+        }
+        for keywords in unreached_halves(refiner, &reach) {
+            let message = format!(
+                "this `$ref`'s untyped sibling {keywords} constrain only the instances of their \
+                 own category, and no branch of its target union has that category, so they \
+                 constrain no value the target accepts"
+            );
+            self.warn_unreached_union_sibling(schema, message);
+        }
+        let Ok(met) = met else {
+            return self.reject_ref_sibling_intersection(schema);
+        };
+        let kind = self.graph.get(met.id)?.kind.clone();
+        let mut ty = self.insert_schema_type(schema, hint, kind);
+        ty.nullable = referenced.nullable;
+        ty.boxed = met.boxed;
+        Some(ty)
+    }
+
+    /// Whether a union branch met with `refiner` may still be `null`, for a union whose every
+    /// real branch was excluded: the sibling's own answer.
+    fn refiner_accepts_null(&self, refiner: Refiner) -> bool {
+        match refiner {
+            Refiner::Whole(ty) => self.ty_accepts_null(ty),
+            Refiner::Scoped(scoped) => scoped.admits_null,
+        }
     }
 
     /// Lower one union member, returning its type and — when the member is a `$ref` to a component —
@@ -3594,6 +3940,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
+    /// Acknowledge that a union's untyped object or array sibling keywords (a [`Refiner::Scoped`]
+    /// sibling, beside the union or beside a `$ref` to it) reach no branch of their category. In
+    /// 2020-12 they are then vacuously satisfied by every value the union accepts, so the union
+    /// generates as it is, and the keywords are reported rather than dropped in silence.
+    fn warn_unreached_union_sibling(&mut self, schema: &Schema, message: String) {
+        // W011 case: unreached-union-sibling
+        Diagnostic::warning(Code::DeclarationHasNoEffect, schema.provenance.clone())
+            .message(message)
+            .emit(self.diags);
+    }
+
+    /// Report that a union's untyped object or array sibling keywords (a [`Refiner::Scoped`]
+    /// sibling) settle no category for a branch that states none: they are both kinds, or a
+    /// deleted multi-type array admits another category beside theirs.
+    fn reject_unscoped_union_sibling<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        // E013 case: inferred-category
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(UNION_SIBLING_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
     /// Report that a `$ref` carrying shape-bearing siblings — or a union member, when the union
     /// has siblings of its own — closes a reference cycle back to the schema enclosing it, so the
     /// siblings would have to be intersected with a target whose definition depends on the result.
@@ -4026,11 +4395,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the enclosing position's answer holds.
             (TypeKind::Union(union), _) => {
                 let enclosing = self.narrowing_opens;
-                self.closed_narrowing(|ctx| ctx.intersect_union(a, union, b, hint, enclosing))
+                self.closed_narrowing(|ctx| {
+                    let reach = &mut ScopeReach::default();
+                    ctx.intersect_union(a, union, Refiner::Whole(b), hint, enclosing, reach)
+                })
             }
             (_, TypeKind::Union(union)) => {
                 let enclosing = self.narrowing_opens;
-                self.closed_narrowing(|ctx| ctx.intersect_union(b, union, a, hint, enclosing))
+                self.closed_narrowing(|ctx| {
+                    let reach = &mut ScopeReach::default();
+                    ctx.intersect_union(b, union, Refiner::Whole(a), hint, enclosing, reach)
+                })
             }
             (TypeKind::Bytes, TypeKind::Bytes) => Ok(non_nullable(a)),
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
@@ -4291,18 +4666,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// branch survives, the result is no union, and that branch is met again under that answer, so
     /// the meet is the same set whichever order the `allOf` writes the union and the `string` in
     /// (written first, the union narrows to that branch before the `string` opens it).
+    ///
+    /// Each branch is met through [`Self::meet_refiner`], so a [`Refiner::Scoped`] `other` leaves
+    /// the branches of another category as they are and records what it reached in `reach`.
     fn intersect_union(
         &mut self,
         union_ty: Ty,
         union: &Union,
-        other: Ty,
+        other: Refiner,
         hint: &str,
         enclosing_opens: bool,
+        reach: &mut ScopeReach,
     ) -> Result<Ty, NoMeet> {
         let mut variants = Vec::new();
         let mut retained = Vec::new();
         for (index, variant) in union.variants.iter().enumerate() {
-            match self.intersect_types(variant.ty, other, &format!("{hint}Variant{index}")) {
+            match self.meet_refiner(variant.ty, other, reach, &format!("{hint}Variant{index}")) {
                 Ok(ty) => {
                     variants.push(UnionVariant {
                         name_hint: variant.name_hint.clone(),
@@ -4321,7 +4700,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if variants.len() == 1 {
             if enclosing_opens {
                 let branch = union.variants[retained[0]].ty;
-                return self.response_narrowing(|ctx| ctx.intersect_types(branch, other, hint));
+                return self.response_narrowing(|ctx| ctx.meet_refiner(branch, other, reach, hint));
             }
             return Ok(variants.remove(0).ty);
         }
@@ -6876,6 +7255,40 @@ const ALL_OF_REMEDY: &str =
 const REF_SIBLING_REMEDY: &str = "restructure the schema so the `$ref` target and its sibling \
                                   keywords describe one representable type, or omit this API \
                                   segment with spargen::omit!";
+
+/// The remedy for a union's untyped sibling keywords that cannot be applied to its branches.
+const UNION_SIBLING_REMEDY: &str = "give the sibling keywords a `type`, move them into the \
+                                    branches they constrain, or omit this API segment with \
+                                    spargen::omit!";
+
+/// The keyword set of every half of a [`Refiner::Scoped`] sibling that reached no branch of its
+/// category, object half first; empty where every half the sibling carries reached one (or the
+/// sibling is not scoped). Each entry is reported with a `W011` of its own.
+fn unreached_halves(refiner: Refiner, reach: &ScopeReach) -> Vec<&'static str> {
+    let Refiner::Scoped(scoped) = refiner else {
+        return Vec::new();
+    };
+    let mut halves = Vec::new();
+    if scoped.object.is_some() && !reach.object {
+        halves.push(
+            "object keywords (`properties`, `patternProperties`, `required`, \
+             `additionalProperties`)",
+        );
+    }
+    if scoped.array.is_some() && !reach.array {
+        halves.push("array keywords (`items`, `prefixItems`)");
+    }
+    halves
+}
+
+/// The message for a scoped sibling half [`unreached_halves`] names.
+fn unreached_message(keywords: &str) -> String {
+    format!(
+        "this schema's untyped {keywords} constrain only the instances of their own category, \
+         and no branch of its union has that category, so they apply to no value the union \
+         accepts"
+    )
+}
 
 fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
     use Prim::{Bool, Date, DateTime, String, Uuid, F64, I32, I64};
