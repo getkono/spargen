@@ -214,6 +214,11 @@ pub(crate) fn vendor(
                             continue;
                         }
                     };
+                    // The build registers a redirected copy under its retrieval URL as well, so a
+                    // later reference to that URL reaches this document and reads no pin of its
+                    // own: it is seen here too, or the lock would fetch and pin what the build
+                    // never reads. A retrieval URL already seen stays the document it named.
+                    seen_remote.insert(retrieved.clone());
                     let sha256 = sha256_hex(&bytes);
                     let rel_path = vendor_path_for_url(&url);
                     let target = vendor_dir.join(&rel_path);
@@ -250,6 +255,7 @@ pub(crate) fn vendor(
                     if let Ok(text) = String::from_utf8(bytes) {
                         if let Some(value) = parse_scratch(&url, &text) {
                             remote_docs.insert(url.clone(), docs.len());
+                            remote_docs.entry(retrieved.clone()).or_insert(docs.len());
                             queue.push_back((docs.len(), JsonPointer::root()));
                             docs.push(ScanDoc {
                                 value,
