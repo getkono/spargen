@@ -22675,6 +22675,100 @@ fn e004_a_component_ref_in_a_sub_file_does_not_read_the_roots_components() {
     }
 }
 
+/// A Media Type Object chain's cycle check keys on the target each hop resolves to (#397), as the
+/// Parameter, Request Body, Response and Header chains' do. A real cycle — through the root's
+/// `components.mediaTypes`, or across a referenced file — is `E004`'s cycle case in Media Type
+/// words. `#/components/mediaTypes/A` written in the root and again in a sub-file names two
+/// targets, so a chain through both is followed to the sub-file's `A` rather than reported as a
+/// cycle, and reaches the client the inline document generates.
+#[test]
+fn e004_a_media_type_chain_is_followed_by_target_not_by_spelling() {
+    use serde_json::json;
+    let with_content = |content: serde_json::Value, extra: serde_json::Value| {
+        placement_document(
+            "3.2.0",
+            json!({ "operationId": "getPet", "responses": { "200": { "description": "ok",
+            "content": { "application/json": content } } } }),
+            extra,
+        )
+    };
+
+    for (label, files) in [
+        (
+            "through the root's components",
+            vec![(
+                "openapi.json",
+                with_content(
+                    json!({ "$ref": "#/components/mediaTypes/A" }),
+                    json!({ "components": { "mediaTypes": {
+                        "A": { "$ref": "#/components/mediaTypes/B" },
+                        "B": { "$ref": "#/components/mediaTypes/A" },
+                    } } }),
+                ),
+            )],
+        ),
+        (
+            "across a referenced file",
+            vec![
+                (
+                    "openapi.json",
+                    with_content(json!({ "$ref": "./c.json#/A" }), json!({})),
+                ),
+                (
+                    "c.json",
+                    json!({ "A": { "$ref": "#/B" }, "B": { "$ref": "#/A" } }),
+                ),
+            ],
+        ),
+    ] {
+        let (generated, checked) = run_placement(&files);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: {report:#?}"
+            );
+            assert!(
+                messages_for(report, Code::UnresolvedRef)
+                    .contains(&"media type reference cycle cannot be resolved"),
+                "{label}/{entry}: a media type cycle must say it is a cycle: {report:#?}"
+            );
+        }
+    }
+
+    // `#/components/mediaTypes/A` is written twice: in the root (naming the root's `A`, which
+    // hops to the sub-file) and in the sub-file (naming the sub-file's own `A`, the object).
+    let root = with_content(
+        json!({ "$ref": "#/components/mediaTypes/A" }),
+        json!({ "components": { "mediaTypes": {
+            "A": { "$ref": "./other.json#/components/mediaTypes/B" },
+        } } }),
+    );
+    let other = json!({ "components": { "mediaTypes": {
+        "B": { "$ref": "#/components/mediaTypes/A" },
+        "A": { "schema": { "type": "integer" } },
+    } } });
+    let (generated, checked, client) =
+        run_placement_with_client(&[("openapi.json", root), ("other.json", other)]);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::UnresolvedRef),
+            "{entry}: one spelling written in two files is not a cycle: {report:#?}"
+        );
+    }
+    let (_, _, inline) = run_placement_with_client(&[(
+        "openapi.json",
+        with_content(json!({ "schema": { "type": "integer" } }), json!({})),
+    )]);
+    assert!(!inline.is_empty(), "the inline document must generate");
+    assert_eq!(
+        client_body(&client),
+        client_body(&inline),
+        "the chain must reach the sub-file's `A`"
+    );
+}
+
 /// A `summary`/`description` on a Reference Object written in a sub-file, at the second hop of a
 /// Parameter, Request Body or Response chain, is `W011`'s reference-docs case, located in that
 /// sub-file. Before bundle chains were followed (#274) the second hop was parsed as the object and
