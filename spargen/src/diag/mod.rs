@@ -228,6 +228,26 @@ mod tests {
     }
 
     #[test]
+    fn a_serialized_diagnostic_carries_its_claim_in_kebab_case() {
+        // `--format json` renders a `Report`'s diagnostics through this `Serialize`, so the key
+        // and these spellings are what a JSON consumer reads.
+        let at = || Provenance::new(JsonPointer::root(), None);
+        let claim_of =
+            |diagnostic: Diagnostic| serde_json::to_value(diagnostic).unwrap()["claim"].clone();
+        assert_eq!(
+            claim_of(Diagnostic::error(Code::UnsupportedMediaType, at()).build()),
+            "rejected"
+        );
+        assert_eq!(
+            claim_of(Diagnostic::warning(Code::AlternativeMediaIgnored, at()).build()),
+            "independent"
+        );
+        let mut generated = Diagnostic::warning(Code::AlternativeMediaIgnored, at()).build();
+        generated.claim = OutcomeClaim::Generated;
+        assert_eq!(claim_of(generated), "generated");
+    }
+
+    #[test]
     fn is_test_fn_accepts_a_function_its_test_attribute_immediately_precedes() {
         assert!(is_test_fn("#[test]\nfn pinned() {}\n", "pinned"));
         assert!(is_test_fn(
