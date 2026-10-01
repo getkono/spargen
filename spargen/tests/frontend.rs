@@ -11522,11 +11522,12 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
         "an untyped `required` sibling changed an exactly-`null` target's type:\n{types}"
     );
 
-    // A union target whose branches do not all share the inferred category. Intersecting branch by
-    // branch drops every branch of another category (the string one here), so `Sibling` would
-    // become a struct that rejects the strings `Target` accepts, with no diagnostic. Whether an
-    // untyped refiner beside a mixed-category union is vacuous for the other branches is #282's
-    // open design question, so the `$ref` spelling rejects rather than choosing silently.
+    // A union target whose branches do not all share the inferred category. Intersecting the whole
+    // union with the category would drop every branch of another category (the string one here),
+    // so `Sibling` would reject the strings `Target` accepts. The applicators refine the branches of
+    // their own category and keep the rest, as beside an inline union (#282): `Sibling` is still a
+    // two-branch union, and it differs from `Target` in the branch the keyword reaches. Object and
+    // array keywords together are no contradiction there: each set refines its own branches.
     for (keyword, target, sibling) in [
         (
             "required",
@@ -11538,22 +11539,80 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
             "{ oneOf: [{ type: string }, { type: array, items: { type: number } }] }",
             "items: { type: integer }",
         ),
+        (
+            "required + items",
+            "{ oneOf: [{ type: object, properties: { a: { type: string } } }, { type: array, \
+             items: { type: number } }] }",
+            "required: [a]\n      items: { type: integer }",
+        ),
     ] {
         let spec = format!(
             "{HEAD}    Target: {target}\n    Sibling:\n      $ref: \
              '#/components/schemas/Target'\n      {sibling}\n{holder}"
         );
         for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
+            assert_ne!(
                 report.outcome(),
                 Outcome::Rejected,
-                "an untyped `{keyword}` sibling silently dropped a union target's branch of \
-                 another category: {report:#?}"
+                "an untyped `{keyword}` sibling on a mixed union target rejected: {report:#?}"
             );
-            let messages = messages_for(&report, Code::AllOfIrreconcilable);
-            assert_eq!(messages.len(), 1, "{keyword}: {report:#?}");
-            assert!(messages[0].contains("branch"), "{keyword}: {messages:?}");
+            for code in [Code::AllOfIrreconcilable, Code::DeclarationHasNoEffect] {
+                assert!(!has_code(&report, code), "{keyword}: {report:#?}");
+            }
         }
+        let (_, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        let target = enum_variants(&types, "Target");
+        let refined = enum_variants(&types, "Sibling");
+        assert_eq!(
+            refined.len(),
+            2,
+            "an untyped `{keyword}` sibling dropped a branch of its union target:\n{types}"
+        );
+        assert_ne!(
+            target, refined,
+            "an untyped `{keyword}` sibling changed no branch of its union target:\n{types}"
+        );
+    }
+    // Where no branch of the target union has the category, the sibling constrains nothing the
+    // target accepts: `Sibling` is the target's union unchanged, and the keyword is `W011`, as it is
+    // beside the inline union.
+    let spec = format!(
+        "{HEAD}    Target: {{ oneOf: [{{ type: string }}, {{ type: integer }}] }}\n    Sibling:\n      \
+         $ref: '#/components/schemas/Target'\n      required: [a]\n{holder}"
+    );
+    for report in [generate(&spec), check(&spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+        let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("no branch of its target union has that category"),
+            "{messages:?}"
+        );
+    }
+    let (_, code) = generate_with_code(&spec);
+    let types = types_module(&code);
+    assert_eq!(
+        enum_variants(&types, "Target"),
+        enum_variants(&types, "Sibling"),
+        "{types}"
+    );
+    // Object and array keywords together beside a target branch that states no category have no
+    // single category to establish for it.
+    let spec = format!(
+        "{HEAD}    Target: {{ oneOf: [{{}}, {{ type: string }}] }}\n    Sibling:\n      $ref: \
+         '#/components/schemas/Target'\n      required: [a]\n      items: {{ type: integer \
+         }}\n{holder}"
+    );
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("states no JSON category"),
+            "{messages:?}"
+        );
     }
     // A union whose every branch has the inferred category loses no branch, so it still composes.
     let spec = format!(
@@ -11581,6 +11640,355 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
             "{messages:?}"
         );
     }
+}
+
+/// An untyped object or array applicator beside `oneOf`/`anyOf` lowered to `TypeKind::Any`, which
+/// intersects as identity, so `required`, `additionalProperties`, `items` and `prefixItems` alone
+/// vanished from every branch with no diagnostic (#282). In JSON Schema 2020-12 such a keyword is
+/// vacuously satisfied by an instance of another category, so it refines exactly the branches of
+/// its own category and leaves the rest as they are; where no branch has its category it reaches
+/// nothing the union accepts, which is the contradiction the `$ref` spelling already rejects.
+#[test]
+fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
+    const HEAD: &str = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: \
+                        'https://e.com' }]\npaths: {}\ncomponents:\n  schemas:\n";
+    const AB: &str = "    A: { type: object, properties: { a: { type: string } } }\n    B: { \
+                      type: object, properties: { b: { type: string } } }\n";
+    // Every variant of `pub enum {name}`, each as the type it wraps.
+    let variants_of = |types: &str, name: &str| -> Vec<String> {
+        enum_variants(types, name)
+            .iter()
+            .filter_map(|variant| {
+                let (_, inner) = variant.split_once('(')?;
+                let inner = inner.trim_end_matches(')');
+                let inner = inner
+                    .strip_prefix("Box<")
+                    .and_then(|boxed| boxed.strip_suffix('>'))
+                    .unwrap_or(inner);
+                Some(inner.to_owned())
+            })
+            .collect()
+    };
+    let variant_types = |types: &str| variants_of(types, "U");
+    // The declaration of field `a` inside `pub struct {name}`, or empty where it has none.
+    let field_a = |types: &str, name: &str| -> String {
+        types
+            .lines()
+            .map(str::trim_start)
+            .skip_while(|line| !line.starts_with(&format!("pub struct {name} ")))
+            .skip(1)
+            .take_while(|line| !line.starts_with('}'))
+            .find(|line| line.starts_with("pub a: "))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let generates = |spec: &str| -> String {
+        for report in [check(spec), generate(spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{spec}\n{report:#?}");
+            for code in [Code::DeclarationHasNoEffect, Code::AllOfIrreconcilable] {
+                assert!(!has_code(&report, code), "{spec}\n{report:#?}");
+            }
+        }
+        types_module(&generate_with_code(spec).1)
+    };
+
+    // The issue's reproduction: both branches are objects, so both now require `a`. `A` declares
+    // it and keeps its type; `B` does not, so `a` joins it as a required unconstrained field.
+    let spec = format!(
+        "{HEAD}{AB}    U:\n      oneOf: [{{ $ref: '#/components/schemas/A' }}, {{ $ref: \
+         '#/components/schemas/B' }}]\n      required: [a]\n"
+    );
+    let types = generates(&spec);
+    let variants = variant_types(&types);
+    assert_eq!(variants.len(), 2, "{types}");
+    for variant in &variants {
+        assert!(
+            declared_fields(&types, variant).contains(&"a".to_owned()),
+            "`{variant}` does not carry `a`:\n{types}"
+        );
+        let a = field_a(&types, variant);
+        assert!(
+            !a.is_empty() && !a.contains("Option<"),
+            "`required: [a]` beside the union left `a` optional in `{variant}`: {a}\n{types}"
+        );
+    }
+
+    // A mixed-category union: each refiner reaches its own category's branch and leaves the
+    // string branch alone, so no branch is dropped and nothing warns.
+    for (keyword, other, sibling, requires_a) in [
+        (
+            "required",
+            "{ type: object, properties: { a: { type: string } } }",
+            "required: [a]",
+            true,
+        ),
+        (
+            "additionalProperties",
+            "{ type: object, properties: { a: { type: string } } }",
+            "additionalProperties: false",
+            false,
+        ),
+        (
+            "items",
+            "{ type: array, items: { type: number } }",
+            "items: { type: integer }",
+            false,
+        ),
+        (
+            "prefixItems",
+            "{ type: array }",
+            "prefixItems: [{ type: integer }]",
+            false,
+        ),
+    ] {
+        let spec =
+            format!("{HEAD}    U:\n      oneOf: [{{ type: string }}, {other}]\n      {sibling}\n");
+        let types = generates(&spec);
+        let variants = variant_types(&types);
+        assert_eq!(
+            variants.len(),
+            2,
+            "`{keyword}` beside a mixed union dropped a branch:\n{types}"
+        );
+        assert!(
+            types.contains(&format!("pub type {} = String;", variants[0])),
+            "`{keyword}` beside a mixed union touched the string branch:\n{types}"
+        );
+        if requires_a {
+            let line = field_a(&types, &variants[1]);
+            assert!(
+                !line.is_empty() && !line.contains("Option<"),
+                "`{keyword}` did not reach the object branch: {line}\n{types}"
+            );
+        }
+    }
+    // The refiners change the branches they reach: compared with the same union bare.
+    for (sibling, branch) in [
+        (
+            "required: [a]",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        (
+            "additionalProperties: false",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        (
+            "items: { type: integer }",
+            "{ type: array, items: { type: number } }",
+        ),
+        ("prefixItems: [{ type: integer }]", "{ type: array }"),
+    ] {
+        let bare = generates(&format!(
+            "{HEAD}    U:\n      oneOf: [{{ type: string }}, {branch}]\n"
+        ));
+        let refined = generates(&format!(
+            "{HEAD}    U:\n      oneOf: [{{ type: string }}, {branch}]\n      {sibling}\n"
+        ));
+        assert_ne!(
+            bare, refined,
+            "`{sibling}` changed nothing beside the union"
+        );
+    }
+
+    // Object and array refiners with no `type` beside a union are not a contradiction there: each
+    // set refines its own category's branches.
+    let spec = format!(
+        "{HEAD}    U:\n      oneOf: [{{ type: string }}, {{ type: object, properties: {{ a: {{ \
+         type: string }} }} }}, {{ type: array, items: {{ type: number }} }}]\n      required: \
+         [a]\n      items: {{ type: integer }}\n"
+    );
+    let types = generates(&spec);
+    assert_eq!(variant_types(&types).len(), 3, "{types}");
+
+    // A nested union branch is refined branch by branch too, so its string branch stays.
+    let spec = format!(
+        "{HEAD}    U:\n      oneOf: [{{ oneOf: [{{ type: string }}, {{ type: object, properties: \
+         {{ a: {{ type: string }} }} }}] }}, {{ type: integer }}]\n      required: [a]\n"
+    );
+    let types = generates(&spec);
+    let variants = variant_types(&types);
+    assert_eq!(variants.len(), 2, "{types}");
+    let nested = variants_of(&types, &variants[0]);
+    assert_eq!(nested.len(), 2, "the nested union lost a branch:\n{types}");
+    assert!(
+        nested
+            .iter()
+            .any(|inner| types.contains(&format!("pub type {inner} = String;"))),
+        "the nested union lost its string branch:\n{types}"
+    );
+
+    // The sole non-null member is refined the same way, and keeps the union's `null`.
+    let spec = format!(
+        "{HEAD}    U:\n      oneOf: [{{ type: object, properties: {{ a: {{ type: string }} }} }}, \
+         {{ type: 'null' }}]\n      required: [a]\n    Holder:\n      type: object\n      \
+         required: [u]\n      properties:\n        u: {{ $ref: '#/components/schemas/U' }}\n"
+    );
+    let types = generates(&spec);
+    assert!(types.contains("pub u: Option<U>"), "{types}");
+    let a = field_a(&types, "U");
+    assert!(
+        !a.is_empty() && !a.contains("Option<"),
+        "`required: [a]` did not reach the sole member: {a}\n{types}"
+    );
+
+    // A branch that states no category takes the one the keywords establish, as an untyped `$ref`
+    // target does. This is the shape of GitHub's `secret-scanning-custom-pattern-to-update`:
+    // `properties` beside an `anyOf` of `required`-only branches is an object in every branch, so
+    // every branch requires `v`. (What each branch's own `required` contributes is decided where
+    // the branch is lowered, not here.)
+    let spec = format!(
+        "{HEAD}    U:\n      required: [v]\n      properties:\n        v: {{ type: integer \
+         }}\n        x: {{ type: string }}\n        y: {{ type: string }}\n      anyOf: [{{ \
+         required: [x] }}, {{ required: [y] }}]\n"
+    );
+    let types = generates(&spec);
+    let variants = variant_types(&types);
+    assert_eq!(variants.len(), 2, "{types}");
+    for variant in &variants {
+        let line = types
+            .lines()
+            .map(str::trim_start)
+            .skip_while(|line| !line.starts_with(&format!("pub struct {variant} ")))
+            .skip(1)
+            .take_while(|line| !line.starts_with('}'))
+            .find(|line| line.starts_with("pub v: "))
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            !line.is_empty() && !line.contains("Option<"),
+            "branch `{variant}` is not the object that requires `v`: {line}\n{types}"
+        );
+    }
+
+    // A refiner that reaches no branch of its category constrains nothing the union accepts: the
+    // union generates exactly as it is, and the keyword is acknowledged with `W011` rather than
+    // dropped in silence, through both entry points.
+    for (case, members, sibling) in [
+        (
+            "no object branch",
+            "[{ type: string }, { type: integer }]",
+            "required: [a]",
+        ),
+        (
+            "no array branch",
+            "[{ type: string }, { type: object }]",
+            "items: { type: integer }",
+        ),
+        (
+            "sole member of another category",
+            "[{ type: string }, { type: 'null' }]",
+            "required: [a]",
+        ),
+    ] {
+        let spec = format!("{HEAD}    U:\n      oneOf: {members}\n      {sibling}\n");
+        for report in [check(&spec), generate(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{case}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+            assert_eq!(messages.len(), 1, "{case}: {report:#?}");
+            assert!(
+                messages[0].contains("no branch of its union has that category"),
+                "{case}: {messages:?}"
+            );
+        }
+        // The union and the types its branches wrap are the bare union's. (The lowered keyword
+        // itself is still emitted as an unused type of its own, as every lowered sibling is.)
+        let shape = |spec: &str| {
+            let types = types_module(&generate_with_code(spec).1);
+            let mut shape = enum_variants(&types, "U");
+            if shape.is_empty() {
+                shape.extend(
+                    types
+                        .lines()
+                        .map(str::trim_start)
+                        .filter(|line| line.starts_with("pub type U "))
+                        .map(str::to_owned),
+                );
+            }
+            for inner in variants_of(&types, "U") {
+                shape.extend(
+                    types
+                        .lines()
+                        .map(str::trim_start)
+                        .filter(|line| line.starts_with(&format!("pub type {inner} ")))
+                        .map(str::to_owned),
+                );
+            }
+            shape
+        };
+        let bare = format!("{HEAD}    U:\n      oneOf: {members}\n");
+        let refined = shape(&spec);
+        assert!(!refined.is_empty(), "{case}: no shape for `U`");
+        assert_eq!(
+            refined,
+            shape(&bare),
+            "{case}: a keyword that reaches no branch changed the union"
+        );
+    }
+
+    // A branch that states no category can be given none when object and array keywords come
+    // together, or when a multi-type `type` array beside them admits another category too: that is
+    // rejected through both entry points rather than generated without them.
+    for (case, schema) in [
+        (
+            "both kinds",
+            "      oneOf: [{}, { type: string }]\n      required: [a]\n      items: { type: \
+             integer }",
+        ),
+        (
+            "a type array admitting another category",
+            "      type: [object, string]\n      oneOf: [{}, { type: string }]\n      required: \
+             [a]",
+        ),
+    ] {
+        let spec = format!("{HEAD}    U:\n{schema}\n");
+        for report in [check(&spec), generate(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            let messages = messages_for(&report, Code::AllOfIrreconcilable);
+            assert_eq!(messages.len(), 1, "{case}: {report:#?}");
+            assert!(
+                messages[0].contains("union member 0 states no JSON category"),
+                "{case}: {messages:?}"
+            );
+        }
+    }
+
+    // A multi-type `type` array deleted for lowering still excludes the branches of the categories
+    // it omits, and its object keywords still reach the object branch.
+    let spec = format!(
+        "{HEAD}    U:\n      type: [object, integer]\n      oneOf: [{{ type: string }}, {{ type: \
+         integer }}, {{ type: object, properties: {{ a: {{ type: string }} }} }}]\n      required: \
+         [a]\n"
+    );
+    for report in [check(&spec), generate(&spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(messages[0].contains("union member 0"), "{messages:?}");
+    }
+    let types = types_module(&generate_with_code(&spec).1);
+    let variants = variant_types(&types);
+    assert_eq!(variants.len(), 2, "{types}");
+    let a = field_a(&types, &variants[1]);
+    assert!(
+        !a.is_empty() && !a.contains("Option<"),
+        "`required: [a]` beside a type array did not reach the object branch: {a}\n{types}"
+    );
+
+    // A typed sibling still speaks for every branch: `type: object` excludes the string one.
+    let spec = format!(
+        "{HEAD}    U:\n      type: object\n      oneOf: [{{ type: string }}, {{ type: object, \
+         properties: {{ a: {{ type: string }} }} }}]\n      required: [a]\n"
+    );
+    let report = generate(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 /// `object_body` consumed `required` only as a per-property flag, so a `required` name that no
@@ -11935,8 +12343,9 @@ fn the_composition_explain_covers_every_cause_that_reports_it() {
         explain.contains("A sibling bears a shape of its own through"),
         "{explain}"
     );
-    // The category rule for untyped applicators, and the two consequences
-    // `a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null` and
+    // The category rule for untyped applicators, and the consequences
+    // `a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null`,
+    // `an_untyped_union_sibling_refines_only_the_branches_of_its_category` and
     // `a_required_name_no_property_declares_is_still_required` pin against the code.
     assert!(
         explain.contains("establish an object and the array keywords"),
@@ -11947,7 +12356,11 @@ fn the_composition_explain_covers_every_cause_that_reports_it() {
         "{explain}"
     );
     assert!(
-        explain.contains("Beside a `$ref` to a union, such a sibling is rejected"),
+        explain.contains("refine only the branches of their own category"),
+        "{explain}"
+    );
+    assert!(
+        explain.contains("are acknowledged with `W011` rather than rejected"),
         "{explain}"
     );
     assert!(
