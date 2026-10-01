@@ -3378,7 +3378,9 @@ fn type_kind_tokens(
         }
         TypeKind::Tuple(items) => {
             let items = items.iter().map(|ty| ty_tokens(*ty, names, options, false));
-            quote! { (#(#items),*) }
+            // Every position carries its comma: `(T,)` is a one-position tuple, while `(T)` is a
+            // parenthesized `T` that decodes from a bare scalar instead of a one-element array.
+            quote! { (#(#items,)*) }
         }
         TypeKind::Bytes => quote! { bytes::Bytes },
         TypeKind::Null => quote! { () },

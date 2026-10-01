@@ -352,6 +352,90 @@ fn a_schema_named_after_a_name_the_types_module_uses_still_compiles() {
     );
 }
 
+/// Closed `prefixItems` tuples of one and two positions, named and as an inline property, so the
+/// one-position case is emitted both as a component alias and as a field type (issue #415).
+const TUPLE_ARITY_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pair:
+    get:
+      operationId: getPair
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Holder' }
+components:
+  schemas:
+    Single: { type: array, prefixItems: [{ type: integer }], items: false }
+    Pair: { type: array, prefixItems: [{ type: integer }, { type: string }], items: false }
+    Holder:
+      type: object
+      required: [single, pair, inline]
+      properties:
+        single: { $ref: '#/components/schemas/Single' }
+        pair: { $ref: '#/components/schemas/Pair' }
+        inline: { type: array, prefixItems: [{ type: string }], items: false }
+"#;
+
+/// A one-position tuple must be emitted as `(T,)`, a tuple, and not `(T)`, which Rust reads as a
+/// parenthesized `T` that decodes from a bare scalar and rejects the one-element array the schema
+/// describes (issue #415). The fixture's own test decodes the wire shapes through the generated
+/// types and reaches each position by index, which a parenthesized scalar has no field for.
+#[test]
+fn a_one_position_tuple_is_a_tuple_on_the_wire() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, TUPLE_ARITY_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "tuple_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/tuple.rs"),
+        r##"
+use tuple_client::types::{Holder, Pair, Single};
+
+#[test]
+fn a_one_element_array_decodes_into_a_one_position_tuple() {
+    let single: Single = serde_json::from_str("[1]").unwrap();
+    assert_eq!(single.0, 1);
+    assert_eq!(serde_json::to_string(&single).unwrap(), "[1]");
+    assert!(serde_json::from_str::<Single>("1").is_err());
+    assert!(serde_json::from_str::<Single>("[1, 2]").is_err());
+
+    let pair: Pair = serde_json::from_str(r#"[1, "a"]"#).unwrap();
+    assert_eq!((pair.0, pair.1.as_str()), (1, "a"));
+
+    let holder: Holder =
+        serde_json::from_str(r#"{"single": [7], "pair": [2, "b"], "inline": ["c"]}"#).unwrap();
+    assert_eq!(holder.single.0, 7);
+    assert_eq!(holder.inline.0, "c");
+    assert_eq!(
+        serde_json::to_value(&holder).unwrap(),
+        serde_json::json!({"single": [7], "pair": [2, "b"], "inline": ["c"]})
+    );
+}
+"##,
+    )
+    .unwrap();
+
+    let status = fixture_cargo(&out).arg("test").status().unwrap();
+    assert!(
+        status.success(),
+        "a one-position tuple must decode from a one-element array"
+    );
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the tuple fixture must lint clean");
+}
+
 /// One operation per fixed inherent method of `Client` and `BlockingClient` (issue #286). The spec
 /// declares a server, so `with_default_server` is emitted too, and the fixture is checked with the
 /// `blocking` feature on, so the `BlockingClient` methods (`inner` among them) are compiled.
