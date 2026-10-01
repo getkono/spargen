@@ -795,6 +795,154 @@ mod tests {
         assert_eq!(urls, ["https://api.example.com/tag.yaml"]);
     }
 
+    /// A fetched document's `$self` URL names it (#426): `b/tag.yaml`, fetched from beside
+    /// `a/pet.yaml`'s `$self` of `../b/pet.yaml`, refers back to `pet.yaml`, which is that
+    /// `$self`. The lock neither fetches it (the stub does not serve it, so a fetch is `E025`) nor
+    /// pins it, and the reference's extension target is found in `a/pet.yaml`, so the remote
+    /// reference held there is pinned.
+    #[test]
+    fn a_reference_to_a_remote_documents_self_url_is_neither_fetched_nor_pinned() {
+        let urls = lock_then_load(
+            &[(
+                "openapi.yaml",
+                "openapi: 3.2.0\n\
+                 components:\n\
+                 \x20 schemas:\n\
+                 \x20   Pet: { $ref: \"https://api.example.com/a/pet.yaml\" }\n",
+            )],
+            &[
+                (
+                    "https://api.example.com/a/pet.yaml",
+                    "$self: ../b/pet.yaml\n\
+                     type: object\n\
+                     x-defs:\n\
+                     \x20 Owner: { $ref: \"owner.yaml\" }\n\
+                     properties:\n\
+                     \x20 tag: { $ref: \"tag.yaml\" }\n",
+                ),
+                (
+                    "https://api.example.com/b/tag.yaml",
+                    "$ref: \"pet.yaml#/x-defs/Owner\"\n",
+                ),
+                ("https://api.example.com/b/owner.yaml", "type: string\n"),
+            ],
+        );
+        assert_eq!(
+            urls,
+            [
+                "https://api.example.com/a/pet.yaml",
+                "https://api.example.com/b/owner.yaml",
+                "https://api.example.com/b/tag.yaml",
+            ]
+        );
+    }
+
+    /// A local document's `http` `$self` names it (#426): `schemas/pet.yaml`, fetched from beside
+    /// the root's `$self`, refers to `../openapi.yaml`, which is that `$self`. The lock neither
+    /// fetches it (the stub does not serve it) nor pins it, and the reference's extension target
+    /// is found in the root, so the remote reference held there is pinned.
+    #[test]
+    fn a_reference_to_a_local_documents_http_self_is_neither_fetched_nor_pinned() {
+        let urls = lock_then_load(
+            &[(
+                "openapi.yaml",
+                "openapi: 3.2.0\n\
+                 $self: https://api.example.com/v1/openapi.yaml\n\
+                 x-defs:\n\
+                 \x20 Owner: { $ref: \"schemas/owner.yaml\" }\n\
+                 components:\n\
+                 \x20 schemas:\n\
+                 \x20   Pet: { $ref: \"schemas/pet.yaml\" }\n",
+            )],
+            &[
+                (
+                    "https://api.example.com/v1/schemas/pet.yaml",
+                    "$ref: \"../openapi.yaml#/x-defs/Owner\"\n",
+                ),
+                (
+                    "https://api.example.com/v1/schemas/owner.yaml",
+                    "type: string\n",
+                ),
+            ],
+        );
+        assert_eq!(
+            urls,
+            [
+                "https://api.example.com/v1/schemas/owner.yaml",
+                "https://api.example.com/v1/schemas/pet.yaml",
+            ]
+        );
+    }
+
+    /// A local document's relative `$self` path names it (#426): `shared/tag.yaml`, reached
+    /// through `lib/sub.yaml`'s `$self` of `../shared/sub.yaml`, refers to `sub.yaml`, which is
+    /// that `$self`. The decoy file at `shared/sub.yaml`, whose remote reference the stub would
+    /// fail with `E025`, is never read, and the reference's extension target is found in
+    /// `lib/sub.yaml`, so the remote reference it leads to is pinned.
+    #[test]
+    fn a_reference_to_a_local_documents_relative_self_never_reads_the_file_there() {
+        let urls = lock_then_load(
+            &[
+                (
+                    "openapi.yaml",
+                    "openapi: 3.2.0\n\
+                     components:\n\
+                     \x20 schemas:\n\
+                     \x20   Sub: { $ref: \"lib/sub.yaml\" }\n",
+                ),
+                (
+                    "lib/sub.yaml",
+                    "$self: ../shared/sub.yaml\n\
+                     type: object\n\
+                     x-defs:\n\
+                     \x20 Owner: { $ref: \"owner.yaml\" }\n\
+                     properties:\n\
+                     \x20 tag: { $ref: \"tag.yaml\" }\n",
+                ),
+                ("shared/tag.yaml", "$ref: \"sub.yaml#/x-defs/Owner\"\n"),
+                (
+                    "shared/owner.yaml",
+                    "$ref: \"https://api.example.com/owner.yaml\"\n",
+                ),
+                (
+                    "shared/sub.yaml",
+                    "$ref: \"https://api.example.com/missing.yaml\"\n",
+                ),
+            ],
+            &[("https://api.example.com/owner.yaml", "type: string\n")],
+        );
+        assert_eq!(urls, ["https://api.example.com/owner.yaml"]);
+    }
+
+    /// A reference through an opaque `$self` into a specification extension is walked at its
+    /// target: `urn:example:lib#/x-defs/Owner` addresses `lib.yaml`'s extension, so the remote
+    /// reference held there is pinned, in the lock as the build reads it.
+    #[test]
+    fn a_reference_through_an_opaque_self_into_an_extension_pins_what_it_holds() {
+        let urls = lock_then_load(
+            &[
+                (
+                    "openapi.yaml",
+                    "openapi: 3.2.0\n\
+                     components:\n\
+                     \x20 schemas:\n\
+                     \x20   Lib: { $ref: \"lib.yaml#/$defs/Tag\" }\n\
+                     \x20   Owner: { $ref: \"urn:example:lib#/x-defs/Owner\" }\n",
+                ),
+                (
+                    "lib.yaml",
+                    "$self: urn:example:lib\n\
+                     $defs:\n\
+                     \x20 Tag: { type: string }\n\
+                     x-defs:\n\
+                     \x20 Owner: { $ref: \"https://api.example.com/owner.yaml\" }\n",
+                ),
+            ],
+            &[("https://api.example.com/owner.yaml", "type: string\n")],
+        );
+        assert_eq!(urls, ["https://api.example.com/owner.yaml"]);
+    }
+
     /// The linked reqwest/rustls stack itself (#292): `spargen lock`'s fetch path completing a TLS
     /// handshake against a local HTTPS server. `tests/vendor_remote.rs` drives the binary over
     /// plain HTTP only, because the fetcher trusts only the bundled `webpki-roots` and a local
