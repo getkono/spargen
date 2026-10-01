@@ -362,9 +362,15 @@ impl InputBundle {
             },
         );
         self.values.insert(id, parsed);
-        self.origins.insert(id, Origin::Remote(url.to_owned()));
+        // The document's base URI is where its fetch was retrieved from (RFC 3986 §5.1.3): after a
+        // redirect, that and not `url` is what its relative references resolve against (#405).
+        // A reference that reaches the document by its retrieval URL — its own fragment-only
+        // references do, once made absolute — finds it there, unless that URL was loaded first.
+        let base = entry.base_url();
+        self.origins.insert(id, Origin::Remote(base.to_owned()));
         self.url_to_file.insert(url.to_owned(), id);
-        self.register_self_identity(id, Some(url));
+        self.url_to_file.entry(base.to_owned()).or_insert(id);
+        self.register_self_identity(id, Some(base));
         Ok(Some(id))
     }
 
@@ -639,6 +645,66 @@ mod tests {
         assert_eq!(file("sub/lib.yaml#/x"), file("./sub/./lib.yaml#/x"));
         assert_ne!(file("./lib.yaml#/x"), file("sub/lib.yaml#/x"));
         assert_ne!(file("./lib.yaml#/x"), Some(bundle.root_id()));
+    }
+
+    /// A spec that names a redirect's target before the redirecting URL loads the target from its
+    /// own pin, and the redirected pin, loaded second, leaves the target URL naming that document:
+    /// the two pins hold different bytes here (the document changed between the fetches), and a
+    /// reference by the target URL reaches the target's own pin, not the redirected copy.
+    #[test]
+    fn a_separately_pinned_retrieval_url_keeps_its_own_document() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        let target = "https://h.example/new/pet.yaml";
+        let redirecting = "https://h.example/old/pet.yaml";
+        let own = "type: string\n";
+        let redirected = "type: integer\n";
+        let vendor = dir.join(VENDOR_DIR);
+        std::fs::create_dir_all(vendor.join("h.example/new")).unwrap();
+        std::fs::create_dir_all(vendor.join("h.example/old")).unwrap();
+        std::fs::write(vendor.join("h.example/new/pet.yaml"), own).unwrap();
+        std::fs::write(vendor.join("h.example/old/pet.yaml"), redirected).unwrap();
+        std::fs::write(
+            dir.join(LOCK_FILE_NAME),
+            format!(
+                "version = 1\n\n[[remote]]\nurl = \"{target}\"\nsha256 = \"{}\"\n\
+                 path = \"h.example/new/pet.yaml\"\n\n[[remote]]\nurl = \"{redirecting}\"\n\
+                 retrieval_url = \"{target}\"\nsha256 = \"{}\"\npath = \"h.example/old/pet.yaml\"\n",
+                sha256_hex(own.as_bytes()),
+                sha256_hex(redirected.as_bytes()),
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("openapi.yaml"),
+            format!(
+                "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+                 schemas:\n    A: {{ $ref: '{target}' }}\n    B: {{ $ref: '{redirecting}' }}\n"
+            ),
+        )
+        .unwrap();
+
+        let bundle = load(&dir.join("openapi.yaml"));
+
+        let own_id = bundle.remote_file(target).expect("the target is loaded");
+        let redirected_id = bundle
+            .remote_file(redirecting)
+            .expect("the redirecting URL is loaded");
+        assert_ne!(own_id, redirected_id);
+        assert_eq!(
+            bundle
+                .value_at(own_id)
+                .get("type")
+                .and_then(SpannedValue::as_str),
+            Some("string")
+        );
+        assert_eq!(
+            bundle
+                .value_at(redirected_id)
+                .get("type")
+                .and_then(SpannedValue::as_str),
+            Some("integer")
+        );
     }
 
     #[test]
