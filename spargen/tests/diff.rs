@@ -1157,20 +1157,25 @@ fn kind_meeting(members: &[&str]) -> String {
     )
 }
 
-/// The enum `kind` lowers to under `open_narrowing`: its variant lines, in order.
-fn open_kind_variants(spec_text: &str) -> Vec<String> {
+/// The module `spec_text` generates, with `open_narrowing` set to `open`.
+fn generated_source(spec_text: &str, open: bool) -> String {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = temp.path().join("spec.yaml");
     std::fs::write(&spec_path, spec_text).unwrap();
     let out = Utf8PathBuf::from_path_buf(temp.path().join("api.rs")).unwrap();
     let report = spargen::generate(
         &Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap())
-            .open_narrowing(true)
+            .open_narrowing(open)
             .build(out.clone())
             .cargo(spargen::CargoIntegration::Off),
     );
     assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
-    let source = std::fs::read_to_string(&out).unwrap();
+    std::fs::read_to_string(&out).unwrap()
+}
+
+/// The enum `kind` lowers to under `open_narrowing`: its variant lines, in order.
+fn open_kind_variants(spec_text: &str) -> Vec<String> {
+    let source = generated_source(spec_text, true);
     // The embedded runtime's `AuthScheme` has a `kind` field of its own.
     let ty = source
         .split("pub kind: ")
@@ -1345,4 +1350,94 @@ fn open_narrowing_never_opens_a_set_narrowed_against_a_formatted_string() {
         }
     }
     assert!(opened.is_empty(), "opened against a format: {opened:#?}");
+}
+
+/// Under `open_narrowing`, the copy an intersection makes of a `$ref`'d set to open or lock it is
+/// emitted only where the lowered type uses it (#401). An all-scalar `allOf`, and a `$ref` with
+/// sibling keywords, re-emit their result under their own name, so a copy no later meet keeps is
+/// unused: `ListedOpen` (`string` meeting `Listed`) and the locked copy `UuidNarrowed`'s `allOf`
+/// makes of `Listed` were both public types nothing referred to. Turning the option on therefore
+/// adds no type: it only opens the types the option-off output already has.
+#[test]
+fn open_narrowing_adds_no_type_the_output_does_not_use() {
+    let open = |spec: Spec| spec.open_narrowing(true);
+    let string = "{ type: string }";
+    let x = "{ const: x }";
+    let listed = "{ $ref: '#/components/schemas/Listed' }";
+    let mut specs: Vec<(String, String)> = [
+        vec![string, x, listed],
+        vec![string, listed, x],
+        vec![x, string, listed],
+        vec![x, listed, string],
+        vec![listed, string, x],
+        vec![listed, x, string],
+        vec![string, listed],
+        vec![listed, string],
+        vec![string, listed, listed],
+    ]
+    .into_iter()
+    .map(|order| (order.join(" & "), kind_meeting(&order)))
+    .collect();
+    // The `$ref`-sibling spelling of `string ∩ Listed`, whose result is re-emitted the same way.
+    specs.push((
+        "$ref Listed beside type: string".to_owned(),
+        kind_meeting(&[string]).replace(
+            "                    allOf:\n                      - { type: string }\n",
+            "                    $ref: '#/components/schemas/Listed'\n                    type: string\n",
+        ),
+    ));
+    let mut added = Vec::new();
+    for (case, spec) in &specs {
+        let report = diff_configured(spec, spec, |spec| spec, open);
+        assert!(
+            kinds(&report).contains(&ChangeKind::VariantAdded),
+            "{case}: the option opens `kind`: {report:?}"
+        );
+        added.extend(
+            report
+                .changes
+                .iter()
+                .filter(|change| change.kind == ChangeKind::TypeAdded)
+                .map(|change| format!("{case}: {}", change.location)),
+        );
+    }
+    assert!(added.is_empty(), "types only the option adds: {added:#?}");
+}
+
+/// The meets an all-scalar `allOf` folds its members through emit only what its re-emitted result
+/// uses, with the option on or off (#401). Two sets that each list a value the other does not meet
+/// in a new set, `…Intersection1`, which the `allOf` re-emits as `kind`'s own type: the new set is
+/// then unused, and is not emitted. A result that refers to a meet's insert keeps it: two arrays of
+/// those sets meet in an array of the new set, which stays the array's item type (and, since only
+/// the most recent inserts can be removed, the meet's own array alias stays beside it).
+#[test]
+fn an_all_of_emits_no_meet_its_result_does_not_use() {
+    let listed = "{ $ref: '#/components/schemas/Listed' }";
+    let xy = "{ enum: [x, y] }";
+    let string = "{ type: string }";
+    for open in [false, true] {
+        for order in [
+            vec![listed, xy],
+            vec![xy, listed],
+            vec![listed, xy, string],
+            vec![string, xy, listed],
+        ] {
+            let source = generated_source(&kind_meeting(&order), open);
+            assert!(
+                !source.contains("pub enum ResponseBodykindIntersection"),
+                "open: {open}, {order:?} emits a superseded meet:\n{source}"
+            );
+        }
+        let arrays = kind_meeting(&[
+            "{ type: array, items: { $ref: '#/components/schemas/Listed' } }",
+            "{ type: array, items: { enum: [x, y] } }",
+        ]);
+        let source = generated_source(&arrays, open);
+        let item = "ResponseBodykindIntersection1Item";
+        assert!(
+            source.contains(&format!("pub enum {item} {{"))
+                && source.contains(&format!("pub type ResponseBodykind = Vec<{item}>;")),
+            "open: {open}, the array's meet keeps its item set:\n{source}"
+        );
+    }
 }

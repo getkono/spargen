@@ -1648,6 +1648,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 None => {}
             }
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
+            let mark = self.graph_mark();
             let Ok(intersection) =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
             else {
@@ -1677,6 +1678,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      but for the target's nullability",
                 );
             }
+            self.discard_meet_intermediates(mark, &kind);
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
             ty.boxed = intersection.boxed;
@@ -3377,6 +3379,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
                 return Some(self.with_all_of_nullability(schema, ty));
             };
+            let mark = self.graph_mark();
             for (index, member) in scalars.iter().copied().enumerate().skip(1) {
                 let Ok(merged) = self.intersect_types(
                     intersection,
@@ -3390,10 +3393,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Re-emit the intersection as the final graph insert so the invariant holds even when
             // the allOf is a component body (the per-member scalar inserts above are left dead —
             // `#[allow(dead_code)]` on the models module — rather than threading a reserved id).
+            // The meets' own inserts are discarded unless the re-emitted kind reaches them.
             let kind = self
                 .graph
                 .get(intersection.id)
                 .map(|def| def.kind.clone())?;
+            self.discard_meet_intermediates(mark, &kind);
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
             return Some(self.with_all_of_nullability(schema, ty));
@@ -4699,6 +4704,33 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             docs,
             provenance,
         )
+    }
+
+    /// The id the next graph insert takes: every type inserted from here on has an id at or above
+    /// it. [`Self::discard_meet_intermediates`] takes it back.
+    fn graph_mark(&self) -> u32 {
+        self.graph.last_id().map_or(0, |id| id.0 + 1)
+    }
+
+    /// Discard every type inserted since `mark` when `kind` refers to none of them, directly or
+    /// transitively. The caller has just met two or more types inserted before `mark` and is about
+    /// to re-emit the meet's result as a new definition of `kind`, so the meets' own inserts are
+    /// unused unless that definition reaches them. Each would otherwise be emitted as a public type
+    /// nothing refers to: the open or locked copy [`Self::reopened_set`] makes of a `$ref`'d set
+    /// (#401), and every intermediate a later meet superseded.
+    ///
+    /// Sound because intersecting only reads the graph and inserts into it: it lowers no schema and
+    /// fills no memo, so nothing outside the inserts since `mark` refers to them, and an in-place
+    /// change of an earlier set's openness ([`Self::reopen_in_place`]) is kept. When `kind` reaches
+    /// one of them, all are kept, since ids are dense and only the most recent can be removed.
+    fn discard_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
+        let reached = reachable_types(&self.graph, &kind_edges(kind));
+        if reached.iter().any(|id| id.0 >= mark) {
+            return;
+        }
+        while self.graph.last_id().is_some_and(|id| id.0 >= mark) {
+            self.graph.pop_last();
+        }
     }
 
     /// Run `lower` with `open_narrowing` out of effect, restoring the enclosing position's answer
@@ -8225,33 +8257,34 @@ fn reachable_types(graph: &TypeGraph, roots: &[TypeId]) -> HashSet<TypeId> {
         let Some(def) = graph.get(id) else {
             continue;
         };
-        match &def.kind {
-            TypeKind::Struct(object) => {
-                for field in &object.fields {
-                    stack.push(field.ty.id);
-                }
-                if let AdditionalProps::Typed(ty) = &object.additional {
-                    stack.push(ty.id);
-                }
-            }
-            TypeKind::Array(ty) => stack.push(ty.id),
-            TypeKind::Tuple(items) => stack.extend(items.iter().map(|ty| ty.id)),
-            TypeKind::Union(union) => {
-                stack.extend(union.variants.iter().map(|variant| variant.ty.id))
-            }
-            // A reservation has no structural edges yet. It is reached only while its own body is
-            // still being lowered, and this walk runs after lowering, so following it would be
-            // following nothing.
-            TypeKind::Reserved
-            | TypeKind::Primitive(_)
-            | TypeKind::Enum(_)
-            | TypeKind::Bytes
-            | TypeKind::Null
-            | TypeKind::Never
-            | TypeKind::Any => {}
-        }
+        stack.extend(kind_edges(&def.kind));
     }
     visited
+}
+
+/// The type ids a definition of `kind` refers to directly: its struct fields and typed
+/// `additionalProperties`, array/tuple elements, and union variants.
+fn kind_edges(kind: &TypeKind) -> Vec<TypeId> {
+    match kind {
+        TypeKind::Struct(object) => {
+            let mut edges: Vec<TypeId> = object.fields.iter().map(|field| field.ty.id).collect();
+            if let AdditionalProps::Typed(ty) = &object.additional {
+                edges.push(ty.id);
+            }
+            edges
+        }
+        TypeKind::Array(ty) => vec![ty.id],
+        TypeKind::Tuple(items) => items.iter().map(|ty| ty.id).collect(),
+        TypeKind::Union(union) => union.variants.iter().map(|variant| variant.ty.id).collect(),
+        // A reservation has no structural edges yet: its body is still being lowered.
+        TypeKind::Reserved
+        | TypeKind::Primitive(_)
+        | TypeKind::Enum(_)
+        | TypeKind::Bytes
+        | TypeKind::Null
+        | TypeKind::Never
+        | TypeKind::Any => Vec::new(),
+    }
 }
 
 fn lower_media_type(
