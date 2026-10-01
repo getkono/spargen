@@ -1495,6 +1495,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     },
                 );
             }
+            // A sibling carrying only object or only array applicators names no `type`, and
+            // `lower_schema` reaches its object and array arms through `type`, so it would lower to
+            // `TypeKind::Any` — which intersects as identity, discarding the keywords with no
+            // diagnostic (#140). The applicators establish the category they apply to, as an
+            // untyped `properties` already does, and say nothing about `null` (the same reading
+            // `lower_union_sibling` takes), so the target's nullability survives the intersection.
+            let mut inferred_category = false;
+            match implied_applicator_category(&sibling) {
+                Some(ImpliedCategory::Only(category)) => {
+                    sibling.types.types = vec![category, JsonType::Null];
+                    inferred_category = true;
+                }
+                Some(ImpliedCategory::Conflicting) => {
+                    return self.reject_ref_sibling_category(
+                        schema,
+                        "this `$ref`'s untyped sibling keywords are both object keywords \
+                         (`properties`, `patternProperties`, `required`, `additionalProperties`) \
+                         and array keywords (`items`, `prefixItems`) with no `type` to choose \
+                         between them, so no single Rust type represents what they constrain",
+                    );
+                }
+                None => {}
+            }
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
             let Ok(intersection) =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
@@ -1508,6 +1531,51 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 return self.reject_ref_sibling_intersection(schema);
             };
             let kind = self.graph.get(intersection.id)?.kind.clone();
+            // The `null` the inferred category carries is there to leave the target's nullability
+            // alone, not to satisfy the intersection on its own. Against a nullable target of
+            // another category the two share only `null`, and typing that as the exact JSON null
+            // would silently replace, say, a nullable string with `()`: the category contradiction
+            // is the same empty intersection it is against the non-null target, and is reported
+            // the same way. A target that is itself exactly `null` keeps its type.
+            if inferred_category
+                && matches!(kind, TypeKind::Null)
+                && !matches!(self.graph.get(referenced.id)?.kind, TypeKind::Null)
+            {
+                return self.reject_ref_sibling_category(
+                    schema,
+                    "this `$ref`'s untyped sibling keywords establish a category its target does \
+                     not have, so the only value both accept is `null`; the intersection is empty \
+                     but for the target's nullability",
+                );
+            }
+            // Against a union target the intersection is taken branch by branch, and a branch the
+            // inferred category excludes is dropped without a word: `oneOf: [string, Obj]` with a
+            // `required` sibling would become `Obj` alone and reject the strings the target
+            // accepts. Whether an untyped refiner is instead vacuous for the other branches is the
+            // same undecided question the inline union sibling raises (#282), so the loss is
+            // reported rather than chosen. Every branch surviving is the only outcome kept.
+            let target_branches = match &self.graph.get(referenced.id)?.kind {
+                TypeKind::Union(target) => Some(target.variants.len()),
+                // A target still being lowered was refused above as a back edge, and it would
+                // have failed the intersection besides; either way it has no branches to keep.
+                TypeKind::Reserved => None,
+                _ => None,
+            };
+            if inferred_category
+                && target_branches.is_some_and(|branches| {
+                    !matches!(
+                        &kind,
+                        TypeKind::Union(result) if result.variants.len() == branches
+                    )
+                })
+            {
+                return self.reject_ref_sibling_category(
+                    schema,
+                    "this `$ref`'s untyped sibling keywords establish a category some branch of \
+                     its target union does not have, so intersecting would drop that branch and \
+                     reject values the target accepts",
+                );
+            }
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
             ty.boxed = intersection.boxed;
@@ -2503,6 +2571,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 write_only,
                 default,
                 xml,
+                undeclared: false,
             });
         }
         let additional = if schema.pattern_properties.is_empty() {
@@ -2524,6 +2593,48 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         } else {
             self.lower_pattern_additional(schema, hint)?
         };
+        // A `required` name no `properties` entry declares is still required: the instance must
+        // carry that key. Consuming `required` only as a per-property flag dropped such a name,
+        // so the generated type accepted and could emit an object without it (#140). It becomes
+        // a required field typed by what the object says of an undeclared key: the
+        // `additionalProperties` schema when there is one, and nothing at all otherwise.
+        // `patternProperties` cannot be matched against the name at generation time, so its
+        // value type would be a guess. `additionalProperties: false` is read the way the rest of
+        // lowering reads it — it closes the object to the fields the generated type declares, as
+        // `deny_unknown_fields` — and this field is one of them; reading it strictly instead
+        // (every undeclared key forbidden, so the object is uninhabited) would reject the common
+        // `allOf: [{$ref: Base}, {additionalProperties: false, required: [id]}]`, which that same
+        // reading generates when `Base` declares `id`.
+        for name in undeclared_required(schema) {
+            let ty = match (&additional, schema.additional_properties.as_deref()) {
+                (AdditionalProps::Typed(ty), Some(SchemaOr::Schema(_))) => {
+                    // The map value dropped its `Box` because the map already provides the
+                    // indirection a cycle-closing reference needs. A plain field has none, so it
+                    // is boxed again exactly when the value closes a cycle: its target is still
+                    // being lowered, which is what makes the `ensure_*` paths box it.
+                    let mut ty = **ty;
+                    ty.boxed = self.is_in_progress_root(ty.id);
+                    ty
+                }
+                _ => self.insert_type(
+                    &format!("{hint}{name}"),
+                    TypeKind::Any,
+                    Docs::default(),
+                    None,
+                ),
+            };
+            fields.push(Field {
+                name: PropertyName { wire: name },
+                ty,
+                required: true,
+                deprecated: false,
+                read_only: false,
+                write_only: false,
+                default: None,
+                xml: XmlField::default(),
+                undeclared: true,
+            });
+        }
         Some((fields, additional))
     }
 
@@ -2715,6 +2826,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             for field in member_fields {
                 match fields.get_mut(&field.name.wire) {
                     Some(existing) => {
+                        // A field one side carries only because it requires the name is not a
+                        // declaration of the property, so it does not intersect with one: the
+                        // declaring member supplies the type and the metadata, and the requirement
+                        // survives (see `take_declaration`).
+                        if take_declaration(existing, field) {
+                            continue;
+                        }
                         // A repeated property is an intersection, not an equality assertion: retain
                         // the narrower compatible type.
                         let field_hint = format!("{hint}{}Intersection", field.name.wire);
@@ -2774,6 +2892,60 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     }
                     None => {
                         fields.insert(field.name.wire.clone(), field.clone());
+                    }
+                }
+            }
+        }
+
+        // A field no member declares is an undeclared key of every member, so each member's
+        // `additionalProperties` value schema constrains it, not only the requiring member's own:
+        // `allOf: [{$ref: Labels}, {required: [a]}]` with string-valued `Labels` makes `a` a
+        // string, not an unconstrained value. The requiring member already applied its own.
+        for contribution in &contributions {
+            let Contribution::Object {
+                fields: member_fields,
+                additional: member_additional,
+                ..
+            } = contribution
+            else {
+                continue;
+            };
+            for field in fields.values_mut() {
+                if !field.undeclared
+                    || member_fields
+                        .iter()
+                        .any(|member| member.name.wire == field.name.wire)
+                {
+                    continue;
+                }
+                let field_hint = format!("{hint}{}Intersection", field.name.wire);
+                match self.narrow_undeclared(field.ty, member_additional, &field_hint) {
+                    Ok(ty) => field.ty = ty,
+                    Err(_)
+                        if self.is_reservation(field.ty.id)
+                            || matches!(member_additional, AdditionalProps::Typed(value) if self.is_reservation(value.id)) =>
+                    {
+                        let message = format!(
+                            "required property `{}`, which no `allOf` member declares, is typed by \
+                             an `additionalProperties` value schema that is a `$ref` closing a \
+                             reference cycle back to the schema being lowered, so its \
+                             intersection cannot be computed",
+                            field.name.wire
+                        );
+                        return self.reject_all_of_cycle(schema.provenance.clone(), &message);
+                    }
+                    // The field is required, so a value no type admits empties the composition.
+                    Err(NoMeet::Empty) => {
+                        return self.reject_all_of_undeclared_required(schema, &field.name.wire);
+                    }
+                    Err(NoMeet::Unrepresentable) => {
+                        let message = format!(
+                            "required property `{}`, which no `allOf` member declares, is typed by \
+                             `additionalProperties` value schemas that share values no single Rust \
+                             type represents",
+                            field.name.wire
+                        );
+                        return self.reject_unrepresentable_meet(schema, &message);
                     }
                 }
             }
@@ -3080,6 +3252,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .map(|field| field.name.wire.clone())
                     .collect();
                 let additional = structure.additional.clone();
+                // A copied field keeps its `undeclared` mark, so one the component carries only
+                // for its own `required` still gives way to a later member's declaration.
                 out.push(Contribution::Object {
                     fields,
                     additional,
@@ -3135,6 +3309,36 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         })
     }
 
+    /// The type of a [`Field::undeclared`] field `field` once it is also a key another object does
+    /// not declare, whose overflow policy is `additional`: a typed value schema there constrains
+    /// the key as well, and `true`, `false` and an absent one leave it as it was (`false` closes
+    /// the object to the fields the merged type declares, this one included, as in
+    /// [`Self::object_body`]).
+    fn narrow_undeclared(
+        &mut self,
+        field: Ty,
+        additional: &AdditionalProps,
+        hint: &str,
+    ) -> Result<Ty, NoMeet> {
+        let AdditionalProps::Typed(value) = additional else {
+            return Ok(field);
+        };
+        // An unconstrained field simply takes the value type. A map value dropped its `Box`
+        // because the map is the indirection a cycle-closing reference needs; a plain field has
+        // none, so it is boxed again exactly when the value's target is still being lowered.
+        if matches!(
+            self.graph.get(field.id).map(|def| &def.kind),
+            Some(TypeKind::Any)
+        ) {
+            let mut ty = **value;
+            ty.boxed = self.is_in_progress_root(ty.id);
+            return Ok(ty);
+        }
+        let mut ty = self.intersect_types(field, **value, hint)?;
+        ty.boxed = field.boxed || self.is_in_progress_root(ty.id);
+        Ok(ty)
+    }
+
     /// Apply the enclosing `allOf` schema's own nullability (a `"null"` in its type array) to the
     /// merged type. Set after the final insert — a pure mutate that preserves the last-insert
     /// invariant.
@@ -3183,6 +3387,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .message(format!(
                 "property `{name}` appears in multiple `allOf` members with conflicting types, and \
                  a member requires it"
+            ))
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// A required property no `allOf` member declares, whose members' `additionalProperties` value
+    /// schemas share no value, so no instance can carry it.
+    fn reject_all_of_undeclared_required<T>(&mut self, schema: &Schema, name: &str) -> Option<T> {
+        // E013 case: required-property
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(format!(
+                "property `{name}` is required but no `allOf` member declares it, and the members' \
+                 `additionalProperties` value schemas it must satisfy share no value"
             ))
             .remedy(ALL_OF_REMEDY)
             .emit(self.diags);
@@ -3243,6 +3461,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 "the `$ref` target and this schema's own sibling keywords have an empty or \
                  unrepresentable intersection",
             )
+            .remedy(REF_SIBLING_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// Report that the category a `$ref`'s untyped sibling keywords establish (see
+    /// [`implied_applicator_category`]) cannot be intersected with the target without either an
+    /// empty result or a dropped target branch. `message` says which.
+    fn reject_ref_sibling_category(&mut self, schema: &Schema, message: &str) -> Option<Ty> {
+        // E013 case: inferred-category
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(message.to_owned())
             .remedy(REF_SIBLING_REMEDY)
             .emit(self.diags);
         None
@@ -3839,6 +4069,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         for field in &right.fields {
             match fields.get_mut(&field.name.wire) {
                 Some(existing) => {
+                    // A field one side carries only for its `required` gives way to the other
+                    // side's declaration of the property (see `take_declaration`).
+                    if take_declaration(existing, field) {
+                        continue;
+                    }
                     let field_hint = format!("{hint}{}", field.name.wire);
                     let intersection = self.intersect_types(existing.ty, field.ty, &field_hint);
                     let required = existing.required || field.required;
@@ -3878,6 +4113,37 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 None => {
                     fields.insert(field.name.wire.clone(), field.clone());
                 }
+            }
+        }
+        // A field neither side declares is an undeclared key of the side that does not carry it
+        // too, so that side's `additionalProperties` value schema constrains it:
+        // `{$ref: Labels, required: [a]}` with string-valued `Labels` makes `a` a string, not an
+        // unconstrained value. The field is required, so a value no type admits empties the object.
+        for field in fields.values_mut() {
+            if !field.undeclared {
+                continue;
+            }
+            let other = if left
+                .fields
+                .iter()
+                .any(|carried| carried.name.wire == field.name.wire)
+            {
+                if right
+                    .fields
+                    .iter()
+                    .any(|carried| carried.name.wire == field.name.wire)
+                {
+                    continue;
+                }
+                &right.additional
+            } else {
+                &left.additional
+            };
+            let field_hint = format!("{hint}{}", field.name.wire);
+            match self.narrow_undeclared(field.ty, other, &field_hint) {
+                Ok(ty) => field.ty = ty,
+                Err(NoMeet::Empty) => return Err(NoMeet::Empty),
+                Err(NoMeet::Unrepresentable) => unrepresentable = true,
             }
         }
         if unrepresentable {
@@ -4443,6 +4709,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(parameter.provenance.clone()),
             )
         };
+        if let Some(property) = unconstrained_parameter_property(&self.graph, ty) {
+            // Most often a `required` name no `properties` entry declares, which is a required
+            // field typed by `additionalProperties` and unconstrained without one (#140). An
+            // arbitrary JSON value has no `key=value` token, and "nested arrays or objects"
+            // would describe nothing the author wrote.
+            Diagnostic::error(
+                Code::UnsupportedParameterStyle,
+                parameter.provenance.clone(),
+            )
+            .message(format!(
+                "parameter property `{property}` is unconstrained: no schema constrains its \
+                 value, so simple/form/deepObject serialization has no scalar token for it"
+            ))
+            .remedy(format!(
+                "declare `{property}` under `properties` with a scalar schema, or give the object \
+                 a scalar `additionalProperties` schema"
+            ))
+            .emit(self.diags);
+            return None;
+        }
         if !parameter_shape_supported(&self.graph, ty) {
             Diagnostic::error(
                 Code::UnsupportedParameterStyle,
@@ -6236,6 +6522,21 @@ fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option
         .filter(|name| in_sub_file || !name.contains('/'))
 }
 
+/// The wire name of the first field of an object parameter whose value is unconstrained
+/// ([`TypeKind::Any`]), which [`parameter_shape_supported`] refuses because an arbitrary JSON value
+/// has no single serialized token. `None` for a parameter that is not an object, or has no such
+/// field.
+fn unconstrained_parameter_property(graph: &TypeGraph, ty: Ty) -> Option<String> {
+    let TypeKind::Struct(object) = &graph.get(ty.id)?.kind else {
+        return None;
+    };
+    object
+        .fields
+        .iter()
+        .find(|field| matches!(graph.get(field.ty.id).map(|d| &d.kind), Some(TypeKind::Any)))
+        .map(|field| field.name.wire.clone())
+}
+
 fn parameter_shape_supported(graph: &TypeGraph, ty: Ty) -> bool {
     parameter_shape_supported_inner(graph, ty, false, &mut HashSet::new())
 }
@@ -7935,6 +8236,83 @@ fn schema_is_object_like(schema: &Schema) -> bool {
         || schema.types.types.contains(&JsonType::Object)
 }
 
+/// The `required` names a schema's own `properties` do not declare, deduplicated, in source order.
+/// [`LowerCtx::object_body`] carries each as a required field of its own, marked
+/// [`Field::undeclared`].
+fn undeclared_required(schema: &Schema) -> Vec<String> {
+    let mut seen: HashSet<&str> = schema.properties.keys().map(String::as_str).collect();
+    schema
+        .required
+        .iter()
+        .filter(|name| seen.insert(name.as_str()))
+        .cloned()
+        .collect()
+}
+
+/// Settle a property two sides of an intersection both carry when exactly one side declares it,
+/// and report whether it did. A field marked [`Field::undeclared`] is no declaration: it stands
+/// for a key its object requires and types it by that object's `additionalProperties` schema,
+/// which by the rule every merge here applies (a merged object's `additionalProperties` constrains
+/// only the keys no side declares) does not reach a property the other side declares. So the
+/// declared field is kept whole — its type, default, flags and `xml` hints — and the requirement
+/// is added to it. Two declarations, or two undeclared fields, are left to the caller to intersect.
+fn take_declaration(existing: &mut Field, other: &Field) -> bool {
+    if existing.undeclared == other.undeclared {
+        return false;
+    }
+    let required = existing.required || other.required;
+    if existing.undeclared {
+        *existing = other.clone();
+    }
+    existing.required = required;
+    if required {
+        if let Some(default) = &mut existing.default {
+            default.applied = None;
+        }
+    }
+    true
+}
+
+/// The category a schema's object or array applicators imply, for a schema that establishes none
+/// of its own. See [`implied_applicator_category`].
+enum ImpliedCategory {
+    /// Only object applicators, or only array applicators: the category they apply to.
+    Only(JsonType),
+    /// Both kinds, and nothing to choose between them.
+    Conflicting,
+}
+
+/// The category a `$ref` sibling's applicators establish when the sibling names no `type` and
+/// carries no other keyword that lowers to a shape of its own (`enum`, `const`, a composition, a
+/// binary encoding, a `$ref`).
+///
+/// The object applicators are `properties`, `patternProperties`, `required` and
+/// `additionalProperties`; the array applicators are `items` and `prefixItems`. `None` when the
+/// schema carries neither kind, or already names or implies its shape some other way.
+fn implied_applicator_category(schema: &Schema) -> Option<ImpliedCategory> {
+    let establishes_elsewhere = !schema.types.types.is_empty()
+        || schema.reference.is_some()
+        || schema.enum_values.is_some()
+        || schema.const_value.is_some()
+        || !schema.all_of.is_empty()
+        || !schema.one_of.is_empty()
+        || !schema.any_of.is_empty()
+        || schema.content_encoding.is_some()
+        || schema.format.as_deref() == Some("binary");
+    if establishes_elsewhere {
+        return None;
+    }
+    // `types` is empty here, so this is exactly the object applicators.
+    let object = schema_is_object_like(schema);
+    let array = schema.items.is_some() || !schema.prefix_items.is_empty();
+    match (object, array) {
+        (true, false) => Some(ImpliedCategory::Only(JsonType::Object)),
+        (false, true) => Some(ImpliedCategory::Only(JsonType::Array)),
+        (true, true) => Some(ImpliedCategory::Conflicting),
+        (false, false) => None,
+    }
+}
+
 /// Whether a non-object schema still imposes a scalar/leaf constraint (a non-null primitive type,
 /// an `enum`/`const`, or `contentEncoding`) — as opposed to a pure annotation member (`{}` /
 /// `{description: ...}`) that constrains nothing.
@@ -8073,31 +8451,12 @@ mod tests {
     }
 
     /// The sibling keywords `E013`'s explain publishes as taking part in a `$ref`-sibling
-    /// intersection, in its three groups: those that establish a shape, those that refine one, and
-    /// `required`.
-    fn published_sibling_keywords() -> (Vec<String>, Vec<String>, Vec<String>) {
+    /// intersection: the one sentence that lists every keyword bearing a shape of its own.
+    fn published_sibling_keywords() -> Vec<String> {
         // Named by its code string: a `Code::<Variant>` mention of an enumerating code is read as
         // an emission site by `diag`'s case-marker test, and this reads the text, emitting nothing.
         let explain = "E013".parse::<Code>().expect("E013 is a code").explain();
-        let establishing = backticked_in_sentence(explain, "A sibling bears a shape of its own ");
-        // The refiners are the spans before the verb; the rest of that sentence names the `type`
-        // that gives them a shape, which is not one of them.
-        const REFINE: &str = " refine a shape rather than establish one";
-        let refine_at = explain
-            .find(REFINE)
-            .unwrap_or_else(|| panic!("E013's explain no longer names its refiners: {explain}"));
-        let refine_start = explain[..refine_at].rfind(". ").map_or(0, |at| at + 2);
-        let refiners = explain[refine_start..refine_at]
-            .split('`')
-            .skip(1)
-            .step_by(2)
-            .map(str::to_owned)
-            .collect();
-        let narrower = backticked_in_sentence(explain, "`required` is narrower still")
-            .into_iter()
-            .take(1)
-            .collect();
-        (establishing, refiners, narrower)
+        backticked_in_sentence(explain, "A sibling bears a shape of its own ")
     }
 
     /// Issue #155: the explain's keyword list and the gate that decides are one set. Read in both
@@ -8106,12 +8465,12 @@ mod tests {
     /// because the gate sees a `$ref`'s siblings with the reference already stripped.
     #[test]
     fn e013_explain_names_exactly_the_keywords_the_gate_reads() {
-        let (establishing, refiners, narrower) = published_sibling_keywords();
+        let listed = published_sibling_keywords();
         let mut published = BTreeSet::new();
-        for keyword in establishing.iter().chain(&refiners).chain(&narrower) {
+        for keyword in &listed {
             assert!(
                 published.insert(keyword.as_str()),
-                "E013's explain names `{keyword}` in more than one group"
+                "E013's explain names `{keyword}` twice"
             );
         }
         let gate: BTreeSet<&str> = SHAPE_KEYWORDS
@@ -8122,7 +8481,7 @@ mod tests {
         assert_eq!(
             published, gate,
             "E013's explain and `SHAPE_KEYWORDS` disagree about which sibling keywords take part in \
-             a `$ref` intersection (explain groups: {establishing:?} / {refiners:?} / {narrower:?})"
+             a `$ref` intersection (explain lists: {listed:?})"
         );
         assert_eq!(
             SHAPE_KEYWORDS.len(),
