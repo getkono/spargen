@@ -782,18 +782,13 @@ mod tests {
         assert_eq!(source.to_string(), "no credential for `token`");
     }
 
-    /// The missing-credential cause is the payload itself, so the chain ends at `RequestError` —
-    /// one level shorter than the message-only error it replaced, which boxed its text as a
-    /// private `MessageError` behind `RequestError`'s then-private `source` field. `RequestCause`,
-    /// the wrapper that box sits inside today, is this branch's own addition and does not exist on
-    /// `master`; naming it here would date this branch's work to before itself, which is the same
-    /// anachronism `35bd393` removed from the sibling doc in `dispatch.rs`.
+    /// The missing-credential cause is the payload itself, so the chain ends at `RequestError`:
+    /// its `source()` is `None`, where `Other` reaches one level further, to its boxed cause.
     ///
-    /// The rendered text is *not* what that error said: master rendered
-    /// `(schemes: key, token)`, sorted and deduplicated across the whole requirement, and this
-    /// renders `(missing: key + token)`, grouped per alternative in declaration order. The break
-    /// is deliberate (the grouping is the payload's whole point) and is what the exact string
-    /// below pins.
+    /// The rendered text groups the missing schemes per alternative, in declaration order —
+    /// `(missing: key + token)` — rather than listing them once, sorted and deduplicated across
+    /// the whole requirement. The grouping is the payload's whole point, and the exact string
+    /// below pins it.
     #[test]
     fn a_missing_credential_is_typed_and_ends_the_cause_chain() {
         let error = Error::<ApiBody>::RequestConstruction(RequestError::MissingCredential {
@@ -975,20 +970,14 @@ mod tests {
 
     /// Every variant renders a non-empty string that names its own cause.
     ///
-    /// The `CredentialProvider` string is a **break against master**, and it is the second render
-    /// delta this branch carries — the first, `(schemes: …)` becoming `(missing: …)`, is disclosed
-    /// on `a_missing_credential_is_typed_and_ends_the_cause_chain` above. On `master`
-    /// `apply_credential` wrapped a failing provider with `Error::request_construction`, and
-    /// `RequestError` was a struct whose `Display` wrote `{source}` — so this level echoed the
-    /// provider's own text (`"refresh rejected"`). Here it writes a fixed sentence naming the
-    /// scheme instead, and the provider's text is reached one level further out through
-    /// `source()`.
-    ///
-    /// Chain *depth* is unchanged (three levels on both sides) and a full-chain renderer loses
-    /// nothing; what changed is that level two stopped duplicating level three. A consumer that
-    /// prints exactly one `.source()` level, or that binds `Err(Error::RequestConstruction(e))`
-    /// and prints `{e}`, sees different text. `RequestError` is publicly re-exported on both
-    /// sides, so that level is directly printable and is not an internal detail.
+    /// `CredentialProvider` renders a fixed sentence naming the scheme, not the provider's own
+    /// text (`"refresh rejected"`), which is one level further out as its `source()`, the
+    /// provider's `AuthError`. The chain is three levels — `Error`, `RequestError`, `AuthError` —
+    /// and the middle one does not repeat the last, so a full-chain renderer prints each piece
+    /// once. A consumer that prints exactly one `.source()` level, or that binds
+    /// `Err(Error::RequestConstruction(e))` and prints `{e}`, sees the scheme sentence.
+    /// `RequestError` is publicly re-exported, so that level is directly printable and is not an
+    /// internal detail.
     #[test]
     fn every_request_variant_displays_exactly_what_names_its_cause() {
         for error in every_request_variant() {

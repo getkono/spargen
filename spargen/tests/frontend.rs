@@ -1112,8 +1112,9 @@ components:
 /// shortcutting to the parsed component map only for the root document. `ensure_component` bypassed
 /// the resolver for anything carrying the `#/components/schemas/` prefix and looked every such name
 /// up in the ROOT document's map whatever file it sat in, so the sibling reference missed. Before
-/// E004 fired that miss was a silent drop — the property simply vanished — which is the same bug
-/// this branch is about, just reached from a sub-file.
+/// E004 fired that miss was a silent drop — the property simply vanished — which is the same
+/// silent drop of an unresolved component reference that E004 exists to replace, just reached from
+/// a sub-file.
 ///
 /// `corpus-smoke` cannot see this: the one multi-file corpus case uses whole-file `$ref`s, and the
 /// other relative-file fixture here uses a non-component fragment (`#/Pet`), which never enters
@@ -2062,17 +2063,17 @@ components:
 /// operation and the **JSON** body of another.
 ///
 /// A serde `rename` applies to every format, so `gate_xml_field_renames` suppresses XML hints on any
-/// type that is not used exclusively as an XML body. That policy is right and pre-dates this branch.
-/// What changed is what it sees: before the resolved-reference memo, the two operations lowered the
-/// sub-file schema to two types — the XML one dedicated and keeping `#[serde(rename = "@Ident")]`,
-/// the JSON one suppressed — and now they share one type, which is reachable from both and is
-/// therefore suppressed for both. **The XML on the wire moved**, and the `W006` count did not change,
-/// so an upgrading consumer had nothing to compare.
+/// type that is not used exclusively as an XML body. The resolved-reference memo changed what that
+/// policy sees: before it, the two operations lowered the sub-file schema to two types — the XML
+/// one dedicated and keeping `#[serde(rename = "@Ident")]`, the JSON one suppressed — and now they
+/// share one type, which is reachable from both and is therefore suppressed for both. **The XML on
+/// the wire moved**, and the `W006` count did not change, so an upgrading consumer had nothing to
+/// compare.
 ///
-/// The verdict is not being reversed here: giving an XML use its own type would reintroduce two
-/// types for one target, which is the defect this branch exists to remove. What is being fixed is
-/// that the warning must say which of its two quite different situations it is in, so a consumer can
-/// tell "your hint was inert" from "your XML body's field names just changed".
+/// The suppression stands: giving an XML use its own type would reintroduce two types for one
+/// target, which the memo exists to prevent. What this test pins is that the warning says which of
+/// its two quite different situations it is in, so a consumer can tell "your hint was inert" from
+/// "your XML body's field names just changed".
 #[test]
 fn a_schema_shared_between_an_xml_and_a_non_xml_body_says_so() {
     let temp = tempfile::tempdir().unwrap();
@@ -2123,7 +2124,7 @@ components:
     let code = std::fs::read_to_string(&out).unwrap();
 
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    // One target, one type — the repair this branch exists for, unchanged.
+    // One target, one type — what the resolved-reference memo guarantees.
     assert_eq!(
         declared_types(&code, "Item", |tail| tail.is_empty()).len(),
         1,
@@ -2599,7 +2600,7 @@ components:
     }
 
     // The same shape in the root document. It is pinned for the same reason and not as a control:
-    // it reproduces identically on the merge base, so the fault is older than this branch.
+    // the fault is not specific to sub-files, and the root spelling must reject the same way.
     let root = format!(
         r##"
 openapi: 3.1.0
@@ -3229,11 +3230,11 @@ components:
 /// A sub-file schema that reaches a **root document** component twice, by explicit file reference.
 ///
 /// `ensure_resolved` routes a resolved target that lands inside the root document's own component
-/// map back through `ensure_component`, so `components` stays that target's single identity. Round 4
-/// filed this branch as "executes but constrains nothing". That reading was wrong: disabling the
-/// branch leaves every suite green and gives **`["RootOne", "RootOne55e60dbe"]`** — two public types
-/// for one declared component, which is the precise defect this change exists to remove, in a shape
-/// it wrote a dedicated branch for.
+/// map back through `ensure_component`, so `components` stays that target's single identity. That
+/// routing can look like code that executes but constrains nothing, and without this test it is:
+/// disabling it leaves every other suite green and gives **`["RootOne", "RootOne55e60dbe"]`** —
+/// two public types for one declared component, which is the precise defect the resolved-reference
+/// memo exists to prevent.
 ///
 /// The reason a second memo is not harmless is that it is a second *identity*: `resolved_components`
 /// would key the same schema by `file#pointer` while `components` keys it by name, and neither would
@@ -3807,10 +3808,10 @@ components:
 /// back a back-edge against `Node`'s reservation, whose placeholder `push_ref_member` read as a
 /// scalar.
 ///
-/// So this document is `clean` on `2aa5ada` and rejected here, verified by building the merge base
-/// and running it. The rejection is right — base emitted `serde_json::Value` for a typed schema with
-/// no diagnostic — but "regenerating from an unchanged description is otherwise unaffected" was not,
-/// and this is a description that uses none of the multi-file machinery the change is about.
+/// So this document was `clean` at `2aa5ada` (verified by building that commit and running it) and
+/// is rejected now. The rejection is right — `2aa5ada` emitted `serde_json::Value` for a typed
+/// schema with no diagnostic — but "regenerating from an unchanged description is otherwise
+/// unaffected" was not, and this is a description that uses none of the multi-file machinery.
 #[test]
 fn a_recursive_all_of_member_reached_through_a_root_alias_is_rejected() {
     let spec = r##"
@@ -3881,8 +3882,8 @@ components:
 /// pre-lowered in key order, and a description that generated in one file stopped generating when
 /// split, because sub-file components are never pre-lowered.
 ///
-/// Every row below was measured against a build of the merge base. The D8 rows are the ones that
-/// must still reject; everything else must still generate.
+/// Every row below was measured against a build of `2aa5ada`. The D8 rows are the ones that must
+/// still reject; everything else must still generate.
 #[test]
 fn a_union_member_that_is_a_different_recursive_type_still_generates() {
     // The union sits in a property, so it is not the component's own reservation.
@@ -4049,7 +4050,7 @@ components:
 /// The guard written for exactly this class sits inside the multi-member loop, which the
 /// `real_members.len() == 1` early return jumps straight over.
 ///
-/// Restoring the merge base's behaviour is **not** the fix. At `2aa5ada` a reservation's kind was
+/// Restoring `2aa5ada`'s behaviour is **not** the fix. At `2aa5ada` a reservation's kind was
 /// `TypeKind::Any`, so the clone emitted `Option<serde_json::Value>` — the silent degradation of a
 /// typed schema the standing invariants forbid outright. The answer `docs/support-matrix.md` and
 /// the direct `{$ref: Node}` spelling both already promise is `Option<Box<Node>>`, so that is what
@@ -4106,7 +4107,7 @@ components:
         // Boxed, because the cycle needs a finite size; `Option`, because the `null` member is what
         // the union collapsed away. Both halves are the matrix's promise.
         assert!(code.contains("Option<Box<Node>>"), "{applicator}: {code}");
-        // And never the merge base's answer.
+        // And never `2aa5ada`'s answer.
         assert!(!code.contains("serde_json::Value>"), "{applicator}: {code}");
     }
 }
@@ -5384,11 +5385,11 @@ paths:
 /// lowered. Nothing true can be said about that intersection, so it must be refused — not guessed
 /// at, and not quietly dropped.
 ///
-/// Three positions, all of which the merge base accepted by guessing: the sole member of a nested
+/// Three positions, all of which `2aa5ada` accepted by guessing: the sole member of a nested
 /// property's union, the sole member of an array `items` union, and one member of a multi-member
 /// union. At `2aa5ada` `intersect_non_null`'s `TypeKind::Any` arm absorbed the placeholder and
 /// returned the *sibling*, silently retyping the recursive branch to the inline object beside it.
-/// At this head the multi-member case instead drops the variant with a `W011` whose message —
+/// Without the refusal, the multi-member case drops the variant with a `W011` whose message —
 /// "cannot satisfy the enclosing schema's own constraints" — is false about the document: the
 /// member can satisfy them perfectly well, it simply has not been lowered yet.
 #[test]
@@ -6383,18 +6384,17 @@ mod remote {
     /// The remote counterpart of the direct-recursive `allOf` member, reached through an **alias**,
     /// which is the shape that needs the id-keyed guard rather than the spelling-keyed one.
     ///
-    /// `gather_member`'s remote arm has two checks. The pre-existing one keys on the reference
-    /// *string* — `remote_in_progress.contains_key(reference)` — and this branch added a second
-    /// keyed on the returned `Ty`'s id. Only the second can see this case: `node.yaml` composes
+    /// `gather_member`'s remote arm has two checks. One keys on the reference *string* —
+    /// `remote_in_progress.contains_key(reference)` — and the other on the returned `Ty`'s id.
+    /// Only the second can see this case: `node.yaml` composes
     /// `allOf: [alias.yaml]`, `alias.yaml` is a bare `$ref` back to `node.yaml`, so the member's own
     /// spelling is never the in-progress key, and `ensure_remote` chains through the alias and hands
     /// back a back-edge against `node.yaml`'s reservation.
     ///
     /// **Removing the id-keyed check leaves every other test in the workspace green.** Without it
     /// this document generates, with zero diagnostics, and emits
-    /// `pub type …child = serde_json::Value;` — the same silent degradation the component path was
-    /// repaired for in this branch, on a path nothing exercised. The guard was added here; the
-    /// fixture was not.
+    /// `pub type …child = serde_json::Value;` — the same silent degradation the component path
+    /// guards against, on a path no other test exercises.
     #[test]
     fn a_direct_recursive_remote_all_of_member_reached_through_an_alias_is_rejected() {
         const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
@@ -12159,10 +12159,10 @@ fn shape_bearing_keywords_the_explain_names() -> Vec<String> {
 /// category, where the `type` alone already rejected and the keyword beside it was never
 /// load-bearing; three rows proved nothing at all.
 ///
-/// The `$ref` sits at a response body rather than a component root. A component root whose value is
-/// a `$ref` with only non-shape-bearing siblings trips a release-level `assert_eq!` inside
-/// `ensure_component` (filed as #148, pre-existing on master), which would turn every "without"
-/// control here into an opaque panic instead of this fixture's own message.
+/// The `$ref` sits at a response body rather than a component root, so each row exercises the
+/// sibling gate alone. A component root whose value is a `$ref` with only non-shape-bearing
+/// siblings once tripped a release-level `assert_eq!` inside `ensure_component` (#148), which
+/// turned every "without" control into an opaque panic instead of this fixture's own message.
 ///
 /// Each target is chosen so the intersection is *genuinely empty*, never merely unrepresentable:
 /// the `contentEncoding`/`format: binary` rows sit against an integer, not a string, because a
@@ -16483,8 +16483,8 @@ paths:
         );
     }
 
-    // (v) The `text/*` range keeps a response too: it generated as text beside an unclassified
-    // `image/png` on master, and a concrete family member ranks below it.
+    // (v) The `text/*` range keeps a response too: it generates as text beside an `image/png` of
+    // another family, and a concrete family member ranks below it.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -16537,10 +16537,9 @@ paths:
     assert!(code.contains("pub type ResponseBody = String;"), "{code}");
     assert_ne!(check(spec).outcome(), Outcome::Rejected);
 
-    // (vii) `*/*` keeps a response the same way: it generated as bytes beside an unclassified
-    // `image/png` on master, and it still does whatever schema `image/png` carries — an object
-    // there is reported as the alternative not generated (`W014`), never rejected by the octet
-    // gate (`E009`).
+    // (vii) `*/*` keeps a response the same way: it generates as bytes beside an `image/png`
+    // whatever schema `image/png` carries — an object there is reported as the alternative not
+    // generated (`W014`), never rejected by the octet gate (`E009`).
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -16576,7 +16575,7 @@ paths:
     assert_ne!(check(spec).outcome(), Outcome::Rejected);
 
     // (viii) The family's own range outranks its concrete member: `image/*` beside `image/png`
-    // with a constraining schema generates from the range, as on master.
+    // with a constraining schema generates from the range.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -20449,7 +20448,7 @@ const PARITY_FIXTURES: &[(&str, &str)] = &[
     ),
     ("E013 irreconcilable allOf", ALL_OF_CONFLICT_SPEC),
     // A nullable alias that generates cleanly. The suite's clean cases are all trivial documents;
-    // this one drives the lowering path this branch reworked, where `check` and `generate` take the
+    // this one drives the nullable-alias lowering path, where `check` and `generate` take the
     // same code and could silently stop agreeing.
     ("nullable alias carries its target", NULLABLE_ALIAS_CARRY_SPEC),
     ("W005 schema default", W005_SPEC),
@@ -22222,7 +22221,7 @@ fn a_cycle_closing_union_member_is_rejected_not_discarded() {
 /// `lower_union_sibling` deletes the enclosing `type` array whenever it holds more than one non-null
 /// type, because no single lowered type represents it. That deletion also throws away the array's
 /// `"null"`, so the lowered sibling reads as null-rejecting even where the array admitted null —
-/// **an under-accept that is a regression against master**, whose compiled client fails on a
+/// **an under-accept**, whose compiled client fails on a
 /// spec-legal `null` with `invalid type: null, expected struct …`. In the other direction, a sibling
 /// that speaks about null through `enum` or `const` rather than `type` was treated as silent, so the
 /// union's acceptance survived a sibling that denied it.

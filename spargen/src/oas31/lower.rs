@@ -2030,7 +2030,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `$ref` of an ordinary recursive schema. Its kind may not be read: cloning a
             // `TypeKind::Reserved` inserts a second reservation nothing will ever `fill`, which
             // `check_invariants` reports as `E011` against a document that is not malformed, and
-            // which on the merge base (where the placeholder was `TypeKind::Any`) cloned as
+            // which at `2aa5ada` (where the placeholder was `TypeKind::Any`) cloned as
             // `serde_json::Value` instead — a typed schema silently degraded.
             //
             // A truthful answer exists and needs no def of its own: the member's own `Ty`, boxed so
