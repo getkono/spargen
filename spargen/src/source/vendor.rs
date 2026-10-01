@@ -13,7 +13,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, JsonPointer, Provenance};
 
 use super::lock::{vendor_path_for_url, Lock, RemoteEntry, LOCK_FILE_NAME, VENDOR_DIR};
-use super::remote::{classify_ref, collect_refs, enters_extension, split_fragment, RefTarget};
+use super::remote::{
+    classify_ref, collect_refs, enters_extension, is_http_url, resolve_ref_url, split_fragment,
+    RefTarget,
+};
 use super::sha256::sha256_hex;
 use super::{parse_json, parse_yaml, SpannedValue};
 
@@ -30,8 +33,8 @@ pub(crate) struct Fetched {
     /// The raw bytes.
     pub(crate) bytes: Vec<u8>,
     /// The URL the bytes were retrieved from: the requested URL, or where its redirects ended.
-    /// It is the document's base URI (RFC 3986 §5.1.3), so its relative `$ref`s resolve against
-    /// it.
+    /// It is the document's retrieval URI (RFC 3986 §5.1.3): its base when it carries no `$self`,
+    /// and what a `$self` is resolved against when it does.
     pub(crate) url: String,
 }
 
@@ -99,13 +102,96 @@ struct ScanDoc {
     base: Base,
 }
 
+/// What a document's OpenAPI 3.2 `$self` makes it, read exactly as the build's
+/// `InputBundle::register_self_identity` reads it, so `spargen lock` resolves each relative `$ref`
+/// to the document the build will ask for (#426).
+enum SelfIdentity {
+    /// An `http`/`https` URL: the base the document's relative references resolve against, and a
+    /// URL a reference reaches the document by.
+    Remote(String),
+    /// A local path: the base the document's relative references resolve against, and a path a
+    /// reference reaches the document by.
+    Local(Utf8PathBuf),
+    /// Any other absolute URI: a reference naming it exactly reaches the document, but it supplies
+    /// no hierarchical base, so the document keeps the one it was reached at.
+    Opaque(String),
+}
+
+/// The identity `value`'s `$self` gives a document reached at `base`, or `None` where it carries
+/// none (or an empty or fragment-only one). A remote document's `$self` is resolved against the
+/// URL it was retrieved from; a local document's relative `$self` against its own path.
+fn self_identity(value: &SpannedValue, base: &Base) -> Option<SelfIdentity> {
+    let (identity, _) = split_fragment(value.get("$self")?.as_str()?);
+    if identity.is_empty() {
+        return None;
+    }
+    Some(match base {
+        Base::Remote(retrieved) => SelfIdentity::Remote(resolve_ref_url(retrieved, identity)),
+        Base::Local(_) if is_http_url(identity) => SelfIdentity::Remote(identity.to_owned()),
+        Base::Local(path) if !identity.contains(':') => SelfIdentity::Local(
+            path.parent()
+                .unwrap_or_else(|| Utf8Path::new(""))
+                .join(identity),
+        ),
+        Base::Local(_) => SelfIdentity::Opaque(identity.to_owned()),
+    })
+}
+
+/// Every document the walk has scanned, and the names a reference reaches each one by.
+#[derive(Default)]
+struct Scanned {
+    /// Every scanned document, kept because a reference into a specification extension is walked
+    /// at its target (`enters_extension`), which may lie in a document scanned earlier.
+    docs: Vec<ScanDoc>,
+    /// The local path each scanned local document is reached by.
+    local_docs: HashMap<Utf8PathBuf, usize>,
+    /// The URL (or opaque `$self` URI) each scanned document is reached by.
+    remote_docs: HashMap<String, usize>,
+    /// Every local path already read, or attempted, or named by a `$self`.
+    seen_local: HashSet<Utf8PathBuf>,
+    /// Every URL already fetched, or attempted, or named by a `$self`.
+    seen_remote: HashSet<String>,
+}
+
+impl Scanned {
+    /// Keep `value`, reached at `base`, and return its index. Its `$self`, if any, replaces `base`
+    /// as the base its relative references resolve against and is registered as a name it is
+    /// reached by, as the build registers it: a reference to that name reaches this document
+    /// rather than reading (or fetching and pinning) one of its own. The caller registers the
+    /// names the document was reached by first, as the build does before reading its `$self`.
+    fn add(&mut self, value: SpannedValue, base: Base) -> usize {
+        let index = self.docs.len();
+        let base = match self_identity(&value, &base) {
+            Some(SelfIdentity::Remote(url)) => {
+                self.seen_remote.insert(url.clone());
+                self.remote_docs.insert(url.clone(), index);
+                Base::Remote(url)
+            }
+            Some(SelfIdentity::Local(path)) => {
+                // The build matches a document's stored path before any `$self` identity.
+                self.seen_local.insert(path.clone());
+                self.local_docs.entry(path.clone()).or_insert(index);
+                Base::Local(path)
+            }
+            Some(SelfIdentity::Opaque(uri)) => {
+                self.remote_docs.insert(uri, index);
+                base
+            }
+            None => base,
+        };
+        self.docs.push(ScanDoc { value, base });
+        index
+    }
+}
+
 /// Fetch and hash-pin every remote `$ref` reachable from `spec`, writing the vendored copies under
 /// `.spargen/vendor/` and (re)writing `spargen.lock` next to the spec. This is the ONLY function
 /// that performs network I/O, and only through the injected `fetcher`.
 ///
 /// The walk recurses through relative-file refs (to catch remote refs nested in local sub-files)
-/// and through fetched remote documents (whose relative refs resolve against the URL each was
-/// retrieved from, after redirects). It
+/// and through fetched remote documents (whose relative refs resolve against each one's `$self`,
+/// itself resolved against the URL it was retrieved from after redirects, or against that URL
+/// where it has none). Every document's `$self` sets its base and names it, as in the build. It
 /// follows exactly the references the build's bundle loader does: none inside a specification
 /// extension, unless a followed reference addresses that extension's contents, so `spargen lock`
 /// pins every document a build reads and fetches nothing a build ignores. Recursion parsing is best-effort: a fetched doc that does not parse is still vendored, and any
@@ -132,29 +218,23 @@ pub(crate) fn vendor(
 
     let mut lock = Lock::default();
     let mut refs: Vec<VendoredRef> = Vec::new();
-    let mut seen_remote: HashSet<String> = HashSet::new();
-    let mut seen_local: HashSet<Utf8PathBuf> = HashSet::new();
-    seen_local.insert(spec.to_path_buf());
+    let mut scanned = Scanned::default();
+    scanned.seen_local.insert(spec.to_path_buf());
+    scanned.local_docs.insert(spec.to_path_buf(), 0);
+    let root = scanned.add(root_value, Base::Local(spec.to_path_buf()));
 
-    // Every scanned document is kept, because a reference into a specification extension is walked
-    // at its target (`enters_extension`), which may lie in a document scanned earlier. The queue
-    // holds a document index and the pointer to walk from: the root, or such a target.
-    let mut docs: Vec<ScanDoc> = vec![ScanDoc {
-        value: root_value,
-        base: Base::Local(spec.to_path_buf()),
-    }];
-    let mut local_docs: HashMap<Utf8PathBuf, usize> = HashMap::from([(spec.to_path_buf(), 0)]);
-    let mut remote_docs: HashMap<String, usize> = HashMap::new();
+    // The queue holds a document index and the pointer to walk from: a document's root, or the
+    // target of a reference into a specification extension.
     let mut walked_targets: HashSet<(usize, JsonPointer)> = HashSet::new();
-    let mut queue: VecDeque<(usize, JsonPointer)> = VecDeque::from([(0, JsonPointer::root())]);
+    let mut queue: VecDeque<(usize, JsonPointer)> = VecDeque::from([(root, JsonPointer::root())]);
 
     while let Some((index, pointer)) = queue.pop_front() {
-        let base = docs[index].base.clone();
+        let base = scanned.docs[index].base.clone();
         let remote_base = match &base {
             Base::Local(_) => None,
             Base::Remote(url) => Some(url.clone()),
         };
-        let Some(value) = docs[index].value.pointer(&pointer) else {
+        let Some(value) = scanned.docs[index].value.pointer(&pointer) else {
             continue;
         };
         let doc_refs = collect_refs(value);
@@ -165,20 +245,21 @@ pub(crate) fn vendor(
                     if let Base::Local(base_path) = &base {
                         let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
                         let target = parent.join(&path);
-                        if seen_local.insert(target.clone()) {
+                        if scanned.seen_local.insert(target.clone()) {
                             if let Ok(text) = std::fs::read_to_string(&target) {
                                 if let Some(value) = parse_scratch(target.as_str(), &text) {
-                                    local_docs.insert(target.clone(), docs.len());
-                                    queue.push_back((docs.len(), JsonPointer::root()));
-                                    docs.push(ScanDoc {
-                                        value,
-                                        base: Base::Local(target),
-                                    });
+                                    scanned
+                                        .local_docs
+                                        .insert(target.clone(), scanned.docs.len());
+                                    let loaded = scanned.add(value, Base::Local(target));
+                                    queue.push_back((loaded, JsonPointer::root()));
                                 }
                             }
                         }
                     }
                 }
+                // A document's opaque `$self` names it, as the build resolves such a reference.
+                RefTarget::UnsupportedRemote(url) if scanned.remote_docs.contains_key(&url) => {}
                 RefTarget::UnsupportedRemote(url) => {
                     Diagnostic::error(
                         Code::AbsoluteRefUnsupported,
@@ -189,7 +270,7 @@ pub(crate) fn vendor(
                     .emit(diags);
                 }
                 RefTarget::Remote(url) => {
-                    if !seen_remote.insert(url.clone()) {
+                    if !scanned.seen_remote.insert(url.clone()) {
                         continue;
                     }
                     let Fetched {
@@ -218,7 +299,7 @@ pub(crate) fn vendor(
                     // later reference to that URL reaches this document and reads no pin of its
                     // own: it is seen here too, or the lock would fetch and pin what the build
                     // never reads. A retrieval URL already seen stays the document it named.
-                    seen_remote.insert(retrieved.clone());
+                    scanned.seen_remote.insert(retrieved.clone());
                     let sha256 = sha256_hex(&bytes);
                     let rel_path = vendor_path_for_url(&url);
                     let target = vendor_dir.join(&rel_path);
@@ -254,13 +335,13 @@ pub(crate) fn vendor(
                     });
                     if let Ok(text) = String::from_utf8(bytes) {
                         if let Some(value) = parse_scratch(&url, &text) {
-                            remote_docs.insert(url.clone(), docs.len());
-                            remote_docs.entry(retrieved.clone()).or_insert(docs.len());
-                            queue.push_back((docs.len(), JsonPointer::root()));
-                            docs.push(ScanDoc {
-                                value,
-                                base: Base::Remote(retrieved),
-                            });
+                            let next = scanned.docs.len();
+                            scanned.remote_docs.insert(url.clone(), next);
+                            scanned.remote_docs.entry(retrieved.clone()).or_insert(next);
+                            // Its relative references resolve from its `$self`, resolved against
+                            // where it was retrieved, or from that retrieval URL where it has none.
+                            let loaded = scanned.add(value, Base::Remote(retrieved));
+                            queue.push_back((loaded, JsonPointer::root()));
                         }
                     }
                 }
@@ -276,12 +357,13 @@ pub(crate) fn vendor(
                 RefTarget::LocalRelative(path) => match &base {
                     Base::Local(base_path) => {
                         let parent = base_path.parent().unwrap_or_else(|| Utf8Path::new(""));
-                        local_docs.get(&parent.join(&path)).copied()
+                        scanned.local_docs.get(&parent.join(&path)).copied()
                     }
                     Base::Remote(_) => None,
                 },
-                RefTarget::Remote(url) => remote_docs.get(&url).copied(),
-                RefTarget::UnsupportedRemote(_) => None,
+                RefTarget::Remote(url) | RefTarget::UnsupportedRemote(url) => {
+                    scanned.remote_docs.get(&url).copied()
+                }
             };
             let (_, fragment) = split_fragment(reference);
             if let Some(target) = target {
@@ -583,6 +665,282 @@ mod tests {
             let on_disk = std::fs::read(report.vendor_dir.join(&vendored.path)).unwrap();
             assert_eq!(sha256_hex(&on_disk), vendored.sha256);
         }
+    }
+
+    /// Write each `(relative path, text)` under a fresh directory, lock the first one with `docs`
+    /// served, then load it as the build does. Returns the URLs pinned, after asserting that
+    /// neither step reported anything.
+    fn lock_then_load(files: &[(&str, &str)], docs: &[(&str, &str)]) -> Vec<String> {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+        for (path, text) in files {
+            let path = dir.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let spec = dir.join(files[0].0);
+        let fetcher = StubFetcher {
+            docs: docs
+                .iter()
+                .map(|(url, text)| ((*url).to_owned(), text.as_bytes().to_vec()))
+                .collect(),
+        };
+
+        let mut diags = Diagnostics::default();
+        let report = vendor(&spec, &fetcher, &mut diags)
+            .unwrap_or_else(|_| panic!("lock failed: {:?}", diags.items()));
+        assert!(diags.items().is_empty(), "{:?}", diags.items());
+        let mut diags = Diagnostics::default();
+        assert!(
+            super::super::InputBundle::load(&spec, &mut diags).is_ok(),
+            "build load failed: {:?}",
+            diags.items()
+        );
+        assert!(diags.items().is_empty(), "{:?}", diags.items());
+        report
+            .refs
+            .into_iter()
+            .map(|vendored| vendored.url)
+            .collect()
+    }
+
+    /// A local document whose `$self` is an `http` URL resolves its relative references as
+    /// remote ones against that URL, in the lock as in the build (#426): `schemas/pet.yaml` is
+    /// fetched from beside the `$self`, and the local file of that name, whose remote reference
+    /// the stub would fail with `E025`, is never read.
+    #[test]
+    fn a_local_documents_http_self_makes_its_relative_refs_remote() {
+        let urls = lock_then_load(
+            &[
+                (
+                    "openapi.yaml",
+                    "openapi: 3.2.0\n\
+                     $self: https://api.example.com/v1/openapi.yaml\n\
+                     components:\n\
+                     \x20 schemas:\n\
+                     \x20   Pet: { $ref: \"schemas/pet.yaml\" }\n",
+                ),
+                (
+                    "schemas/pet.yaml",
+                    "$ref: \"https://api.example.com/missing.yaml\"\n",
+                ),
+            ],
+            &[(
+                "https://api.example.com/v1/schemas/pet.yaml",
+                "type: string\n",
+            )],
+        );
+        assert_eq!(urls, ["https://api.example.com/v1/schemas/pet.yaml"]);
+    }
+
+    /// A local document's relative `$self` is the path its relative references resolve from
+    /// (#426): `tag.yaml` inside `lib/sub.yaml`, which names itself `../shared/sub.yaml`, is
+    /// `shared/tag.yaml`, whose remote reference is pinned; `lib/tag.yaml`, whose remote
+    /// reference the stub would fail, is never read.
+    #[test]
+    fn a_local_documents_relative_self_is_the_base_its_refs_resolve_from() {
+        let urls = lock_then_load(
+            &[
+                (
+                    "openapi.yaml",
+                    "openapi: 3.2.0\n\
+                     components:\n\
+                     \x20 schemas:\n\
+                     \x20   Sub: { $ref: \"lib/sub.yaml\" }\n",
+                ),
+                (
+                    "lib/sub.yaml",
+                    "$self: ../shared/sub.yaml\n\
+                     type: object\n\
+                     properties:\n\
+                     \x20 tag: { $ref: \"tag.yaml\" }\n",
+                ),
+                (
+                    "lib/tag.yaml",
+                    "$ref: \"https://api.example.com/missing.yaml\"\n",
+                ),
+                (
+                    "shared/tag.yaml",
+                    "$ref: \"https://api.example.com/tag.yaml\"\n",
+                ),
+            ],
+            &[("https://api.example.com/tag.yaml", "type: string\n")],
+        );
+        assert_eq!(urls, ["https://api.example.com/tag.yaml"]);
+    }
+
+    /// A reference naming a loaded document by its opaque `$self` reaches that document, in the
+    /// lock as in the build: it is not refused as a non-http(s) `$ref` it cannot vendor.
+    #[test]
+    fn a_reference_to_an_opaque_self_reaches_its_document() {
+        let urls = lock_then_load(
+            &[
+                (
+                    "openapi.yaml",
+                    "openapi: 3.2.0\n\
+                     components:\n\
+                     \x20 schemas:\n\
+                     \x20   Lib: { $ref: \"lib.yaml#/$defs/Tag\" }\n\
+                     \x20   Tag: { $ref: \"urn:example:lib#/$defs/Tag\" }\n",
+                ),
+                (
+                    "lib.yaml",
+                    "$self: urn:example:lib\n\
+                     $defs:\n\
+                     \x20 Tag: { $ref: \"https://api.example.com/tag.yaml\" }\n",
+                ),
+            ],
+            &[("https://api.example.com/tag.yaml", "type: string\n")],
+        );
+        assert_eq!(urls, ["https://api.example.com/tag.yaml"]);
+    }
+
+    /// A fetched document's `$self` URL names it (#426): `b/tag.yaml`, fetched from beside
+    /// `a/pet.yaml`'s `$self` of `../b/pet.yaml`, refers back to `pet.yaml`, which is that
+    /// `$self`. The lock neither fetches it (the stub does not serve it, so a fetch is `E025`) nor
+    /// pins it, and the reference's extension target is found in `a/pet.yaml`, so the remote
+    /// reference held there is pinned.
+    #[test]
+    fn a_reference_to_a_remote_documents_self_url_is_neither_fetched_nor_pinned() {
+        let urls = lock_then_load(
+            &[(
+                "openapi.yaml",
+                "openapi: 3.2.0\n\
+                 components:\n\
+                 \x20 schemas:\n\
+                 \x20   Pet: { $ref: \"https://api.example.com/a/pet.yaml\" }\n",
+            )],
+            &[
+                (
+                    "https://api.example.com/a/pet.yaml",
+                    "$self: ../b/pet.yaml\n\
+                     type: object\n\
+                     x-defs:\n\
+                     \x20 Owner: { $ref: \"owner.yaml\" }\n\
+                     properties:\n\
+                     \x20 tag: { $ref: \"tag.yaml\" }\n",
+                ),
+                (
+                    "https://api.example.com/b/tag.yaml",
+                    "$ref: \"pet.yaml#/x-defs/Owner\"\n",
+                ),
+                ("https://api.example.com/b/owner.yaml", "type: string\n"),
+            ],
+        );
+        assert_eq!(
+            urls,
+            [
+                "https://api.example.com/a/pet.yaml",
+                "https://api.example.com/b/owner.yaml",
+                "https://api.example.com/b/tag.yaml",
+            ]
+        );
+    }
+
+    /// A local document's `http` `$self` names it (#426): `schemas/pet.yaml`, fetched from beside
+    /// the root's `$self`, refers to `../openapi.yaml`, which is that `$self`. The lock neither
+    /// fetches it (the stub does not serve it) nor pins it, and the reference's extension target
+    /// is found in the root, so the remote reference held there is pinned.
+    #[test]
+    fn a_reference_to_a_local_documents_http_self_is_neither_fetched_nor_pinned() {
+        let urls = lock_then_load(
+            &[(
+                "openapi.yaml",
+                "openapi: 3.2.0\n\
+                 $self: https://api.example.com/v1/openapi.yaml\n\
+                 x-defs:\n\
+                 \x20 Owner: { $ref: \"schemas/owner.yaml\" }\n\
+                 components:\n\
+                 \x20 schemas:\n\
+                 \x20   Pet: { $ref: \"schemas/pet.yaml\" }\n",
+            )],
+            &[
+                (
+                    "https://api.example.com/v1/schemas/pet.yaml",
+                    "$ref: \"../openapi.yaml#/x-defs/Owner\"\n",
+                ),
+                (
+                    "https://api.example.com/v1/schemas/owner.yaml",
+                    "type: string\n",
+                ),
+            ],
+        );
+        assert_eq!(
+            urls,
+            [
+                "https://api.example.com/v1/schemas/owner.yaml",
+                "https://api.example.com/v1/schemas/pet.yaml",
+            ]
+        );
+    }
+
+    /// A local document's relative `$self` path names it (#426): `shared/tag.yaml`, reached
+    /// through `lib/sub.yaml`'s `$self` of `../shared/sub.yaml`, refers to `sub.yaml`, which is
+    /// that `$self`. The decoy file at `shared/sub.yaml`, whose remote reference the stub would
+    /// fail with `E025`, is never read, and the reference's extension target is found in
+    /// `lib/sub.yaml`, so the remote reference it leads to is pinned.
+    #[test]
+    fn a_reference_to_a_local_documents_relative_self_never_reads_the_file_there() {
+        let urls = lock_then_load(
+            &[
+                (
+                    "openapi.yaml",
+                    "openapi: 3.2.0\n\
+                     components:\n\
+                     \x20 schemas:\n\
+                     \x20   Sub: { $ref: \"lib/sub.yaml\" }\n",
+                ),
+                (
+                    "lib/sub.yaml",
+                    "$self: ../shared/sub.yaml\n\
+                     type: object\n\
+                     x-defs:\n\
+                     \x20 Owner: { $ref: \"owner.yaml\" }\n\
+                     properties:\n\
+                     \x20 tag: { $ref: \"tag.yaml\" }\n",
+                ),
+                ("shared/tag.yaml", "$ref: \"sub.yaml#/x-defs/Owner\"\n"),
+                (
+                    "shared/owner.yaml",
+                    "$ref: \"https://api.example.com/owner.yaml\"\n",
+                ),
+                (
+                    "shared/sub.yaml",
+                    "$ref: \"https://api.example.com/missing.yaml\"\n",
+                ),
+            ],
+            &[("https://api.example.com/owner.yaml", "type: string\n")],
+        );
+        assert_eq!(urls, ["https://api.example.com/owner.yaml"]);
+    }
+
+    /// A reference through an opaque `$self` into a specification extension is walked at its
+    /// target: `urn:example:lib#/x-defs/Owner` addresses `lib.yaml`'s extension, so the remote
+    /// reference held there is pinned, in the lock as the build reads it.
+    #[test]
+    fn a_reference_through_an_opaque_self_into_an_extension_pins_what_it_holds() {
+        let urls = lock_then_load(
+            &[
+                (
+                    "openapi.yaml",
+                    "openapi: 3.2.0\n\
+                     components:\n\
+                     \x20 schemas:\n\
+                     \x20   Lib: { $ref: \"lib.yaml#/$defs/Tag\" }\n\
+                     \x20   Owner: { $ref: \"urn:example:lib#/x-defs/Owner\" }\n",
+                ),
+                (
+                    "lib.yaml",
+                    "$self: urn:example:lib\n\
+                     $defs:\n\
+                     \x20 Tag: { type: string }\n\
+                     x-defs:\n\
+                     \x20 Owner: { $ref: \"https://api.example.com/owner.yaml\" }\n",
+                ),
+            ],
+            &[("https://api.example.com/owner.yaml", "type: string\n")],
+        );
+        assert_eq!(urls, ["https://api.example.com/owner.yaml"]);
     }
 
     /// The linked reqwest/rustls stack itself (#292): `spargen lock`'s fetch path completing a TLS
