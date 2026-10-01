@@ -5573,6 +5573,26 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(parameter.provenance.clone()),
             )
         };
+        if let Some(path) = uninhabited_parameter_part(&self.graph, ty) {
+            // `false`, or an `allOf` whose members meet empty, admits no value at all (#407).
+            // Nothing is nested, so "nested arrays or objects" would describe nothing the author
+            // wrote; name the schema that admits nothing instead.
+            let at = format!("{}{path}", parameter.name);
+            Diagnostic::error(
+                Code::UnsupportedParameterStyle,
+                parameter.provenance.clone(),
+            )
+            .message(format!(
+                "parameter schema `{at}` is uninhabited: no value satisfies it (`false`, or an \
+                 `allOf` whose members conflict), so simple/form/deepObject serialization has no \
+                 token for it"
+            ))
+            .remedy(format!(
+                "give `{at}` a schema some value satisfies, or remove it"
+            ))
+            .emit(self.diags);
+            return None;
+        }
         if let Some(property) = unconstrained_parameter_property(&self.graph, ty) {
             // Most often a `required` name no `properties` entry declares, which is a required
             // field typed by `additionalProperties` and unconstrained without one (#140). An
@@ -7459,6 +7479,54 @@ fn unconstrained_parameter_property(graph: &TypeGraph, ty: Ty) -> Option<String>
         .iter()
         .find(|field| matches!(graph.get(field.ty.id).map(|d| &d.kind), Some(TypeKind::Any)))
         .map(|field| field.name.wire.clone())
+}
+
+/// The path, relative to the parameter, of the first uninhabited ([`TypeKind::Never`]) schema at a
+/// position simple/form/deepObject serialization would otherwise accept, which
+/// [`parameter_shape_supported`] refuses because no value has a token: `""` for the parameter
+/// itself, `.name` for an object property, `.*` for its `additionalProperties`, `[]` for an
+/// array's items, and `[i]` for a tuple's. Only those positions are searched, so an uninhabited
+/// schema below a nested array or object stays reported as the nesting. `None` when there is no
+/// such schema.
+fn uninhabited_parameter_part(graph: &TypeGraph, ty: Ty) -> Option<String> {
+    fn never(graph: &TypeGraph, ty: Ty, visiting: &mut HashSet<TypeId>) -> bool {
+        if !visiting.insert(ty.id) {
+            return false;
+        }
+        let found = match graph.get(ty.id).map(|definition| &definition.kind) {
+            Some(TypeKind::Never) => true,
+            Some(TypeKind::Union(union)) => union
+                .variants
+                .iter()
+                .any(|variant| never(graph, variant.ty, visiting)),
+            _ => false,
+        };
+        visiting.remove(&ty.id);
+        found
+    }
+    let mut visiting = HashSet::new();
+    if never(graph, ty, &mut visiting) {
+        return Some(String::new());
+    }
+    match &graph.get(ty.id)?.kind {
+        TypeKind::Array(item) => never(graph, **item, &mut visiting).then(|| "[]".to_owned()),
+        TypeKind::Tuple(items) => items
+            .iter()
+            .position(|item| never(graph, *item, &mut visiting))
+            .map(|index| format!("[{index}]")),
+        TypeKind::Struct(object) => object
+            .fields
+            .iter()
+            .find(|field| never(graph, field.ty, &mut visiting))
+            .map(|field| format!(".{}", field.name.wire))
+            .or_else(|| match &object.additional {
+                AdditionalProps::Typed(value) => {
+                    never(graph, **value, &mut visiting).then(|| ".*".to_owned())
+                }
+                AdditionalProps::Deny | AdditionalProps::Allow => None,
+            }),
+        _ => None,
+    }
 }
 
 fn parameter_shape_supported(graph: &TypeGraph, ty: Ty) -> bool {
