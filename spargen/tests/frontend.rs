@@ -10909,6 +10909,47 @@ paths:
             );
         }
     }
+    // A union with an uninhabited member still admits its other members' values, so it is not
+    // uninhabited; only the member is, and the message names that member rather than the union.
+    let partly = [
+        ("form", "{ oneOf: [{ type: string }, false] }", "`f`"),
+        (
+            "deepObject",
+            "{ type: object, properties: { a: { anyOf: [{ type: integer }, false] } } }",
+            "`f.a`",
+        ),
+    ];
+    for (style, schema, named) in partly {
+        let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+            assert_eq!(messages.len(), 1, "{schema}: {report:#?}");
+            assert!(
+                messages[0].contains(&format!(
+                    "{named} has a `oneOf`/`anyOf` member that is uninhabited"
+                )) && !messages[0].contains(&format!("{named} is uninhabited"))
+                    && !messages[0].contains("nested arrays or objects"),
+                "{schema}: {messages:?}"
+            );
+        }
+    }
+    // One `E010` per parameter, for the first cause in a fixed order: an uninhabited part, then
+    // an unconstrained property, then nesting. So an uninhabited property is reported while a
+    // nested sibling is not, and the sibling surfaces once the first is fixed.
+    let both = TEMPLATE.replace("STYLE", "deepObject").replace(
+        "SCHEMA",
+        "{ type: object, properties: { a: false, b: { type: object } } }",
+    );
+    for report in [generate(&both), check(&both)] {
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("`f.a` is uninhabited")
+                && !messages[0].contains("nested arrays or objects"),
+            "{messages:?}"
+        );
+    }
     let nested = TEMPLATE.replace("STYLE", "deepObject").replace(
         "SCHEMA",
         "{ type: object, properties: { a: { type: object, properties: { b: false } } } }",
