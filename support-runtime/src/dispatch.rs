@@ -1085,16 +1085,14 @@ mod tests {
     /// A provider under a scheme that takes no token is a registration mismatch, and it must stay
     /// one regardless of whether a refresh would have worked: the provider is never asked.
     ///
-    /// Not asking is a break against master, where `apply_credential` awaited the provider for
-    /// every `AuthKind`, so a `Credential::Provider` under an `http basic` scheme *was* called. A
-    /// failing one propagated there and then, as the request-construction error's source, which
-    /// downcast to `AuthError`; a succeeding one had its token discarded by the `Basic` arm on the
-    /// next line and returned this same mismatch. So no succeeding call becomes a failing one, and
-    /// what changes for a consumer is that the round trip to the identity provider is gone and the
-    /// cause no longer downcasts to `AuthError`.
+    /// Not asking means no round trip to the identity provider, and the outcome does not depend
+    /// on what the provider would have returned: a provider that would fail and one that would
+    /// succeed give the same mismatch, because a token cannot satisfy an `http basic` scheme
+    /// either way. The test registers a failing provider and asserts both that it is never called
+    /// and that its `AuthError` appears nowhere in the error's chain.
     ///
-    /// What replaces it is typed: `RequestError::CredentialMismatch`, naming the scheme, the kind
-    /// it carries, and the kind registered, and ending the chain, so a consumer routes it without
+    /// The mismatch is typed: `RequestError::CredentialMismatch`, naming the scheme, the kind it
+    /// carries, and the kind registered, and ending the chain, so a consumer routes it without
     /// matching on text.
     #[test]
     fn a_token_provider_under_a_basic_scheme_is_a_mismatch_without_calling_it() {
