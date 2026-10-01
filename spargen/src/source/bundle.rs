@@ -362,9 +362,15 @@ impl InputBundle {
             },
         );
         self.values.insert(id, parsed);
-        self.origins.insert(id, Origin::Remote(url.to_owned()));
+        // The document's base URI is where its fetch was retrieved from (RFC 3986 §5.1.3): after a
+        // redirect, that and not `url` is what its relative references resolve against (#405).
+        // A reference that reaches the document by its retrieval URL — its own fragment-only
+        // references do, once made absolute — finds it there, unless that URL was loaded first.
+        let base = entry.base_url();
+        self.origins.insert(id, Origin::Remote(base.to_owned()));
         self.url_to_file.insert(url.to_owned(), id);
-        self.register_self_identity(id, Some(url));
+        self.url_to_file.entry(base.to_owned()).or_insert(id);
+        self.register_self_identity(id, Some(base));
         Ok(Some(id))
     }
 

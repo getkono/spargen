@@ -259,6 +259,68 @@ fn a_redirect_is_followed_and_pinned_under_the_url_the_spec_names() {
     assert_eq!(report.refs[0].sha256, sha256_hex(TAG_YAML.as_bytes()));
 }
 
+/// A redirected document's relative `$ref`s resolve against the URL it was retrieved from, not the
+/// one the spec names (RFC 3986 §5.1.3, #405): `tag.yaml` inside `/old/pet.yaml`, which redirects
+/// to `/new/pet.yaml`, is `/new/tag.yaml`. `/old/tag.yaml` does not exist, so resolving against
+/// the requested URL fails the lock with `E025`. The lock records the retrieval URL beside the
+/// pin, and generation resolves the vendored copy's references against it, offline — the
+/// relative one and the in-document one, which is made absolute against that same base.
+#[test]
+fn a_redirected_documents_relative_refs_resolve_against_the_url_it_was_retrieved_from() {
+    const MOVED_PET_YAML: &str = "type: object\n\
+                                  required: [id]\n\
+                                  properties:\n  \
+                                  id: { type: integer, format: int64 }\n  \
+                                  tag: { $ref: 'tag.yaml' }\n  \
+                                  owner: { $ref: '#/$defs/Owner' }\n\
+                                  $defs:\n  \
+                                  Owner:\n    \
+                                  type: object\n    \
+                                  required: [name]\n    \
+                                  properties:\n      \
+                                  name: { type: string }\n";
+    let server = MockServer::start(&[
+        ("/old/pet.yaml", Reply::Redirect("/new/pet.yaml")),
+        ("/new/pet.yaml", Reply::Body(MOVED_PET_YAML)),
+        ("/new/tag.yaml", Reply::Body(TAG_YAML)),
+    ]);
+    let requested = server.url("/old/pet.yaml");
+    let retrieved = server.url("/new/pet.yaml");
+    let tag_url = server.url("/new/tag.yaml");
+    let (_temp, spec_path) = workspace(&requested);
+    let spec = Spec::new(spec_path.clone());
+
+    let report = spargen::vendor(&spec).unwrap_or_else(|r| panic!("{r:#?}"));
+
+    assert_eq!(
+        server.hits(),
+        ["/old/pet.yaml", "/new/pet.yaml", "/new/tag.yaml"]
+    );
+    let urls: Vec<&str> = report.refs.iter().map(|r| r.url.as_str()).collect();
+    assert_eq!(urls, [tag_url.as_str(), requested.as_str()]);
+    let lock = std::fs::read_to_string(&report.lock_path).unwrap();
+    assert!(
+        lock.contains(&format!(
+            "url = \"{requested}\"\nretrieval_url = \"{retrieved}\"\n"
+        )),
+        "{lock}"
+    );
+    assert!(
+        !lock.contains(&format!("url = \"{tag_url}\"\nretrieval_url")),
+        "an unredirected pin records no retrieval URL: {lock}"
+    );
+
+    let out = spec_path.with_file_name("client.rs");
+    let generated =
+        spargen::generate(&spec.clone().build(out.clone()).cargo(CargoIntegration::Off));
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    let code = std::fs::read_to_string(&out).unwrap();
+    assert!(code.contains("pub label"), "{code}");
+    assert!(code.contains("pub tag"), "{code}");
+    assert!(code.contains("pub name"), "{code}");
+    assert_eq!(server.hits().len(), 3, "generation must not fetch");
+}
+
 #[test]
 fn a_refused_connection_is_e025_naming_the_url() {
     // Bind and release a port so nothing is listening on it.

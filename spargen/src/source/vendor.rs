@@ -20,8 +20,19 @@ use super::{parse_json, parse_yaml, SpannedValue};
 /// The network seam used by [`vendor`]. Real fetching lives in [`ReqwestFetcher`]; tests supply a
 /// stub so the vendor logic is exercised without HTTP.
 pub(crate) trait RemoteFetch {
-    /// Fetch the raw bytes at an absolute `http`/`https` `url`, or an error message.
-    fn fetch(&self, url: &str) -> Result<Vec<u8>, String>;
+    /// Fetch the document at an absolute `http`/`https` `url`, following redirects, or an error
+    /// message.
+    fn fetch(&self, url: &str) -> Result<Fetched, String>;
+}
+
+/// A fetched remote document.
+pub(crate) struct Fetched {
+    /// The raw bytes.
+    pub(crate) bytes: Vec<u8>,
+    /// The URL the bytes were retrieved from: the requested URL, or where its redirects ended.
+    /// It is the document's base URI (RFC 3986 §5.1.3), so its relative `$ref`s resolve against
+    /// it.
+    pub(crate) url: String,
 }
 
 /// One vendored remote document, reported back from [`crate::vendor`].
@@ -93,7 +104,8 @@ struct ScanDoc {
 /// that performs network I/O, and only through the injected `fetcher`.
 ///
 /// The walk recurses through relative-file refs (to catch remote refs nested in local sub-files)
-/// and through fetched remote documents (whose relative refs resolve against their own URL). It
+/// and through fetched remote documents (whose relative refs resolve against the URL each was
+/// retrieved from, after redirects). It
 /// follows exactly the references the build's bundle loader does: none inside a specification
 /// extension, unless a followed reference addresses that extension's contents, so `spargen lock`
 /// pins every document a build reads and fetches nothing a build ignores. Recursion parsing is best-effort: a fetched doc that does not parse is still vendored, and any
@@ -180,8 +192,11 @@ pub(crate) fn vendor(
                     if !seen_remote.insert(url.clone()) {
                         continue;
                     }
-                    let bytes = match fetcher.fetch(&url) {
-                        Ok(bytes) => bytes,
+                    let Fetched {
+                        bytes,
+                        url: retrieved,
+                    } = match fetcher.fetch(&url) {
+                        Ok(fetched) => fetched,
                         Err(error) => {
                             // A fetch failure is a fact about the network, not the document:
                             // the ref is well-formed and exactly what this step exists to pin.
@@ -218,10 +233,14 @@ pub(crate) fn vendor(
                         );
                         continue;
                     }
+                    // The pin stays keyed by the URL the spec names, which is what a build looks
+                    // up; a redirect's end is recorded beside it, because it is the base the
+                    // document's own relative references resolve against.
                     lock.upsert(RemoteEntry {
                         url: url.clone(),
                         sha256: sha256.clone(),
                         path: rel_path.clone(),
+                        retrieval_url: (retrieved != url).then(|| retrieved.clone()),
                     });
                     refs.push(VendoredRef {
                         url: url.clone(),
@@ -234,7 +253,7 @@ pub(crate) fn vendor(
                             queue.push_back((docs.len(), JsonPointer::root()));
                             docs.push(ScanDoc {
                                 value,
-                                base: Base::Remote(url),
+                                base: Base::Remote(retrieved),
                             });
                         }
                     }
@@ -318,7 +337,7 @@ pub(crate) struct ReqwestFetcher;
 
 #[cfg(feature = "remote-fetch")]
 impl RemoteFetch for ReqwestFetcher {
-    fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+    fn fetch(&self, url: &str) -> Result<Fetched, String> {
         // What `reqwest::blocking::get` does: a default client per fetch.
         fetch_with(reqwest::blocking::Client::builder(), url)
     }
@@ -329,16 +348,28 @@ impl RemoteFetch for ReqwestFetcher {
 /// to it and otherwise runs exactly the path `spargen lock` runs, so the handshake, the root
 /// store, and ALPN under the linked reqwest/rustls stack are reached by a test.
 #[cfg(feature = "remote-fetch")]
-fn fetch_with(builder: reqwest::blocking::ClientBuilder, url: &str) -> Result<Vec<u8>, String> {
+fn fetch_with(builder: reqwest::blocking::ClientBuilder, url: &str) -> Result<Fetched, String> {
     let response = builder
         .build()
         .and_then(|client| client.get(url).send())
         .and_then(reqwest::blocking::Response::error_for_status)
         .map_err(|error| with_causes(&error))?;
-    response
+    // Where the client's redirects ended; read before `bytes` consumes the response. The client
+    // normalizes what it requests (`HTTPS://Host` is `https://host/`), so an unredirected fetch
+    // is reported under the spelling it was asked for, not the normalized one.
+    let retrieved = if reqwest::Url::parse(url).ok().as_ref() == Some(response.url()) {
+        url.to_owned()
+    } else {
+        response.url().to_string()
+    };
+    let bytes = response
         .bytes()
         .map(|bytes| bytes.to_vec())
-        .map_err(|error| with_causes(&error))
+        .map_err(|error| with_causes(&error))?;
+    Ok(Fetched {
+        bytes,
+        url: retrieved,
+    })
 }
 
 /// `error` followed by each error in its `source()` chain, `: `-separated.
@@ -372,10 +403,14 @@ mod tests {
     }
 
     impl RemoteFetch for StubFetcher {
-        fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+        fn fetch(&self, url: &str) -> Result<Fetched, String> {
             self.docs
                 .get(url)
                 .cloned()
+                .map(|bytes| Fetched {
+                    bytes,
+                    url: url.to_owned(),
+                })
                 .ok_or_else(|| format!("404 {url}"))
         }
     }
@@ -571,7 +606,7 @@ mod tests {
         struct TrustingFetcher(reqwest::Certificate);
 
         impl RemoteFetch for TrustingFetcher {
-            fn fetch(&self, url: &str) -> Result<Vec<u8>, String> {
+            fn fetch(&self, url: &str) -> Result<Fetched, String> {
                 fetch_with(
                     reqwest::blocking::Client::builder().add_root_certificate(self.0.clone()),
                     url,

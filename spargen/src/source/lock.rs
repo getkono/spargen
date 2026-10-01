@@ -18,7 +18,9 @@
 //! ```
 //!
 //! `path` is relative to the vendor directory ([`VENDOR_DIR`], `.spargen/vendor/` beside the spec),
-//! so the lock carries no machine-specific absolute paths.
+//! so the lock carries no machine-specific absolute paths. A pin whose fetch was redirected also
+//! carries `retrieval_url = "…"` after `url`: where the redirects ended, which is the base its
+//! relative `$ref`s resolve against.
 
 #[cfg(feature = "remote-fetch")]
 use std::fmt::Write as _;
@@ -41,6 +43,17 @@ pub(crate) struct RemoteEntry {
     pub(crate) sha256: String,
     /// Path of the vendored copy, relative to [`VENDOR_DIR`].
     pub(crate) path: String,
+    /// Where `url`'s redirects ended, when they ended somewhere else: the document's base URI
+    /// (RFC 3986 §5.1.3), against which its relative `$ref`s resolve. `None` (no
+    /// `retrieval_url` key) when the document was retrieved from `url` itself.
+    pub(crate) retrieval_url: Option<String>,
+}
+
+impl RemoteEntry {
+    /// The URL the document was retrieved from: its base URI.
+    pub(crate) fn base_url(&self) -> &str {
+        self.retrieval_url.as_deref().unwrap_or(&self.url)
+    }
 }
 
 /// The parsed `spargen.lock`: a set of pinned remote documents, kept sorted by URL.
@@ -89,6 +102,9 @@ impl Lock {
             out.push('\n');
             let _ = writeln!(out, "[[remote]]");
             let _ = writeln!(out, "url = {}", toml_string(&entry.url));
+            if let Some(retrieval_url) = &entry.retrieval_url {
+                let _ = writeln!(out, "retrieval_url = {}", toml_string(retrieval_url));
+            }
             let _ = writeln!(out, "sha256 = {}", toml_string(&entry.sha256));
             let _ = writeln!(out, "path = {}", toml_string(&entry.path));
         }
@@ -131,6 +147,7 @@ impl Lock {
                 })?;
                 match key {
                     "url" => entry.url = Some(text),
+                    "retrieval_url" => entry.retrieval_url = Some(text),
                     "sha256" => entry.sha256 = Some(text),
                     "path" => entry.path = Some(text),
                     other => {
@@ -179,6 +196,15 @@ impl Lock {
         // absolute path, a drive/root prefix, or any `..` component is rejected here — before any
         // file is opened — rather than trusting the on-disk lock.
         validate_vendor_path(&entry.path)?;
+        // A base URI is what the document's relative references resolve against, and only an
+        // `http`/`https` fetch can have produced one.
+        if let Some(retrieval_url) = &entry.retrieval_url {
+            if !(retrieval_url.starts_with("http://") || retrieval_url.starts_with("https://")) {
+                return Err(LockError(format!(
+                    "spargen.lock: retrieval_url `{retrieval_url}` must be an http(s) URL"
+                )));
+            }
+        }
         self.entries.push(entry);
         Ok(())
     }
@@ -217,6 +243,7 @@ struct PartialEntry {
     url: Option<String>,
     sha256: Option<String>,
     path: Option<String>,
+    retrieval_url: Option<String>,
 }
 
 impl PartialEntry {
@@ -225,6 +252,7 @@ impl PartialEntry {
             url: self.url?,
             sha256: self.sha256?,
             path: self.path?,
+            retrieval_url: self.retrieval_url,
         })
     }
 }
@@ -326,11 +354,13 @@ mod tests {
             url: "https://b.example/z.yaml".to_owned(),
             sha256: "beef".to_owned(),
             path: "b.example/z.yaml".to_owned(),
+            retrieval_url: Some("https://b.example/moved/z.yaml".to_owned()),
         });
         lock.upsert(RemoteEntry {
             url: "https://a.example/y.yaml".to_owned(),
             sha256: "cafe".to_owned(),
             path: "a.example/y.yaml".to_owned(),
+            retrieval_url: None,
         });
         let toml = lock.to_toml();
         // Sorted by URL regardless of insertion order.
@@ -361,6 +391,27 @@ mod tests {
             "version = 1\n[[remote]]\nurl = \"https://h/x\"\nsha256 = \"a\"\npath = \"/etc/passwd\"\n";
         let err = Lock::parse(absolute).unwrap_err();
         assert!(err.0.contains("relative"), "{err}");
+    }
+
+    #[test]
+    fn a_retrieval_url_is_read_as_the_base_and_must_be_http() {
+        let redirected = "version = 1\n[[remote]]\nurl = \"https://h/old.yaml\"\n\
+                          retrieval_url = \"https://h/new.yaml\"\nsha256 = \"a\"\npath = \"h/old.yaml\"\n";
+        let lock = Lock::parse(redirected).unwrap();
+        assert_eq!(
+            lock.get("https://h/old.yaml").unwrap().base_url(),
+            "https://h/new.yaml"
+        );
+        let direct = "version = 1\n[[remote]]\nurl = \"https://h/a.yaml\"\nsha256 = \"a\"\npath = \"h/a.yaml\"\n";
+        let lock = Lock::parse(direct).unwrap();
+        assert_eq!(
+            lock.get("https://h/a.yaml").unwrap().base_url(),
+            "https://h/a.yaml"
+        );
+
+        let file = redirected.replace("https://h/new.yaml", "file:///etc/new.yaml");
+        let err = Lock::parse(&file).unwrap_err();
+        assert!(err.0.contains("http(s)"), "{err}");
     }
 
     #[test]
