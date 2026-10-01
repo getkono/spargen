@@ -7333,7 +7333,8 @@ fn a_gen_named_spec_compiles_under_edition_2024() {
 /// The RFC 9457 shape from #268: each documented error status narrows the shared `Problem`'s
 /// `type` with a `const`, spelled as an `allOf` member (`404`) and as `$ref` siblings (`409`). The
 /// positions `open_narrowing` leaves closed sit beside them: a union of narrowed problems (`400`),
-/// a narrowing inside a component (`410`), and a request body.
+/// a narrowing inside a component (`410`), a set narrowed against a `uuid` string in either member
+/// order (`428`, `429`), and a request body.
 const OPEN_NARROWING_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Problems, version: 1.0.0 }
@@ -7476,6 +7477,32 @@ paths:
                       - oneOf: [{ const: a }, { type: string }]
                       - { enum: [a, b, c] }
                       - { type: string }
+        "428":
+          description: a set narrowed against a uuid string after a plain string opened it
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: ["00000000-0000-0000-0000-000000000001"] }
+                      - { type: string, format: uuid }
+        "429":
+          description: the same set with the uuid string first and the plain string last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string, format: uuid }
+                      - { enum: ["00000000-0000-0000-0000-000000000001"] }
+                      - { type: string }
 components:
   schemas:
     Problem:
@@ -7522,6 +7549,7 @@ fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
     // `424`/`425` `kind`, whose union narrows to one branch. The `{enum: [a, b, c]}` members of
     // `422`, `423`, `426`, and `427` open in place too, as intermediates no field uses: a union
     // that keeps two branches meets them into closed branch sets (`tests/open.rs` decodes both).
+    // The `428`/`429` `kind`, narrowed against a `uuid` string, stays closed in either order.
     // Only an open enum emits `as_str`.
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
     assert_eq!(
@@ -7670,6 +7698,26 @@ fn a_union_meeting_an_open_set_decodes_in_either_member_order() {
     }
     closed_beside_another!(PostProblemsError::Status426, "union last");
     closed_beside_another!(PostProblemsError::Status427, "union first");
+}
+
+#[test]
+fn a_set_narrowed_against_a_uuid_stays_closed_in_either_member_order() {
+    // `428` opens the set before the `uuid` string meets it; `429` meets the `uuid` string first.
+    // Either way the listed value decodes and an unlisted one, a uuid or not, is refused.
+    macro_rules! closed_against_uuid {
+        ($status:expr, $order:literal) => {
+            decode($status, r#"{"kind":"00000000-0000-0000-0000-000000000001"}"#)
+                .unwrap_or_else(|error| panic!("{}: listed: {error}", $order));
+            assert!(
+                decode($status, r#"{"kind":"00000000-0000-0000-0000-000000000002"}"#).is_err(),
+                "{}: unlisted uuid",
+                $order
+            );
+            assert!(decode($status, r#"{"kind":"z"}"#).is_err(), "{}: unlisted string", $order);
+        };
+    }
+    closed_against_uuid!(PostProblemsError::Status428, "uuid last");
+    closed_against_uuid!(PostProblemsError::Status429, "uuid first");
 }
 
 #[test]
