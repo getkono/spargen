@@ -48,11 +48,42 @@ pub fn build_url_on(
     } else {
         format!("{base_path}/{request_path}")
     };
-    // `Url::set_path` leaves `%`, `;`, `=`, `,` and `.` alone, so pre-encoded values and the
-    // `matrix`/`label` style prefixes survive it unchanged.
+    // `Url::set_path` removes `.` and `..` segments, in every spelling the URL Standard gives
+    // them (`%2E`, `.%2E`, ...), so percent-encoding a dot does not protect it. A rendered path
+    // value forming such a segment would silently re-target the request (`/users/../keys` is
+    // sent to `/keys`), so it is refused instead. A special-scheme URL also splits on `\`.
+    if let Some(segment) = request_path.split(['/', '\\']).find(|s| is_dot_segment(s)) {
+        return Err(Error::request_message(format!(
+            "request path contains the dot segment `{segment}`, which URL normalization would \
+             remove and so send the request to a different resource"
+        )));
+    }
+    // Otherwise `Url::set_path` leaves `%`, `;`, `=`, `,` and `.` alone, so pre-encoded values
+    // and the `matrix`/`label` style prefixes survive it unchanged.
     url.set_path(&joined);
     append_query(&mut url, query);
     Ok(url)
+}
+
+/// Whether `segment` is a `.` or `..` path segment under the URL Standard: `.` or `%2E`, or
+/// `..`, `.%2E`, `%2E.` or `%2E%2E`, each `%2E` matched ASCII case-insensitively.
+fn is_dot_segment(segment: &str) -> bool {
+    let rest = segment
+        .strip_prefix('.')
+        .or_else(|| strip_encoded_dot(segment));
+    match rest {
+        Some("") => true,
+        Some(rest) => rest == "." || strip_encoded_dot(rest) == Some(""),
+        None => false,
+    }
+}
+
+/// `segment` without a leading `%2E` (either case), if it starts with one.
+fn strip_encoded_dot(segment: &str) -> Option<&str> {
+    segment
+        .get(..3)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("%2e"))
+        .map(|_| &segment[3..])
 }
 
 /// Resolve the base URL for one request: the client's own, or a per-operation server override.
@@ -1483,7 +1514,7 @@ mod tests {
         assert_eq!(request.url().query(), None, "{}", request.url());
     }
 
-    use super::{build_url, build_url_on, build_url_with_query_string, StatusSpec};
+    use super::{build_url, build_url_on, build_url_with_query_string, is_dot_segment, StatusSpec};
 
     fn core_at(base: &str) -> ClientCore {
         ClientCore::new(base).unwrap()
@@ -1555,6 +1586,97 @@ mod tests {
         assert_eq!(url.path(), "/map/;position=B,150,R,100");
         let labelled = build_url(&core, "/files/.tar%2Egz", &[]).unwrap();
         assert_eq!(labelled.path(), "/files/.tar%2Egz");
+    }
+
+    /// Every spelling the URL Standard treats as a `.` or `..` path segment.
+    const DOT_SEGMENTS: [&str; 12] = [
+        ".", "%2e", "%2E", "..", ".%2e", ".%2E", "%2e.", "%2E.", "%2e%2e", "%2E%2E", "%2e%2E",
+        "%2E%2e",
+    ];
+
+    #[test]
+    fn dot_segment_spellings_are_exactly_what_set_path_removes() {
+        // Pins the guard's spelling list to `url`'s own normalization: each listed segment is
+        // removed (or climbs) under `set_path`, and near-misses survive it untouched.
+        let mut url = reqwest::Url::parse("https://example.com/").unwrap();
+        for segment in DOT_SEGMENTS {
+            url.set_path(&format!("/a/{segment}/b"));
+            assert_ne!(url.path(), format!("/a/{segment}/b"), "{segment}");
+            assert!(is_dot_segment(segment), "{segment}");
+        }
+        for segment in [
+            "...",
+            ".a",
+            "a.",
+            "%2e%2e%2e",
+            "%2",
+            "%2F..",
+            ".%2",
+            "",
+            "a..b",
+        ] {
+            url.set_path(&format!("/a/{segment}/b"));
+            assert_eq!(url.path(), format!("/a/{segment}/b"), "{segment}");
+            assert!(!is_dot_segment(segment), "{segment}");
+        }
+    }
+
+    #[test]
+    fn build_url_refuses_a_path_value_that_forms_a_dot_segment() {
+        // #406: `/users/{p}/keys` with `p = ".."` must not be sent to `/v1/keys`.
+        let core = core_at("https://api.example.com/v1/");
+        for segment in DOT_SEGMENTS {
+            let error =
+                build_url(&core, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
+            assert!(
+                matches!(error, Error::RequestConstruction(RequestError::Other(_))),
+                "{segment}: {error:?}"
+            );
+            let cause = std::error::Error::source(&error).map(ToString::to_string);
+            assert!(
+                cause.as_deref().is_some_and(|c| c.contains("dot segment")),
+                "{cause:?}"
+            );
+            // The trailing segment, and the whole request path, are segments too.
+            build_url(&core, &format!("/users/{segment}"), &[]).expect_err(segment);
+            build_url(&core, segment, &[]).expect_err(segment);
+        }
+        // A special-scheme URL treats `\` as a separator as well.
+        build_url(&core, "/users\\..\\keys", &[]).expect_err("backslash");
+        // Through every builder.
+        build_url_on(&core, Some("/v2/"), "/users/../keys", &[]).expect_err("override");
+        build_url_with_query_string(&core, "/users/%2E%2E/keys", &[], Some("a=b"))
+            .expect_err("querystring");
+    }
+
+    #[test]
+    fn a_label_value_that_is_only_its_prefix_is_refused_as_a_whole_segment() {
+        // The `label` undefined row is `.`; as a whole segment no encoding of it survives
+        // `set_path`, so the request is refused rather than re-targeted.
+        let rendered = crate::serialize_label(
+            &serde_json::Value::Null,
+            false,
+            crate::PercentEncoding::Unreserved,
+        )
+        .unwrap();
+        assert_eq!(rendered, ".");
+        let core = core_at("https://example.com/v1");
+        build_url(&core, &format!("/colors/{rendered}/shades"), &[]).expect_err("label");
+    }
+
+    #[test]
+    fn build_url_keeps_dots_that_do_not_form_a_whole_segment() {
+        let core = core_at("https://api.example.com/v1/");
+        for path in [
+            "/users/.../keys",
+            "/files/.tar.gz",
+            "/v../x",
+            "/a/.%2e%2e",
+            "/x.",
+        ] {
+            let url = build_url(&core, path, &[]).unwrap();
+            assert_eq!(url.path(), format!("/v1{path}"));
+        }
     }
 
     #[test]

@@ -288,8 +288,9 @@ pub fn serialize_matrix<T: Serialize>(
 
 /// Serialize one `style: label` path parameter, including its leading `.`.
 ///
-/// A serialization that is exactly `.` or `..` is emitted as `%2E`/`%2E%2E`; otherwise URL path
-/// normalization would remove it as a dot segment and silently change the request target.
+/// A serialization that is exactly `.` or `..` is returned as it is. Where it forms a whole path
+/// segment, `Url::set_path` would remove it in any spelling (`%2E` included), so the URL builder
+/// refuses that path rather than let it re-target the request.
 pub fn serialize_label<T: Serialize>(
     value: &T,
     explode: bool,
@@ -320,12 +321,7 @@ pub fn serialize_label<T: Serialize>(
         }
         value => scalar(&value, encoding)?,
     };
-    let labelled = format!(".{rendered}");
-    Ok(match labelled.as_str() {
-        "." => "%2E".to_owned(),
-        ".." => "%2E%2E".to_owned(),
-        _ => labelled,
-    })
+    Ok(format!(".{rendered}"))
 }
 
 /// Serialize one `style: form` value into fully-encoded `name=value` query or cookie fragments.
@@ -661,8 +657,9 @@ mod tests {
 
     #[test]
     fn label_table_rows() {
-        // The undefined row is `.`, which must not survive as a removable dot segment.
-        assert_eq!(serialize_label(&undefined(), false, U).unwrap(), "%2E");
+        // The undefined row is `.`, exactly as the specification's table gives it; the URL builder,
+        // not this serializer, refuses it where it forms a whole segment.
+        assert_eq!(serialize_label(&undefined(), false, U).unwrap(), ".");
         assert_eq!(serialize_label(&string(), false, U).unwrap(), ".blue");
         assert_eq!(
             serialize_label(&array(), false, U).unwrap(),
@@ -672,7 +669,7 @@ mod tests {
             serialize_label(&object(), false, U).unwrap(),
             ".B,150,G,200,R,100"
         );
-        assert_eq!(serialize_label(&undefined(), true, U).unwrap(), "%2E");
+        assert_eq!(serialize_label(&undefined(), true, U).unwrap(), ".");
         assert_eq!(serialize_label(&string(), true, U).unwrap(), ".blue");
         assert_eq!(
             serialize_label(&array(), true, U).unwrap(),
