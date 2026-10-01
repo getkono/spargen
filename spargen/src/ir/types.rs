@@ -344,13 +344,23 @@ pub(crate) enum UnionStrategy {
         /// order: each `mapping` key naming the variant's member in document order, then its
         /// implicit component name unless a `mapping` key claims that value. Deserialization
         /// accepts every entry; serialization writes the first. Empty for a variant routed by
-        /// `categories`, and for an object variant reached only as the `default_variant` fallback.
+        /// `categories`, for an object variant reached only as the `default_variant` fallback, and
+        /// for an `untagged` variant.
         tags: Vec<Vec<String>>,
         /// The JSON category per non-object variant, parallel to [`Union::variants`].
         categories: Vec<Option<JsonCategory>>,
-        /// OpenAPI 3.2 `defaultMapping`: the variant used when the tag is absent or unrecognized.
-        /// Without one, either case is a deserialization error.
+        /// OpenAPI 3.2 `defaultMapping`: the variant used when the tag is absent or unrecognized
+        /// and no `untagged` variant matches. Without one, either case is a deserialization error.
         default_variant: Option<usize>,
+        /// The trial priority of each object variant that no tag selects and that is not the
+        /// `default_variant`, parallel to [`Union::variants`]; `None` for every other variant. Such
+        /// a variant (inline, or a pointer into another schema, that no `mapping` entry names) has
+        /// no discriminator value, so it is tried against the buffered value, with `mode`'s
+        /// semantics, only when the tag is absent or selects no tagged variant; a tag that does
+        /// select one dispatches to it alone. Serialization writes no tag for it.
+        untagged: Vec<Option<u32>>,
+        /// How the `untagged` variants are matched: the source applicator's semantics.
+        mode: UnionMode,
     },
     /// No discriminator, but the variants were proven statically disjoint → a custom
     /// content-inspecting `Deserialize`/`Serialize`. Each variant carries the feature that

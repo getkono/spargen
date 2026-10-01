@@ -2298,13 +2298,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 &discriminator.property_name,
                 resolved,
                 default_variant,
+                mode,
             );
             if let Some(UnionStrategy::Discriminated {
                 tags,
                 categories,
                 default_variant,
+                untagged,
                 ..
-            }) = &discriminated
+            }) = &mut discriminated
             {
                 let unselectable: Vec<usize> = (0..variants.len())
                     .filter(|&index| {
@@ -2334,17 +2336,31 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     );
                 }
                 // A member that is no component — inline, or a pointer into another schema — has
-                // no implicit value, and with no mapping entry naming it no tag selects it. The
-                // discriminator then cannot dispatch this union, and inventing a tag for it would
-                // be one no server sends; the members' own schemas still can, as for a union
-                // with no discriminator at all.
+                // no implicit value, and with no mapping entry naming it no tag selects it;
+                // inventing a tag for it would be one no server sends. Where no variant carries a
+                // tag at all, the discriminator dispatches nothing, and the members' own schemas
+                // decode the union, as for one with no discriminator. Otherwise the tagged
+                // members keep their dispatch — a tag that names one selects it, exactly as the
+                // document says — and the untagged ones are tried by their schemas only when the
+                // tag is absent or names no tagged member. Dropping the dispatch for the whole
+                // union instead would let an `anyOf` trial pick a tagged member the payload's own
+                // tag does not name.
                 if !unselectable.is_empty() {
                     let members: Vec<usize> = unselectable
                         .iter()
                         .map(|&index| variant_members[index])
                         .collect();
-                    self.warn_untagged_discriminated_members(discriminator, &members);
-                    discriminated = None;
+                    let dispatches = tags.iter().any(|accepted| !accepted.is_empty());
+                    self.warn_untagged_discriminated_members(discriminator, &members, dispatches);
+                    if dispatches {
+                        for &index in &unselectable {
+                            untagged[index] = Some(
+                                self.type_specificity(variants[index].ty, &mut HashSet::new()),
+                            );
+                        }
+                    } else {
+                        discriminated = None;
+                    }
                 }
             }
             discriminated
@@ -2876,8 +2892,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its
     /// unique JSON category. An object variant is selected by every `discriminator.mapping` key
     /// naming its member, in document order, and then by its own `$ref` component name unless a
-    /// mapping key claims that value; the first is the tag serialization writes. A variant left
-    /// with no tag is [`Self::reject_unselectable_discriminated_variant`]'s to refuse.
+    /// mapping key claims that value; the first is the tag serialization writes. Every variant
+    /// starts with no `untagged` priority: the caller refuses a component variant left with no
+    /// tag ([`Self::reject_unselectable_discriminated_variant`]) and decides how any other is
+    /// reached.
+    #[allow(clippy::too_many_arguments)]
     fn discriminated_strategy(
         &self,
         variants: &[UnionVariant],
@@ -2886,6 +2905,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         tag_field: &str,
         discriminator: &DiscriminatorMembers,
         default_variant: Option<usize>,
+        mode: UnionMode,
     ) -> Option<UnionStrategy> {
         let mut tags = Vec::new();
         let mut categories = Vec::new();
@@ -2918,7 +2938,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // A member that is no component — inline, or a deeper pointer — has no implicit value
             // ("inline `oneOf` or `anyOf` subschemas are not considered"), so only a mapping key
             // selects it. With none it keeps no tag at all: anything else would be one spargen
-            // made up and no server sends, and the caller refuses a member left unselectable.
+            // made up and no server sends. The caller decides how such a member is reached.
             if let Some(name) = component {
                 if !discriminator.mapping.iter().any(|(tag, _)| tag == name) {
                     accepted.push(name.to_owned());
@@ -2929,9 +2949,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
         Some(UnionStrategy::Discriminated {
             tag_field: tag_field.to_owned(),
+            untagged: vec![None; tags.len()],
             tags,
             categories,
             default_variant,
+            mode,
         })
     }
 
@@ -3165,13 +3187,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// Discriminated object members that are no schema component — inline, or a pointer into
     /// another schema — and that no `mapping` entry or `defaultMapping` names. The specification
     /// gives them no implicit value ("inline `oneOf` or `anyOf` subschemas are not considered"),
-    /// so no discriminator value selects them and the discriminator cannot dispatch the union. The
-    /// caller dispatches it by its members' schemas instead, as a union with no discriminator,
-    /// rather than on a tag spargen would have to invent; this says so at the discriminator.
+    /// so no discriminator value selects them. Where another variant carries a tag (`dispatches`),
+    /// the caller keeps the tag dispatch for those and tries these by their schemas when the tag
+    /// is absent or names no tagged member; otherwise the discriminator dispatches nothing and the
+    /// union is decoded by its members' schemas, as one with no discriminator. Either way no tag
+    /// is invented for them; this says so at the discriminator.
     fn warn_untagged_discriminated_members(
         &mut self,
         discriminator: &super::Discriminator,
         members: &[usize],
+        dispatches: bool,
     ) {
         let list = members
             .iter()
@@ -3195,6 +3220,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 "them",
             )
         };
+        let consequence = if dispatches {
+            let (verb, possessive) = if members.len() == 1 {
+                ("it is", "its")
+            } else {
+                ("they are", "their")
+            };
+            format!(
+                "so the tag dispatches only to the members a value names, and {verb} matched by \
+                 {possessive} own schema when the tag is absent or names no such member"
+            )
+        } else {
+            "so this `discriminator` dispatches nothing and the union is decoded by its members' \
+             schemas"
+                .to_owned()
+        };
         // W011 case: untagged-discriminated-member
         Diagnostic::warning(
             Code::DeclarationHasNoEffect,
@@ -3202,8 +3242,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         )
         .message(format!(
             "{subject}, and no `discriminator.mapping` entry names {pronoun}: no discriminator \
-             value selects {pronoun}, so this `discriminator` dispatches nothing and the union is \
-             decoded by its members' schemas"
+             value selects {pronoun}, {consequence}"
         ))
         .remedy(
             "add a `discriminator.mapping` entry naming each such member (a URI reference to it \
@@ -5029,10 +5068,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 tags,
                 categories,
                 default_variant,
+                untagged,
+                mode,
             } => UnionStrategy::Discriminated {
                 tag_field: tag_field.clone(),
                 tags: retained.iter().map(|index| tags[*index].clone()).collect(),
                 categories: retained.iter().map(|index| categories[*index]).collect(),
+                untagged: retained.iter().map(|index| untagged[*index]).collect(),
+                mode: *mode,
                 // The fallback variant's index moves with the retained set; if the fallback itself
                 // was dropped, the union simply has no fallback any more.
                 default_variant: default_variant

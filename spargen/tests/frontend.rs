@@ -8305,10 +8305,11 @@ fn a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry() {
 /// has no implicit discriminator value ("inline `oneOf` or `anyOf` subschemas are not considered").
 /// With no `mapping` entry naming it, the generated client dispatched on a tag spargen made up —
 /// the pointer text `Envelope/properties/cat`, or the hint `PetVariant1` — which no server sends,
-/// and serialized that tag into the payload. No discriminator value selects such a member, so the
-/// discriminator dispatches nothing: `W011` at the discriminator, in `check` as in `generate`, and
-/// the union is decoded by its members' schemas with no tag dispatch at all. A `mapping` entry
-/// naming it, or `defaultMapping` falling back to it, reaches it and keeps the tag dispatch.
+/// and serialized that tag into the payload. No discriminator value selects such a member: `W011`
+/// at the discriminator, in `check` as in `generate`. Beside a tagged member the tag dispatch stays
+/// for the tagged one and the untagged one takes no tag; with no tagged member at all the union is
+/// decoded by its members' schemas with no tag dispatch. A `mapping` entry naming it, or
+/// `defaultMapping` falling back to it, reaches it with no warning.
 #[test]
 fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag() {
     let spec = |members: &str, discriminator: &str, version: &str| {
@@ -8337,17 +8338,26 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag
     // discriminating property with an `enum` the discriminator never reads.
     let both_inline = "        - { type: object, required: [kind, done], properties: { kind: { enum: [completed] }, done: { type: boolean } } }\n        \
                        - { type: object, properties: { kind: { enum: [queued, in_progress] } } }\n";
-    for (what, members, subject) in [
+    // Beside the tagged `Dog`, the untagged member keeps Dog's dispatch (`dispatches`); with no
+    // tagged member at all, the discriminator dispatches nothing.
+    for (what, members, subject, dispatches) in [
         (
             "deep pointer",
             deep,
             "union member 0 is no schema component",
+            true,
         ),
-        ("inline", inline, "union member 1 is no schema component"),
+        (
+            "inline",
+            inline,
+            "union member 1 is no schema component",
+            true,
+        ),
         (
             "both inline",
             both_inline,
             "union members 0, 1 are no schema components",
+            false,
         ),
     ] {
         let spec = spec(members, "", "3.1.0");
@@ -8377,14 +8387,41 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag
                 w011[0].message.contains(subject),
                 "{what} {entry}: {report:#?}"
             );
+            let consequence = if dispatches {
+                "the tag dispatches only to the members a value names"
+            } else {
+                "this `discriminator` dispatches nothing"
+            };
+            assert!(
+                w011[0].message.contains(consequence),
+                "{what} {entry}: {report:#?}"
+            );
         }
-        // No tag dispatch, so no tag at all: neither the pointer text nor a variant hint.
-        let de_impl = code
-            .split("impl<'de> serde::Deserialize<'de> for Pet {")
-            .nth(1)
-            .unwrap_or_else(|| panic!("{what}: no Deserialize for Pet\n{code}"));
-        let de_impl = de_impl.split("\nimpl").next().unwrap_or(de_impl);
-        assert!(!de_impl.contains("match tag"), "{what}\n{de_impl}");
+        if dispatches {
+            // `Dog` keeps its implicit tag both ways; the untagged member is selected by no tag
+            // and written with none.
+            let arms = discriminated_arms(&code, "Pet");
+            assert_eq!(
+                arms.decode,
+                vec![("Dog".to_owned(), vec!["Dog".to_owned()])],
+                "{what}\n{code}"
+            );
+            let written: Vec<_> = arms
+                .encode
+                .iter()
+                .filter_map(|(_, tag)| tag.clone())
+                .collect();
+            assert_eq!(written, ["Dog"], "{what}\n{code}");
+            assert_eq!(arms.encode.len(), 2, "{what}\n{code}");
+        } else {
+            let de_impl = code
+                .split("impl<'de> serde::Deserialize<'de> for Pet {")
+                .nth(1)
+                .unwrap_or_else(|| panic!("{what}: no Deserialize for Pet\n{code}"));
+            let de_impl = de_impl.split("\nimpl").next().unwrap_or(de_impl);
+            assert!(!de_impl.contains("match tag"), "{what}\n{de_impl}");
+        }
+        // Either way no tag is invented: neither the pointer text nor a variant hint.
         for invented in ["\"Envelope/properties/cat\"", "\"PetVariant"] {
             assert!(!code.contains(invented), "{what}: {invented}\n{code}");
         }
@@ -8429,6 +8466,90 @@ fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag
     assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
     let checked = check(&fallback);
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+}
+
+/// An untagged member beside tagged ones must not cost the tagged ones their dispatch. Dropping the
+/// discriminator for the whole union made `anyOf [Cat, Dog, inline]` decode by priority, then source
+/// order, so `{"kind": "Dog", …}` that `Cat` also accepts decoded as `Cat` against its own tag, and
+/// `Dog` lost the tag serialization re-inserts. The tag still selects `Cat` and `Dog`, which still
+/// write it; the inline member is tried by its schema, with the applicator's semantics, only when
+/// the tag is absent or names neither. (`e2e.rs` drives the decoded values.)
+#[test]
+fn an_untagged_discriminated_member_keeps_the_tag_dispatch_of_the_tagged_ones() {
+    let members = "        - { $ref: '#/components/schemas/Cat' }\n        \
+                   - { $ref: '#/components/schemas/Dog' }\n        \
+                   - { type: object, required: [kind, fins], properties: { kind: { type: string }, fins: { type: integer } } }\n";
+    for (applicator, valid) in [("oneOf", "match_count == 1"), ("anyOf", "match_count >= 1")] {
+        let spec = discriminated_pet("3.1.0", members, "        propertyName: kind\n").replacen(
+            "oneOf:",
+            &format!("{applicator}:"),
+            1,
+        );
+        let (generated, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{applicator} {entry}: {report:#?}"
+            );
+            let w011: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .collect();
+            assert_eq!(w011.len(), 1, "{applicator} {entry}: {report:#?}");
+            assert!(
+                w011[0]
+                    .message
+                    .contains("union member 2 is no schema component")
+                    && w011[0]
+                        .message
+                        .contains("the tag dispatches only to the members a value names"),
+                "{applicator} {entry}: {report:#?}"
+            );
+        }
+        let arms = discriminated_arms(&code, "Pet");
+        assert_eq!(
+            arms.decode,
+            vec![
+                ("Cat".to_owned(), vec!["Cat".to_owned()]),
+                ("Dog".to_owned(), vec!["Dog".to_owned()]),
+            ],
+            "{applicator}\n{code}"
+        );
+        assert_eq!(
+            arms.encode,
+            vec![
+                ("Cat".to_owned(), Some("Cat".to_owned())),
+                ("Dog".to_owned(), Some("Dog".to_owned())),
+                ("PetVariant2".to_owned(), None),
+            ],
+            "{applicator}\n{code}"
+        );
+        // The untagged member is the only one tried, after the tag finds no arm, and with the
+        // applicator's own match rule.
+        let de_impl = code
+            .split("impl<'de> serde::Deserialize<'de> for Pet {")
+            .nth(1)
+            .and_then(|rest| rest.split("impl serde::Serialize for Pet").next())
+            .unwrap_or_else(|| panic!("no Deserialize for Pet:\n{code}"));
+        let flat = de_impl.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            flat.matches("serde_json::from_value::<").count(),
+            2,
+            "{applicator}: one attempt in each of the absent and unknown tag paths\n{flat}"
+        );
+        assert!(flat.contains(valid), "{applicator}\n{flat}");
+        let tried = flat
+            .split("match tag.as_str() {")
+            .nth(1)
+            .and_then(|rest| rest.split("_ =>").nth(1))
+            .unwrap_or_else(|| panic!("{applicator}: no unknown-tag arm\n{flat}"));
+        assert!(
+            tried.contains("Pet::PetVariant2(inner)") && !tried.contains("Pet::Cat(inner)"),
+            "{applicator}\n{flat}"
+        );
+    }
 }
 
 /// A Discriminator Object whose fields have the wrong shape was read leniently and the bad part

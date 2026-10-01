@@ -2832,6 +2832,8 @@ fn emit_type_def(
                     tags,
                     categories,
                     default_variant,
+                    untagged,
+                    mode,
                 } => {
                     let variant_defs = union.variants.iter().map(|variant| {
                         let variant_ident = names
@@ -2933,6 +2935,59 @@ fn emit_type_def(
                         Some(fallback) => fallback.clone(),
                         None => quote! { Err(serde::de::Error::custom(#unknown_tag)) },
                     };
+                    // Variants no tag selects are tried by their own schemas — with the source
+                    // applicator's semantics, as `Trial` tries them — before the absent or
+                    // unrecognized tag falls through to `defaultMapping` or the error. A tag that
+                    // names a tagged variant never reaches them.
+                    let attempts: Vec<TokenStream> = union
+                        .variants
+                        .iter()
+                        .zip(untagged)
+                        .filter_map(|(variant, priority)| {
+                            let priority = (*priority)?;
+                            let variant_ident = names
+                                .variants
+                                .get(&(id, variant.name_hint.clone()))
+                                .expect("union variant name allocated");
+                            let ty = union_variant_ty_tokens(variant.ty, names, options);
+                            Some(quote! {
+                                if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
+                                    match_count += 1;
+                                    let replace = match &selected {
+                                        Some((selected_priority, _)) => {
+                                            #priority > *selected_priority
+                                        }
+                                        None => true,
+                                    };
+                                    if replace {
+                                        selected = Some((#priority, #ident::#variant_ident(inner)));
+                                    }
+                                }
+                            })
+                        })
+                        .collect();
+                    let untagged_trial = |otherwise: TokenStream| {
+                        if attempts.is_empty() {
+                            return otherwise;
+                        }
+                        let valid = match mode {
+                            UnionMode::OneOf => quote! { match_count == 1 },
+                            UnionMode::AnyOf => quote! { match_count >= 1 },
+                        };
+                        quote! {
+                            {
+                                let mut match_count = 0_usize;
+                                let mut selected: Option<(u32, Self)> = None;
+                                #(#attempts)*
+                                match selected {
+                                    Some((_, selected)) if #valid => Ok(selected),
+                                    _ => #otherwise,
+                                }
+                            }
+                        }
+                    };
+                    let missing_tag_arm = untagged_trial(missing_tag_arm);
+                    let unknown_tag_arm = untagged_trial(unknown_tag_arm);
                     quote! {
                         #docs
                         #deprecated
