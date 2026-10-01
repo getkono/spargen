@@ -149,7 +149,12 @@ red with nothing committed. Four things hold the audit to the committed artefact
   RustSec into `deny.toml`'s `db-path` (`target/advisory-dbs/`), the next command logs that
   checkout's commit, and every `cargo audit` reads it with `--no-fetch`. A past green is read
   against that logged revision, not against today's database. (The `cargo deny check`s after it
-  fetch again, so theirs is that revision or a later one.)
+  fetch again, so theirs is that revision or a later one.) `--no-fetch` also stops cargo-audit
+  updating the crates.io index, so its yank check reads only Cargo's local index cache, which is
+  empty on a fresh runner: it printed "couldn't check if the package is yanked" for every entry
+  and exited 0 (#414). So each `cargo audit` follows a `cargo fetch` of its workspace, which
+  refreshes that cache for every entry, and ends in a guard (`AUDIT_GUARD` in
+  `corpus_manifest.rs`) that fails an audit which exited 0 but printed an error or warning.
 - `deny.yml` runs it daily on `master` (and on `workflow_dispatch`), so the repository finds a new
   advisory before a contributor's unrelated pull request does. GitHub sends a failed scheduled run
   to whoever last changed the workflow's `cron`, and disables a schedule after 60 days without
