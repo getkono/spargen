@@ -301,10 +301,7 @@ impl Audit<'_, '_> {
                 .split_once('/')
                 .is_some_and(|(root, _)| components.contains_key(root));
             if from_root && !into_a_declared_component {
-                // E004 case: undeclared-component
-                Diagnostic::error(Code::UnresolvedRef, at.clone())
-                    .message(format!("unresolved schema reference `{reference}`"))
-                    .emit(self.diags);
+                super::lower::reject_undeclared_component(self.diags, at, "schema", reference);
                 return;
             }
         }
@@ -334,32 +331,13 @@ impl Audit<'_, '_> {
                     .map(|target| (None, target)),
             );
         for (tag, target) in entries {
-            let value = &target.value;
-            let reference = if super::lower::is_schema_component_name(value) {
-                format!("#/components/schemas/{value}")
-            } else {
-                value.clone()
-            };
-            let root_component = reference
-                .strip_prefix("#/components/schemas/")
-                .is_some_and(|name| self.document.components.schemas.contains_key(name));
-            let names_a_schema = root_component
-                || self
-                    .resolver
-                    .reference_identity(&reference, &target.provenance)
-                    .is_some_and(|(file, pointer)| self.resolver.node_at(file, &pointer).is_some());
-            if !names_a_schema {
-                let entry = super::lower::discriminator_entry(tag);
-                // E004 case: discriminator-target
-                Diagnostic::error(Code::UnresolvedRef, target.provenance.clone())
-                    .message(format!(
-                        "{entry} names `{value}`, which is not a schema in the loaded description"
-                    ))
-                    .remedy(
-                        "declare the schema, correct the name or reference, or remove the entry",
-                    )
-                    .emit(self.diags);
-            }
+            super::lower::discriminator_target_identity(
+                self.document,
+                self.resolver,
+                self.diags,
+                &super::lower::discriminator_entry(tag),
+                target,
+            );
         }
     }
 }
