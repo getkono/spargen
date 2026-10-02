@@ -14938,11 +14938,11 @@ fn a_default_an_intersection_narrows_away_is_reported_not_applied() {
 /// default and both spellings must report it once.
 #[test]
 fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
-    fn spec(members: &[&str]) -> String {
-        let mut spec = String::from(
-            "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: 'https://e.com' }]\n\
+    fn spec(media: &str, members: &[&str]) -> String {
+        let mut spec = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\n\
              paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          \
-             description: ok\n          content:\n            application/json:\n              \
+             description: ok\n          content:\n            {media}:\n              \
              schema:\n                allOf:\n",
         );
         for k in members {
@@ -14964,9 +14964,12 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
         reported
     }
 
-    // (three members, the two left once the superseded middle one is dropped, `W005`/`W006` count)
-    let cases: [([&str; 3], [&str; 2], usize); 3] = [
+    // (body media type, three members, the two left once the superseded middle one is dropped,
+    // `W005`/`W006` count)
+    let json = "application/json";
+    let cases: [(&str, [&str; 3], [&str; 2], usize); 4] = [
         (
+            json,
             [
                 "{ type: string, default: z }",
                 "{ enum: [a, b] }",
@@ -14976,6 +14979,7 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
             0,
         ),
         (
+            json,
             [
                 "{ type: string, default: z }",
                 "{ enum: [a, b, c] }",
@@ -14985,6 +14989,7 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
             1,
         ),
         (
+            json,
             [
                 "{ type: string, xml: { name: kay } }",
                 "{ type: string, maxLength: 9 }",
@@ -14996,9 +15001,26 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
             ],
             2,
         ),
+        // Under an XML body the merged struct is XML-dedicated and keeps its rename. Both spellings
+        // report one `W006`, for the first member's own `inner` struct, which no body reaches. The
+        // superseded meet is reached from no body either, so a pass reading it would report a
+        // second `W006` for a type the output does not have.
+        (
+            "application/xml",
+            [
+                "{ type: string, xml: { name: kay } }",
+                "{ type: string, maxLength: 9 }",
+                "{ type: string, minLength: 1 }",
+            ],
+            [
+                "{ type: string, xml: { name: kay } }",
+                "{ type: string, minLength: 1 }",
+            ],
+            1,
+        ),
     ];
-    for (three, two, count) in cases {
-        let (three, two) = (spec(&three), spec(&two));
+    for (media, three, two, count) in cases {
+        let (three, two) = (spec(media, &three), spec(media, &two));
         for (entry, run) in [
             ("generate", generate as fn(&str) -> Report),
             ("check", check),
