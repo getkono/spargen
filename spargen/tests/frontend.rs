@@ -24629,6 +24629,24 @@ fn a_ref_under_a_validation_only_keyword_is_followed_into_other_files() {
         );
     }
 
+    // A bare `#/components/schemas/<name>` written in a sub-file that the sub-file declares and
+    // the root does not addresses the sub-file, as lowering reads it: only a reference written in
+    // the root is a missing root component when the root does not declare its name.
+    let local_component = "Outer:\n  \
+                           type: object\n  \
+                           properties:\n    \
+                           y: { $ref: '#/components/schemas/Local' }\n\
+                           components:\n  \
+                           schemas:\n    \
+                           Local: { type: string }\n";
+    for (entry, report) in root_and_lib(&root, local_component) {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnresolvedRef),
+            "{entry}: a sub-file's own component is not a missing root component: {report:#?}"
+        );
+    }
+
     let missing_file = validation_ref_spec("      not: { $ref: './absent.yaml#/Outer' }\n");
     for (entry, report) in [
         ("generate", generate(&missing_file)),
