@@ -1408,8 +1408,8 @@ fn open_narrowing_adds_no_type_the_output_does_not_use() {
 /// uses, with the option on or off (#401). Two sets that each list a value the other does not meet
 /// in a new set, `…Intersection1`, which the `allOf` re-emits as `kind`'s own type: the new set is
 /// then unused, and is not emitted. A result that refers to a meet's insert keeps it: two arrays of
-/// those sets meet in an array of the new set, which stays the array's item type (and, since only
-/// the most recent inserts can be removed, the meet's own array alias stays beside it).
+/// those sets meet in an array of the new set, which stays the array's item type, while the meet's
+/// own array alias, which the re-emitted array replaces, is not emitted (#428).
 #[test]
 fn an_all_of_emits_no_meet_its_result_does_not_use() {
     let listed = "{ $ref: '#/components/schemas/Listed' }";
@@ -1439,5 +1439,110 @@ fn an_all_of_emits_no_meet_its_result_does_not_use() {
                 && source.contains(&format!("pub type ResponseBodykind = Vec<{item}>;")),
             "open: {open}, the array's meet keeps its item set:\n{source}"
         );
+        assert!(
+            !source.contains("pub type ResponseBodykindIntersection1 "),
+            "open: {open}, the array's superseded meet is emitted:\n{source}"
+        );
     }
+}
+
+/// A `404` body that is the `allOf` of `members`, one per entry, beside the closed set `Listed`.
+fn object_all_of(members: &[&str]) -> String {
+    let members: String = members
+        .iter()
+        .map(|member| format!("                  - {member}\n"))
+        .collect();
+    full(
+        &format!(
+            "  /pets:
+    get:
+      operationId: listPets
+      responses:
+        '200':
+          description: ok
+        '404':
+          description: missing
+          content:
+            application/json:
+              schema:
+                allOf:
+{members}"
+        ),
+        "    Listed: { type: string, enum: [x, listed-only] }
+",
+    )
+}
+
+/// An object `allOf` whose members repeat a property meets it member by member, and a later
+/// member's meet supersedes an earlier one's: `string` meeting `Listed` makes the open copy
+/// `ListedOpen`, and `const: x` then narrows the field past it (#428). The struct the merge emits
+/// refers only to the last meet, so the superseded ones are not emitted — not the open copy, and
+/// not, when the repeated property is itself an object, the struct an earlier pair of members met
+/// in. Unlike the re-emitted results of #401, the merged struct does refer to some of the meets'
+/// inserts, interleaved with the ones it does not, so this holds for each insert on its own.
+/// Turning `open_narrowing` on therefore adds no type, in any order of the members.
+#[test]
+fn an_object_all_of_emits_no_meet_a_later_member_superseded() {
+    let object = |property: &str, ty: &str| {
+        format!("{{ type: object, required: [{property}], properties: {{ {property}: {ty} }} }}")
+    };
+    let open = |spec: Spec| spec.open_narrowing(true);
+    let types = [
+        "{ type: string }",
+        "{ $ref: '#/components/schemas/Listed' }",
+        "{ const: x }",
+    ];
+    let orders = [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ];
+    let mut added = Vec::new();
+    for nested in [false, true] {
+        for order in orders {
+            let members: Vec<String> = order
+                .iter()
+                .map(|&index| {
+                    let kind = object("kind", types[index]);
+                    if nested {
+                        object("inner", &kind)
+                    } else {
+                        kind
+                    }
+                })
+                .collect();
+            let members: Vec<&str> = members.iter().map(String::as_str).collect();
+            let spec = object_all_of(&members);
+            let case = format!("nested: {nested}, {order:?}");
+            for open in [false, true] {
+                let source = generated_source(&spec, open);
+                // No order meets `kind` last against `Listed` alone, so no field keeps its copy.
+                assert!(
+                    !source.contains("ListedOpen"),
+                    "{case}, open: {open} emits a superseded open copy:\n{source}"
+                );
+                // The second pair of `inner` structs meets in the one the body refers to; the
+                // first pair's meet is superseded.
+                assert!(
+                    source
+                        .matches("pub struct ResponseBodyinnerIntersection")
+                        .count()
+                        == usize::from(nested),
+                    "{case}, open: {open} emits a superseded struct meet:\n{source}"
+                );
+            }
+            let report = diff_configured(&spec, &spec, |spec| spec, open);
+            added.extend(
+                report
+                    .changes
+                    .iter()
+                    .filter(|change| change.kind == ChangeKind::TypeAdded)
+                    .map(|change| format!("{case}: {}", change.location)),
+            );
+        }
+    }
+    assert!(added.is_empty(), "types only the option adds: {added:#?}");
 }

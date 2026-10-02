@@ -13,11 +13,12 @@ use crate::name::{Names, OperationBindings};
 
 use super::CodegenOptions;
 
-/// Emit the `types` (models) module for every type in the graph, in deterministic order.
+/// Emit the `types` (models) module for every type the graph emits (every one but those lowering
+/// elided), in deterministic order.
 pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStream {
     let items = api
         .types
-        .iter()
+        .emitted()
         .map(|(id, def)| emit_type_def(id, def, api, names, options));
     let decode_present = format_ident!("{DECODE_PRESENT}");
     // The RFC 3339 newtypes live beside `types`, so bring them into scope under the same bare names

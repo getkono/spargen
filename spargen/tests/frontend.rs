@@ -14924,6 +14924,124 @@ fn a_default_an_intersection_narrows_away_is_reported_not_applied() {
     );
 }
 
+/// An object `allOf` whose members repeat an object property meets that property pair by pair, and
+/// the struct an earlier pair met it in is superseded by the next meet and not emitted (#428). The
+/// post-lowering passes that report `W005` (#404) and `W006` read only emitted types, so a
+/// superseded meet reports nothing of its own: three members say exactly what the two members
+/// without the superseded one say. Before #428 the three-member `string`/`enum`/`integer` spelling
+/// warned `W005` against the dead `string`∩`enum` struct while the two-member spelling, whose
+/// result is the same uninhabited field, was clean.
+///
+/// This pins the two spellings agreeing, not what they say: how a default on a field an
+/// intersection empties should be reported is the two-member spelling's question. The second case
+/// keeps the fixture from passing vacuously, since there the emitted struct itself drops the
+/// default and both spellings must report it once.
+#[test]
+fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
+    fn spec(media: &str, members: &[&str]) -> String {
+        let mut spec = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          \
+             description: ok\n          content:\n            {media}:\n              \
+             schema:\n                allOf:\n",
+        );
+        for k in members {
+            spec.push_str(&format!(
+                "                  - {{ type: object, properties: {{ inner: {{ type: object, \
+                 properties: {{ k: {k} }} }} }} }}\n"
+            ));
+        }
+        spec
+    }
+    fn reported(report: &Report) -> Vec<(&'static str, String, String)> {
+        let mut reported: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| matches!(d.code, Code::SchemaDefaultNotApplied | Code::XmlHintIgnored))
+            .map(|d| (d.code.as_str(), d.pointer.to_string(), d.message.clone()))
+            .collect();
+        reported.sort();
+        reported
+    }
+
+    // (body media type, three members, the two left once the superseded middle one is dropped,
+    // `W005`/`W006` count)
+    let json = "application/json";
+    let cases: [(&str, [&str; 3], [&str; 2], usize); 4] = [
+        (
+            json,
+            [
+                "{ type: string, default: z }",
+                "{ enum: [a, b] }",
+                "{ type: integer }",
+            ],
+            ["{ type: string, default: z }", "{ type: integer }"],
+            0,
+        ),
+        (
+            json,
+            [
+                "{ type: string, default: z }",
+                "{ enum: [a, b, c] }",
+                "{ enum: [a, b] }",
+            ],
+            ["{ type: string, default: z }", "{ enum: [a, b] }"],
+            1,
+        ),
+        (
+            json,
+            [
+                "{ type: string, xml: { name: kay } }",
+                "{ type: string, maxLength: 9 }",
+                "{ type: string, minLength: 1 }",
+            ],
+            [
+                "{ type: string, xml: { name: kay } }",
+                "{ type: string, minLength: 1 }",
+            ],
+            2,
+        ),
+        // Under an XML body the merged struct is XML-dedicated and keeps its rename. Both spellings
+        // report one `W006`, for the first member's own `inner` struct, which no body reaches. The
+        // superseded meet is reached from no body either, so a pass reading it would report a
+        // second `W006` for a type the output does not have.
+        (
+            "application/xml",
+            [
+                "{ type: string, xml: { name: kay } }",
+                "{ type: string, maxLength: 9 }",
+                "{ type: string, minLength: 1 }",
+            ],
+            [
+                "{ type: string, xml: { name: kay } }",
+                "{ type: string, minLength: 1 }",
+            ],
+            1,
+        ),
+    ];
+    for (media, three, two, count) in cases {
+        let (three, two) = (spec(media, &three), spec(media, &two));
+        for (entry, run) in [
+            ("generate", generate as fn(&str) -> Report),
+            ("check", check),
+        ] {
+            let (with_superseded, without) = (run(&three), run(&two));
+            assert_ne!(
+                with_superseded.outcome(),
+                Outcome::Rejected,
+                "{entry}: {with_superseded:#?}"
+            );
+            assert_eq!(
+                reported(&with_superseded),
+                reported(&without),
+                "{entry}: the superseded meet must report nothing the two-member spelling does \
+                 not:\n{three}"
+            );
+            assert_eq!(reported(&without).len(), count, "{entry}: {without:#?}");
+        }
+    }
+}
+
 /// A parameter `default` is documented in rustdoc (never serde-wired) — generation is clean and
 /// must NOT raise W005 (parameters always have a documentation home).
 #[test]

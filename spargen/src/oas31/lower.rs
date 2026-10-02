@@ -3711,6 +3711,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut additional = AdditionalProps::Allow;
         // Repeated properties whose types have no common value, in first-seen order.
         let mut uninhabited: IndexSet<String> = IndexSet::new();
+        // Every member is lowered already, so what the merge inserts from here on is its meets'.
+        let mark = self.graph_mark();
         for contribution in contributions {
             let Contribution::Object {
                 fields: member_fields,
@@ -3905,11 +3907,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
 
-        let ty = self.insert_schema_type(
-            schema,
-            hint,
-            TypeKind::Struct(Struct { fields, additional }),
-        );
+        // A property repeated by three or more members is met pair by pair, and each meet replaces
+        // the field's type, so the struct refers to the last meet and not to the ones before it.
+        let kind = TypeKind::Struct(Struct { fields, additional });
+        self.elide_meet_intermediates(mark, &kind);
+        let ty = self.insert_schema_type(schema, hint, kind);
         Some(self.with_all_of_nullability(schema, ty))
     }
 
@@ -5037,24 +5039,53 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.graph.last_id().map_or(0, |id| id.0 + 1)
     }
 
-    /// Discard every type inserted since `mark` when `kind` refers to none of them, directly or
+    /// Discard every type inserted since `mark` that `kind` does not refer to, directly or
     /// transitively. The caller has just met two or more types inserted before `mark` and is about
     /// to re-emit the meet's result as a new definition of `kind`, so the meets' own inserts are
     /// unused unless that definition reaches them. Each would otherwise be emitted as a public type
     /// nothing refers to: the open or locked copy [`Self::reopened_set`] makes of a `$ref`'d set
     /// (#401), and every intermediate a later meet superseded.
     ///
-    /// Sound because intersecting only reads the graph and inserts into it: it lowers no schema and
-    /// fills no memo, so nothing outside the inserts since `mark` refers to them, and an in-place
-    /// change of an earlier set's openness ([`Self::reopen_in_place`]) is kept. When `kind` reaches
-    /// one of them, all are kept, since ids are dense and only the most recent can be removed.
+    /// When `kind` reaches none of them, all are removed (#401). Otherwise only the most recent
+    /// could be, since ids are dense, so the unused ones are elided instead, as
+    /// [`Self::elide_meet_intermediates`] does.
     fn discard_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
         let reached = reachable_types(&self.graph, &kind_edges(kind));
         if reached.iter().any(|id| id.0 >= mark) {
+            self.elide_unreached(mark, &reached);
             return;
         }
         while self.graph.last_id().is_some_and(|id| id.0 >= mark) {
             self.graph.pop_last();
+        }
+    }
+
+    /// [Elide](TypeGraph::elide) every type inserted since `mark` that `kind` does not refer to,
+    /// directly or transitively. The caller has just met the properties its members repeat, each
+    /// meet replacing the field's type, and is about to emit `kind`, the struct that refers to the
+    /// last meet of each property and not to the ones a later member superseded: the open copy
+    /// [`Self::reopened_set`] makes of a `$ref`'d set, or the struct an earlier pair of members met
+    /// a repeated object property in (#428). Those are interleaved with the inserts the struct
+    /// uses, so they cannot be popped; eliding keeps each one's id and name, so no type the output
+    /// carries is renamed or reordered.
+    ///
+    /// Sound because intersecting only reads the graph and inserts into it: it lowers no schema and
+    /// fills no memo, so nothing outside the inserts since `mark` refers to them, and an in-place
+    /// change of an earlier set's openness ([`Self::reopen_in_place`]) is kept.
+    fn elide_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
+        let reached = reachable_types(&self.graph, &kind_edges(kind));
+        self.elide_unreached(mark, &reached);
+    }
+
+    /// Elide every type inserted since `mark` that is not in `reached`.
+    fn elide_unreached(&mut self, mark: u32, reached: &HashSet<TypeId>) {
+        let Some(last) = self.graph.last_id() else {
+            return;
+        };
+        for id in (mark..=last.0).map(TypeId) {
+            if !reached.contains(&id) {
+                self.graph.elide(id);
+            }
         }
     }
 
@@ -8533,10 +8564,10 @@ fn security_scheme_docs(name: &str, scheme: &super::SecuritySchemeObject) -> Vec
 /// value of it (the enum variant, the integer); one it does not admit is no value of the field, so
 /// it is documented as not applied and reported (`W005`) at the `default` that wrote it, naming
 /// the type whose field drops it. Running once over the finished graph reaches every meet, and
-/// only the types that are emitted: a meet's discarded intermediates are gone by now.
+/// only the types that are emitted: a meet's discarded intermediates are gone or elided by now.
 fn retype_field_defaults(graph: &mut TypeGraph, diags: &mut Diagnostics) {
     let mut retyped: Vec<(TypeId, usize, Option<DefaultValue>)> = Vec::new();
-    for (id, def) in graph.iter() {
+    for (id, def) in graph.emitted() {
         let TypeKind::Struct(object) = &def.kind else {
             continue;
         };
@@ -8628,7 +8659,9 @@ fn gate_xml_field_renames(
     diags: &mut Diagnostics,
 ) {
     // Cheap guard: nothing to gate (and nothing to warn) unless some field carries an XML hint.
-    let any_hint = graph.iter().any(|(_, def)| {
+    // Only an emitted type's hint is reported or suppressed: an elided meet intermediate is no
+    // type of the output, so a hint it copied from a member has nothing to apply to.
+    let any_hint = graph.emitted().any(|(_, def)| {
         matches!(&def.kind, TypeKind::Struct(object)
         if object.fields.iter().any(|field| {
             field.xml.name.is_some()
@@ -8681,7 +8714,7 @@ fn gate_xml_field_renames(
     // contract forbids. On a type never serialized as XML the same hint genuinely has no effect,
     // so it stays a warning and the document is not refused for it.
     let mut unsupported_reports: Vec<(bool, Provenance, String)> = Vec::new();
-    for (id, def) in graph.iter() {
+    for (id, def) in graph.emitted() {
         let TypeKind::Struct(object) = &def.kind else {
             continue;
         };
@@ -8730,7 +8763,7 @@ fn gate_xml_field_renames(
     // uses were two types and the XML one kept its rename. Same code, same count — so the message
     // has to carry the distinction or there is nothing to compare across an upgrade.
     let to_suppress: Vec<(TypeId, bool)> = graph
-        .iter()
+        .emitted()
         .filter_map(|(id, def)| {
             let TypeKind::Struct(object) = &def.kind else {
                 return None;
