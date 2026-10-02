@@ -395,7 +395,8 @@ pub(crate) fn build(api: &Api, names: &Names) -> Surface {
     }
 
     let mut types = BTreeMap::new();
-    for (id, def) in api.types.iter() {
+    // An elided type has a name but no item, so it is no part of the surface.
+    for (id, def) in api.types.emitted() {
         let name = match names.types.get(&id) {
             Some(ident) => ident.as_str().to_owned(),
             None => continue,

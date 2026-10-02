@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use indexmap::IndexMap;
 
 use crate::diag::{JsonPointer, Provenance};
@@ -14,6 +16,8 @@ pub(crate) struct TypeId(pub(crate) u32);
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TypeGraph {
     defs: IndexMap<TypeId, TypeDef>,
+    /// The definitions [`elide`](Self::elide) withheld from the output.
+    elided: BTreeSet<TypeId>,
 }
 
 impl TypeGraph {
@@ -61,7 +65,37 @@ impl TypeGraph {
     /// root — always the last def inserted while lowering its body — into its reserved id, which
     /// keeps ids dense (the freed id is immediately reused by the next insert).
     pub(crate) fn pop_last(&mut self) -> Option<(TypeId, TypeDef)> {
-        self.defs.pop()
+        let popped = self.defs.pop();
+        if let Some((id, _)) = &popped {
+            // The freed id is reused by the next insert, which is a definition of its own.
+            self.elided.remove(id);
+        }
+        popped
+    }
+
+    /// Withhold the definition at `id` from the output: codegen emits no item for it, and the API
+    /// surface lists no type for it. It keeps its id and its place in [`iter`](Self::iter), so
+    /// naming still allocates it a name and every other definition's name and emission order is
+    /// the one it had before. Only a definition nothing in the API refers to may be elided;
+    /// `check_invariants` reports a reference to one as a missing type.
+    ///
+    /// This is how a definition that is not the most recent one is dropped, where
+    /// [`pop_last`](Self::pop_last) cannot reach it without renumbering the ones after it: the
+    /// intermediate a struct meet made for a property a later member narrowed again (#428).
+    pub(crate) fn elide(&mut self, id: TypeId) {
+        debug_assert!(self.defs.contains_key(&id), "elide of an absent id");
+        self.elided.insert(id);
+    }
+
+    /// Whether the definition at `id` is withheld from the output (see [`elide`](Self::elide)).
+    pub(crate) fn is_elided(&self, id: TypeId) -> bool {
+        self.elided.contains(&id)
+    }
+
+    /// Iterate the `(id, def)` pairs the output carries, in insertion order: every definition but
+    /// the [`elide`](Self::elide)d ones.
+    pub(crate) fn emitted(&self) -> impl Iterator<Item = (TypeId, &TypeDef)> {
+        self.iter().filter(|(id, _)| !self.is_elided(*id))
     }
 
     /// The id of the most recently inserted definition, if any. Paired with
@@ -81,7 +115,9 @@ impl TypeGraph {
         self.defs.get_mut(&id)
     }
 
-    /// Iterate `(id, def)` pairs in insertion order.
+    /// Iterate `(id, def)` pairs in insertion order, [`elide`](Self::elide)d ones included. Naming
+    /// allocates over this, so eliding a definition renames nothing; codegen, the API surface, and
+    /// the post-lowering passes that report on a type read [`emitted`](Self::emitted) instead.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (TypeId, &TypeDef)> {
         self.defs.iter().map(|(id, def)| (*id, def))
     }
@@ -642,7 +678,8 @@ mod tests {
     //! A dedicated variant turns a read site into a compile error only where its `match` is
     //! exhaustive; a catch-all arm absorbs it silently. This walks every `match` in the crate's
     //! sources and holds each one that classifies a [`TypeKind`] to stating its answer for a
-    //! reservation, so the audit is checked rather than counted by hand.
+    //! reservation, so the audit is checked rather than counted by hand. The graph's elision
+    //! bookkeeping is pinned here too.
 
     use std::path::{Path, PathBuf};
 
@@ -817,5 +854,61 @@ mod tests {
              undecided:\n{}",
             absorbers.join("\n")
         );
+    }
+
+    fn primitive(hint: &str) -> super::TypeDef {
+        super::TypeDef {
+            name_hint: hint.to_owned(),
+            kind: super::TypeKind::Primitive(super::Prim::String),
+            docs: super::Docs::default(),
+            provenance: crate::diag::Provenance::new(crate::diag::JsonPointer::root(), None),
+            document: String::new(),
+        }
+    }
+
+    /// Eliding withholds a definition from [`super::TypeGraph::emitted`] and from nothing else: it
+    /// keeps its id and its place in `iter`, which naming allocates over, so the definitions
+    /// around it keep their ids, order, and names (#428).
+    #[test]
+    fn an_elided_definition_keeps_its_place_and_leaves_the_output() {
+        let mut graph = super::TypeGraph::default();
+        let ids: Vec<_> = ["A", "B", "C"]
+            .into_iter()
+            .map(|hint| graph.insert(primitive(hint)))
+            .collect();
+        graph.elide(ids[1]);
+        let hints = |defs: Vec<(super::TypeId, &super::TypeDef)>| {
+            defs.into_iter()
+                .map(|(id, def)| (id, def.name_hint.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            hints(graph.iter().collect()),
+            vec![
+                (ids[0], "A".to_owned()),
+                (ids[1], "B".to_owned()),
+                (ids[2], "C".to_owned()),
+            ]
+        );
+        assert_eq!(
+            hints(graph.emitted().collect()),
+            vec![(ids[0], "A".to_owned()), (ids[2], "C".to_owned())]
+        );
+        assert!(graph.is_elided(ids[1]) && !graph.is_elided(ids[0]) && !graph.is_elided(ids[2]));
+    }
+
+    /// An id `pop_last` frees is reused by the next insert, which is a new definition: popping an
+    /// elided one clears its elision, so the definition that takes the id is emitted.
+    #[test]
+    fn popping_an_elided_definition_frees_its_id_unelided() {
+        let mut graph = super::TypeGraph::default();
+        graph.insert(primitive("A"));
+        let popped = graph.insert(primitive("B"));
+        graph.elide(popped);
+        graph.pop_last();
+        let reused = graph.insert(primitive("C"));
+        assert_eq!(reused, popped);
+        assert!(!graph.is_elided(reused));
+        assert_eq!(graph.emitted().count(), 2);
     }
 }

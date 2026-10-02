@@ -8,7 +8,8 @@ use super::{AdditionalProps, Api, MediaType, Ty, TypeKind};
 /// referential integrity of the type graph: every [`super::Ty`] reachable from the API —
 /// operation parameters, request bodies, response bodies, response headers, and, transitively,
 /// struct fields, typed additional properties, array items, tuple elements, and union variants —
-/// names a `TypeId` that resolves in the [`TypeGraph`](super::TypeGraph). The second is the kind
+/// names a `TypeId` that resolves in the [`TypeGraph`](super::TypeGraph) to a definition it does
+/// not [elide](super::TypeGraph::elide). The second is the kind
 /// of an octet-stream request body's type: when a request body with [`MediaType::OctetStream`]
 /// media has a type whose definition resolves, that definition's kind is [`TypeKind::Bytes`] and
 /// the reference is not nullable, because the emitter sends such a body only through its
@@ -67,7 +68,8 @@ pub(crate) fn check_invariants(api: &Api, diags: &mut Diagnostics) {
         }
     }
 
-    for (_, def) in api.types.iter() {
+    // An elided definition is no type of the output, so what it refers to is never read.
+    for (_, def) in api.types.emitted() {
         match &def.kind {
             TypeKind::Struct(object) => {
                 for field in &object.fields {
@@ -162,7 +164,9 @@ fn check_ty(
     label: &str,
     provenance: crate::diag::Provenance,
 ) {
-    if api.types.get(ty.id).is_none() {
+    // An elided definition emits no item, so a reference to one names a type the output lacks,
+    // exactly as a dangling id does.
+    if api.types.get(ty.id).is_none() || api.types.is_elided(ty.id) {
         Diagnostic::error(Code::InvalidInput, provenance)
             .message(format!(
                 "IR invariant failed: `{label}` references missing type {}",
@@ -297,6 +301,35 @@ mod tests {
         let mut diags = Diagnostics::new(100);
         check_invariants(&api, &mut diags);
         assert!(diags.has_errors(), "{diags:#?}");
+    }
+
+    /// An elided definition emits no item, so a reference to one is as dangling as an id that
+    /// resolves to nothing: lowering may elide only what nothing refers to (#428).
+    #[test]
+    fn a_reference_to_an_elided_type_is_caught() {
+        let mut api = api_with_header_ty(ty(0));
+        api.types.elide(TypeId(0));
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&api, &mut diags);
+        assert!(diags.has_errors(), "{diags:#?}");
+    }
+
+    /// What an elided definition itself refers to is never read, so it is not checked: here a
+    /// surviving reservation, which an emitted definition would be reported for.
+    #[test]
+    fn an_elided_type_is_not_checked() {
+        let mut api = api_with_header_ty(ty(0));
+        let reserved = api.types.insert(TypeDef {
+            name_hint: String::new(),
+            kind: TypeKind::Reserved,
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        });
+        api.types.elide(reserved);
+        let mut diags = Diagnostics::new(100);
+        check_invariants(&api, &mut diags);
+        assert!(!diags.has_errors(), "{diags:#?}");
     }
 
     /// The resolvable header API with one request body of `media` / `content_type`. When `kind` is
