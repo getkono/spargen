@@ -3876,7 +3876,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // A property repeated by three or more members is met pair by pair, and each meet replaces
         // the field's type, so the struct refers to the last meet and not to the ones before it.
         let kind = TypeKind::Struct(Struct { fields, additional });
-        self.discard_meet_intermediates(mark, &kind);
+        self.elide_meet_intermediates(mark, &kind);
         let ty = self.insert_schema_type(schema, hint, kind);
         Some(self.with_all_of_nullability(schema, ty))
     }
@@ -5007,33 +5007,48 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 
     /// Discard every type inserted since `mark` that `kind` does not refer to, directly or
     /// transitively. The caller has just met two or more types inserted before `mark` and is about
-    /// to emit the meet's result as a new definition of `kind`, so the meets' own inserts are
+    /// to re-emit the meet's result as a new definition of `kind`, so the meets' own inserts are
     /// unused unless that definition reaches them. Each would otherwise be emitted as a public type
     /// nothing refers to: the open or locked copy [`Self::reopened_set`] makes of a `$ref`'d set
-    /// (#401), and every intermediate a later meet superseded — in an object `allOf`, the meet of
-    /// a property an earlier pair of members repeated, which a later member's meet replaced
-    /// (#428).
+    /// (#401), and every intermediate a later meet superseded.
+    ///
+    /// When `kind` reaches none of them, all are removed (#401). Otherwise only the most recent
+    /// could be, since ids are dense, so the unused ones are elided instead, as
+    /// [`Self::elide_meet_intermediates`] does.
+    fn discard_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
+        let reached = reachable_types(&self.graph, &kind_edges(kind));
+        if reached.iter().any(|id| id.0 >= mark) {
+            self.elide_unreached(mark, &reached);
+            return;
+        }
+        while self.graph.last_id().is_some_and(|id| id.0 >= mark) {
+            self.graph.pop_last();
+        }
+    }
+
+    /// [Elide](TypeGraph::elide) every type inserted since `mark` that `kind` does not refer to,
+    /// directly or transitively. The caller has just met the properties its members repeat, each
+    /// meet replacing the field's type, and is about to emit `kind`, the struct that refers to the
+    /// last meet of each property and not to the ones a later member superseded: the open copy
+    /// [`Self::reopened_set`] makes of a `$ref`'d set, or the struct an earlier pair of members met
+    /// a repeated object property in (#428). Those are interleaved with the inserts the struct
+    /// uses, so they cannot be popped; eliding keeps each one's id and name, so no type the output
+    /// carries is renamed or reordered.
     ///
     /// Sound because intersecting only reads the graph and inserts into it: it lowers no schema and
     /// fills no memo, so nothing outside the inserts since `mark` refers to them, and an in-place
-    /// change of an earlier set's openness ([`Self::reopen_in_place`]) is kept. The unused inserts
-    /// at the end of the graph are removed; an unused one before a used one is
-    /// [elided](TypeGraph::elide) instead, since ids are dense and only the most recent can be
-    /// removed. Eliding keeps its id and name, so neither way renames or reorders a type the
-    /// output carries.
-    fn discard_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
+    /// change of an earlier set's openness ([`Self::reopen_in_place`]) is kept.
+    fn elide_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
         let reached = reachable_types(&self.graph, &kind_edges(kind));
-        while self
-            .graph
-            .last_id()
-            .is_some_and(|id| id.0 >= mark && !reached.contains(&id))
-        {
-            self.graph.pop_last();
-        }
+        self.elide_unreached(mark, &reached);
+    }
+
+    /// Elide every type inserted since `mark` that is not in `reached`.
+    fn elide_unreached(&mut self, mark: u32, reached: &HashSet<TypeId>) {
         let Some(last) = self.graph.last_id() else {
             return;
         };
-        for id in (mark..last.0).map(TypeId) {
+        for id in (mark..=last.0).map(TypeId) {
             if !reached.contains(&id) {
                 self.graph.elide(id);
             }
