@@ -588,11 +588,81 @@ fn is_schema_component_name(value: &str) -> bool {
 
 /// How a diagnostic names one Discriminator Object target: the `mapping` entry with tag `tag`, or
 /// `defaultMapping` for `None`.
-fn discriminator_entry(tag: Option<&String>) -> String {
+pub(super) fn discriminator_entry(tag: Option<&String>) -> String {
     match tag {
         Some(tag) => format!("`discriminator.mapping` entry `{tag}`"),
         None => "`discriminator.defaultMapping`".to_owned(),
     }
+}
+
+/// `E004` for a reference into `#/components/<kind>/` naming an entry the document does not
+/// declare. Shared by lowering and the audit's walk of subschemas lowering never reads, so both
+/// report the miss in one wording.
+pub(super) fn reject_undeclared_component(
+    diags: &mut Diagnostics,
+    provenance: &Provenance,
+    kind: &str,
+    reference: &str,
+) {
+    // E004 case: undeclared-component
+    Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+        .message(format!("unresolved {kind} reference `{reference}`"))
+        .emit(diags);
+}
+
+/// The `file#pointer` a schema `$ref` written at `at` resolves to, answered the way lowering
+/// resolves it: a `#/components/schemas/<name>` the root document declares is the root's
+/// component wherever it is written — [`LowerCtx::ensure_component`] consults the root map first —
+/// and every other reference is the bundle's own answer. Reads no schema and emits nothing.
+pub(super) fn schema_reference_identity(
+    document: &Document,
+    resolver: &Resolver<'_>,
+    reference: &str,
+    at: &Provenance,
+) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+    let root_component = reference
+        .strip_prefix("#/components/schemas/")
+        .is_some_and(|name| document.components.schemas.contains_key(name));
+    if root_component {
+        return resolver.reference_identity_from(reference, resolver.root_id());
+    }
+    resolver.reference_identity(reference, at)
+}
+
+/// The `file#pointer` of the schema one Discriminator Object `target` names, or `E004` at the
+/// target when the loaded description holds no schema there. `entry` describes the target in
+/// the message ([`discriminator_entry`]). Shared by lowering and the audit's walk of subschemas
+/// lowering never reads, so a mapping value is read, and a miss worded, the same at both.
+///
+/// A value is a component name or a URI reference. The specification recommends reading a value
+/// that could be either as a name, and a name is exactly a Components Object key, so a value
+/// made only of key characters is `#/components/schemas/<value>` and anything else is a
+/// reference, written relative to the file the discriminator sits in.
+pub(super) fn discriminator_target_identity(
+    document: &Document,
+    resolver: &Resolver<'_>,
+    diags: &mut Diagnostics,
+    entry: &str,
+    target: &super::schema::DiscriminatorTarget,
+) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+    let value = &target.value;
+    let reference = if is_schema_component_name(value) {
+        format!("#/components/schemas/{value}")
+    } else {
+        value.clone()
+    };
+    let identity = schema_reference_identity(document, resolver, &reference, &target.provenance)
+        .filter(|(file, pointer)| resolver.node_at(*file, pointer).is_some());
+    if identity.is_none() {
+        // E004 case: discriminator-target
+        Diagnostic::error(Code::UnresolvedRef, target.provenance.clone())
+            .message(format!(
+                "{entry} names `{value}`, which is not a schema in the loaded description"
+            ))
+            .remedy("declare the schema, correct the name or reference, or remove the entry")
+            .emit(diags);
+    }
+    identity
 }
 
 /// A union's Discriminator Object resolved against the union's own members: every `mapping`
@@ -2826,38 +2896,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         (!failed).then_some(resolved)
     }
 
-    /// The `file#pointer` of the schema one Discriminator Object `target` names, or `E004` at the
-    /// target when the loaded description holds no schema there. `entry` describes the target in
-    /// the message ([`discriminator_entry`]).
-    ///
-    /// A value is a component name or a URI reference. The specification recommends reading a value
-    /// that could be either as a name, and a name is exactly a Components Object key, so a value
-    /// made only of key characters is `#/components/schemas/<value>` and anything else is a
-    /// reference, written relative to the file the discriminator sits in.
+    /// [`discriminator_target_identity`] against this lowering's document and resolver.
     fn discriminator_target_identity(
         &mut self,
         entry: &str,
         target: &super::schema::DiscriminatorTarget,
     ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
-        let value = &target.value;
-        let reference = if is_schema_component_name(value) {
-            format!("#/components/schemas/{value}")
-        } else {
-            value.clone()
-        };
-        let identity = self
-            .schema_reference_identity(&reference, &target.provenance)
-            .filter(|(file, pointer)| self.resolver.node_at(*file, pointer).is_some());
-        if identity.is_none() {
-            // E004 case: discriminator-target
-            Diagnostic::error(Code::UnresolvedRef, target.provenance.clone())
-                .message(format!(
-                    "{entry} names `{value}`, which is not a schema in the loaded description"
-                ))
-                .remedy("declare the schema, correct the name or reference, or remove the entry")
-                .emit(self.diags);
-        }
-        identity
+        discriminator_target_identity(self.document, self.resolver, self.diags, entry, target)
     }
 
     /// Give a `discriminator` on a schema with no `oneOf`/`anyOf` of its own a disposition (#264).
@@ -2909,24 +2954,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         .emit(self.diags);
     }
 
-    /// The `file#pointer` a schema `$ref` written at `at` resolves to, answered the way lowering
-    /// resolves it: a `#/components/schemas/<name>` the root document declares is the root's
-    /// component wherever it is written — [`Self::ensure_component`] consults the root map first —
-    /// and every other reference is the bundle's own answer. Reads no schema and emits nothing.
+    /// [`schema_reference_identity`] against this lowering's document and resolver.
     fn schema_reference_identity(
         &self,
         reference: &str,
         at: &Provenance,
     ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
-        let root_component = reference
-            .strip_prefix("#/components/schemas/")
-            .is_some_and(|name| self.document.components.schemas.contains_key(name));
-        if root_component {
-            return self
-                .resolver
-                .reference_identity_from(reference, self.resolver.root_id());
-        }
-        self.resolver.reference_identity(reference, at)
+        schema_reference_identity(self.document, self.resolver, reference, at)
     }
 
     /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its
@@ -7188,10 +7222,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         kind: &str,
         reference: &str,
     ) -> Option<T> {
-        // E004 case: undeclared-component
-        Diagnostic::error(Code::UnresolvedRef, provenance.clone())
-            .message(format!("unresolved {kind} reference `{reference}`"))
-            .emit(self.diags);
+        reject_undeclared_component(self.diags, provenance, kind, reference);
         None
     }
 
