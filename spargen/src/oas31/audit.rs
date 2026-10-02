@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
 
 use crate::diag::{Code, Diagnostic, Diagnostics, FileId, JsonPointer, Provenance};
@@ -6,180 +7,162 @@ use super::{Document, MediaTypeObject, RefOr, Resolver, Schema, SchemaOr, Valida
 
 type AnnotationKey = (Option<FileId>, JsonPointer);
 
-/// The per-keyword W-class audit: walks every reachable schema and emits the once-per-site
-/// warnings (validation-only keywords). R-class rejections fire during parsing and lowering.
+/// What one audit pass carries through its walk.
+struct Audit<'a, 'doc> {
+    document: &'doc Document,
+    resolver: &'a Resolver<'doc>,
+    /// The `contentSchema` sites an SSE envelope consumes, which lowering reads.
+    consumed_content: HashSet<AnnotationKey>,
+    /// Every schema node [`Audit::resolve_unlowered`] has already walked, by `(file, pointer)`,
+    /// so a subtree reached twice is walked once and a cycle of references terminates.
+    unlowered_walked: HashSet<AnnotationKey>,
+    diags: &'a mut Diagnostics,
+}
+
+/// The per-keyword audit: walks every reachable schema and emits the once-per-site warnings
+/// (validation-only keywords), and resolves the references in every subschema lowering never
+/// reads ([`Audit::resolve_unlowered`]). Other rejections fire during parsing and lowering.
 pub(crate) fn audit(document: &Document, resolver: &Resolver<'_>, diags: &mut Diagnostics) {
     let consumed_content = consumed_sse_content(document, resolver, diags);
-    for (name, schema) in &document.components.schemas {
-        if let RefOr::Item(schema) = schema {
-            audit_schema(
-                schema,
-                JsonPointer::root()
-                    .push("components")
-                    .push("schemas")
-                    .push(name),
-                &consumed_content,
-                diags,
-            );
-        }
-    }
-
-    let components_pointer = JsonPointer::root().push("components");
-    for (name, parameter) in &document.components.parameters {
-        if let RefOr::Item(parameter) = parameter {
-            audit_parameter(
-                parameter,
-                components_pointer.push("parameters").push(name),
-                &consumed_content,
-                diags,
-            );
-        }
-    }
-    for (name, body) in &document.components.request_bodies {
-        if let RefOr::Item(body) = body {
-            audit_content(
-                &body.content,
-                components_pointer
-                    .push("requestBodies")
-                    .push(name)
-                    .push("content"),
-                &consumed_content,
-                diags,
-            );
-        }
-    }
-    for (name, response) in &document.components.responses {
-        if let RefOr::Item(response) = response {
-            audit_content(
-                &response.content,
-                components_pointer
-                    .push("responses")
-                    .push(name)
-                    .push("content"),
-                &consumed_content,
-                diags,
-            );
-        }
-    }
-    for (name, media) in &document.components.media_types {
-        audit_media(
-            media,
-            components_pointer.push("mediaTypes").push(name),
-            &consumed_content,
-            diags,
-        );
-    }
-
-    for (path, item) in &document.paths.items {
-        for (method, operation) in &item.operations {
-            let op_pointer = JsonPointer::root()
-                .push("paths")
-                .push(path)
-                .push(method.as_str());
-            for (index, parameter) in item
-                .parameters
-                .iter()
-                .chain(operation.parameters.iter())
-                .enumerate()
-            {
-                if let RefOr::Item(parameter) = parameter {
-                    audit_parameter(
-                        parameter,
-                        op_pointer.push("parameters").index(index),
-                        &consumed_content,
-                        diags,
-                    );
-                }
-            }
-            if let Some(RefOr::Item(body)) = &operation.request_body {
-                audit_content(
-                    &body.content,
-                    op_pointer.push("requestBody").push("content"),
-                    &consumed_content,
-                    diags,
-                );
-            }
-            for (status, response) in &operation.responses.by_status {
-                if let RefOr::Item(response) = response {
-                    audit_content(
-                        &response.content,
-                        op_pointer.push("responses").push(status).push("content"),
-                        &consumed_content,
-                        diags,
-                    );
-                }
-            }
-            if let Some(RefOr::Item(response)) = &operation.responses.default {
-                audit_content(
-                    &response.content,
-                    op_pointer.push("responses").push("default").push("content"),
-                    &consumed_content,
-                    diags,
-                );
-            }
-        }
-    }
-}
-
-fn audit_parameter(
-    parameter: &super::ParameterObject,
-    pointer: JsonPointer,
-    consumed_content: &HashSet<AnnotationKey>,
-    diags: &mut Diagnostics,
-) {
-    if let Some(RefOr::Item(schema)) = &parameter.schema {
-        audit_schema(schema, pointer.push("schema"), consumed_content, diags);
-    }
-    audit_content(
-        &parameter.content,
-        pointer.push("content"),
+    let mut audit = Audit {
+        document,
+        resolver,
         consumed_content,
+        unlowered_walked: HashSet::new(),
         diags,
-    );
+    };
+    audit.walk();
 }
 
-fn audit_content(
-    content: &indexmap::IndexMap<String, MediaTypeObject>,
-    pointer: JsonPointer,
-    consumed_content: &HashSet<AnnotationKey>,
-    diags: &mut Diagnostics,
-) {
-    for (media, object) in content {
-        audit_media(object, pointer.push(media), consumed_content, diags);
-    }
-}
+impl Audit<'_, '_> {
+    fn walk(&mut self) {
+        let document = self.document;
+        for (name, schema) in &document.components.schemas {
+            if let RefOr::Item(schema) = schema {
+                self.audit_schema(
+                    schema,
+                    JsonPointer::root()
+                        .push("components")
+                        .push("schemas")
+                        .push(name),
+                );
+            }
+        }
 
-fn audit_media(
-    media: &MediaTypeObject,
-    pointer: JsonPointer,
-    consumed_content: &HashSet<AnnotationKey>,
-    diags: &mut Diagnostics,
-) {
-    if let Some(RefOr::Item(schema)) = &media.schema {
-        audit_schema(schema, pointer.push("schema"), consumed_content, diags);
-    }
-    if let Some(RefOr::Item(schema)) = &media.item_schema {
-        audit_schema(schema, pointer.push("itemSchema"), consumed_content, diags);
-    }
-}
+        let components_pointer = JsonPointer::root().push("components");
+        for (name, parameter) in &document.components.parameters {
+            if let RefOr::Item(parameter) = parameter {
+                self.audit_parameter(parameter, components_pointer.push("parameters").push(name));
+            }
+        }
+        for (name, body) in &document.components.request_bodies {
+            if let RefOr::Item(body) = body {
+                self.audit_content(
+                    &body.content,
+                    components_pointer
+                        .push("requestBodies")
+                        .push(name)
+                        .push("content"),
+                );
+            }
+        }
+        for (name, response) in &document.components.responses {
+            if let RefOr::Item(response) = response {
+                self.audit_content(
+                    &response.content,
+                    components_pointer
+                        .push("responses")
+                        .push(name)
+                        .push("content"),
+                );
+            }
+        }
+        for (name, media) in &document.components.media_types {
+            self.audit_media(media, components_pointer.push("mediaTypes").push(name));
+        }
 
-fn audit_schema(
-    schema: &Schema,
-    pointer: JsonPointer,
-    consumed_content: &HashSet<AnnotationKey>,
-    diags: &mut Diagnostics,
-) {
-    if has_validation_keywords(&schema.validation) {
-        Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
-            .message("validation-only schema keywords are not enforced at runtime")
-            .remedy("keep producer-side validation for these constraints")
-            .emit(diags);
+        for (path, item) in &document.paths.items {
+            for (method, operation) in &item.operations {
+                let op_pointer = JsonPointer::root()
+                    .push("paths")
+                    .push(path)
+                    .push(method.as_str());
+                for (index, parameter) in item
+                    .parameters
+                    .iter()
+                    .chain(operation.parameters.iter())
+                    .enumerate()
+                {
+                    if let RefOr::Item(parameter) = parameter {
+                        self.audit_parameter(parameter, op_pointer.push("parameters").index(index));
+                    }
+                }
+                if let Some(RefOr::Item(body)) = &operation.request_body {
+                    self.audit_content(
+                        &body.content,
+                        op_pointer.push("requestBody").push("content"),
+                    );
+                }
+                for (status, response) in &operation.responses.by_status {
+                    if let RefOr::Item(response) = response {
+                        self.audit_content(
+                            &response.content,
+                            op_pointer.push("responses").push(status).push("content"),
+                        );
+                    }
+                }
+                if let Some(RefOr::Item(response)) = &operation.responses.default {
+                    self.audit_content(
+                        &response.content,
+                        op_pointer.push("responses").push("default").push("content"),
+                    );
+                }
+            }
+        }
     }
 
-    if (schema.content_media_type.is_some() || schema.content_schema.is_some())
-        && !consumed_content.contains(&annotation_key(&schema.provenance))
-    {
-        Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+    fn audit_parameter(&mut self, parameter: &super::ParameterObject, pointer: JsonPointer) {
+        if let Some(RefOr::Item(schema)) = &parameter.schema {
+            self.audit_schema(schema, pointer.push("schema"));
+        }
+        self.audit_content(&parameter.content, pointer.push("content"));
+    }
+
+    fn audit_content(
+        &mut self,
+        content: &indexmap::IndexMap<String, MediaTypeObject>,
+        pointer: JsonPointer,
+    ) {
+        for (media, object) in content {
+            self.audit_media(object, pointer.push(media));
+        }
+    }
+
+    fn audit_media(&mut self, media: &MediaTypeObject, pointer: JsonPointer) {
+        if let Some(RefOr::Item(schema)) = &media.schema {
+            self.audit_schema(schema, pointer.push("schema"));
+        }
+        if let Some(RefOr::Item(schema)) = &media.item_schema {
+            self.audit_schema(schema, pointer.push("itemSchema"));
+        }
+    }
+
+    fn audit_schema(&mut self, schema: &Schema, pointer: JsonPointer) {
+        let diags = &mut *self.diags;
+        if has_validation_keywords(&schema.validation) {
+            Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+                .message("validation-only schema keywords are not enforced at runtime")
+                .remedy("keep producer-side validation for these constraints")
+                .emit(diags);
+        }
+
+        let content_consumed = self
+            .consumed_content
+            .contains(&annotation_key(&schema.provenance));
+        if (schema.content_media_type.is_some() || schema.content_schema.is_some())
+            && !content_consumed
+        {
+            Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
             .message(
                 "`contentMediaType`/`contentSchema` are decoded only on an OpenAPI 3.2 SSE \
                  envelope's string `data` property",
@@ -189,109 +172,195 @@ fn audit_schema(
                  or decode the string content in application code",
             )
             .emit(diags);
-    }
+        }
 
-    // A `patternProperties` key regex is a validation-only constraint: the generated typed overflow
-    // map captures every non-declared property regardless of the pattern, so the key regex is not
-    // enforced. Acknowledge it as `W001` (never silent) — the value schemas still lower.
-    if !schema.pattern_properties.is_empty() {
-        Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
-            .message(
-                "`patternProperties` key patterns are not enforced: the generated typed map \
+        // A `patternProperties` key regex is a validation-only constraint: the generated typed overflow
+        // map captures every non-declared property regardless of the pattern, so the key regex is not
+        // enforced. Acknowledge it as `W001` (never silent) — the value schemas still lower.
+        if !schema.pattern_properties.is_empty() {
+            Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+                .message(
+                    "`patternProperties` key patterns are not enforced: the generated typed map \
                  captures all non-declared properties, not only pattern-matching keys",
-            )
-            .remedy("keep producer-side validation for the key pattern")
-            .emit(diags);
+                )
+                .remedy("keep producer-side validation for the key pattern")
+                .emit(diags);
+        }
+
+        for (name, child) in &schema.properties {
+            self.audit_schema_or(child, pointer.push("properties").push(name));
+        }
+        if let Some(child) = &schema.additional_properties {
+            self.audit_schema_or(child, pointer.push("additionalProperties"));
+        }
+        for (pattern, child) in &schema.pattern_properties {
+            self.audit_schema_or(child, pointer.push("patternProperties").push(pattern));
+        }
+        if let Some(child) = &schema.items {
+            self.audit_schema_or(child, pointer.push("items"));
+        }
+        for (index, child) in schema.prefix_items.iter().enumerate() {
+            self.audit_schema_or(child, pointer.push("prefixItems").index(index));
+        }
+        for (index, child) in schema.all_of.iter().enumerate() {
+            self.audit_schema_or(child, pointer.push("allOf").index(index));
+        }
+        for (index, child) in schema.one_of.iter().enumerate() {
+            self.audit_schema_or(child, pointer.push("oneOf").index(index));
+        }
+        for (index, child) in schema.any_of.iter().enumerate() {
+            self.audit_schema_or(child, pointer.push("anyOf").index(index));
+        }
+        // Lowering reads a `$defs` entry only when a reference names it, so an unreferenced one is
+        // reached by nothing else; resolving a referenced one here as well reports nothing lowering
+        // would not.
+        for (name, child) in &schema.defs {
+            self.audit_schema_or(child, pointer.push("$defs").push(name));
+            self.resolve_unlowered_or(child);
+        }
+        for (keyword, child) in &schema.validation_children {
+            self.audit_schema_or(child, pointer.push(keyword));
+            self.resolve_unlowered_or(child);
+        }
+        if let Some(child) = schema.content_schema.as_deref() {
+            self.audit_schema_or(child, pointer.push("contentSchema"));
+            if !content_consumed {
+                self.resolve_unlowered_or(child);
+            }
+        }
     }
 
-    for (name, child) in &schema.properties {
-        audit_schema_or(
-            child,
-            pointer.push("properties").push(name),
-            consumed_content,
-            diags,
-        );
+    fn audit_schema_or(&mut self, schema: &SchemaOr, pointer: JsonPointer) {
+        if let SchemaOr::Schema(schema) = schema {
+            self.audit_schema(schema, pointer);
+        }
     }
-    if let Some(child) = &schema.additional_properties {
-        audit_schema_or(
-            child,
-            pointer.push("additionalProperties"),
-            consumed_content,
-            diags,
-        );
-    }
-    for (pattern, child) in &schema.pattern_properties {
-        audit_schema_or(
-            child,
-            pointer.push("patternProperties").push(pattern),
-            consumed_content,
-            diags,
-        );
-    }
-    if let Some(child) = &schema.items {
-        audit_schema_or(child, pointer.push("items"), consumed_content, diags);
-    }
-    for (index, child) in schema.prefix_items.iter().enumerate() {
-        audit_schema_or(
-            child,
-            pointer.push("prefixItems").index(index),
-            consumed_content,
-            diags,
-        );
-    }
-    for (index, child) in schema.all_of.iter().enumerate() {
-        audit_schema_or(
-            child,
-            pointer.push("allOf").index(index),
-            consumed_content,
-            diags,
-        );
-    }
-    for (index, child) in schema.one_of.iter().enumerate() {
-        audit_schema_or(
-            child,
-            pointer.push("oneOf").index(index),
-            consumed_content,
-            diags,
-        );
-    }
-    for (index, child) in schema.any_of.iter().enumerate() {
-        audit_schema_or(
-            child,
-            pointer.push("anyOf").index(index),
-            consumed_content,
-            diags,
-        );
-    }
-    for (name, child) in &schema.defs {
-        audit_schema_or(
-            child,
-            pointer.push("$defs").push(name),
-            consumed_content,
-            diags,
-        );
-    }
-    for (keyword, child) in &schema.validation_children {
-        audit_schema_or(child, pointer.push(keyword), consumed_content, diags);
-    }
-    if let Some(child) = schema.content_schema.as_deref() {
-        audit_schema_or(
-            child,
-            pointer.push("contentSchema"),
-            consumed_content,
-            diags,
-        );
-    }
-}
 
-fn audit_schema_or(
-    schema: &SchemaOr,
-    pointer: JsonPointer,
-    consumed_content: &HashSet<AnnotationKey>,
-    diags: &mut Diagnostics,
-) {
-    if let SchemaOr::Schema(schema) = schema {
-        audit_schema(schema, pointer, consumed_content, diags);
+    fn resolve_unlowered_or(&mut self, schema: &SchemaOr) {
+        if let SchemaOr::Schema(schema) = schema {
+            self.resolve_unlowered(schema);
+        }
+    }
+
+    /// Resolve every reference in `schema`, a subschema lowering never reads (#424): one under
+    /// `not`, `if`/`then`/`else`, `contains`, `propertyNames`, `unevaluated*` or
+    /// `dependentSchemas`, an unreferenced `$defs` entry, or a `contentSchema` no SSE envelope
+    /// consumes. The subschema still lowers to nothing, but a reference naming nothing is a broken
+    /// document wherever it sits, so it is `E004` here as it is in a position lowering reads.
+    ///
+    /// Every keyword of the subtree is walked, since none of it is lowered, and a reference is
+    /// read the way lowering reads one: a `#/components/schemas/<name>` the root declares is that
+    /// component, which lowering reaches on its own, and anything else goes to the resolver, which
+    /// reports a miss itself. A target the resolver parses is walked in turn — it is in this
+    /// subtree's position, and lowering reads it only if something else names it. Each
+    /// `discriminator`'s `mapping` and `defaultMapping` values are resolved as a lowered one's are.
+    fn resolve_unlowered(&mut self, schema: &Schema) {
+        if !self
+            .unlowered_walked
+            .insert(annotation_key(&schema.provenance))
+        {
+            return;
+        }
+        if let Some(reference) = &schema.reference {
+            self.resolve_unlowered_ref(reference, &schema.provenance);
+        }
+        if let Some(discriminator) = &schema.discriminator {
+            self.resolve_unlowered_discriminator(discriminator);
+        }
+        let children = schema
+            .properties
+            .values()
+            .chain(schema.additional_properties.as_deref())
+            .chain(schema.pattern_properties.values())
+            .chain(schema.items.as_deref())
+            .chain(&schema.prefix_items)
+            .chain(&schema.all_of)
+            .chain(&schema.one_of)
+            .chain(&schema.any_of)
+            .chain(schema.defs.values())
+            .chain(schema.validation_children.iter().map(|(_, child)| child))
+            .chain(schema.content_schema.as_deref());
+        for child in children {
+            self.resolve_unlowered_or(child);
+        }
+    }
+
+    fn resolve_unlowered_ref(&mut self, reference: &str, at: &Provenance) {
+        let from_root = at
+            .span
+            .is_none_or(|span| span.file == self.resolver.root_id());
+        if let Some(name) = reference.strip_prefix("#/components/schemas/") {
+            let components = &self.document.components.schemas;
+            if components.contains_key(name) {
+                return;
+            }
+            // As lowering reads it: from the root, a name whose first segment is no declared
+            // component is a missing component, and one whose first segment is declared is a
+            // pointer into that component's body, which the resolver walks.
+            let into_a_declared_component = name
+                .split_once('/')
+                .is_some_and(|(root, _)| components.contains_key(root));
+            if from_root && !into_a_declared_component {
+                // E004 case: undeclared-component
+                Diagnostic::error(Code::UnresolvedRef, at.clone())
+                    .message(format!("unresolved schema reference `{reference}`"))
+                    .emit(self.diags);
+                return;
+            }
+        }
+        if self
+            .resolver
+            .reference_identity(reference, at)
+            .is_some_and(|(file, pointer)| self.unlowered_walked.contains(&(Some(file), pointer)))
+        {
+            return;
+        }
+        if let Ok(resolved) = self.resolver.resolve(reference, at, self.diags) {
+            if let Cow::Owned(target) = resolved.schema {
+                self.resolve_unlowered(&target);
+            }
+        }
+    }
+
+    fn resolve_unlowered_discriminator(&mut self, discriminator: &super::Discriminator) {
+        let entries = discriminator
+            .mapping
+            .iter()
+            .map(|(tag, target)| (Some(tag), target))
+            .chain(
+                discriminator
+                    .default_mapping
+                    .iter()
+                    .map(|target| (None, target)),
+            );
+        for (tag, target) in entries {
+            let value = &target.value;
+            let reference = if super::lower::is_schema_component_name(value) {
+                format!("#/components/schemas/{value}")
+            } else {
+                value.clone()
+            };
+            let root_component = reference
+                .strip_prefix("#/components/schemas/")
+                .is_some_and(|name| self.document.components.schemas.contains_key(name));
+            let names_a_schema = root_component
+                || self
+                    .resolver
+                    .reference_identity(&reference, &target.provenance)
+                    .is_some_and(|(file, pointer)| self.resolver.node_at(file, &pointer).is_some());
+            if !names_a_schema {
+                let entry = super::lower::discriminator_entry(tag);
+                // E004 case: discriminator-target
+                Diagnostic::error(Code::UnresolvedRef, target.provenance.clone())
+                    .message(format!(
+                        "{entry} names `{value}`, which is not a schema in the loaded description"
+                    ))
+                    .remedy(
+                        "declare the schema, correct the name or reference, or remove the entry",
+                    )
+                    .emit(self.diags);
+            }
+        }
     }
 }
 

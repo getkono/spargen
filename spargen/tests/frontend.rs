@@ -24393,3 +24393,299 @@ components:
         );
     }
 }
+
+/// `generate_and_check_files` over `root` and `lib.yaml`, as `(entry, report)` pairs.
+fn root_and_lib(root: &str, lib: &str) -> [(&'static str, Report); 2] {
+    let (generated, checked, _) =
+        generate_and_check_files(&[("openapi.yaml", root), ("lib.yaml", lib)]);
+    [("generate", generated), ("check", checked)]
+}
+
+/// A reachable `A` whose only content under test sits at `site` (indented as a schema keyword of
+/// `A`), with `Present` and `Wrapper` declared so a control can name something that exists.
+fn validation_ref_spec(site: &str) -> String {
+    format!(
+        "openapi: 3.1.0\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\n\
+         paths:\n  \
+         /a:\n    \
+         get:\n      \
+         operationId: getA\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json:\n              \
+         schema: {{ $ref: '#/components/schemas/A' }}\n\
+         components:\n  \
+         schemas:\n    \
+         Present: {{ type: string }}\n    \
+         Wrapper:\n      \
+         type: object\n      \
+         properties:\n        \
+         w: {{ type: integer }}\n    \
+         A:\n      \
+         type: object\n\
+         {site}"
+    )
+}
+
+/// The keyword positions lowering never reads (#424): `not`, `if`/`then`/`else`, `contains`,
+/// `propertyNames`, `unevaluated*`, `dependentSchemas`, an unconsumed `contentSchema`, and an
+/// unreferenced `$defs` entry, each at depth one and nested inside another such subtree. `{target}`
+/// is the reference each one carries.
+fn unlowered_ref_sites(target: &str) -> Vec<(&'static str, String, String)> {
+    let at = "/components/schemas/A";
+    vec![
+        (
+            "not",
+            format!("      not: {{ $ref: '{target}' }}\n"),
+            format!("{at}/not"),
+        ),
+        (
+            "if",
+            format!("      if: {{ $ref: '{target}' }}\n"),
+            format!("{at}/if"),
+        ),
+        (
+            "then",
+            format!("      then: {{ $ref: '{target}' }}\n"),
+            format!("{at}/then"),
+        ),
+        (
+            "else",
+            format!("      else: {{ $ref: '{target}' }}\n"),
+            format!("{at}/else"),
+        ),
+        (
+            "contains",
+            format!(
+                "      properties:\n        l:\n          type: array\n          items: {{ type: string }}\n          contains: {{ $ref: '{target}' }}\n"
+            ),
+            format!("{at}/properties/l/contains"),
+        ),
+        (
+            "propertyNames",
+            format!("      propertyNames: {{ $ref: '{target}' }}\n"),
+            format!("{at}/propertyNames"),
+        ),
+        (
+            "unevaluatedProperties",
+            format!("      unevaluatedProperties: {{ $ref: '{target}' }}\n"),
+            format!("{at}/unevaluatedProperties"),
+        ),
+        (
+            "unevaluatedItems",
+            format!(
+                "      properties:\n        l:\n          type: array\n          unevaluatedItems: {{ $ref: '{target}' }}\n"
+            ),
+            format!("{at}/properties/l/unevaluatedItems"),
+        ),
+        (
+            "dependentSchemas",
+            format!("      dependentSchemas:\n        x: {{ $ref: '{target}' }}\n"),
+            format!("{at}/dependentSchemas/x"),
+        ),
+        (
+            "contentSchema",
+            format!(
+                "      properties:\n        s:\n          type: string\n          contentMediaType: application/json\n          contentSchema: {{ $ref: '{target}' }}\n"
+            ),
+            format!("{at}/properties/s/contentSchema"),
+        ),
+        (
+            "an unreferenced $defs entry",
+            format!("      $defs:\n        D: {{ $ref: '{target}' }}\n"),
+            format!("{at}/$defs/D"),
+        ),
+        (
+            "a property inside not",
+            format!(
+                "      not:\n        properties:\n          y: {{ $ref: '{target}' }}\n"
+            ),
+            format!("{at}/not/properties/y"),
+        ),
+        (
+            "an allOf member inside if",
+            format!("      if:\n        allOf:\n          - {{ $ref: '{target}' }}\n"),
+            format!("{at}/if/allOf/0"),
+        ),
+        (
+            "a not inside contains",
+            format!(
+                "      properties:\n        l:\n          type: array\n          contains:\n            not: {{ $ref: '{target}' }}\n"
+            ),
+            format!("{at}/properties/l/contains/not"),
+        ),
+    ]
+}
+
+/// #424: a `$ref` under a keyword lowering never reads was never resolved, so a dangling one
+/// audited clean beside only the parent's `W001`, where the same reference under `properties` is
+/// `E004`. The subschema is still not lowered, but its references are resolved, and one naming
+/// nothing is `E004` at the reference through both entry points — whether it is a component name
+/// the document does not declare or a pointer into a file that holds nothing there.
+#[test]
+fn a_dangling_ref_under_a_validation_only_keyword_is_e004() {
+    for target in [
+        "#/components/schemas/Missing",
+        "#/components/schemas/A/nothing",
+    ] {
+        for (what, site, pointer) in unlowered_ref_sites(target) {
+            let spec = validation_ref_spec(&site);
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{target} under {what} through {entry}: {report:#?}"
+                );
+                assert!(
+                    report
+                        .diagnostics()
+                        .iter()
+                        .any(|d| d.code == Code::UnresolvedRef && d.pointer.as_str() == pointer),
+                    "{target} under {what} through {entry}: E004 must sit at {pointer}: \
+                     {report:#?}"
+                );
+            }
+        }
+    }
+}
+
+/// The control for #424: the same positions naming a schema that exists — a root component, a
+/// pointer into the document, a sub-file — still resolve and generate with no `E004`, and the
+/// subschema is still not lowered, so the emitted types are those of the document without it.
+#[test]
+fn a_resolvable_ref_under_a_validation_only_keyword_stays_clean() {
+    let (_, base_code) = generate_with_code(&validation_ref_spec(""));
+    let base_types = types_module(&base_code);
+    for target in [
+        "#/components/schemas/Present",
+        "#/components/schemas/Wrapper/properties/w",
+        "#/components/schemas/A",
+    ] {
+        for (what, site, _) in unlowered_ref_sites(target) {
+            let spec = validation_ref_spec(&site);
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{target} under {what} through {entry}: {report:#?}"
+                );
+                assert!(
+                    !has_code(&report, Code::UnresolvedRef),
+                    "{target} under {what} through {entry}: {report:#?}"
+                );
+            }
+            // `contains`/`unevaluatedItems` add an array property and `contentSchema` a string
+            // one, so only the positions that add no shape are compared with the baseline.
+            if !site.contains("properties:") {
+                let (_, code) = generate_with_code(&spec);
+                assert_eq!(
+                    types_module(&code),
+                    base_types,
+                    "{target} under {what} changed the emitted types, so it was lowered"
+                );
+            }
+        }
+    }
+}
+
+/// #424 across files: a target reached only through `not` is never lowered, so its own references
+/// are resolved by following it — a dangling one inside it is `E004` at that reference, in the
+/// file it is written in. A cycle of such targets terminates. A bare `#/components/schemas/<name>`
+/// written in a sub-file names the root's component when the root declares one, as lowering reads
+/// it, so it is not reported against the sub-file.
+#[test]
+fn a_ref_under_a_validation_only_keyword_is_followed_into_other_files() {
+    let root = validation_ref_spec("      not: { $ref: './lib.yaml#/Outer' }\n");
+
+    let dangling = "Outer:\n  type: object\n  properties:\n    y: { $ref: '#/Gone' }\n";
+    for (entry, report) in root_and_lib(&root, dangling) {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::UnresolvedRef
+                    && d.pointer.as_str() == "/Outer/properties/y"),
+            "{entry}: E004 must sit at lib.yaml's /Outer/properties/y: {report:#?}"
+        );
+    }
+
+    let resolvable = "Outer:\n  \
+                      type: object\n  \
+                      properties:\n    \
+                      y: { $ref: '#/Inner' }\n    \
+                      z: { $ref: '#/components/schemas/Present' }\n\
+                      Inner:\n  \
+                      not: { $ref: '#/Outer' }\n";
+    for (entry, report) in root_and_lib(&root, resolvable) {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnresolvedRef),
+            "{entry}: {report:#?}"
+        );
+    }
+
+    let missing_file = validation_ref_spec("      not: { $ref: './absent.yaml#/Outer' }\n");
+    for (entry, report) in [
+        ("generate", generate(&missing_file)),
+        ("check", check(&missing_file)),
+    ] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+}
+
+/// #424: a `discriminator` inside a subschema lowering never reads was never checked, so a
+/// `mapping` or `defaultMapping` value naming no schema went unreported. Each is resolved as a
+/// lowered discriminator's would be, and one naming nothing is `E004` at the entry; a value naming
+/// a schema that exists is not.
+#[test]
+fn a_discriminator_under_a_validation_only_keyword_resolves_its_mapping() {
+    let site = |target: &str| {
+        format!(
+            "      else:\n        \
+             discriminator:\n          \
+             propertyName: kind\n          \
+             mapping:\n            \
+             p: {target}\n          \
+             defaultMapping: Present\n        \
+             oneOf:\n          \
+             - {{ $ref: '#/components/schemas/Present' }}\n"
+        )
+    };
+    let dangling = validation_ref_spec(&site("Missing"));
+    for (entry, report) in [
+        ("generate", generate(&dangling)),
+        ("check", check(&dangling)),
+    ] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let e004: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        assert_eq!(
+            e004,
+            ["/components/schemas/A/else/discriminator/mapping/p"],
+            "{entry}: only the dangling mapping entry is E004: {report:#?}"
+        );
+    }
+    for target in ["Present", "'#/components/schemas/Present'"] {
+        let clean = validation_ref_spec(&site(target));
+        for (entry, report) in [("generate", generate(&clean)), ("check", check(&clean))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target}, {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::UnresolvedRef),
+                "{target}, {entry}: {report:#?}"
+            );
+        }
+    }
+}

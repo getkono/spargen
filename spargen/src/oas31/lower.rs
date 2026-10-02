@@ -579,7 +579,7 @@ struct ScopeReach {
 /// The specification recommends reading a value that is both a valid name and a valid relative
 /// reference (`Cat`, `pets.yaml`) as a name, and asks authors to write `./pets.yaml` to mean the
 /// file — which the `/` here excludes.
-fn is_schema_component_name(value: &str) -> bool {
+pub(super) fn is_schema_component_name(value: &str) -> bool {
     !value.is_empty()
         && value
             .bytes()
@@ -588,7 +588,7 @@ fn is_schema_component_name(value: &str) -> bool {
 
 /// How a diagnostic names one Discriminator Object target: the `mapping` entry with tag `tag`, or
 /// `defaultMapping` for `None`.
-fn discriminator_entry(tag: Option<&String>) -> String {
+pub(super) fn discriminator_entry(tag: Option<&String>) -> String {
     match tag {
         Some(tag) => format!("`discriminator.mapping` entry `{tag}`"),
         None => "`discriminator.defaultMapping`".to_owned(),
