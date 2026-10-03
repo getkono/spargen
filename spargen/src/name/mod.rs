@@ -33,8 +33,8 @@ pub(crate) struct Names {
     /// Optional-parameters `…Params` struct name per operation.
     pub(crate) params_structs: HashMap<OperationId, Ident>,
     /// Generator-owned signature and request-building bindings per operation. Required OpenAPI
-    /// parameters reserve their natural Rust spellings first, so these identifiers can never
-    /// shadow caller-provided values.
+    /// parameters are allocated in the same scope first, so these identifiers can never shadow
+    /// caller-provided values.
     pub(crate) operation_bindings: HashMap<OperationId, OperationBindings>,
     /// Identifier per operation parameter, in `Operation::params` order: a method argument for a
     /// required parameter, a `…Params` field (and setter) for an optional one. Each kind shares
