@@ -7,6 +7,10 @@ use super::{Document, MediaTypeObject, RefOr, Resolver, Schema, SchemaOr, Valida
 
 type AnnotationKey = (Option<FileId>, JsonPointer);
 
+/// A schema node's `(file, pointer)` identity, with an unspanned node placed in the root document,
+/// as [`Resolver::reference_identity`] places a reference written at one.
+type SchemaKey = (FileId, JsonPointer);
+
 /// What one audit pass carries through its walk.
 struct Audit<'a, 'doc> {
     document: &'doc Document,
@@ -16,6 +20,12 @@ struct Audit<'a, 'doc> {
     /// Every schema node [`Audit::resolve_unlowered`] has already walked, by `(file, pointer)`,
     /// so a subtree reached twice is walked once and a cycle of references terminates.
     unlowered_walked: HashSet<AnnotationKey>,
+    /// Every schema node [`Audit::audit_schema`] has audited, so a target that several references
+    /// reach, or that the walk reaches as well, is audited once and a reference cycle terminates.
+    audited: HashSet<SchemaKey>,
+    /// The references met in audited positions, followed once the root walk is done
+    /// ([`Audit::follow_references`]).
+    pending: Vec<(String, Provenance)>,
     diags: &'a mut Diagnostics,
 }
 
@@ -29,24 +39,25 @@ pub(crate) fn audit(document: &Document, resolver: &Resolver<'_>, diags: &mut Di
         resolver,
         consumed_content,
         unlowered_walked: HashSet::new(),
+        audited: HashSet::new(),
+        pending: Vec::new(),
         diags,
     };
     audit.walk();
+    audit.follow_references();
 }
 
 impl Audit<'_, '_> {
     fn walk(&mut self) {
         let document = self.document;
         for (name, schema) in &document.components.schemas {
-            if let RefOr::Item(schema) = schema {
-                self.audit_schema(
-                    schema,
-                    JsonPointer::root()
-                        .push("components")
-                        .push("schemas")
-                        .push(name),
-                );
-            }
+            self.audit_schema_ref_or(
+                schema,
+                JsonPointer::root()
+                    .push("components")
+                    .push("schemas")
+                    .push(name),
+            );
         }
 
         let components_pointer = JsonPointer::root().push("components");
@@ -122,8 +133,8 @@ impl Audit<'_, '_> {
     }
 
     fn audit_parameter(&mut self, parameter: &super::ParameterObject, pointer: JsonPointer) {
-        if let Some(RefOr::Item(schema)) = &parameter.schema {
-            self.audit_schema(schema, pointer.push("schema"));
+        if let Some(schema) = &parameter.schema {
+            self.audit_schema_ref_or(schema, pointer.push("schema"));
         }
         self.audit_content(&parameter.content, pointer.push("content"));
     }
@@ -139,15 +150,77 @@ impl Audit<'_, '_> {
     }
 
     fn audit_media(&mut self, media: &MediaTypeObject, pointer: JsonPointer) {
-        if let Some(RefOr::Item(schema)) = &media.schema {
-            self.audit_schema(schema, pointer.push("schema"));
+        if let Some(schema) = &media.schema {
+            self.audit_schema_ref_or(schema, pointer.push("schema"));
         }
-        if let Some(RefOr::Item(schema)) = &media.item_schema {
-            self.audit_schema(schema, pointer.push("itemSchema"));
+        if let Some(schema) = &media.item_schema {
+            self.audit_schema_ref_or(schema, pointer.push("itemSchema"));
         }
     }
 
+    /// A schema position that may hold a bare Reference Object: an inline schema is audited, and
+    /// a reference is queued to be followed ([`Self::follow_references`]).
+    fn audit_schema_ref_or(&mut self, schema: &RefOr<Schema>, pointer: JsonPointer) {
+        match schema {
+            RefOr::Item(schema) => self.audit_schema(schema, pointer),
+            RefOr::Ref(reference) => self
+                .pending
+                .push((reference.reference.clone(), reference.provenance.clone())),
+        }
+    }
+
+    /// Audit every schema a queued reference reaches that the walk has not (#446).
+    ///
+    /// The walk starts only from positions written in the root document, so a schema in a
+    /// referenced sub-file or vendored remote document, which lowering reads when a `$ref` reaches
+    /// it, was never audited: no `W001` for its validation-only keywords and no resolution of the
+    /// references under its unlowered keywords. Each reference met in an audited position is
+    /// followed to its `(file, pointer)` target, which is parsed and audited in turn, so the
+    /// target's own references are queued too. [`Self::audit_schema`] audits each target once.
+    ///
+    /// A miss is not reported here: the reference sits either in a position lowering reads, which
+    /// reports it in its own words, or under a keyword lowering never reads, which
+    /// [`Self::resolve_unlowered`] reports. So the resolver's diagnostics are discarded.
+    fn follow_references(&mut self) {
+        while let Some((reference, at)) = self.pending.pop() {
+            // As lowering reads it: a bare `#/components/schemas/<name>` the root declares is that
+            // root component wherever the reference is written, and the walk has audited every
+            // root component already (or queued the reference it is).
+            if reference
+                .strip_prefix("#/components/schemas/")
+                .is_some_and(|name| self.document.components.schemas.contains_key(name))
+            {
+                continue;
+            }
+            match self.resolver.reference_identity(&reference, &at) {
+                Some(target) if !self.audited.contains(&target) => {}
+                _ => continue,
+            }
+            let mut discarded = Diagnostics::new(0);
+            if let Ok(resolved) = self.resolver.resolve(&reference, &at, &mut discarded) {
+                let pointer = resolved.schema.provenance.pointer.clone();
+                self.audit_schema(&resolved.schema, pointer);
+            }
+        }
+    }
+
+    fn schema_key(&self, provenance: &Provenance) -> SchemaKey {
+        (
+            provenance
+                .span
+                .map_or_else(|| self.resolver.root_id(), |span| span.file),
+            provenance.pointer.clone(),
+        )
+    }
+
     fn audit_schema(&mut self, schema: &Schema, pointer: JsonPointer) {
+        if !self.audited.insert(self.schema_key(&schema.provenance)) {
+            return;
+        }
+        if let Some(reference) = &schema.reference {
+            self.pending
+                .push((reference.clone(), schema.provenance.clone()));
+        }
         let diags = &mut *self.diags;
         if has_validation_keywords(&schema.validation) {
             Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())

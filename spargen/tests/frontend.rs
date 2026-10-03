@@ -25390,6 +25390,60 @@ fn a_ref_under_a_validation_only_keyword_is_followed_into_other_files() {
     }
 }
 
+/// Whether `report` carries `code` at `pointer`.
+fn has_code_at(report: &Report, code: Code, pointer: &str) -> bool {
+    report
+        .diagnostics()
+        .iter()
+        .any(|d| d.code == code && d.pointer.as_str() == pointer)
+}
+
+/// #446: the audit walked only the schemas written in the root document, so a schema lowering
+/// reaches through a `$ref` into another file got no `W001` for its validation-only keywords, and
+/// a dangling reference under its `not` audited clean. The issue's reproducer: `check` printed
+/// `clean`. The audit now follows a reference it meets in a position lowering reads into the file
+/// it names, so the sub-file's schema gets the audit a root one does, through both entry points.
+#[test]
+fn a_schema_in_a_referenced_file_gets_the_audit_a_root_schema_does() {
+    let reproducer = "X:\n  type: object\n  maxProperties: 3\n  not: { $ref: '#/Missing' }\n";
+    let (generated, checked, _) = split("./lib.yaml#/X", reproducer);
+    for (entry, report) in [("generate", generated), ("check", checked)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code_at(&report, Code::ValidationKeywordIgnored, "/X"),
+            "{entry}: lib.yaml's /X carries `maxProperties` and `not`, so W001: {report:#?}"
+        );
+        assert!(
+            has_code_at(&report, Code::UnresolvedRef, "/X/not"),
+            "{entry}: `#/Missing` names nothing in lib.yaml, so E004 at /X/not: {report:#?}"
+        );
+    }
+
+    // Without the dangling reference the same schema generates, still warned. A target reached
+    // only through another sub-file schema's property — and a cycle back to the first — is
+    // audited too, and the walk terminates.
+    let chained = "X:\n  \
+                   type: object\n  \
+                   maxProperties: 3\n  \
+                   properties:\n    \
+                   y: { $ref: '#/Y' }\n\
+                   Y:\n  \
+                   type: object\n  \
+                   properties:\n    \
+                   s: { type: string, pattern: '^a' }\n    \
+                   back: { $ref: '#/X' }\n";
+    let (generated, checked, _) = split("./lib.yaml#/X", chained);
+    for (entry, report) in [("generate", generated), ("check", checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        for pointer in ["/X", "/Y/properties/s"] {
+            assert!(
+                has_code_at(&report, Code::ValidationKeywordIgnored, pointer),
+                "{entry}: W001 must sit at lib.yaml's {pointer}: {report:#?}"
+            );
+        }
+    }
+}
+
 /// #424: a `discriminator` inside a subschema lowering never reads was never checked, so a
 /// `mapping` or `defaultMapping` value naming no schema went unreported. Each is resolved as a
 /// lowered discriminator's would be, and one naming nothing is `E004` at the entry; a value naming
