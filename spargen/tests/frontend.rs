@@ -812,6 +812,155 @@ components:
     }
 }
 
+/// A document whose only component `U` is `body`, reached from one response body.
+fn single_component_document(body: &str) -> String {
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/U' }} }}
+components:
+  schemas:
+    Name: {{ type: string }}
+    Base:
+      type: object
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    U:
+{body}"##
+    )
+}
+
+/// A `oneOf`/`anyOf` member written `{ $ref: Name, <union> }` is a `$ref` with a union sibling like
+/// any other, so `lower_union_variant` lowers it through the same `$ref`-sibling intersection
+/// rather than as the bare target. A union sibling that contradicts the target is `E013` at the
+/// member; one that narrows it gives the member the narrowed type. Before the shape gate counted
+/// the union keywords the member took the bare-target exit, so the first generated with the member
+/// typed `String` and the second with no narrowing, both with no diagnostic.
+#[test]
+fn a_union_member_ref_with_a_union_sibling_is_intersected_with_its_target() {
+    for outer in ["oneOf", "anyOf"] {
+        for keyword in ["oneOf", "anyOf"] {
+            let contradicting = single_component_document(&format!(
+                "      {outer}:\n        - $ref: '#/components/schemas/Name'\n          {keyword}: \
+                 [{{ type: integer }}]\n        - type: boolean\n"
+            ));
+            let pointer = format!("/components/schemas/U/{outer}/0");
+            for (entry, report) in [
+                ("generate", generate(&contradicting)),
+                ("check", check(&contradicting)),
+            ] {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{keyword} beside a {outer} member via {entry}: {report:#?}\n{contradicting}"
+                );
+                assert!(
+                    report.diagnostics().iter().any(|d| {
+                        d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer
+                    }),
+                    "{keyword} beside a {outer} member via {entry}: E013 must point at \
+                     `{pointer}`: {report:#?}"
+                );
+            }
+
+            let narrowing = single_component_document(&format!(
+                "      {outer}:\n        - $ref: '#/components/schemas/Name'\n          {keyword}: \
+                 [{{ type: string, enum: [red, green] }}, {{ type: integer }}]\n        - type: \
+                 boolean\n"
+            ));
+            let (report, code) = generate_with_code(&narrowing);
+            for (entry, report) in [("generate", &report), ("check", &check(&narrowing))] {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{keyword} beside a {outer} member via {entry}: {report:#?}\n{narrowing}"
+                );
+                assert!(
+                    report.diagnostics().is_empty(),
+                    "{keyword} beside a {outer} member via {entry}: {report:#?}"
+                );
+            }
+            let types = types_module(&code);
+            let variants = enum_variants(&types, "U");
+            let payload = variants
+                .iter()
+                .find_map(|variant| {
+                    variant
+                        .strip_prefix("Name(")
+                        .and_then(|rest| rest.strip_suffix(')'))
+                        .map(|ty| {
+                            ty.strip_prefix("Box<")
+                                .and_then(|ty| ty.strip_suffix('>'))
+                                .unwrap_or(ty)
+                        })
+                })
+                .unwrap_or_else(|| {
+                    panic!("{keyword} beside a {outer} member: no `Name` variant: {types}")
+                });
+            assert_eq!(
+                enum_variants(&types, payload),
+                ["Red", "Green"],
+                "{keyword} beside a {outer} member: the member must be the enum branch alone: \
+                 {types}"
+            );
+        }
+    }
+}
+
+/// An `allOf` member written `{ $ref: X, <union> }` gathers its union sibling as a further
+/// conjunct, as `gather_member` does for every shape-bearing sibling of a member's `$ref`. That
+/// conjunct is a union, which the object merge does not intersect with object members: it is the
+/// object/scalar-mix `E013` the separate-member spelling `allOf: [{$ref: Base}, {oneOf: [...]}]`
+/// already gives on `master` (making both agree with the `$ref` spelling is #491). Before the shape
+/// gate counted the union keywords both documents below generated as the bare target with the
+/// union dropped in silence: the object one as `Base` merged with `c`, the scalar one as `String`
+/// for a union that admits no string at all.
+#[test]
+fn an_all_of_member_ref_with_a_union_sibling_is_not_dropped() {
+    for keyword in ["oneOf", "anyOf"] {
+        let beside_object = single_component_document(&format!(
+            "      allOf:\n        - $ref: '#/components/schemas/Base'\n          {keyword}: [{{ \
+             required: [a] }}, {{ required: [b] }}]\n        - type: object\n          \
+             properties:\n            c: {{ type: string }}\n"
+        ));
+        let contradicting = single_component_document(&format!(
+            "      allOf:\n        - $ref: '#/components/schemas/Name'\n          {keyword}: [{{ \
+             type: integer }}]\n"
+        ));
+        for (shape, spec) in [
+            ("beside an object member", beside_object),
+            ("contradicting its target", contradicting),
+        ] {
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{keyword} {shape} via {entry}: the member's union must not be dropped: \
+                     {report:#?}\n{spec}"
+                );
+                assert!(
+                    report.diagnostics().iter().any(|d| {
+                        d.code == Code::AllOfIrreconcilable
+                            && d.pointer.as_str().starts_with("/components/schemas/U")
+                    }),
+                    "{keyword} {shape} via {entry}: E013 must point into `U`: {report:#?}"
+                );
+            }
+        }
+    }
+}
+
 /// The control: `not` beside a `$ref` was never silent — it is validation-only and says so with
 /// `W001` — and admitting the union keywords to the shape gate must leave it exactly that, in every
 /// position, with the position still typed as the target.
