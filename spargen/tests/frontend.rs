@@ -696,6 +696,132 @@ components:
     }
 }
 
+/// An inline `oneOf` whose branches lower to one and the same generated type is the `$ref`-sibling
+/// collapse above spelled without the `$ref` (#402). Branches of nothing but `required` beside
+/// `type: object` and `properties` each meet the sibling to the same object, and bare ones each
+/// lower to `serde_json::Value`; emitted as two variants, every value matches both, so the
+/// exactly-one check fails every decode. The position is that one type instead, and the branch
+/// distinctions are reported (`W001`) rather than generating a union nothing can decode. Where only
+/// some branches share a type, they become one variant and the others stand. `null` follows the
+/// collapse's `oneOf` rule: two branches that both accept it fail exactly-one, so it is invalid.
+#[test]
+fn an_inline_one_of_whose_branches_lower_to_one_type_collapses_and_warns() {
+    let props = "properties: { a: { type: string }, b: { type: string } }";
+    let required_branches = "oneOf: [ { required: [a] }, { required: [b] } ]";
+    for (shape, body, expect_fields, expect_variants) in [
+        (
+            "beside type: object",
+            format!("      type: object\n      {props}\n      {required_branches}\n"),
+            Some(["a", "b"]),
+            None,
+        ),
+        ("bare", format!("      {required_branches}\n"), None, None),
+        (
+            "partly shared",
+            "      oneOf: [ { type: string, minLength: 1 }, { type: string, maxLength: 3 }, { \
+             type: integer } ]\n"
+                .to_owned(),
+            None,
+            Some(2),
+        ),
+    ] {
+        let spec = single_component_document(&body);
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{shape} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/U"
+                        && d.message.contains("same generated type")
+                }),
+                "{shape} via {entry}: the collapse must warn at `U`: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        match (expect_fields, expect_variants) {
+            (Some(fields), _) => assert_eq!(
+                declared_fields(&types, "U"),
+                fields,
+                "{shape}: `U` must be the one object both branches lower to: {types}"
+            ),
+            (None, Some(count)) => assert_eq!(
+                enum_variants(&types, "U").len(),
+                count,
+                "{shape}: the two string branches must be one variant: {types}"
+            ),
+            (None, None) => assert!(
+                types.contains("pub type U = serde_json::Value;"),
+                "{shape}: `U` must be the one untyped value both branches lower to: {types}"
+            ),
+        }
+        assert!(
+            !types.contains("pub enum U ") || expect_variants.is_some(),
+            "{shape}: `U` must not be a union of indistinguishable variants: {types}"
+        );
+    }
+
+    // Beside a nullable object, each `required`-only branch admits `null` (`required` binds objects
+    // only), so `null` matches both and the `oneOf` rejects it: the collapsed position is required
+    // and non-nullable, as the `$ref` spelling of the same document is.
+    let spec = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        x:
+          type: [object, 'null']
+          {props}
+          {required_branches}
+      required: [x]
+"##
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+    let types = types_module(&code);
+    let x = field_type(&types, "pub x").unwrap_or_else(|| panic!("no `x` field: {types}"));
+    assert!(
+        !x.starts_with("Option<"),
+        "`x` is `{x}`, but `null` matches both branches and is invalid: {types}"
+    );
+    assert_eq!(declared_fields(&types, &x), ["a", "b"], "{types}");
+
+    // An `anyOf` of the same branches decodes: one match is enough, so it is not collapsed.
+    let spec = single_component_document(&format!(
+        "      type: object\n      {props}\n      anyOf: [ \
+                                            {{ required: [a] }}, {{ required: [b] }} ]\n"
+    ));
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        enum_variants(&types_module(&code), "U").len(),
+        2,
+        "an `anyOf` keeps its variants: {code}"
+    );
+}
+
 /// The collapse above is reserved for a `$ref` whose own sibling is a `oneOf`/`anyOf`. A `$ref` to a
 /// union component beside a non-union sibling (`U: anyOf[...]`, `P: {$ref: U, const: x}`) is an
 /// intersection this change does not touch: its branches may intersect to one type, but it must
