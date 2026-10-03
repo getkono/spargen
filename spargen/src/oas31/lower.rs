@@ -1734,6 +1734,44 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // parameter or property from the generated client.
                 return self.reject_ref_sibling_intersection(schema);
             };
+            // Only a `$ref` whose own sibling is a `oneOf`/`anyOf` is collapsed. A `$ref` to a union
+            // beside a non-union sibling is an intersection this check was never meant for, and it
+            // keeps the shape it has always generated.
+            let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
+            let collapsed = has_union_sibling
+                .then(|| self.indistinguishable_union_variant(intersection))
+                .flatten();
+            let intersection = match collapsed {
+                // Every branch of the intersected union is one and the same type: the branches
+                // differ only in keywords the lowered shape does not carry, such as a branch of
+                // nothing but `required` (#140). Emitting them as a union gives a `oneOf` whose
+                // exactly-one check fails on every value, so the position takes that one type and
+                // the ignored branch distinctions are reported, not dropped in silence.
+                Some(mut common) => {
+                    // Every branch is `common`, so either all of them accept `null` or none does,
+                    // and `intersection.nullable` says whether the union's own `null` member
+                    // survived the meet with the target. An `anyOf` needs one match, so `null` is
+                    // valid when either admits it. A `oneOf` needs exactly one: a nullable
+                    // `common` puts `null` in two or more branches, which fails it whatever the
+                    // `null` member does, so `null` is valid only through that member and only
+                    // when `common` rejects it.
+                    common.nullable = if schema.one_of.is_empty() {
+                        intersection.nullable || common.nullable
+                    } else {
+                        intersection.nullable && !common.nullable
+                    };
+                    Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+                        .message(
+                            "this `$ref` and its `oneOf`/`anyOf` sibling intersect to a union whose \
+                             branches differ only in keywords the generated type does not carry, \
+                             so which branch a value matches is not enforced",
+                        )
+                        .remedy("keep producer-side validation for the union's branch constraints")
+                        .emit(self.diags);
+                    common
+                }
+                None => intersection,
+            };
             let kind = self.graph.get(intersection.id)?.kind.clone();
             // The `null` the inferred category carries is there to leave the target's nullability
             // alone, not to satisfy the intersection on its own. Against a nullable target of
@@ -5254,6 +5292,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             Docs::default(),
             None,
         ))
+    }
+
+    /// The one type every variant of `ty` shares, when `ty` is a union of two or more variants that
+    /// are all the same type. No value can tell such variants apart, so the union adds nothing to
+    /// its common type — and a `oneOf` of them rejects every value its common type accepts.
+    fn indistinguishable_union_variant(&self, ty: Ty) -> Option<Ty> {
+        let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) else {
+            return None;
+        };
+        let (first, rest) = union.variants.split_first()?;
+        (!rest.is_empty() && rest.iter().all(|variant| same_ty(variant.ty, first.ty)))
+            .then_some(first.ty)
     }
 
     /// The meet of the union `union` (whose type is `union_ty`) with `other`, branch by branch.
@@ -9786,6 +9836,12 @@ const SHAPE_KEYWORDS: &[ShapeKeyword] = &[
     }),
     ("$ref", |schema| schema.reference.is_some()),
     ("allOf", |schema| !schema.all_of.is_empty()),
+    // `oneOf`/`anyOf` count exactly as `allOf` does: in 2020-12 each is an applicator constraining
+    // the instance, so a union beside a `$ref` narrows the target like a `type` beside it would,
+    // and `schema_imposes_scalar` already treats them so. Leaving them out made a `$ref` whose only
+    // sibling was a union take the bare-reference exit, discarding the union with no diagnostic.
+    ("oneOf", |schema| !schema.one_of.is_empty()),
+    ("anyOf", |schema| !schema.any_of.is_empty()),
 ];
 
 /// Whether a schema carries any keyword that gives it a shape of its own, which decides whether a
@@ -9935,6 +9991,8 @@ mod tests {
             "format: binary" => "format: binary",
             "$ref" => "$ref: '#/components/schemas/A'",
             "allOf" => "allOf: [{ type: string }]",
+            "oneOf" => "oneOf: [{ type: string }]",
+            "anyOf" => "anyOf: [{ type: string }]",
             other => panic!("`SHAPE_KEYWORDS` row `{other}` has no probe here; add one"),
         };
         for (keyword, _) in SHAPE_KEYWORDS {
@@ -9953,15 +10011,13 @@ mod tests {
     }
 
     /// The gate reads nothing the table does not name. A schema carrying every other keyword the
-    /// parser keeps — unions, validation, annotations, content, `$defs` — does not clear it, so a
+    /// parser keeps — validation, annotations, content, `$defs` — does not clear it, so a
     /// clause added to `schema_has_shape_constraint` beside the table (the `maxLength` mutation
     /// #155 measured surviving) fails here rather than widening the published rule unseen.
     #[test]
     fn the_gate_reads_only_the_keywords_its_table_names() {
         let everything_else = schema(
-            "oneOf: [{ type: string }]\n\
-             anyOf: [{ type: string }]\n\
-             discriminator: { propertyName: kind }\n\
+            "discriminator: { propertyName: kind }\n\
              $defs: { A: { type: string } }\n\
              not: { type: string }\n\
              if: { type: string }\n\
