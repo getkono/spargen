@@ -5,8 +5,8 @@ use indexmap::{IndexMap, IndexSet};
 use crate::diag::{Aborted, Code, Diagnostic, Diagnostics, Provenance};
 use crate::ir::{
     AdditionalProps, Api, ApiKeyLoc, BodyEncoding, DefaultValue, Delimiter, DisjointFeature, Docs,
-    EncodingMode, Field, FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Operation,
-    OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
+    EncodingMode, Field, FieldDefault, HttpScheme, Info, JsonCategory, MediaType, Openness,
+    Operation, OperationId, ParamLoc, ParamStyle, Parameter, PathSegment, PathTemplate, Prim,
     PropertyEncoding, PropertyName, RequestBody, Response, ResponseHeader, Responses, ScalarEnum,
     ScalarRepr, ScalarValue, SchemeId, SecurityScheme, SecuritySchemeDef, Server, StatusSpec,
     Struct, Ty, TypeDef, TypeGraph, TypeId, TypeKind, Union, UnionMode, UnionStrategy,
@@ -389,6 +389,10 @@ fn lower_pass(
         }
     }
 
+    // An intersection narrows a field's type after its `default` was checked against the type the
+    // declaring member gave it, so the applied defaults are checked again against the final graph.
+    retype_field_defaults(&mut ctx.graph, ctx.diags);
+
     // `xml.name`/`xml.attribute` become a format-agnostic serde `rename`, so they may only be applied
     // to a schema used *exclusively* as an XML body — otherwise the rename would corrupt the JSON
     // wire format. Suppress (and warn `W006` on) the rename for any shared/non-XML-reachable type.
@@ -474,19 +478,201 @@ fn append_response_docs(target: &mut Option<String>, status: &str, response: &Re
     }
 }
 
-/// A union's shape-bearing sibling: the lowered type, plus whether the sibling's own keywords say
-/// anything about `null`.
+/// A union's shape-bearing sibling: what each branch is met with, plus whether the sibling's own
+/// keywords say anything about `null`.
 ///
-/// The second field exists because the lowered [`Ty`] cannot answer it. A `properties`-only sibling
-/// and a `type: object` + `properties` sibling both lower to a non-nullable `Struct`, yet only the
-/// second denies `null` — the first is an object applicator, vacuously satisfied by every
-/// non-object. The question has to be asked of the schema, and asked of the SIBLING rather than of
-/// the schema that encloses it: those differ whenever a multi-type array is deleted for lowering,
-/// and whenever the sibling speaks through `enum`/`const` instead of `type`.
+/// The second field exists because the lowered type cannot answer it. A `properties`-only sibling
+/// and a `type: object` + `properties` sibling both refine objects, yet only the second denies
+/// `null` — the first is an object applicator, vacuously satisfied by every non-object. The
+/// question has to be asked of the schema, and asked of the SIBLING rather than of the schema that
+/// encloses it: those differ whenever a multi-type array is deleted for lowering, and whenever the
+/// sibling speaks through `enum`/`const` instead of `type`.
 #[derive(Clone, Copy)]
 struct UnionSibling {
-    ty: Ty,
+    refiner: Refiner,
     speaks_about_null: bool,
+}
+
+/// What a union's branches are met with: a union's own sibling keywords, or the sibling keywords
+/// of a `$ref` whose target is a union.
+#[derive(Clone, Copy)]
+enum Refiner {
+    /// A sibling that establishes a shape of its own (`type`, `enum`, `const`, `$ref`, `allOf`, a
+    /// binary encoding): every branch is intersected with it.
+    Whole(Ty),
+    /// A sibling of untyped object or array applicators alone (see
+    /// [`implied_applicator_category`]). In 2020-12 those are vacuously satisfied by an instance
+    /// of another category, so each set refines only the branches of its own category (#282).
+    Scoped(ScopedRefiners),
+}
+
+/// The two halves of a [`Refiner::Scoped`] sibling, each lowered as its category with `null`
+/// admitted where the sibling does not deny it.
+#[derive(Clone, Copy)]
+struct ScopedRefiners {
+    /// The object applicators (`properties`, `patternProperties`, `required`,
+    /// `additionalProperties`), lowered as an object: met with every object branch.
+    object: Option<Ty>,
+    /// The array applicators (`items`, `prefixItems`), lowered as an array: met with every array
+    /// branch.
+    array: Option<Ty>,
+    /// Whether the sibling admits `null`. The applicators say nothing about it, so this is false
+    /// only where a multi-type array deleted for lowering omitted `null`; a branch neither half
+    /// reaches still loses its `null` then, as it would against the deleted array.
+    admits_null: bool,
+    /// The categories a multi-type array deleted for lowering admits, where there was one: a
+    /// branch of any other category is excluded, as it would be against the array.
+    allowed: Option<CategoryMask>,
+}
+
+/// A set of JSON categories, the non-null members of a `type` array. `integer` and `number` both
+/// admit [`JsonCategory::Number`], the category a lowered numeric branch reports.
+#[derive(Clone, Copy)]
+struct CategoryMask(u8);
+
+impl CategoryMask {
+    fn of(types: &[JsonType]) -> Self {
+        Self(types.iter().fold(0, |mask, kind| {
+            mask | match kind {
+                JsonType::Null => 0,
+                JsonType::Boolean => Self::bit(JsonCategory::Boolean),
+                JsonType::Object => Self::bit(JsonCategory::Object),
+                JsonType::Array => Self::bit(JsonCategory::Array),
+                JsonType::Number | JsonType::Integer => Self::bit(JsonCategory::Number),
+                JsonType::String => Self::bit(JsonCategory::String),
+            }
+        }))
+    }
+
+    fn bit(category: JsonCategory) -> u8 {
+        match category {
+            JsonCategory::String => 1,
+            JsonCategory::Number => 2,
+            JsonCategory::Boolean => 4,
+            JsonCategory::Array => 8,
+            JsonCategory::Object => 16,
+        }
+    }
+
+    fn admits(self, category: JsonCategory) -> bool {
+        self.0 & Self::bit(category) != 0
+    }
+
+    /// Whether the set admits a category other than `category`.
+    fn admits_besides(self, category: JsonCategory) -> bool {
+        self.0 & !Self::bit(category) != 0
+    }
+}
+
+/// What a [`Refiner::Scoped`] meeting found across the branches it visited: which halves reached
+/// a branch of their category, and whether both halves met a branch that states no category, which
+/// leaves no single category to establish for it.
+#[derive(Default)]
+struct ScopeReach {
+    object: bool,
+    array: bool,
+    uncategorised: bool,
+}
+
+/// Whether a Discriminator Object value is a schema *name* rather than a URI reference: a
+/// non-empty string of the characters a Components Object key may hold (`^[a-zA-Z0-9.\-_]+$`).
+/// The specification recommends reading a value that is both a valid name and a valid relative
+/// reference (`Cat`, `pets.yaml`) as a name, and asks authors to write `./pets.yaml` to mean the
+/// file — which the `/` here excludes.
+fn is_schema_component_name(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
+
+/// How a diagnostic names one Discriminator Object target: the `mapping` entry with tag `tag`, or
+/// `defaultMapping` for `None`.
+pub(super) fn discriminator_entry(tag: Option<&String>) -> String {
+    match tag {
+        Some(tag) => format!("`discriminator.mapping` entry `{tag}`"),
+        None => "`discriminator.defaultMapping`".to_owned(),
+    }
+}
+
+/// `E004` for a reference into `#/components/<kind>/` naming an entry the document does not
+/// declare. Shared by lowering and the audit's walk of subschemas lowering never reads, so both
+/// report the miss in one wording.
+pub(super) fn reject_undeclared_component(
+    diags: &mut Diagnostics,
+    provenance: &Provenance,
+    kind: &str,
+    reference: &str,
+) {
+    // E004 case: undeclared-component
+    Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+        .message(format!("unresolved {kind} reference `{reference}`"))
+        .emit(diags);
+}
+
+/// The `file#pointer` a schema `$ref` written at `at` resolves to, answered the way lowering
+/// resolves it: a `#/components/schemas/<name>` the root document declares is the root's
+/// component wherever it is written — [`LowerCtx::ensure_component`] consults the root map first —
+/// and every other reference is the bundle's own answer. Reads no schema and emits nothing.
+pub(super) fn schema_reference_identity(
+    document: &Document,
+    resolver: &Resolver<'_>,
+    reference: &str,
+    at: &Provenance,
+) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+    let root_component = reference
+        .strip_prefix("#/components/schemas/")
+        .is_some_and(|name| document.components.schemas.contains_key(name));
+    if root_component {
+        return resolver.reference_identity_from(reference, resolver.root_id());
+    }
+    resolver.reference_identity(reference, at)
+}
+
+/// The `file#pointer` of the schema one Discriminator Object `target` names, or `E004` at the
+/// target when the loaded description holds no schema there. `entry` describes the target in
+/// the message ([`discriminator_entry`]). Shared by lowering and the audit's walk of subschemas
+/// lowering never reads, so a mapping value is read, and a miss worded, the same at both.
+///
+/// A value is a component name or a URI reference. The specification recommends reading a value
+/// that could be either as a name, and a name is exactly a Components Object key, so a value
+/// made only of key characters is `#/components/schemas/<value>` and anything else is a
+/// reference, written relative to the file the discriminator sits in.
+pub(super) fn discriminator_target_identity(
+    document: &Document,
+    resolver: &Resolver<'_>,
+    diags: &mut Diagnostics,
+    entry: &str,
+    target: &super::schema::DiscriminatorTarget,
+) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+    let value = &target.value;
+    let reference = if is_schema_component_name(value) {
+        format!("#/components/schemas/{value}")
+    } else {
+        value.clone()
+    };
+    let identity = schema_reference_identity(document, resolver, &reference, &target.provenance)
+        .filter(|(file, pointer)| resolver.node_at(*file, pointer).is_some());
+    if identity.is_none() {
+        // E004 case: discriminator-target
+        Diagnostic::error(Code::UnresolvedRef, target.provenance.clone())
+            .message(format!(
+                "{entry} names `{value}`, which is not a schema in the loaded description"
+            ))
+            .remedy("declare the schema, correct the name or reference, or remove the entry")
+            .emit(diags);
+    }
+    identity
+}
+
+/// A union's Discriminator Object resolved against the union's own members: every `mapping`
+/// entry's tag with the index (into the union's real, non-null members) of the member it names, in
+/// document order, and the member `defaultMapping` names. Built by
+/// [`LowerCtx::discriminator_members`], which rejects any entry naming a schema that does not
+/// exist or is not a member, so every index here is a member.
+struct DiscriminatorMembers {
+    mapping: Vec<(String, usize)>,
+    default: Option<usize>,
 }
 
 struct LowerCtx<'a, 'doc> {
@@ -723,6 +909,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let mut sibling = schema.clone();
             sibling.reference = None;
             if !schema_has_shape_constraint(&sibling) {
+                // The alias never reaches `lower_schema_inner`, which reports this elsewhere.
+                self.diagnose_standalone_discriminator(schema);
                 if let Some(default) = &schema.default {
                     let at = crate::diag::Provenance::new(
                         schema.provenance.pointer.push("default"),
@@ -1409,6 +1597,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     fn lower_schema_inner(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        // Before any arm can return: a discriminator beside no union is dropped by every one of
+        // them (a `$ref` with no other sibling, `allOf`, a type array, a plain object).
+        self.diagnose_standalone_discriminator(schema);
         if let Some(value) = schema.boolean {
             let kind = if value {
                 TypeKind::Any
@@ -1501,8 +1692,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // diagnostic (#140). The applicators establish the category they apply to, as an
             // untyped `properties` already does, and say nothing about `null` (the same reading
             // `lower_union_sibling` takes), so the target's nullability survives the intersection.
+            //
+            // Against a union target that reading would drop every branch of another category in
+            // silence — `oneOf: [string, Obj]` with a `required` sibling would become `Obj` alone
+            // and reject the strings the target accepts. There the applicators refine the branches
+            // of their own category, as they do beside an inline union (#282).
+            let category = implied_applicator_category(&sibling);
+            if category.is_some() {
+                if let TypeKind::Union(union) = &self.graph.get(referenced.id)?.kind {
+                    let union = union.clone();
+                    return self.refine_union_target(schema, hint, referenced, &union, &sibling);
+                }
+            }
             let mut inferred_category = false;
-            match implied_applicator_category(&sibling) {
+            match category {
                 Some(ImpliedCategory::Only(category)) => {
                     sibling.types.types = vec![category, JsonType::Null];
                     inferred_category = true;
@@ -1519,6 +1722,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 None => {}
             }
             let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
+            let mark = self.graph_mark();
             let Ok(intersection) =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
             else {
@@ -1586,34 +1790,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                      but for the target's nullability",
                 );
             }
-            // Against a union target the intersection is taken branch by branch, and a branch the
-            // inferred category excludes is dropped without a word: `oneOf: [string, Obj]` with a
-            // `required` sibling would become `Obj` alone and reject the strings the target
-            // accepts. Whether an untyped refiner is instead vacuous for the other branches is the
-            // same undecided question the inline union sibling raises (#282), so the loss is
-            // reported rather than chosen. Every branch surviving is the only outcome kept.
-            let target_branches = match &self.graph.get(referenced.id)?.kind {
-                TypeKind::Union(target) => Some(target.variants.len()),
-                // A target still being lowered was refused above as a back edge, and it would
-                // have failed the intersection besides; either way it has no branches to keep.
-                TypeKind::Reserved => None,
-                _ => None,
-            };
-            if inferred_category
-                && target_branches.is_some_and(|branches| {
-                    !matches!(
-                        &kind,
-                        TypeKind::Union(result) if result.variants.len() == branches
-                    )
-                })
-            {
-                return self.reject_ref_sibling_category(
-                    schema,
-                    "this `$ref`'s untyped sibling keywords establish a category some branch of \
-                     its target union does not have, so intersecting would drop that branch and \
-                     reject values the target accepts",
-                );
-            }
+            self.discard_meet_intermediates(mark, &kind);
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
             ty.boxed = intersection.boxed;
@@ -1621,6 +1798,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         }
 
         if !schema.all_of.is_empty() {
+            if schema_has_union(schema) {
+                return self.lower_all_of_beside_union(schema, hint);
+            }
             return self.lower_all_of(schema, hint);
         }
 
@@ -1866,6 +2046,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The union's overall acceptance needs both; only the rescues below need them apart.
         let mut nullable = null_from_type_array || null_from_member;
 
+        // Every schema the discriminator names is checked against the members before any path
+        // below can return. The collapses do not build a discriminated dispatch at all, so a check
+        // made only where one is built dropped a dangling or non-member mapping entry there
+        // without looking at it. Resolution here reads identities, not schemas, so it lowers
+        // nothing and cannot reorder what the members lower to.
+        let discriminator_members = match &schema.discriminator {
+            Some(discriminator) => Some(self.discriminator_members(discriminator, &real_members)?),
+            None => None,
+        };
+
         // Only null members remained: the exact JSON null type.
         if real_members.is_empty() {
             return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
@@ -1951,7 +2141,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // `$ref` of an ordinary recursive schema. Its kind may not be read: cloning a
             // `TypeKind::Reserved` inserts a second reservation nothing will ever `fill`, which
             // `check_invariants` reports as `E011` against a document that is not malformed, and
-            // which on the merge base (where the placeholder was `TypeKind::Any`) cloned as
+            // which at `2aa5ada` (where the placeholder was `TypeKind::Any`) cloned as
             // `serde_json::Value` instead — a typed schema silently degraded.
             //
             // A truthful answer exists and needs no def of its own: the member's own `Ty`, boxed so
@@ -1991,9 +2181,27 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // and it already reaches the intersection on the sibling side, where it belongs —
                 // it can narrow what the result accepts, never create something to accept.
                 inner.nullable = inner.nullable || null_from_member;
-                let Ok(constrained) =
-                    self.intersect_types(inner, sibling.ty, &format!("{hint}Constrained"))
-                else {
+                let mut reach = ScopeReach::default();
+                let met = self.meet_refiner(
+                    inner,
+                    sibling.refiner,
+                    &mut reach,
+                    &format!("{hint}Constrained"),
+                );
+                if met.is_err() && reach.uncategorised {
+                    return self.reject_unscoped_union_sibling(
+                        schema,
+                        "the union's sole non-null member states no JSON category, and the \
+                         enclosing schema's untyped sibling keywords settle none for it — they are \
+                         both object keywords and array keywords, or its `type` array admits \
+                         another category beside theirs — so no single Rust type represents what \
+                         they constrain of it",
+                    );
+                }
+                for keywords in unreached_halves(sibling.refiner, &reach) {
+                    self.warn_unreached_union_sibling(schema, unreached_message(keywords));
+                }
+                let Ok(constrained) = met else {
                     // Neither side admits null and the non-null shapes do not meet, so nothing is
                     // left to collapse to. The terminal code matches the multi-variant path below,
                     // which rejects with `E007` once every variant has been excluded — but only the
@@ -2035,7 +2243,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // the union def below), recording the `$ref` component name for tag/variant naming.
         let mut variants: Vec<UnionVariant> = Vec::new();
         let mut ref_names: Vec<Option<String>> = Vec::new();
+        // The real member each variant came from: sibling keywords can exclude a member, so a
+        // variant's position is not its member's.
+        let mut variant_members: Vec<usize> = Vec::new();
         let mut used_hints: HashSet<String> = HashSet::new();
+        let mut reach = ScopeReach::default();
         for (index, member) in real_members.iter().enumerate() {
             let (mut ty, ref_name) =
                 self.lower_union_variant(member, &format!("{hint}Variant{index}"))?;
@@ -2072,9 +2284,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
             }
             if let Some(sibling) = sibling {
-                ty = match self.intersect_types(
+                ty = match self.meet_refiner(
                     ty,
-                    sibling.ty,
+                    sibling.refiner,
+                    &mut reach,
                     &format!("{hint}Variant{index}Constrained"),
                 ) {
                     Ok(intersection) => intersection,
@@ -2093,6 +2306,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         ))
                         .emit(self.diags);
                         continue;
+                    }
+                    // Object and array applicators together beside a branch that states no
+                    // category (`{}`) have no single category to establish for it.
+                    Err(NoMeet::Unrepresentable) if reach.uncategorised => {
+                        let message = format!(
+                            "union member {index} states no JSON category, and the enclosing \
+                             schema's untyped sibling keywords settle none for it — they are both \
+                             object keywords and array keywords, or its `type` array admits \
+                             another category beside theirs — so no single Rust type represents \
+                             what they constrain of it"
+                        );
+                        return self.reject_unscoped_union_sibling(schema, &message);
                     }
                     // The branch does admit values the siblings admit, but no Rust type holds
                     // them, so it can be neither kept nor dropped without refusing them.
@@ -2125,8 +2350,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             variants.push(UnionVariant { name_hint, ty });
             ref_names.push(ref_name);
+            variant_members.push(index);
         }
 
+        if let Some(sibling) = sibling {
+            for keywords in unreached_halves(sibling.refiner, &reach) {
+                self.warn_unreached_union_sibling(schema, unreached_message(keywords));
+            }
+        }
         if variants.is_empty() {
             // The same blind spot as the sole-member site above, on the pre-existing path: every
             // REAL variant is impossible, but a null-only member's branch was stripped out before
@@ -2135,7 +2366,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // exact JSON null type is the answer — the same type the all-null-members branch above
             // returns for the same reason. Again only the MEMBER-derived flag can rescue: a
             // `"null"` in the enclosing `type` array leaves nothing for `null` to match.
-            if null_from_member && sibling.is_none_or(|sibling| self.ty_accepts_null(sibling.ty)) {
+            if null_from_member
+                && sibling.is_none_or(|sibling| self.refiner_accepts_null(sibling.refiner))
+            {
                 return Some(self.insert_schema_type(schema, hint, TypeKind::Null));
             }
             return self.reject_branchless_union(
@@ -2152,59 +2385,100 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(ty);
         }
 
-        let strategy = if let Some(discriminator) = &schema.discriminator {
-            // A `mapping` value is matched to a member by component name (see
-            // `discriminated_strategy`), so one that names none of this union's members is ignored
-            // there, and a member it was written for takes an invented tag on the wire. That covers
-            // every spelling that is not a member's component name: a pointer into a component
-            // (`#/components/schemas/Envelope/properties/payload`), a file reference with or without
-            // a path separator (`./lib.yaml#/…`, or `cat.yaml` — also a legal component name, and
-            // read as one, as the specification recommends for a value that is both), and a
-            // component that is not a member. Refuse it rather than ignore it, as `defaultMapping`
-            // below is refused. Members are read as written, so a mapping for a member the sibling
-            // keywords removed (with `W011`) still names a member. A deep pointer written in a
-            // sub-file keeps its pointer text as its name (see `member_component_name`), so a
-            // `mapping` value spelled the same way there still matches it.
-            let root = self.resolver.root_id();
-            let members: Vec<&str> = real_members
-                .iter()
-                .filter_map(|member| member_component_name(member, root))
-                .collect();
-            if let Some((tag, target)) = discriminator.mapping.iter().find(|(_, target)| {
-                let name = target
-                    .strip_prefix("#/components/schemas/")
-                    .unwrap_or(target);
-                !members.contains(&name)
-            }) {
-                return self.reject_unrepresentable_union(
-                    schema,
-                    &format!(
-                        "`discriminator.mapping` maps `{tag}` to `{target}`, which names none of \
-                         this union's members by component name — it is a pointer into a \
-                         component, a file reference, or a component that is not a member — so it \
-                         cannot be matched to a member and the tag it declares would not be the \
-                         one on the wire"
-                    ),
-                );
-            }
-            // A `defaultMapping` that names a schema outside this union describes a fallback
-            // branch the generated enum does not have, so it cannot be quietly downgraded to
-            // another dispatch strategy.
-            if let Some(target) = &discriminator.default_mapping {
-                let bare = target
-                    .strip_prefix("#/components/schemas/")
-                    .unwrap_or(target);
-                if !ref_names.iter().any(|name| name.as_deref() == Some(bare)) {
-                    return self.reject_unrepresentable_union(
+        let strategy = if let (Some(discriminator), Some(resolved)) =
+            (&schema.discriminator, &discriminator_members)
+        {
+            // `discriminator_members` already refused a `defaultMapping` naming a non-member. A
+            // member the enclosing schema's sibling keywords excluded (`W011`) is the one way left
+            // for it to have no variant, and a fallback to a branch the enum does not have cannot
+            // be quietly downgraded to another dispatch strategy either.
+            let default_variant = match resolved.default {
+                None => None,
+                Some(member) => {
+                    let Some(variant) = variant_members.iter().position(|&m| m == member) else {
+                        return self.reject_unrepresentable_union(
+                            schema,
+                            "`discriminator.defaultMapping` names a member that the enclosing \
+                             schema's own sibling keywords exclude, so there is no branch to fall \
+                             back to",
+                        );
+                    };
+                    Some(variant)
+                }
+            };
+            let mut discriminated = self.discriminated_strategy(
+                &variants,
+                &ref_names,
+                &variant_members,
+                &discriminator.property_name,
+                resolved,
+                default_variant,
+                mode,
+            );
+            if let Some(UnionStrategy::Discriminated {
+                tags,
+                categories,
+                default_variant,
+                untagged,
+                ..
+            }) = &mut discriminated
+            {
+                let unselectable: Vec<usize> = (0..variants.len())
+                    .filter(|&index| {
+                        categories[index].is_none()
+                            && tags[index].is_empty()
+                            && *default_variant != Some(index)
+                    })
+                    .collect();
+                let component = |index: usize| {
+                    ref_names[index]
+                        .as_deref()
+                        .filter(|name| is_schema_component_name(name))
+                };
+                // A component member whose implicit value a mapping key claims for another
+                // member: the document routes that member's own name elsewhere, which no
+                // dispatch can honour.
+                if let Some(&index) = unselectable
+                    .iter()
+                    .find(|&&index| component(index).is_some())
+                {
+                    let implicit = component(index).unwrap_or_default().to_owned();
+                    return self.reject_unselectable_discriminated_variant(
                         schema,
-                        &format!(
-                            "`discriminator.defaultMapping` names `{target}`, which is not one of \
-                             this union's members, so there is no branch to fall back to"
-                        ),
+                        discriminator,
+                        variant_members[index],
+                        &implicit,
                     );
                 }
+                // A member that is no component — inline, or a pointer into another schema — has
+                // no implicit value, and with no mapping entry naming it no tag selects it;
+                // inventing a tag for it would be one no server sends. Where no variant carries a
+                // tag at all, the discriminator dispatches nothing, and the members' own schemas
+                // decode the union, as for one with no discriminator. Otherwise the tagged
+                // members keep their dispatch — a tag that names one selects it, exactly as the
+                // document says — and the untagged ones are tried by their schemas only when the
+                // tag is absent or names no tagged member. Dropping the dispatch for the whole
+                // union instead would let an `anyOf` trial pick a tagged member the payload's own
+                // tag does not name.
+                if !unselectable.is_empty() {
+                    let members: Vec<usize> = unselectable
+                        .iter()
+                        .map(|&index| variant_members[index])
+                        .collect();
+                    let dispatches = tags.iter().any(|accepted| !accepted.is_empty());
+                    self.warn_untagged_discriminated_members(discriminator, &members, dispatches);
+                    if dispatches {
+                        for &index in &unselectable {
+                            untagged[index] = Some(
+                                self.type_specificity(variants[index].ty, &mut HashSet::new()),
+                            );
+                        }
+                    } else {
+                        discriminated = None;
+                    }
+                }
             }
-            self.discriminated_strategy(&variants, &ref_names, discriminator)
+            discriminated
                 .or_else(|| self.disjoint_strategy(&variants))
                 .unwrap_or_else(|| self.trial_strategy(&variants, mode))
         } else {
@@ -2255,6 +2529,25 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if !schema_has_shape_constraint(&sibling) {
             return Some(None);
         }
+        // Untyped object or array applicators alone name no `type`, so `lower_schema` would lower
+        // them to `TypeKind::Any`, which intersects as identity and drops them from every branch
+        // in silence (#282). Nor do they establish their category for the whole union, as they do
+        // beside a `$ref` to a single schema: `required: [a]` beside `oneOf: [string, Obj]` is
+        // vacuous for the strings, and reading it as an object would drop that branch. Each set
+        // refines the branches of its own category instead.
+        //
+        // A multi-type array deleted above still says which categories the union admits, so it
+        // goes with them: the branches of the categories it omits are excluded as they would be
+        // against it.
+        if implied_applicator_category(&sibling).is_some() {
+            let admits_null = !types_deleted || declared_types_admit_null;
+            let allowed = types_deleted.then(|| CategoryMask::of(&schema.types.types));
+            let scoped = self.lower_scoped_refiners(&sibling, admits_null, allowed, hint)?;
+            return Some(Some(UnionSibling {
+                refiner: Refiner::Scoped(scoped),
+                speaks_about_null,
+            }));
+        }
         let mut ty = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
         if types_deleted {
             // Restore the one piece of the deleted array that still has a faithful representation.
@@ -2263,9 +2556,265 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             ty.nullable = declared_types_admit_null;
         }
         Some(Some(UnionSibling {
-            ty,
+            refiner: Refiner::Whole(ty),
             speaks_about_null,
         }))
+    }
+
+    /// Lower a sibling of untyped object or array applicators (one [`implied_applicator_category`]
+    /// answers for) into the [`ScopedRefiners`] its two halves refine. Each half is the sibling
+    /// with the other half's keywords removed and its own category as `type`, with `null` admitted
+    /// where `admits_null` says the sibling does not deny it. `allowed` is the categories of a
+    /// multi-type array deleted for lowering, where there was one.
+    fn lower_scoped_refiners(
+        &mut self,
+        sibling: &Schema,
+        admits_null: bool,
+        allowed: Option<CategoryMask>,
+        hint: &str,
+    ) -> Option<ScopedRefiners> {
+        // `types` is empty here, so this is exactly the object applicators.
+        let object_like = schema_is_object_like(sibling);
+        let array_like = sibling.items.is_some() || !sibling.prefix_items.is_empty();
+        let category = |kind: JsonType| {
+            if admits_null {
+                vec![kind, JsonType::Null]
+            } else {
+                vec![kind]
+            }
+        };
+        let object = if object_like {
+            let mut half = sibling.clone();
+            half.items = None;
+            half.prefix_items.clear();
+            half.types.types = category(JsonType::Object);
+            Some(self.lower_schema(&half, &format!("{hint}Constraint"))?)
+        } else {
+            None
+        };
+        let array = if array_like {
+            let mut half = sibling.clone();
+            half.properties.clear();
+            half.pattern_properties.clear();
+            half.required.clear();
+            half.additional_properties = None;
+            half.types.types = category(JsonType::Array);
+            let name = if object_like {
+                "ArrayConstraint"
+            } else {
+                "Constraint"
+            };
+            Some(self.lower_schema(&half, &format!("{hint}{name}"))?)
+        } else {
+            None
+        };
+        Some(ScopedRefiners {
+            object,
+            array,
+            admits_null,
+            allowed,
+        })
+    }
+
+    /// Meet one union branch with `refiner`. A [`Refiner::Whole`] sibling is intersected with it.
+    /// A [`Refiner::Scoped`] one meets an object branch with its object half and an array branch
+    /// with its array half, recording in `reach` which half reached one; a branch of another
+    /// category is left as it is, but for a `null` the sibling denies. A nested union is met
+    /// branch by branch. A branch of a category [`ScopedRefiners::allowed`] omits is excluded. A
+    /// branch that states no category (`{}`) takes the one the sibling establishes, as an untyped
+    /// `$ref` target does; where the sibling carries both kinds, or `allowed` admits another
+    /// category too, there is none to establish, and the meet is [`NoMeet::Unrepresentable`] with
+    /// `reach.uncategorised` set.
+    fn meet_refiner(
+        &mut self,
+        branch: Ty,
+        refiner: Refiner,
+        reach: &mut ScopeReach,
+        hint: &str,
+    ) -> Result<Ty, NoMeet> {
+        let scoped = match refiner {
+            Refiner::Whole(ty) => return self.intersect_types(branch, ty, hint),
+            Refiner::Scoped(scoped) => scoped,
+        };
+        let Some(kind) = self.graph.get(branch.id).map(|def| def.kind.clone()) else {
+            return Err(NoMeet::Unrepresentable);
+        };
+        // A branch of a category the deleted `type` array omits is excluded, as against the array.
+        if let (Some(allowed), Some(category)) = (scoped.allowed, value_category(&kind)) {
+            if !allowed.admits(category) {
+                return if branch.nullable && scoped.admits_null {
+                    Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+                } else {
+                    Err(NoMeet::Empty)
+                };
+            }
+        }
+        let half = match &kind {
+            TypeKind::Union(union) => {
+                return self.meet_scoped_refiner_with_union(branch, union, refiner, hint, reach);
+            }
+            TypeKind::Struct(_) => {
+                reach.object |= scoped.object.is_some();
+                scoped.object
+            }
+            TypeKind::Array(_) | TypeKind::Tuple(_) => {
+                reach.array |= scoped.array.is_some();
+                scoped.array
+            }
+            // A branch that states no category (`{}`, or `{required: [x]}` alone) is the untyped
+            // target the `$ref` arm meets: there the applicators establish their category, so
+            // `properties` beside `anyOf: [{required: [a]}, {required: [b]}]` is an object in
+            // every branch. Both kinds at once have no single category to establish, and nor
+            // does one kind beside a deleted `type` array that admits another category too.
+            TypeKind::Any => {
+                let (half, category) = match (scoped.object, scoped.array) {
+                    (Some(object), None) => (object, JsonCategory::Object),
+                    (None, Some(array)) => (array, JsonCategory::Array),
+                    _ => {
+                        reach.uncategorised = true;
+                        return Err(NoMeet::Unrepresentable);
+                    }
+                };
+                match scoped.allowed {
+                    Some(allowed) if allowed.admits_besides(category) => {
+                        reach.uncategorised = true;
+                        return Err(NoMeet::Unrepresentable);
+                    }
+                    Some(allowed) if !allowed.admits(category) => {
+                        return if branch.nullable && scoped.admits_null {
+                            Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+                        } else {
+                            Err(NoMeet::Empty)
+                        };
+                    }
+                    _ => {}
+                }
+                if category == JsonCategory::Object {
+                    reach.object = true;
+                } else {
+                    reach.array = true;
+                }
+                Some(half)
+            }
+            // A placeholder's body is not known yet, so nothing can be said of its category. The
+            // callers refuse a reservation before they get here; this keeps the refusal for one
+            // that does not.
+            TypeKind::Reserved => return Err(NoMeet::Unrepresentable),
+            TypeKind::Primitive(_)
+            | TypeKind::Enum(_)
+            | TypeKind::Bytes
+            | TypeKind::Null
+            | TypeKind::Never => None,
+        };
+        match half {
+            Some(half) => self.intersect_types(branch, half, hint),
+            None => {
+                let mut ty = branch;
+                ty.nullable = branch.nullable && scoped.admits_null;
+                Ok(ty)
+            }
+        }
+    }
+
+    /// The `$ref` arm's answer for a `$ref` to the union `union` (its target, `referenced`) whose
+    /// siblings are untyped object or array applicators alone: each set refines the target's
+    /// branches of its own category, and the rest are kept as they are. Such siblings say nothing
+    /// about `null`, so the target's nullability stands. A set that reaches no branch of its
+    /// category is vacuous, and `W011`; a branch that states no category with no single one to
+    /// establish for it, and a meet that leaves no branch, are `E013`.
+    fn refine_union_target(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        referenced: Ty,
+        union: &Union,
+        sibling: &Schema,
+    ) -> Option<Ty> {
+        let scoped = self.lower_scoped_refiners(sibling, true, None, hint)?;
+        let refiner = Refiner::Scoped(scoped);
+        let mut reach = ScopeReach::default();
+        let met = self.meet_scoped_refiner_with_union(
+            referenced,
+            union,
+            refiner,
+            &format!("{hint}ReferenceIntersection"),
+            &mut reach,
+        );
+        if met.is_err() && reach.uncategorised {
+            return self.reject_ref_sibling_category(
+                schema,
+                "a branch of this `$ref`'s target union states no JSON category, and the untyped \
+                 sibling keywords are both object keywords and array keywords with no `type` to \
+                 choose between them, so no single Rust type represents what they constrain of it",
+            );
+        }
+        for keywords in unreached_halves(refiner, &reach) {
+            let message = format!(
+                "this `$ref`'s untyped sibling {keywords} constrain only the instances of their \
+                 own category, and no branch of its target union has that category, so they \
+                 constrain no value the target accepts"
+            );
+            self.warn_unreached_union_sibling(schema, message);
+        }
+        let Ok(met) = met else {
+            return self.reject_ref_sibling_intersection(schema);
+        };
+        let kind = self.graph.get(met.id)?.kind.clone();
+        let mut ty = self.insert_schema_type(schema, hint, kind);
+        ty.nullable = referenced.nullable;
+        ty.boxed = met.boxed;
+        Some(ty)
+    }
+
+    /// Meet `target` with the untyped applicators `refiner` carries: branch by branch where
+    /// `target` is a union, keeping every branch of another category, and as that one branch
+    /// otherwise. [`Self::refine_union_target`]'s meet, for a target that need not be a union.
+    fn meet_scoped_refiner(
+        &mut self,
+        target: Ty,
+        refiner: Refiner,
+        hint: &str,
+        reach: &mut ScopeReach,
+    ) -> Result<Ty, NoMeet> {
+        match self.graph.get(target.id).map(|def| &def.kind) {
+            Some(TypeKind::Union(union)) => {
+                let union = union.clone();
+                self.meet_scoped_refiner_with_union(target, &union, refiner, hint, reach)
+            }
+            // A placeholder's body is not known yet, so nothing can be said of its category,
+            // exactly as `meet_refiner` answers for one.
+            Some(TypeKind::Reserved) => Err(NoMeet::Unrepresentable),
+            _ => self.closed_narrowing(|ctx| ctx.meet_refiner(target, refiner, reach, hint)),
+        }
+    }
+
+    /// [`Self::meet_scoped_refiner`] for a `target` whose kind is `union`. The meet admits `null`
+    /// exactly when `target` and `refiner` both do: [`Self::intersect_union`] builds its result
+    /// from the non-null branches alone, and a union's `null` branch is its outer nullability,
+    /// so it is carried across here rather than lost with the rebuilt union.
+    fn meet_scoped_refiner_with_union(
+        &mut self,
+        target: Ty,
+        union: &Union,
+        refiner: Refiner,
+        hint: &str,
+        reach: &mut ScopeReach,
+    ) -> Result<Ty, NoMeet> {
+        let enclosing = self.narrowing_opens;
+        let mut ty = self.closed_narrowing(|ctx| {
+            ctx.intersect_union(target, union, refiner, hint, enclosing, reach)
+        })?;
+        ty.nullable = target.nullable && self.refiner_accepts_null(refiner);
+        Ok(ty)
+    }
+
+    /// Whether a union branch met with `refiner` may still be `null`, for a union whose every
+    /// real branch was excluded: the sibling's own answer.
+    fn refiner_accepts_null(&self, refiner: Refiner) -> bool {
+        match refiner {
+            Refiner::Whole(ty) => self.ty_accepts_null(ty),
+            Refiner::Scoped(scoped) => scoped.admits_null,
+        }
     }
 
     /// Lower one union member, returning its type and — when the member is a `$ref` to a component —
@@ -2292,6 +2841,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             let ty = if schema_has_shape_constraint(&sibling) {
                 self.lower_schema_or(member, hint)?
             } else {
+                // The member itself never reaches `lower_schema_inner`, which reports this.
+                self.diagnose_standalone_discriminator(schema);
                 self.ensure_component(name, schema.reference.as_deref(), &schema.provenance)?
             };
             return Some((ty, Some(name.to_owned())));
@@ -2300,18 +2851,177 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some((ty, None))
     }
 
+    /// Resolve every schema a union's Discriminator Object names — each `mapping` value, then
+    /// `defaultMapping` — to the union member it denotes.
+    ///
+    /// A value is a component name or a URI reference. The specification recommends reading a value
+    /// that could be either as a name, and a name is exactly a Components Object key, so a value
+    /// made only of key characters is `#/components/schemas/<value>` and anything else is a
+    /// reference, written relative to the file the discriminator sits in. The two sides are compared
+    /// by resolved `file#pointer` ([`Self::schema_reference_identity`]), never by spelling, so
+    /// `Cat`, `#/components/schemas/Cat` and `./openapi.yaml#/components/schemas/Cat` all name one
+    /// member. Only `$ref` members can be named: the specification excludes inline members from
+    /// name mapping.
+    ///
+    /// Every entry is checked, and each failure is reported at the entry itself: one naming no
+    /// schema the loaded description holds is `E004`, like any other reference that cannot be
+    /// followed; one naming a schema the union does not list is `E007`, because the tag it describes
+    /// has no variant to decode into and the specification requires every possible schema to be
+    /// listed beside the discriminator.
+    fn discriminator_members(
+        &mut self,
+        discriminator: &super::Discriminator,
+        members: &[&SchemaOr],
+    ) -> Option<DiscriminatorMembers> {
+        let member_identities: Vec<_> = members
+            .iter()
+            .map(|member| match member {
+                SchemaOr::Schema(schema) => schema.reference.as_deref().and_then(|reference| {
+                    self.schema_reference_identity(reference, &schema.provenance)
+                }),
+                SchemaOr::Bool(_) => None,
+            })
+            .collect();
+        let entries = discriminator
+            .mapping
+            .iter()
+            .map(|(tag, target)| (Some(tag), target))
+            .chain(
+                discriminator
+                    .default_mapping
+                    .iter()
+                    .map(|target| (None, target)),
+            );
+        let mut resolved = DiscriminatorMembers {
+            mapping: Vec::new(),
+            default: None,
+        };
+        let mut failed = false;
+        for (tag, target) in entries {
+            let entry = discriminator_entry(tag);
+            let value = &target.value;
+            let Some(identity) = self.discriminator_target_identity(&entry, target) else {
+                failed = true;
+                continue;
+            };
+            let Some(member) = member_identities
+                .iter()
+                .position(|member| member.as_ref() == Some(&identity))
+            else {
+                let consequence = match tag {
+                    Some(tag) => format!("a payload tagged `{tag}` has no variant to decode into"),
+                    None => "there is no branch to fall back to".to_owned(),
+                };
+                // E007 case: unrepresentable-applicators
+                Diagnostic::error(Code::NonDisjointUnion, target.provenance.clone())
+                    .message(format!(
+                        "{entry} names `{value}`, which is not one of this union's `$ref` \
+                         members, so {consequence}"
+                    ))
+                    .remedy(
+                        "list the schema as a `$ref` member of the union beside the \
+                         discriminator, or remove the entry",
+                    )
+                    .emit(self.diags);
+                failed = true;
+                continue;
+            };
+            match tag {
+                Some(tag) => resolved.mapping.push((tag.clone(), member)),
+                None => resolved.default = Some(member),
+            }
+        }
+        (!failed).then_some(resolved)
+    }
+
+    /// [`discriminator_target_identity`] against this lowering's document and resolver.
+    fn discriminator_target_identity(
+        &mut self,
+        entry: &str,
+        target: &super::schema::DiscriminatorTarget,
+    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+        discriminator_target_identity(self.document, self.resolver, self.diags, entry, target)
+    }
+
+    /// Give a `discriminator` on a schema with no `oneOf`/`anyOf` of its own a disposition (#264).
+    ///
+    /// spargen dispatches by discriminator only across the members of the union it sits beside,
+    /// so here it selects nothing: the schema lowers by its other keywords, and the `allOf`
+    /// polymorphism form — children reaching this schema through `allOf`, decoded by the tag into
+    /// whichever child it names — is not generated, since no keyword of the parent lists its
+    /// children. That is `W011` at the Discriminator Object. Every `mapping` and `defaultMapping`
+    /// value is still a reference to a schema, so each is resolved as a union's would be, and one
+    /// naming no schema is `E004` at the entry; with no union, there is no membership to check.
+    /// Called wherever a schema is lowered or gathered as an `allOf` member by its keywords, and
+    /// idempotent there: a repeated report at one site is the same diagnostic, which
+    /// [`Diagnostics`] keeps once.
+    fn diagnose_standalone_discriminator(&mut self, schema: &Schema) {
+        let Some(discriminator) = &schema.discriminator else {
+            return;
+        };
+        if !schema.one_of.is_empty() || !schema.any_of.is_empty() {
+            return;
+        }
+        let entries = discriminator
+            .mapping
+            .iter()
+            .map(|(tag, target)| (Some(tag), target))
+            .chain(
+                discriminator
+                    .default_mapping
+                    .iter()
+                    .map(|target| (None, target)),
+            );
+        for (tag, target) in entries {
+            self.discriminator_target_identity(&discriminator_entry(tag), target);
+        }
+        // W011 case: standalone-discriminator
+        Diagnostic::warning(
+            Code::DeclarationHasNoEffect,
+            discriminator.provenance.clone(),
+        )
+        .message(
+            "this `discriminator` has no `oneOf` or `anyOf` beside it, so it selects nothing: the \
+             schema lowers by its other keywords alone, and the `allOf` polymorphism form, which \
+             decodes a payload into whichever child schema its tag names, is not generated",
+        )
+        .remedy(
+            "list every schema the tag can select in a `oneOf` beside the discriminator, or remove \
+             the discriminator",
+        )
+        .emit(self.diags);
+    }
+
+    /// [`schema_reference_identity`] against this lowering's document and resolver.
+    fn schema_reference_identity(
+        &self,
+        reference: &str,
+        at: &Provenance,
+    ) -> Option<(crate::diag::FileId, crate::diag::JsonPointer)> {
+        schema_reference_identity(self.document, self.resolver, reference, at)
+    }
+
     /// Build the discriminated fast path. Objects route by tag; a non-object variant routes by its
-    /// unique JSON category. The tag value comes from `discriminator.mapping` (matched by `$ref`)
-    /// when present, otherwise from the variant's own `$ref` component name.
+    /// unique JSON category. An object variant is selected by every `discriminator.mapping` key
+    /// naming its member, in document order, and then by its own `$ref` component name unless a
+    /// mapping key claims that value; the first is the tag serialization writes. Every variant
+    /// starts with no `untagged` priority: the caller refuses a component variant left with no
+    /// tag ([`Self::reject_unselectable_discriminated_variant`]) and decides how any other is
+    /// reached.
+    #[allow(clippy::too_many_arguments)]
     fn discriminated_strategy(
         &self,
         variants: &[UnionVariant],
         ref_names: &[Option<String>],
-        discriminator: &super::Discriminator,
+        variant_members: &[usize],
+        tag_field: &str,
+        discriminator: &DiscriminatorMembers,
+        default_variant: Option<usize>,
+        mode: UnionMode,
     ) -> Option<UnionStrategy> {
         let mut tags = Vec::new();
         let mut categories = Vec::new();
-        for (variant, ref_name) in variants.iter().zip(ref_names) {
+        for ((variant, ref_name), member) in variants.iter().zip(ref_names).zip(variant_members) {
             if !matches!(
                 self.graph.get(variant.ty.id).map(|def| &def.kind),
                 Some(TypeKind::Struct(_))
@@ -2320,53 +3030,42 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 if category == JsonCategory::Object || categories.contains(&Some(category)) {
                     return None;
                 }
-                tags.push(None);
+                tags.push(Vec::new());
                 categories.push(Some(category));
                 continue;
             }
-            // Prefer an explicit mapping entry that points at this variant's component; fall back to
-            // the component name (implicit mapping). A mapping value may be a bare name or a full
-            // `#/components/schemas/Name` pointer.
-            let tag = ref_name
-                .as_ref()
-                .and_then(|name| {
-                    discriminator
-                        .mapping
-                        .iter()
-                        .find(|(_, target)| {
-                            target.as_str() == name
-                                || target.strip_prefix("#/components/schemas/") == Some(name)
-                        })
-                        .map(|(key, _)| key.clone())
-                        .or_else(|| Some(name.clone()))
-                })
-                .unwrap_or_else(|| variant.name_hint.clone());
-            tags.push(Some(tag));
+            // Every explicit mapping entry naming this variant's member — already resolved by
+            // identity, so its spelling does not matter — selects it. So does its component name,
+            // because the specification reads a value as a component name "unless a `mapping` is
+            // present for that value": a key equal to it claims it, for this member or another.
+            let mut accepted: Vec<String> = discriminator
+                .mapping
+                .iter()
+                .filter(|(_, named)| named == member)
+                .map(|(tag, _)| tag.clone())
+                .collect();
+            let component = ref_name
+                .as_deref()
+                .filter(|name| is_schema_component_name(name));
+            // A member that is no component — inline, or a deeper pointer — has no implicit value
+            // ("inline `oneOf` or `anyOf` subschemas are not considered"), so only a mapping key
+            // selects it. With none it keeps no tag at all: anything else would be one spargen
+            // made up and no server sends. The caller decides how such a member is reached.
+            if let Some(name) = component {
+                if !discriminator.mapping.iter().any(|(tag, _)| tag == name) {
+                    accepted.push(name.to_owned());
+                }
+            }
+            tags.push(accepted);
             categories.push(None);
         }
-        // 3.2 `defaultMapping` names the schema to fall back to when the tag is absent or
-        // unrecognized. It must name one of this union's own variants; anything else describes a
-        // branch that does not exist.
-        let default_variant = match &discriminator.default_mapping {
-            None => None,
-            Some(target) => {
-                let bare = target
-                    .strip_prefix("#/components/schemas/")
-                    .unwrap_or(target);
-                // A fallback naming a non-member is rejected by the caller, which owns the
-                // union's provenance; here it simply means there is no discriminated strategy.
-                Some(
-                    ref_names
-                        .iter()
-                        .position(|name| name.as_deref() == Some(bare))?,
-                )
-            }
-        };
         Some(UnionStrategy::Discriminated {
-            tag_field: discriminator.property_name.clone(),
+            tag_field: tag_field.to_owned(),
+            untagged: vec![None; tags.len()],
             tags,
             categories,
             default_variant,
+            mode,
         })
     }
 
@@ -2542,8 +3241,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     }
 
     /// A union whose applicators or discriminator describe a combination no generated enum can
-    /// carry: `oneOf` beside `anyOf`, or a discriminator whose `mapping`/`defaultMapping` names no
-    /// member.
+    /// carry: `oneOf` beside `anyOf`, or a `defaultMapping` whose member the enclosing schema's
+    /// sibling keywords excluded, so the fallback has no branch. A `mapping`/`defaultMapping` entry
+    /// naming a schema that is not a member is reported at the entry by
+    /// [`Self::discriminator_members`].
     fn reject_unrepresentable_union<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
         // E007 case: unrepresentable-applicators
         Diagnostic::error(Code::NonDisjointUnion, schema.provenance.clone())
@@ -2554,6 +3255,112 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             )
             .emit(self.diags);
         None
+    }
+
+    /// A discriminated object member no discriminator value selects: no `mapping` key names it, and
+    /// a key equal to its component name claims that value for another member, so the dispatch has
+    /// no arm that decodes into it, and the tag it would serialize decodes as that other member.
+    /// Reported at the entry that claims the name. A member `defaultMapping` names is still reached
+    /// by the fallback and never comes here.
+    fn reject_unselectable_discriminated_variant<T>(
+        &mut self,
+        schema: &Schema,
+        discriminator: &super::Discriminator,
+        member: usize,
+        implicit: &str,
+    ) -> Option<T> {
+        let claim = discriminator.mapping.get_key_value(implicit);
+        let (provenance, message) = match claim {
+            Some((tag, target)) => (
+                target.provenance.clone(),
+                format!(
+                    "`discriminator.mapping` entry `{tag}` claims the component name of union \
+                     member {member} for `{}`, and no entry names member {member}, so no \
+                     discriminator value selects it",
+                    target.value
+                ),
+            ),
+            None => (
+                schema.provenance.clone(),
+                format!("no discriminator value selects union member {member}"),
+            ),
+        };
+        // E007 case: unrepresentable-applicators
+        Diagnostic::error(Code::NonDisjointUnion, provenance)
+            .message(message)
+            .remedy(
+                "add a `discriminator.mapping` entry naming the member, rename the entry that \
+                 claims its component name, or remove the member from the union",
+            )
+            .emit(self.diags);
+        None
+    }
+
+    /// Discriminated object members that are no schema component — inline, or a pointer into
+    /// another schema — and that no `mapping` entry or `defaultMapping` names. The specification
+    /// gives them no implicit value ("inline `oneOf` or `anyOf` subschemas are not considered"),
+    /// so no discriminator value selects them. Where another variant carries a tag (`dispatches`),
+    /// the caller keeps the tag dispatch for those and tries these by their schemas when the tag
+    /// is absent or names no tagged member; otherwise the discriminator dispatches nothing and the
+    /// union is decoded by its members' schemas, as one with no discriminator. Either way no tag
+    /// is invented for them; this says so at the discriminator.
+    fn warn_untagged_discriminated_members(
+        &mut self,
+        discriminator: &super::Discriminator,
+        members: &[usize],
+        dispatches: bool,
+    ) {
+        let list = members
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let (subject, pronoun) = if members.len() == 1 {
+            (
+                format!(
+                    "union member {list} is no schema component — inline, or a pointer into \
+                     another schema — so it has no implicit discriminator value"
+                ),
+                "it",
+            )
+        } else {
+            (
+                format!(
+                    "union members {list} are no schema components — inline, or pointers into \
+                     another schema — so they have no implicit discriminator value"
+                ),
+                "them",
+            )
+        };
+        let consequence = if dispatches {
+            let (verb, possessive) = if members.len() == 1 {
+                ("it is", "its")
+            } else {
+                ("they are", "their")
+            };
+            format!(
+                "so the tag dispatches only to the members a value names, and {verb} matched by \
+                 {possessive} own schema when the tag is absent or names no such member"
+            )
+        } else {
+            "so this `discriminator` dispatches nothing and the union is decoded by its members' \
+             schemas"
+                .to_owned()
+        };
+        // W011 case: untagged-discriminated-member
+        Diagnostic::warning(
+            Code::DeclarationHasNoEffect,
+            discriminator.provenance.clone(),
+        )
+        .message(format!(
+            "{subject}, and no `discriminator.mapping` entry names {pronoun}: no discriminator \
+             value selects {pronoun}, {consequence}"
+        ))
+        .remedy(
+            "add a `discriminator.mapping` entry naming each such member (a URI reference to it \
+             works), move it to a schema component of its own, or remove the discriminator",
+        )
+        .emit(self.diags);
     }
 
     /// A union that resolves to itself, so its generated `Deserialize` would re-enter itself on the
@@ -2759,7 +3566,127 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     fn lower_all_of(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
         let mut contributions = Vec::new();
         self.gather_all_of(schema, hint, &mut contributions)?;
+        self.combine_all_of(schema, hint, &contributions)
+    }
 
+    /// Lower a schema carrying `allOf` and `oneOf`/`anyOf` together (issue #419). Both apply to
+    /// every instance, so the schema is their conjunction: the union (the schema without its
+    /// `allOf`, so the schema's own keywords refine its branches as they do with no `allOf` beside
+    /// it) met with the `allOf` members branch by branch. A branch a member excludes drops out,
+    /// and a union left with no branch is `E013`. Dispatching to the `allOf` arm alone dropped the
+    /// union and its discriminator with no diagnostic.
+    ///
+    /// The schema's own keywords are the union's siblings only. Folded into the composition as
+    /// well, as [`Self::gather_all_of`] folds them beside a bare `allOf`, untyped ones would make
+    /// it an object and drop every branch of another category, and every `null` branch.
+    ///
+    /// Each member of untyped object or array applicators alone (one
+    /// [`implied_applicator_category`] answers for) refines the branches of its own category and
+    /// leaves the rest, as the same keywords do as siblings of a `$ref` to a union
+    /// ([`Self::refine_union_target`]). The other members are combined as an `allOf` and met
+    /// with the union through [`Self::intersect_types`], the meet that `$ref` arm applies to a typed
+    /// sibling; the composition admits `null` exactly when every one of them does. Members that
+    /// constrain nothing (`true`, `{}`, an annotation) take part in neither: with none of either
+    /// kind left the union alone is the schema's type, under the schema's own hint, as it is with
+    /// no `allOf` at all.
+    fn lower_all_of_beside_union(&mut self, schema: &Schema, hint: &str) -> Option<Ty> {
+        let mut composition = schema.clone();
+        composition.one_of.clear();
+        composition.any_of.clear();
+        composition.discriminator = None;
+        // Everything `gather_all_of` and `combine_all_of` read beside `all_of`: the fold of the
+        // schema's own object keywords and its `null`.
+        composition.types = super::TypeSet::default();
+        composition.properties.clear();
+        composition.pattern_properties.clear();
+        composition.additional_properties = None;
+        composition.required.clear();
+        let (scoped, combined): (Vec<SchemaOr>, Vec<SchemaOr>) =
+            schema.all_of.iter().cloned().partition(|member| {
+                matches!(member, SchemaOr::Schema(member) if implied_applicator_category(member).is_some())
+            });
+        composition.all_of = combined;
+        let mut union = schema.clone();
+        union.all_of.clear();
+
+        let composition_hint = format!("{hint}Composition");
+        let mut contributions = Vec::new();
+        self.gather_all_of(&composition, &composition_hint, &mut contributions)?;
+        if contributions.is_empty() && scoped.is_empty() {
+            return self.lower_union(&union, hint);
+        }
+        let composed = if contributions.is_empty() {
+            None
+        } else {
+            let mut composed =
+                self.combine_all_of(&composition, &composition_hint, &contributions)?;
+            composed.nullable = contributions.iter().all(Contribution::admits_null);
+            Some(composed)
+        };
+        let mut refiners = Vec::new();
+        for (index, member) in scoped.iter().enumerate() {
+            let SchemaOr::Schema(member) = member else {
+                continue;
+            };
+            let scoped =
+                self.lower_scoped_refiners(member, true, None, &format!("{hint}Member{index}"))?;
+            refiners.push((member.as_ref(), Refiner::Scoped(scoped)));
+        }
+        let union = self.lower_schema(&union, &format!("{hint}Union"))?;
+        let mark = self.graph_mark();
+        let mut meet = union;
+        if let Some(composed) = composed {
+            let Ok(met) = self.intersect_types(composed, meet, &format!("{hint}Intersection"))
+            else {
+                return self.reject_all_of_beside_union(schema);
+            };
+            meet = met;
+        }
+        for (index, (member, refiner)) in refiners.into_iter().enumerate() {
+            let mut reach = ScopeReach::default();
+            let met = self.meet_scoped_refiner(
+                meet,
+                refiner,
+                &format!("{hint}Refined{index}"),
+                &mut reach,
+            );
+            if met.is_err() && reach.uncategorised {
+                return self.reject_unscoped_union_sibling(
+                    member,
+                    "a branch of the union beside this `allOf` states no JSON category, and this \
+                     member's untyped keywords are both object keywords and array keywords with \
+                     no `type` to choose between them, so no single Rust type represents what \
+                     they constrain of it",
+                );
+            }
+            for keywords in unreached_halves(refiner, &reach) {
+                let message = format!(
+                    "this `allOf` member's untyped {keywords} constrain only the instances of \
+                     their own category, and no branch of the union beside the `allOf` has that \
+                     category, so they apply to no value the union accepts"
+                );
+                self.warn_unreached_union_sibling(member, message);
+            }
+            let Ok(met) = met else {
+                return self.reject_all_of_beside_union(schema);
+            };
+            meet = met;
+        }
+        let kind = self.graph.get(meet.id)?.kind.clone();
+        self.discard_meet_intermediates(mark, &kind);
+        let mut ty = self.insert_schema_type(schema, hint, kind);
+        ty.nullable = meet.nullable;
+        ty.boxed = meet.boxed;
+        Some(ty)
+    }
+
+    /// Combine the gathered members of an `allOf` into its type; see [`Self::lower_all_of`].
+    fn combine_all_of(
+        &mut self,
+        schema: &Schema,
+        hint: &str,
+        contributions: &[Contribution],
+    ) -> Option<Ty> {
         let has_object = contributions
             .iter()
             .any(|c| matches!(c, Contribution::Object { .. }));
@@ -2791,6 +3718,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 );
                 return Some(self.with_all_of_nullability(schema, ty));
             };
+            let mark = self.graph_mark();
             for (index, member) in scalars.iter().copied().enumerate().skip(1) {
                 let Ok(merged) = self.intersect_types(
                     intersection,
@@ -2804,10 +3732,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Re-emit the intersection as the final graph insert so the invariant holds even when
             // the allOf is a component body (the per-member scalar inserts above are left dead —
             // `#[allow(dead_code)]` on the models module — rather than threading a reserved id).
+            // The meets' own inserts are discarded unless the re-emitted kind reaches them.
             let kind = self
                 .graph
                 .get(intersection.id)
                 .map(|def| def.kind.clone())?;
+            self.discard_meet_intermediates(mark, &kind);
             let mut ty = self.insert_schema_type(schema, hint, kind);
             ty.nullable = intersection.nullable;
             return Some(self.with_all_of_nullability(schema, ty));
@@ -2819,11 +3749,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let mut additional = AdditionalProps::Allow;
         // Repeated properties whose types have no common value, in first-seen order.
         let mut uninhabited: IndexSet<String> = IndexSet::new();
-        for contribution in &contributions {
+        // Every member is lowered already, so what the merge inserts from here on is its meets'.
+        let mark = self.graph_mark();
+        for contribution in contributions {
             let Contribution::Object {
                 fields: member_fields,
                 additional: member_additional,
                 required: member_required,
+                ..
             } = contribution
             else {
                 continue;
@@ -2939,7 +3872,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `additionalProperties` value schema constrains it, not only the requiring member's own:
         // `allOf: [{$ref: Labels}, {required: [a]}]` with string-valued `Labels` makes `a` a
         // string, not an unconstrained value. The requiring member already applied its own.
-        for contribution in &contributions {
+        for contribution in contributions {
             let Contribution::Object {
                 fields: member_fields,
                 additional: member_additional,
@@ -3012,11 +3945,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
 
-        let ty = self.insert_schema_type(
-            schema,
-            hint,
-            TypeKind::Struct(Struct { fields, additional }),
-        );
+        // A property repeated by three or more members is met pair by pair, and each meet replaces
+        // the field's type, so the struct refers to the last meet and not to the ones before it.
+        let kind = TypeKind::Struct(Struct { fields, additional });
+        self.elide_meet_intermediates(mark, &kind);
+        let ty = self.insert_schema_type(schema, hint, kind);
         Some(self.with_all_of_nullability(schema, ty))
     }
 
@@ -3038,6 +3971,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 fields: member_fields,
                 additional: member_additional,
                 required: schema.required.clone(),
+                nullable: schema.types.types.contains(&JsonType::Null),
             });
         }
         Some(())
@@ -3057,6 +3991,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             SchemaOr::Schema(schema) => schema.as_ref(),
         };
+        // An inline member, or a non-component target expanded in place, is read by its keywords
+        // here rather than lowered through `lower_schema_inner`, which would report this.
+        self.diagnose_standalone_discriminator(schema);
 
         if let Some(reference) = &schema.reference {
             self.gather_ref_target(schema, reference, hint, out)?;
@@ -3079,8 +4016,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             );
         }
 
-        if !schema.all_of.is_empty() {
+        if !schema.all_of.is_empty() && !schema_has_union(schema) {
             // Nested allOf: flatten its members (and its own siblings) into the same accumulator.
+            // One with a union beside it is that composition met with the union, which only
+            // lowering computes, so `gather_inline` lowers it as the scalar it then is.
             return self.gather_all_of(schema, hint, out);
         }
 
@@ -3296,6 +4235,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     fields,
                     additional,
                     required,
+                    nullable: ty.nullable,
                 });
             }
             _ => out.push(Contribution::Scalar(ty)),
@@ -3309,12 +4249,16 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         hint: &str,
         out: &mut Vec<Contribution>,
     ) -> Option<()> {
-        if schema_is_object_like(schema) {
+        // A member carrying its own `oneOf`/`anyOf` is that union, its object keywords refining the
+        // branches as `lower_union` refines them; read as an object by its keywords, the union was
+        // dropped with no diagnostic (issue #419).
+        if schema_is_object_like(schema) && !schema_has_union(schema) {
             let (fields, additional) = self.object_body(schema, hint)?;
             out.push(Contribution::Object {
                 fields,
                 additional,
                 required: schema.required.clone(),
+                nullable: schema.types.types.contains(&JsonType::Null),
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
@@ -3504,6 +4448,21 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         None
     }
 
+    /// Report that a schema's `allOf` composition and the `oneOf`/`anyOf` beside it have no single
+    /// typed intersection (see [`Self::lower_all_of_beside_union`]): no branch meets the
+    /// composition, or one does in a way no single Rust type represents.
+    fn reject_all_of_beside_union(&mut self, schema: &Schema) -> Option<Ty> {
+        // E013 case: scalar-members, required-property, additional-values, object-scalar-mix, unrepresentable-meet
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(
+                "this schema's `allOf` and the `oneOf`/`anyOf` beside it both apply, and their \
+                 intersection is empty or unrepresentable",
+            )
+            .remedy(ALL_OF_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
     /// Report that the category a `$ref`'s untyped sibling keywords establish (see
     /// [`implied_applicator_category`]) cannot be intersected with the target without either an
     /// empty result or a dropped target branch. `message` says which.
@@ -3512,6 +4471,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
             .message(message.to_owned())
             .remedy(REF_SIBLING_REMEDY)
+            .emit(self.diags);
+        None
+    }
+
+    /// Acknowledge that a union's untyped object or array sibling keywords (a [`Refiner::Scoped`]
+    /// sibling, beside the union or beside a `$ref` to it) reach no branch of their category. In
+    /// 2020-12 they are then vacuously satisfied by every value the union accepts, so the union
+    /// generates as it is, and the keywords are reported rather than dropped in silence.
+    fn warn_unreached_union_sibling(&mut self, schema: &Schema, message: String) {
+        // W011 case: unreached-union-sibling
+        Diagnostic::warning(Code::DeclarationHasNoEffect, schema.provenance.clone())
+            .message(message)
+            .emit(self.diags);
+    }
+
+    /// Report that a union's untyped object or array sibling keywords (a [`Refiner::Scoped`]
+    /// sibling) settle no category for a branch that states none: they are both kinds, or a
+    /// deleted multi-type array admits another category beside theirs.
+    fn reject_unscoped_union_sibling<T>(&mut self, schema: &Schema, message: &str) -> Option<T> {
+        // E013 case: inferred-category
+        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
+            .message(message.to_owned())
+            .remedy(UNION_SIBLING_REMEDY)
             .emit(self.diags);
         None
     }
@@ -3844,7 +4826,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Where `open_narrowing` is out of effect (inside a union, which `intersect_union`
             // reaches with a set the response already opened) the meet is closed: two variants
             // that each held an unlisted string would both match it, and the trial union would
-            // refuse every value.
+            // refuse every value. A locked set (one narrowed against a `uuid` or date string) locks
+            // the meet, open side or not, which is again order-independent: the format's domain
+            // holds no unlisted string for the open side to keep.
             (TypeKind::Enum(left), TypeKind::Enum(right)) if left.repr == right.repr => {
                 let variants: Vec<ScalarValue> = left
                     .variants
@@ -3852,25 +4836,32 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     .filter(|value| right.variants.contains(value))
                     .cloned()
                     .collect();
-                let open = self.narrowing_opens && (left.open || right.open);
+                let openness =
+                    if left.openness == Openness::Locked || right.openness == Openness::Locked {
+                        Openness::Locked
+                    } else if self.narrowing_opens && (left.is_open() || right.is_open()) {
+                        Openness::Open
+                    } else {
+                        Openness::Closed
+                    };
                 if variants.is_empty() {
                     // Both value sets are finite and listed in full, so sharing no value is proof.
                     Err(NoMeet::Empty)
-                } else if variants == left.variants && open == left.open {
+                } else if variants == left.variants && openness == left.openness {
                     Ok(non_nullable(a))
-                } else if variants == right.variants && open == right.open {
+                } else if variants == right.variants && openness == right.openness {
                     Ok(non_nullable(b))
-                } else if open && variants == left.variants {
-                    Ok(self.opened_set(a, left))
-                } else if open && variants == right.variants {
-                    Ok(self.opened_set(b, right))
+                } else if variants == left.variants {
+                    Ok(self.reopened_set(a, left, openness, hint))
+                } else if variants == right.variants {
+                    Ok(self.reopened_set(b, right, openness, hint))
                 } else {
                     Ok(self.insert_type(
                         hint,
                         TypeKind::Enum(ScalarEnum {
                             repr: left.repr,
                             variants,
-                            open,
+                            openness,
                         }),
                         Docs::default(),
                         None,
@@ -3948,11 +4939,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // the enclosing position's answer holds.
             (TypeKind::Union(union), _) => {
                 let enclosing = self.narrowing_opens;
-                self.closed_narrowing(|ctx| ctx.intersect_union(a, union, b, hint, enclosing))
+                self.closed_narrowing(|ctx| {
+                    let reach = &mut ScopeReach::default();
+                    ctx.intersect_union(a, union, Refiner::Whole(b), hint, enclosing, reach)
+                })
             }
             (_, TypeKind::Union(union)) => {
                 let enclosing = self.narrowing_opens;
-                self.closed_narrowing(|ctx| ctx.intersect_union(b, union, a, hint, enclosing))
+                self.closed_narrowing(|ctx| {
+                    let reach = &mut ScopeReach::default();
+                    ctx.intersect_union(b, union, Refiner::Whole(a), hint, enclosing, reach)
+                })
             }
             (TypeKind::Bytes, TypeKind::Bytes) => Ok(non_nullable(a)),
             // Binary content (`format: binary` / `contentEncoding: base64`) is a string, so a plain
@@ -3974,7 +4971,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// target, or from another intersection, may be reached from where it must stay closed).
     ///
     /// Only a plain `string` widens it: `uuid` and the date formats have a decoded representation
-    /// of their own that an arbitrary string is not.
+    /// of their own that an arbitrary string is not. Under `open_narrowing` (in a response body's
+    /// own schema or not), a string set meeting one of them is [`Openness::Locked`] instead, so no
+    /// plain `string` met before or after opens it: the set an `allOf` lowers to does not depend
+    /// on where its formatted member sits.
     ///
     /// A set the response already opened, met where [`Self::narrowing_opens`] does not hold (a
     /// union variant `intersect_union` meets it with), is a new closed copy under `hint`, for the
@@ -3986,38 +4986,69 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         primitive: Prim,
         hint: &str,
     ) -> Ty {
-        if set.open && !self.narrowing_opens {
-            return self.insert_type(
-                hint,
-                TypeKind::Enum(ScalarEnum {
-                    open: false,
-                    ..set.clone()
-                }),
-                Docs::default(),
-                None,
-            );
-        }
-        let opens = self.narrowing_opens
-            && set.repr == ScalarRepr::String
-            && !set.open
-            && primitive == Prim::String;
-        if !opens {
+        let openness = match (set.openness, primitive) {
+            _ if set.repr != ScalarRepr::String => set.openness,
+            (_, Prim::Uuid | Prim::Date | Prim::DateTime) if self.open_narrowing => {
+                Openness::Locked
+            }
+            (Openness::Closed, Prim::String) if self.narrowing_opens => Openness::Open,
+            (Openness::Open, _) if !self.narrowing_opens => Openness::Closed,
+            (openness, _) => openness,
+        };
+        self.reopened_set(enum_ty, set, openness, hint)
+    }
+
+    /// The set `set` (whose type is `enum_ty`) with `openness`: the set itself when it already has
+    /// it, the set opened as [`Self::opened_set`] does, and otherwise a closed or locked one. That
+    /// is the set itself, changed in place, when it is one of [`Self::open_candidates`] met where
+    /// [`Self::narrowing_opens`] holds, and a new copy under `hint` otherwise, since a set reached
+    /// from anywhere else may be reached from where it must keep its own openness.
+    fn reopened_set(
+        &mut self,
+        enum_ty: Ty,
+        set: &ScalarEnum,
+        openness: Openness,
+        hint: &str,
+    ) -> Ty {
+        if openness == set.openness {
             return non_nullable(enum_ty);
         }
-        self.opened_set(enum_ty, set)
+        if openness == Openness::Open {
+            return self.opened_set(enum_ty, set);
+        }
+        if self.narrowing_opens && self.reopen_in_place(enum_ty, openness) {
+            return non_nullable(enum_ty);
+        }
+        self.insert_type(
+            hint,
+            TypeKind::Enum(ScalarEnum {
+                openness,
+                ..set.clone()
+            }),
+            Docs::default(),
+            None,
+        )
+    }
+
+    /// Give the set `enum_ty` `openness` in place, when it is one of [`Self::open_candidates`]:
+    /// whether it was.
+    fn reopen_in_place(&mut self, enum_ty: Ty, openness: Openness) -> bool {
+        if !self.open_candidates.contains(&enum_ty.id) {
+            return false;
+        }
+        if let Some(TypeKind::Enum(own)) = self.graph.get_mut(enum_ty.id).map(|def| &mut def.kind) {
+            own.openness = openness;
+            return true;
+        }
+        false
     }
 
     /// The closed set `set` (whose type is `enum_ty`), opened: in place when it is one of
     /// [`Self::open_candidates`], and as a new open copy otherwise, as [`Self::narrowed_string`]
     /// describes.
     fn opened_set(&mut self, enum_ty: Ty, set: &ScalarEnum) -> Ty {
-        if self.open_candidates.contains(&enum_ty.id) {
-            if let Some(TypeKind::Enum(own)) =
-                self.graph.get_mut(enum_ty.id).map(|def| &mut def.kind)
-            {
-                own.open = true;
-                return non_nullable(enum_ty);
-            }
+        if self.reopen_in_place(enum_ty, Openness::Open) {
+            return non_nullable(enum_ty);
         }
         // Named for the closed set it opens, which stays in the graph where it came from.
         let (name_hint, docs, provenance) = match self.graph.get(enum_ty.id) {
@@ -4033,11 +5064,67 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             TypeKind::Enum(ScalarEnum {
                 repr: ScalarRepr::String,
                 variants: set.variants.clone(),
-                open: true,
+                openness: Openness::Open,
             }),
             docs,
             provenance,
         )
+    }
+
+    /// The id the next graph insert takes: every type inserted from here on has an id at or above
+    /// it. [`Self::discard_meet_intermediates`] takes it back.
+    fn graph_mark(&self) -> u32 {
+        self.graph.last_id().map_or(0, |id| id.0 + 1)
+    }
+
+    /// Discard every type inserted since `mark` that `kind` does not refer to, directly or
+    /// transitively. The caller has just met two or more types inserted before `mark` and is about
+    /// to re-emit the meet's result as a new definition of `kind`, so the meets' own inserts are
+    /// unused unless that definition reaches them. Each would otherwise be emitted as a public type
+    /// nothing refers to: the open or locked copy [`Self::reopened_set`] makes of a `$ref`'d set
+    /// (#401), and every intermediate a later meet superseded.
+    ///
+    /// When `kind` reaches none of them, all are removed (#401). Otherwise only the most recent
+    /// could be, since ids are dense, so the unused ones are elided instead, as
+    /// [`Self::elide_meet_intermediates`] does.
+    fn discard_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
+        let reached = reachable_types(&self.graph, &kind_edges(kind));
+        if reached.iter().any(|id| id.0 >= mark) {
+            self.elide_unreached(mark, &reached);
+            return;
+        }
+        while self.graph.last_id().is_some_and(|id| id.0 >= mark) {
+            self.graph.pop_last();
+        }
+    }
+
+    /// [Elide](TypeGraph::elide) every type inserted since `mark` that `kind` does not refer to,
+    /// directly or transitively. The caller has just met the properties its members repeat, each
+    /// meet replacing the field's type, and is about to emit `kind`, the struct that refers to the
+    /// last meet of each property and not to the ones a later member superseded: the open copy
+    /// [`Self::reopened_set`] makes of a `$ref`'d set, or the struct an earlier pair of members met
+    /// a repeated object property in (#428). Those are interleaved with the inserts the struct
+    /// uses, so they cannot be popped; eliding keeps each one's id and name, so no type the output
+    /// carries is renamed or reordered.
+    ///
+    /// Sound because intersecting only reads the graph and inserts into it: it lowers no schema and
+    /// fills no memo, so nothing outside the inserts since `mark` refers to them, and an in-place
+    /// change of an earlier set's openness ([`Self::reopen_in_place`]) is kept.
+    fn elide_meet_intermediates(&mut self, mark: u32, kind: &TypeKind) {
+        let reached = reachable_types(&self.graph, &kind_edges(kind));
+        self.elide_unreached(mark, &reached);
+    }
+
+    /// Elide every type inserted since `mark` that is not in `reached`.
+    fn elide_unreached(&mut self, mark: u32, reached: &HashSet<TypeId>) {
+        let Some(last) = self.graph.last_id() else {
+            return;
+        };
+        for id in (mark..=last.0).map(TypeId) {
+            if !reached.contains(&id) {
+                self.graph.elide(id);
+            }
+        }
     }
 
     /// Run `lower` with `open_narrowing` out of effect, restoring the enclosing position's answer
@@ -4225,18 +5312,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// branch survives, the result is no union, and that branch is met again under that answer, so
     /// the meet is the same set whichever order the `allOf` writes the union and the `string` in
     /// (written first, the union narrows to that branch before the `string` opens it).
+    ///
+    /// Each branch is met through [`Self::meet_refiner`], so a [`Refiner::Scoped`] `other` leaves
+    /// the branches of another category as they are and records what it reached in `reach`.
     fn intersect_union(
         &mut self,
         union_ty: Ty,
         union: &Union,
-        other: Ty,
+        other: Refiner,
         hint: &str,
         enclosing_opens: bool,
+        reach: &mut ScopeReach,
     ) -> Result<Ty, NoMeet> {
         let mut variants = Vec::new();
         let mut retained = Vec::new();
         for (index, variant) in union.variants.iter().enumerate() {
-            match self.intersect_types(variant.ty, other, &format!("{hint}Variant{index}")) {
+            match self.meet_refiner(variant.ty, other, reach, &format!("{hint}Variant{index}")) {
                 Ok(ty) => {
                     variants.push(UnionVariant {
                         name_hint: variant.name_hint.clone(),
@@ -4255,7 +5346,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if variants.len() == 1 {
             if enclosing_opens {
                 let branch = union.variants[retained[0]].ty;
-                return self.response_narrowing(|ctx| ctx.intersect_types(branch, other, hint));
+                return self.response_narrowing(|ctx| ctx.meet_refiner(branch, other, reach, hint));
             }
             return Ok(variants.remove(0).ty);
         }
@@ -4276,10 +5367,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 tags,
                 categories,
                 default_variant,
+                untagged,
+                mode,
             } => UnionStrategy::Discriminated {
                 tag_field: tag_field.clone(),
                 tags: retained.iter().map(|index| tags[*index].clone()).collect(),
                 categories: retained.iter().map(|index| categories[*index]).collect(),
+                untagged: retained.iter().map(|index| untagged[*index]).collect(),
+                mode: *mode,
                 // The fallback variant's index moves with the retained set; if the fallback itself
                 // was dropped, the union simply has no fallback any more.
                 default_variant: default_variant
@@ -4376,6 +5471,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let raw = schema.default.as_ref()?;
         let classified = classify_default(raw);
         let kind = self.graph.get(ty.id).map(|def| &def.kind);
+        let provenance = Provenance::new(schema.provenance.pointer.push("default"), Some(raw.span));
         match representable_default(&classified, kind) {
             Some(value) => {
                 let display = default_display(&value);
@@ -4387,6 +5483,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(FieldDefault {
                     doc_note: format!("Default: `{display}`."),
                     applied,
+                    provenance,
                 })
             }
             None => {
@@ -4403,6 +5500,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(FieldDefault {
                     doc_note: format!("Default (not applied): `{}`.", raw_display(raw)),
                     applied: None,
+                    provenance,
                 })
             }
         }
@@ -4499,13 +5597,24 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The enum def is the last graph insert; setting `nullable` afterward is a pure mutate that
         // preserves the component-root last-insert invariant asserted in `ensure_component`.
         let repr = repr.unwrap_or(ScalarRepr::String);
+        // A string set whose own schema names a `uuid` or date format is narrowed against that
+        // format exactly as an `allOf` member declaring it would narrow it (`narrowed_string`).
+        let formatted = matches!(
+            schema.format.as_deref(),
+            Some("uuid" | "date" | "date-time")
+        );
+        let openness = if self.open_narrowing && repr == ScalarRepr::String && formatted {
+            Openness::Locked
+        } else {
+            Openness::Closed
+        };
         let mut ty = self.insert_schema_type(
             schema,
             hint,
             TypeKind::Enum(ScalarEnum {
                 repr,
                 variants,
-                open: false,
+                openness,
             }),
         );
         if self.narrowing_opens && repr == ScalarRepr::String {
@@ -4759,6 +5868,43 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 Some(parameter.provenance.clone()),
             )
         };
+        if let Some((path, kind)) = uninhabited_parameter_part(&self.graph, ty) {
+            // `false`, or an `allOf` whose members meet empty, admits no value at all (#407).
+            // Nothing is nested, so "nested arrays or objects" would describe nothing the author
+            // wrote; name the schema that admits nothing instead. A union with such a member
+            // still admits its other members' values, so only the member is called uninhabited.
+            let at = format!("{}{path}", parameter.name);
+            let (message, remedy) = match kind {
+                Uninhabited::Whole => (
+                    format!(
+                        "parameter schema `{at}` is uninhabited: no value satisfies it (`false`, \
+                         or an `allOf` whose members conflict), so simple/form/deepObject \
+                         serialization has no token for it"
+                    ),
+                    format!("give `{at}` a schema some value satisfies, or remove it"),
+                ),
+                Uninhabited::Member => (
+                    format!(
+                        "parameter schema `{at}` has a `oneOf`/`anyOf` member that is \
+                         uninhabited: no value satisfies that member (`false`, or an `allOf` \
+                         whose members conflict), so simple/form/deepObject serialization has no \
+                         token for it"
+                    ),
+                    format!(
+                        "remove the uninhabited member from `{at}`, or give it a schema some \
+                         value satisfies"
+                    ),
+                ),
+            };
+            Diagnostic::error(
+                Code::UnsupportedParameterStyle,
+                parameter.provenance.clone(),
+            )
+            .message(message)
+            .remedy(remedy)
+            .emit(self.diags);
+            return None;
+        }
         if let Some(property) = unconstrained_parameter_property(&self.graph, ty) {
             // Most often a `required` name no `properties` entry declares, which is a required
             // field typed by `additionalProperties` and unconstrained without one (#140). An
@@ -5325,8 +6471,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The declared `contentType` is a wire *header*; how the value is rendered into bytes is
         // decided by the property's own lowered type. That is what lets a part declare
         // `application/sdp` (which spargen has no codec for) over a string property and still be
-        // sent correctly, with the declared header attached.
-        let codec = match classify_media(media_essence(&content_type)).map(|(codec, _)| codec) {
+        // sent correctly, with the declared header attached. Media types are case-insensitive
+        // (RFC 9110 § 8.3.1) and the classifier's arms are spelled in lowercase, so the essence is
+        // classified lowercased: `Application/JSON` selects the codec `application/json` does,
+        // here and in the refusal below.
+        let classified = classify_media(&media_essence(&content_type).to_ascii_lowercase())
+            .map(|(codec, _)| codec);
+        let codec = match classified {
             Some(codec @ (MediaType::Json | MediaType::Text | MediaType::OctetStream)) => codec,
             _ => self.natural_codec(field_ty),
         };
@@ -5336,8 +6487,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // whatever it declares, so a declaration that is not JSON (`application/xml` over an
         // object, `text/csv` over an array, or a type with no codec at all) would put JSON under
         // a header naming another syntax — bytes no reader of the document predicts. Refused.
-        // Media types are case-insensitive (RFC 9110 § 8.3.1), and the classifier's JSON arms are
-        // spelled in lowercase, so `Application/JSON` is judged as the JSON it is.
+        // `classified` is the lowercased classification, so `Application/JSON` is judged as the
+        // JSON it is.
         //
         // A form-urlencoded field has no header, so the argument there is not the same one, but it
         // reaches the same rule: its `contentType` is the only statement of the syntax the field's
@@ -5350,9 +6501,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         if matches!(media, MediaType::Multipart | MediaType::FormUrlEncoded)
             && explicit.is_some()
             && self.natural_codec(field_ty) == MediaType::Json
-            && classify_media(&media_essence(&content_type).to_ascii_lowercase())
-                .map(|(codec, _)| codec)
-                != Some(MediaType::Json)
+            && classified != Some(MediaType::Json)
         {
             Diagnostic::error(
                 Code::UnsupportedMediaType,
@@ -5898,12 +7047,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             match current {
                 RefOr::Item(header) => return Some(header),
                 RefOr::Ref(reference) => {
+                    self.note_reference_docs(&reference);
                     if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "header");
                     }
-                    let alias = reference
-                        .reference
-                        .strip_prefix("#/components/headers/")
+                    let alias = self
+                        .root_component_name(&reference, "#/components/headers/")
                         .map(|name| self.document.components.headers.get(name).cloned());
                     match alias {
                         Some(Some(target)) => current = target,
@@ -5914,10 +7063,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                                 &reference.reference,
                             );
                         }
-                        // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle exactly as a Parameter or
-                        // Response Object reference already does — and may itself be a Reference,
-                        // followed from the file it is written in.
+                        // Not a root component alias: a multi-file description may reference a
+                        // whole file, or a sub-file's own components, which resolve through the
+                        // input bundle exactly as a Parameter or Response Object reference already
+                        // does — and may itself be a Reference, followed from the file it is
+                        // written in.
                         None => {
                             current = self.follow_bundle_reference(
                                 &reference,
@@ -5959,11 +7109,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "parameter");
                     }
-                    let Some(name) = reference.reference.strip_prefix("#/components/parameters/")
+                    let Some(name) =
+                        self.root_component_name(&reference, "#/components/parameters/")
                     else {
-                        // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref` —
-                        // and may itself be a Reference, followed from the file it is written in.
+                        // Not a root component alias: a multi-file description may reference a
+                        // whole file, or a sub-file's own components, which resolve through the
+                        // input bundle like a schema `$ref` — and may itself be a Reference,
+                        // followed from the file it is written in.
                         current = self.follow_bundle_reference(
                             &reference,
                             "parameter",
@@ -5998,13 +7150,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "request body");
                     }
-                    let Some(name) = reference
-                        .reference
-                        .strip_prefix("#/components/requestBodies/")
+                    let Some(name) =
+                        self.root_component_name(&reference, "#/components/requestBodies/")
                     else {
-                        // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref` —
-                        // and may itself be a Reference, followed from the file it is written in.
+                        // Not a root component alias: a multi-file description may reference a
+                        // whole file, or a sub-file's own components, which resolve through the
+                        // input bundle like a schema `$ref` — and may itself be a Reference,
+                        // followed from the file it is written in.
                         current = self.follow_bundle_reference(
                             &reference,
                             "request body",
@@ -6036,11 +7188,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                     if !seen.insert(self.hop_identity(&reference)) {
                         return self.reject_alias_cycle(&reference.provenance, "response");
                     }
-                    let Some(name) = reference.reference.strip_prefix("#/components/responses/")
+                    let Some(name) =
+                        self.root_component_name(&reference, "#/components/responses/")
                     else {
-                        // Not a component alias: a multi-file description may reference a whole
-                        // file, which resolves through the input bundle like a schema `$ref` —
-                        // and may itself be a Reference, followed from the file it is written in.
+                        // Not a root component alias: a multi-file description may reference a
+                        // whole file, or a sub-file's own components, which resolve through the
+                        // input bundle like a schema `$ref` — and may itself be a Reference,
+                        // followed from the file it is written in.
                         current = self.follow_bundle_reference(
                             &reference,
                             "response",
@@ -6100,6 +7254,28 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             .ok_or_else(|| reference.reference.clone())
     }
 
+    /// The `<name>` of a `#/components/<kind>/<name>` reference (`prefix` is
+    /// `#/components/<kind>/`) that addresses the **root** document's component map — one written
+    /// in the root document, or with no span to say otherwise.
+    ///
+    /// A JSON Pointer fragment addresses the document it appears in, so the same spelling written
+    /// inside a referenced file names that file's components (#397). Reading the root's map for it
+    /// rejected the reference when the root declared no such name and silently substituted the
+    /// root's declaration when it did; `None` sends it to the bundle, which resolves it from the
+    /// file it is written in.
+    fn root_component_name<'r>(
+        &self,
+        reference: &'r super::Reference,
+        prefix: &str,
+    ) -> Option<&'r str> {
+        let root = self.resolver.root_id();
+        let written_in = reference.provenance.span.map_or(root, |span| span.file);
+        if written_in != root {
+            return None;
+        }
+        reference.reference.strip_prefix(prefix)
+    }
+
     /// Acknowledge a Reference Object `summary`/`description`.
     ///
     /// These document the *reference site*, not the target. Spargen emits one shared item per
@@ -6127,10 +7303,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         kind: &str,
         reference: &str,
     ) -> Option<T> {
-        // E004 case: undeclared-component
-        Diagnostic::error(Code::UnresolvedRef, provenance.clone())
-            .message(format!("unresolved {kind} reference `{reference}`"))
-            .emit(self.diags);
+        reject_undeclared_component(self.diags, provenance, kind, reference);
         None
     }
 
@@ -6173,15 +7346,42 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
             ComponentMiss::AbsentTarget => {
                 // E004 case: absent-target
-                Diagnostic::error(Code::UnresolvedRef, provenance.clone())
+                let mut diagnostic = Diagnostic::error(Code::UnresolvedRef, provenance.clone())
                     .message(format!(
                         "{kind} reference target `{reference}` was not found in the input bundle"
-                    ))
-                    .emit(self.diags);
+                    ));
+                // A bare fragment written in a referenced file addresses that file (#397); when
+                // the root declares what it names, that is almost certainly what was meant.
+                if let Some(remedy) = self.root_declares_the_fragment(provenance, reference) {
+                    diagnostic = diagnostic.remedy(remedy);
+                }
+                diagnostic.emit(self.diags);
             }
             ComponentMiss::Unparsable => {}
         }
         None
+    }
+
+    /// The remedy for a bare `#…` fragment written in a referenced file whose own document holds
+    /// nothing at it while the root document does: the fragment addresses the file it is written
+    /// in, so the root's declaration is reached only by naming the root document.
+    fn root_declares_the_fragment(
+        &self,
+        provenance: &crate::diag::Provenance,
+        reference: &str,
+    ) -> Option<String> {
+        let root = self.resolver.root_id();
+        let written_in = provenance.span.map(|span| span.file)?;
+        if written_in == root || !reference.starts_with('#') {
+            return None;
+        }
+        let (file, pointer) = self.resolver.reference_identity_from(reference, root)?;
+        self.resolver.node_at(file, &pointer)?;
+        Some(format!(
+            "the root document declares `{reference}`, but a `#` fragment addresses the file it \
+             is written in; name the root document before the fragment to reference the root's \
+             declaration, or declare it in this file"
+        ))
     }
 
     /// Resolve a Media Type Object through any `$ref` hops and give every position-independent
@@ -6203,18 +7403,20 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // generated item shared across every use cannot express — the same disposition the
             // Parameter, Response, and Request Body paths already give it.
             self.note_reference_docs(&reference);
-            if !seen.insert(reference.reference.clone()) {
+            // Keyed on the target each hop resolves to, as the Parameter, Response, Request Body
+            // and Header chains are: `#/components/mediaTypes/A` written in two files is two hops.
+            if !seen.insert(self.hop_identity(&reference)) {
                 return self.reject_alias_cycle(&reference.provenance, "media type");
             }
-            let Some(name) = reference.reference.strip_prefix("#/components/mediaTypes/") else {
-                // Not a component alias: a multi-file description may reference a whole file,
-                // which resolves through the input bundle exactly as a Parameter or Response
-                // Object reference already does.
+            let Some(name) = self.root_component_name(&reference, "#/components/mediaTypes/")
+            else {
+                // Not a root component alias: a multi-file description may reference a whole
+                // file, or a sub-file's own components, which resolve through the input bundle
+                // exactly as a Parameter or Response Object reference already does.
                 let from = reference
                     .provenance
                     .span
-                    .map(|span| span.file)
-                    .unwrap_or(crate::diag::FileId(0));
+                    .map_or_else(|| self.resolver.root_id(), |span| span.file);
                 let resolved = self.resolver.resolve_component(
                     &reference.reference,
                     from,
@@ -6548,18 +7750,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
 }
 
 /// The component name a union member is written as — `$ref: '#/components/schemas/<name>'` — or
-/// `None`. It names the member's variant and implicit discriminator tag, and it is what a
-/// `discriminator.mapping` value is matched against. Written in the root document, a name with a
+/// `None`. It names the member's variant and implicit discriminator tag; an explicit
+/// `discriminator.mapping` value is matched by resolved target instead
+/// ([`LowerCtx::discriminator_members`]). Written in the root document, a name with a
 /// raw `/` is a pointer *into* a component, not a component name: it has none to derive a variant
 /// or a tag from, exactly as the same pointer written against a relative file has none, and neither
 /// has any file reference.
 ///
-/// Written in a sub-file, the same spelling keeps the name it has always had. That route resolved
-/// through the resolver before same-file deep pointers did in the root, and its members were named
-/// from the pointer text (`Envelope/properties/cat` → variant `EnvelopePropertiesCat`, implicit tag
-/// `Envelope/properties/cat`), with a `mapping` value spelled the same way matched to them. Dropping
-/// the name there would rename those variants and reject those mappings with `E007` in documents
-/// that generate today; the root-only filter confines the change to what previously rejected.
+/// Written in a sub-file, the same spelling keeps the variant name it has always had. That route
+/// resolved through the resolver before same-file deep pointers did in the root, and its members
+/// were named from the pointer text (`Envelope/properties/cat` → variant `EnvelopePropertiesCat`).
+/// Dropping the name there would rename those variants in documents that generate today; the
+/// root-only filter confines the change to what previously rejected. The name is no component
+/// name, so it supplies no implicit discriminator tag ([`is_schema_component_name`]).
 fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option<&str> {
     let SchemaOr::Schema(schema) = member else {
         return None;
@@ -6585,6 +7788,84 @@ fn unconstrained_parameter_property(graph: &TypeGraph, ty: Ty) -> Option<String>
         .iter()
         .find(|field| matches!(graph.get(field.ty.id).map(|d| &d.kind), Some(TypeKind::Any)))
         .map(|field| field.name.wire.clone())
+}
+
+/// How a parameter position fails to be inhabited, as [`uninhabited_parameter_part`] finds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Uninhabited {
+    /// The schema at the position admits no value: [`TypeKind::Never`], or a union every one of
+    /// whose members admits none.
+    Whole,
+    /// The schema is a union that admits some value, but at least one of its members admits none
+    /// (`oneOf: [{type: string}, false]`). The position itself is inhabited, so only the member
+    /// may be called uninhabited.
+    Member,
+}
+
+/// The path, relative to the parameter, of the first schema at a position simple/form/deepObject
+/// serialization would otherwise accept that is uninhabited, or is a union holding an uninhabited
+/// ([`TypeKind::Never`]) member, together with which of the two it is. [`parameter_shape_supported`]
+/// refuses both, because no value of the uninhabited schema has a token. The path is `""` for the
+/// parameter itself, `.name` for an object property, `.*` for its `additionalProperties`, `[]` for
+/// an array's items, and `[i]` for a tuple's. Only those positions are searched, so an uninhabited
+/// schema below a nested array or object stays reported as the nesting. `None` when there is no
+/// such schema.
+fn uninhabited_parameter_part(graph: &TypeGraph, ty: Ty) -> Option<(String, Uninhabited)> {
+    fn classify(graph: &TypeGraph, ty: Ty, visiting: &mut HashSet<TypeId>) -> Option<Uninhabited> {
+        if !visiting.insert(ty.id) {
+            return None;
+        }
+        let found = match graph.get(ty.id).map(|definition| &definition.kind) {
+            Some(TypeKind::Never) => Some(Uninhabited::Whole),
+            Some(TypeKind::Union(union)) => {
+                let members: Vec<_> = union
+                    .variants
+                    .iter()
+                    .map(|variant| classify(graph, variant.ty, visiting))
+                    .collect();
+                if !members.is_empty()
+                    && members
+                        .iter()
+                        .all(|member| *member == Some(Uninhabited::Whole))
+                {
+                    Some(Uninhabited::Whole)
+                } else if members.iter().any(Option::is_some) {
+                    Some(Uninhabited::Member)
+                } else {
+                    None
+                }
+            }
+            // A reservation's shape is unknown, so nothing proves it admits no value; it is left
+            // to `parameter_shape_supported`, which refuses it.
+            Some(TypeKind::Reserved) => None,
+            _ => None,
+        };
+        visiting.remove(&ty.id);
+        found
+    }
+    let mut visiting = HashSet::new();
+    if let Some(kind) = classify(graph, ty, &mut visiting) {
+        return Some((String::new(), kind));
+    }
+    let mut at = |path: String, ty: Ty| classify(graph, ty, &mut visiting).map(|kind| (path, kind));
+    match &graph.get(ty.id)?.kind {
+        TypeKind::Array(item) => at("[]".to_owned(), **item),
+        TypeKind::Tuple(items) => items
+            .iter()
+            .enumerate()
+            .find_map(|(index, item)| at(format!("[{index}]"), *item)),
+        TypeKind::Struct(object) => object
+            .fields
+            .iter()
+            .find_map(|field| at(format!(".{}", field.name.wire), field.ty))
+            .or_else(|| match &object.additional {
+                AdditionalProps::Typed(value) => at(".*".to_owned(), **value),
+                AdditionalProps::Deny | AdditionalProps::Allow => None,
+            }),
+        // The parameter itself was classified above; a reservation has no parts to search.
+        TypeKind::Reserved => None,
+        _ => None,
+    }
 }
 
 fn parameter_shape_supported(graph: &TypeGraph, ty: Ty) -> bool {
@@ -6809,6 +8090,40 @@ const ALL_OF_REMEDY: &str =
 const REF_SIBLING_REMEDY: &str = "restructure the schema so the `$ref` target and its sibling \
                                   keywords describe one representable type, or omit this API \
                                   segment with spargen::omit!";
+
+/// The remedy for a union's untyped sibling keywords that cannot be applied to its branches.
+const UNION_SIBLING_REMEDY: &str = "give the sibling keywords a `type`, move them into the \
+                                    branches they constrain, or omit this API segment with \
+                                    spargen::omit!";
+
+/// The keyword set of every half of a [`Refiner::Scoped`] sibling that reached no branch of its
+/// category, object half first; empty where every half the sibling carries reached one (or the
+/// sibling is not scoped). Each entry is reported with a `W011` of its own.
+fn unreached_halves(refiner: Refiner, reach: &ScopeReach) -> Vec<&'static str> {
+    let Refiner::Scoped(scoped) = refiner else {
+        return Vec::new();
+    };
+    let mut halves = Vec::new();
+    if scoped.object.is_some() && !reach.object {
+        halves.push(
+            "object keywords (`properties`, `patternProperties`, `required`, \
+             `additionalProperties`)",
+        );
+    }
+    if scoped.array.is_some() && !reach.array {
+        halves.push("array keywords (`items`, `prefixItems`)");
+    }
+    halves
+}
+
+/// The message for a scoped sibling half [`unreached_halves`] names.
+fn unreached_message(keywords: &str) -> String {
+    format!(
+        "this schema's untyped {keywords} constrain only the instances of their own category, \
+         and no branch of its union has that category, so they apply to no value the union \
+         accepts"
+    )
+}
 
 fn intersect_primitives(left: Prim, right: Prim) -> Option<Prim> {
     use Prim::{Bool, Date, DateTime, String, Uuid, F64, I32, I64};
@@ -7290,6 +8605,95 @@ fn security_scheme_docs(name: &str, scheme: &super::SecuritySchemeObject) -> Vec
     docs
 }
 
+/// Re-type every applied field `default` against the type its field ends lowering with (#404).
+///
+/// [`LowerCtx::field_default`] decides a default against the type the declaring property lowers
+/// to, but an intersection — `allOf` members repeating the property, or a `$ref` whose sibling
+/// `properties` repeat it — then narrows that type: a `string` met with `enum: [a, b]` is the enum,
+/// a `number` met with `integer` is the integer. A default the narrowed type still admits becomes a
+/// value of it (the enum variant, the integer); one it does not admit is no value of the field, so
+/// it is documented as not applied and reported (`W005`) at the `default` that wrote it, naming
+/// the type whose field drops it. Running once over the finished graph reaches every meet, and
+/// only the types that are emitted: a meet's discarded intermediates are gone or elided by now.
+fn retype_field_defaults(graph: &mut TypeGraph, diags: &mut Diagnostics) {
+    let mut retyped: Vec<(TypeId, usize, Option<DefaultValue>)> = Vec::new();
+    for (id, def) in graph.emitted() {
+        let TypeKind::Struct(object) = &def.kind else {
+            continue;
+        };
+        for (index, field) in object.fields.iter().enumerate() {
+            let Some(applied) = field.default.as_ref().and_then(|d| d.applied.as_ref()) else {
+                continue;
+            };
+            let kind = graph.get(field.ty.id).map(|target| &target.kind);
+            let value = representable_default(&reclassify_default(applied), kind);
+            if value.as_ref() != Some(applied) {
+                retyped.push((id, index, value));
+            }
+        }
+    }
+    for (id, index, value) in retyped {
+        let Some(def) = graph.get_mut(id) else {
+            continue;
+        };
+        let TypeKind::Struct(object) = &mut def.kind else {
+            continue;
+        };
+        let field = &mut object.fields[index];
+        let Some(default) = field.default.as_mut() else {
+            continue;
+        };
+        if value.is_none() {
+            let written = default
+                .applied
+                .as_ref()
+                .map(written_default_display)
+                .unwrap_or_default();
+            Diagnostic::warning(Code::SchemaDefaultNotApplied, default.provenance.clone())
+                .message(format!(
+                    "schema `default` `{written}` of property `{}` is not a value of the type an \
+                     intersection narrows the property to in `{}`; it is documented in rustdoc \
+                     there but not applied as a deserialization default",
+                    field.name.wire, def.provenance.pointer
+                ))
+                .remedy(
+                    "use a default every intersected schema of the property admits, or set the \
+                     value explicitly at each call site",
+                )
+                .emit(diags);
+            default.doc_note = format!("Default (not applied): `{written}`.");
+        }
+        default.applied = value;
+    }
+}
+
+/// Recover the JSON value a representable default was decided from, so it can be decided again
+/// against another type. An integral float is classified as the integer JSON Schema says it is: a
+/// `number` field's `3` is carried as `3.0`, and the `integer` it narrows to admits it.
+fn reclassify_default(value: &DefaultValue) -> RawDefault {
+    match value {
+        DefaultValue::Bool(value) => RawDefault::Bool(*value),
+        DefaultValue::Int(value) => RawDefault::Int(*value),
+        DefaultValue::Float(value)
+            if value.fract() == 0.0 && *value >= i64::MIN as f64 && *value < i64::MAX as f64 =>
+        {
+            RawDefault::Int(*value as i64)
+        }
+        DefaultValue::Float(value) => RawDefault::Float(*value),
+        DefaultValue::Str(value) | DefaultValue::EnumVariant(value) => {
+            RawDefault::Str(value.clone())
+        }
+    }
+}
+
+/// Render a representable default as [`raw_display`] renders the JSON it came from.
+fn written_default_display(value: &DefaultValue) -> String {
+    match value {
+        DefaultValue::Str(value) | DefaultValue::EnumVariant(value) => format!("{value:?}"),
+        other => default_display(other),
+    }
+}
+
 /// Suppress `xml.name`/`xml.attribute` renames on any type that is not XML-dedicated, warning `W006`.
 ///
 /// A serde `rename` applies to every serde format, so honoring an `xml.name`/`xml.attribute` hint on
@@ -7305,7 +8709,9 @@ fn gate_xml_field_renames(
     diags: &mut Diagnostics,
 ) {
     // Cheap guard: nothing to gate (and nothing to warn) unless some field carries an XML hint.
-    let any_hint = graph.iter().any(|(_, def)| {
+    // Only an emitted type's hint is reported or suppressed: an elided meet intermediate is no
+    // type of the output, so a hint it copied from a member has nothing to apply to.
+    let any_hint = graph.emitted().any(|(_, def)| {
         matches!(&def.kind, TypeKind::Struct(object)
         if object.fields.iter().any(|field| {
             field.xml.name.is_some()
@@ -7358,7 +8764,7 @@ fn gate_xml_field_renames(
     // contract forbids. On a type never serialized as XML the same hint genuinely has no effect,
     // so it stays a warning and the document is not refused for it.
     let mut unsupported_reports: Vec<(bool, Provenance, String)> = Vec::new();
-    for (id, def) in graph.iter() {
+    for (id, def) in graph.emitted() {
         let TypeKind::Struct(object) = &def.kind else {
             continue;
         };
@@ -7407,7 +8813,7 @@ fn gate_xml_field_renames(
     // uses were two types and the XML one kept its rename. Same code, same count — so the message
     // has to carry the distinction or there is nothing to compare across an upgrade.
     let to_suppress: Vec<(TypeId, bool)> = graph
-        .iter()
+        .emitted()
         .filter_map(|(id, def)| {
             let TypeKind::Struct(object) = &def.kind else {
                 return None;
@@ -7470,33 +8876,34 @@ fn reachable_types(graph: &TypeGraph, roots: &[TypeId]) -> HashSet<TypeId> {
         let Some(def) = graph.get(id) else {
             continue;
         };
-        match &def.kind {
-            TypeKind::Struct(object) => {
-                for field in &object.fields {
-                    stack.push(field.ty.id);
-                }
-                if let AdditionalProps::Typed(ty) = &object.additional {
-                    stack.push(ty.id);
-                }
-            }
-            TypeKind::Array(ty) => stack.push(ty.id),
-            TypeKind::Tuple(items) => stack.extend(items.iter().map(|ty| ty.id)),
-            TypeKind::Union(union) => {
-                stack.extend(union.variants.iter().map(|variant| variant.ty.id))
-            }
-            // A reservation has no structural edges yet. It is reached only while its own body is
-            // still being lowered, and this walk runs after lowering, so following it would be
-            // following nothing.
-            TypeKind::Reserved
-            | TypeKind::Primitive(_)
-            | TypeKind::Enum(_)
-            | TypeKind::Bytes
-            | TypeKind::Null
-            | TypeKind::Never
-            | TypeKind::Any => {}
-        }
+        stack.extend(kind_edges(&def.kind));
     }
     visited
+}
+
+/// The type ids a definition of `kind` refers to directly: its struct fields and typed
+/// `additionalProperties`, array/tuple elements, and union variants.
+fn kind_edges(kind: &TypeKind) -> Vec<TypeId> {
+    match kind {
+        TypeKind::Struct(object) => {
+            let mut edges: Vec<TypeId> = object.fields.iter().map(|field| field.ty.id).collect();
+            if let AdditionalProps::Typed(ty) = &object.additional {
+                edges.push(ty.id);
+            }
+            edges
+        }
+        TypeKind::Array(ty) => vec![ty.id],
+        TypeKind::Tuple(items) => items.iter().map(|ty| ty.id).collect(),
+        TypeKind::Union(union) => union.variants.iter().map(|variant| variant.ty.id).collect(),
+        // A reservation has no structural edges yet: its body is still being lowered.
+        TypeKind::Reserved
+        | TypeKind::Primitive(_)
+        | TypeKind::Enum(_)
+        | TypeKind::Bytes
+        | TypeKind::Null
+        | TypeKind::Never
+        | TypeKind::Any => Vec::new(),
+    }
 }
 
 fn lower_media_type(
@@ -8271,8 +9678,22 @@ enum Contribution {
         fields: Vec<Field>,
         additional: AdditionalProps,
         required: Vec<String>,
+        /// Whether the member admits `null` (a `"null"` in its type array, or a nullable `$ref`
+        /// target). Read only beside a union ([`LowerCtx::lower_all_of_beside_union`]), where it
+        /// decides whether the union's `null` survives the meet.
+        nullable: bool,
     },
     Scalar(Ty),
+}
+
+impl Contribution {
+    /// Whether the member this contribution came from admits `null`.
+    fn admits_null(&self) -> bool {
+        match self {
+            Contribution::Object { nullable, .. } => *nullable,
+            Contribution::Scalar(ty) => ty.nullable,
+        }
+    }
 }
 
 /// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`
@@ -8284,6 +9705,11 @@ fn schema_is_object_like(schema: &Schema) -> bool {
         || schema.additional_properties.is_some()
         || !schema.required.is_empty()
         || schema.types.types.contains(&JsonType::Object)
+}
+
+/// Whether a schema carries a `oneOf` or an `anyOf` of its own.
+fn schema_has_union(schema: &Schema) -> bool {
+    !schema.one_of.is_empty() || !schema.any_of.is_empty()
 }
 
 /// The `required` names a schema's own `properties` do not declare, deduplicated, in source order.

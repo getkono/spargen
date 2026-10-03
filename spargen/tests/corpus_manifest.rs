@@ -122,6 +122,21 @@ fn every_case_meets_its_declared_expectation() {
             // batch can hide the terminal rejection code the manifest names.
             .batch_cap(usize::MAX);
         let report = spargen::check(&spec);
+        // Every diagnostic's declared claim must be one the run's outcome admits (#413). This
+        // checks the declared claim only, not the message prose: a message that states an outcome
+        // its claim does not declare (#174's "is generated", which was built `Independent`) passes
+        // here. `frontend.rs`'s `claim_violations` reads the prose and is what catches that shape.
+        let contradicted: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|diagnostic| !report.outcome().admits(diagnostic.claim))
+            .collect();
+        assert!(
+            contradicted.is_empty(),
+            "`{}` reported diagnostics whose claim its `{}` outcome contradicts: {contradicted:#?}",
+            case.id,
+            report.outcome()
+        );
 
         match case.rejection_code() {
             None => assert_ne!(
@@ -246,6 +261,43 @@ const LOCKFILE_AUDIT_FLAGS: [(&str, bool); 5] = [
     ("--file", true),
     ("--ignore", true),
 ];
+
+/// The only flags the `cargo fetch` before a lockfile audit may pass; an allow-list like the two
+/// above. cargo-audit 0.22.2 updates the crates.io index only when it also fetches the database,
+/// so under `--no-fetch` its yank check reads Cargo's local sparse-index cache and nothing else;
+/// on a runner whose cache starts empty it printed "couldn't check if the package is yanked" for
+/// every entry and exited 0, and spargen 0.5.0's shipped lockfile passed `deny-published` with a
+/// yanked `chacha20 0.10.1` in it (#414). `cargo fetch` resolves the lockfile against the registry
+/// and so refreshes that cache for every registry entry in it, failing where it cannot reach the
+/// registry. `--offline`, `--frozen` and `-Z no-index-update` would read the stale cache instead,
+/// and `--target` would refresh one platform's entries only; each is rejected with every other
+/// word.
+const INDEX_REFRESH_FLAGS: [(&str, bool); 2] = [("--locked", false), ("--manifest-path", true)];
+
+/// What follows every lockfile audit's flags, byte for byte. Under `--no-fetch` an entry whose
+/// yank status cargo-audit cannot read is an `error:` line on stderr and exit status 0 (#414), as
+/// is an index it cannot open (a `warning:`); with `--deny warnings` a clean audit prints neither,
+/// so the guard fails an audit that exited 0 but printed either. Stderr goes to a file in the
+/// gitignored `target/` and is printed whether the audit passed or failed, so the log loses
+/// nothing; `|| { …; exit 1; }` keeps a failing audit failing under both `sh -c -o errexit` (mise)
+/// and `bash -e` (CI), neither of which sets `pipefail`.
+const AUDIT_GUARD: &str = "2>target/cargo-audit.stderr || { cat target/cargo-audit.stderr >&2; \
+     exit 1; }; cat target/cargo-audit.stderr >&2; if grep -qE 'error|warning' \
+     target/cargo-audit.stderr; then echo 'cargo audit exited 0 but printed an error or warning \
+     above, so it did not check every entry' >&2; exit 1; fi";
+
+/// The words of a lockfile audit `command` before its `AUDIT_GUARD`, which must end it exactly.
+fn guarded_audit_words(command: &str) -> Result<Vec<&str>, String> {
+    let (audit, guard) = command
+        .split_once(" 2>")
+        .ok_or_else(|| format!("`{command}` does not send its stderr through the audit guard"))?;
+    if format!("2>{guard}") != AUDIT_GUARD {
+        return Err(format!(
+            "`{command}` ends in `2>{guard}`, not the audit guard `{AUDIT_GUARD}`"
+        ));
+    }
+    Ok(audit.split_whitespace().collect())
+}
 
 /// Every word of `words` read as a flag from `allowed`, in order, each paired with its value:
 /// `--flag value` or `--flag=value` where the flag takes one, the bare flag where it does not.
@@ -726,6 +778,43 @@ fn the_audit_flag_allow_lists_admit_only_what_they_name() {
             "`cargo audit {line}` passes `allowed_flags`, so the lockfile audit test admits it"
         );
     }
+    for narrowing in [
+        "--offline",
+        "--frozen",
+        "-Z no-index-update",
+        "--target x86_64-unknown-linux-gnu",
+        "--manifest-path",
+    ] {
+        let line = format!("--locked {narrowing}");
+        let flags: Vec<&str> = line.split_whitespace().collect();
+        assert!(
+            allowed_flags(&flags, &INDEX_REFRESH_FLAGS).is_err(),
+            "`cargo fetch {line}` passes `allowed_flags`, so the lockfile audit test admits it"
+        );
+    }
+
+    // The guard: the audit's own words come back, and an audit that drops, discards, or softens
+    // the guard is rejected (#414).
+    let audit = "cargo audit --db target/db --no-fetch --deny warnings --file Cargo.lock";
+    assert_eq!(
+        guarded_audit_words(&format!("{audit} {AUDIT_GUARD}")),
+        Ok(audit.split_whitespace().collect::<Vec<_>>())
+    );
+    for unguarded in [
+        audit.to_owned(),
+        format!("{audit} 2>/dev/null"),
+        format!("{audit} {AUDIT_GUARD} || true"),
+        format!("{audit} {}", AUDIT_GUARD.replacen("exit 1", "exit 0", 1)),
+        format!(
+            "{audit} {}",
+            AUDIT_GUARD.replace("error|warning", "nothing")
+        ),
+    ] {
+        assert!(
+            guarded_audit_words(&unguarded).is_err(),
+            "`{unguarded}` passes `guarded_audit_words`, so the lockfile audit test admits it"
+        );
+    }
 }
 
 /// The published workspace crates that ship a binary, by package name. `cargo package` puts
@@ -847,6 +936,8 @@ enum LockfileAuditStep<'a> {
     Fetch,
     /// `git -C <checkout> log -1 --format=…`: print the commit that checkout is at.
     Revision(&'a str),
+    /// `cargo fetch …`: refresh the index cache an audit's yank check reads (#414).
+    IndexRefresh,
     /// `cargo audit …`: audit every entry of one lockfile.
     Audit,
 }
@@ -855,6 +946,8 @@ enum LockfileAuditStep<'a> {
 fn lockfile_audit_step<'a>(words: &[&'a str]) -> Option<LockfileAuditStep<'a>> {
     if words.starts_with(&["cargo", "deny", "fetch"]) {
         Some(LockfileAuditStep::Fetch)
+    } else if words.starts_with(&["cargo", "fetch"]) {
+        Some(LockfileAuditStep::IndexRefresh)
     } else if words.starts_with(&["cargo", "audit"]) || words.first() == Some(&"cargo-audit") {
         Some(LockfileAuditStep::Audit)
     } else if words.first() == Some(&"git") {
@@ -871,8 +964,10 @@ fn lockfile_audit_step<'a>(words: &[&'a str]) -> Option<LockfileAuditStep<'a>> {
 
 /// The lockfiles `task`'s `cargo audit` commands read, after holding the task to the audit's
 /// shape: one `cargo deny fetch db`, then one line printing the fetched checkout's commit, then
-/// every `cargo audit`, each over that checkout without fetching, denying every warning kind, and
-/// ignoring exactly what `deny.toml` ignores.
+/// every `cargo audit`, each over that checkout without fetching, denying every warning kind,
+/// ignoring exactly what `deny.toml` ignores, ending in `AUDIT_GUARD`, and preceded by a `cargo
+/// fetch` of the workspace that lockfile belongs to (`--locked` outside `examples/`, as that
+/// workspace's `cargo deny check` is).
 fn lockfile_audits(task: &str) -> BTreeSet<String> {
     let deny: toml::Table = toml::from_str(&read("deny.toml")).expect("deny.toml parses");
     let advisories = deny["advisories"]
@@ -911,10 +1006,41 @@ fn lockfile_audits(task: &str) -> BTreeSet<String> {
     let mut fetched = false;
     let mut checkout: Option<String> = None;
     let mut files = BTreeSet::new();
+    // The lockfile of each workspace a `cargo fetch` refreshed, with whether it passed `--locked`.
+    let mut refreshed: BTreeMap<String, bool> = BTreeMap::new();
     for command in mise_commands(&tasks, task) {
         let words: Vec<&str> = command.split_whitespace().collect();
         match lockfile_audit_step(&words) {
             None => {}
+            Some(LockfileAuditStep::IndexRefresh) => {
+                let flags =
+                    allowed_flags(&words[2..], &INDEX_REFRESH_FLAGS).unwrap_or_else(|error| {
+                        panic!(
+                            "`{command}`: {error}. The index refresh passes only the flags \
+                             `INDEX_REFRESH_FLAGS` allows, {INDEX_REFRESH_FLAGS:?} (#414)"
+                        )
+                    });
+                let count = |flag: &str| flags.iter().filter(|(name, _)| *name == flag).count();
+                assert!(
+                    count("--locked") <= 1 && count("--manifest-path") <= 1,
+                    "`{command}` passes a flag more than once"
+                );
+                let manifest = flags
+                    .iter()
+                    .find_map(|(name, value)| (*name == "--manifest-path").then_some(*value))
+                    .flatten()
+                    .unwrap_or("Cargo.toml")
+                    .trim_start_matches("./");
+                let lockfile = manifest
+                    .strip_suffix("Cargo.toml")
+                    .filter(|dir| dir.is_empty() || dir.ends_with('/'))
+                    .map(|dir| format!("{dir}Cargo.lock"))
+                    .unwrap_or_else(|| panic!("`{command}` names `{manifest}`, not a Cargo.toml"));
+                assert!(
+                    refreshed.insert(lockfile, count("--locked") == 1).is_none(),
+                    "`mise run {task}` refreshes the index for `{manifest}` twice"
+                );
+            }
             Some(LockfileAuditStep::Fetch) => {
                 assert_eq!(
                     words,
@@ -954,6 +1080,13 @@ fn lockfile_audits(task: &str) -> BTreeSet<String> {
                     panic!(
                         "`mise run {task}` runs `{command}` before printing the database revision \
                          it audits against"
+                    )
+                });
+                let words = guarded_audit_words(&command).unwrap_or_else(|error| {
+                    panic!(
+                        "{error}. Under `--no-fetch` an unreadable yank status is an `error:` \
+                         line and exit status 0, so an audit without the guard passes a lockfile \
+                         it did not check (#414)"
                     )
                 });
                 let skip = if words.first() == Some(&"cargo-audit") {
@@ -1009,6 +1142,21 @@ fn lockfile_audits(task: &str) -> BTreeSet<String> {
                 assert!(
                     files.insert(file.to_owned()),
                     "`mise run {task}` audits `{file}` twice"
+                );
+                let locked = refreshed.get(file).copied().unwrap_or_else(|| {
+                    panic!(
+                        "`mise run {task}` audits `{file}` without a `cargo fetch` of its \
+                         workspace before it, so the yank check reads whatever index cache the \
+                         machine has, and none on a fresh runner (#414)"
+                    )
+                });
+                assert_eq!(
+                    locked,
+                    !file.starts_with("examples/"),
+                    "`mise run {task}` refreshes the index for `{file}` with `--locked` {}; the \
+                     refresh is locked exactly where that workspace's `cargo deny check` is, so \
+                     it resolves the lockfile the audit reads",
+                    if locked { "set" } else { "unset" }
                 );
             }
         }

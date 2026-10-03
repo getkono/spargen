@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use indexmap::IndexMap;
 
 use crate::diag::{JsonPointer, Provenance};
@@ -14,6 +16,8 @@ pub(crate) struct TypeId(pub(crate) u32);
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TypeGraph {
     defs: IndexMap<TypeId, TypeDef>,
+    /// The definitions [`elide`](Self::elide) withheld from the output.
+    elided: BTreeSet<TypeId>,
 }
 
 impl TypeGraph {
@@ -61,7 +65,37 @@ impl TypeGraph {
     /// root — always the last def inserted while lowering its body — into its reserved id, which
     /// keeps ids dense (the freed id is immediately reused by the next insert).
     pub(crate) fn pop_last(&mut self) -> Option<(TypeId, TypeDef)> {
-        self.defs.pop()
+        let popped = self.defs.pop();
+        if let Some((id, _)) = &popped {
+            // The freed id is reused by the next insert, which is a definition of its own.
+            self.elided.remove(id);
+        }
+        popped
+    }
+
+    /// Withhold the definition at `id` from the output: codegen emits no item for it, and the API
+    /// surface lists no type for it. It keeps its id and its place in [`iter`](Self::iter), so
+    /// naming still allocates it a name and every other definition's name and emission order is
+    /// the one it had before. Only a definition nothing in the API refers to may be elided;
+    /// `check_invariants` reports a reference to one as a missing type.
+    ///
+    /// This is how a definition that is not the most recent one is dropped, where
+    /// [`pop_last`](Self::pop_last) cannot reach it without renumbering the ones after it: the
+    /// intermediate a struct meet made for a property a later member narrowed again (#428).
+    pub(crate) fn elide(&mut self, id: TypeId) {
+        debug_assert!(self.defs.contains_key(&id), "elide of an absent id");
+        self.elided.insert(id);
+    }
+
+    /// Whether the definition at `id` is withheld from the output (see [`elide`](Self::elide)).
+    pub(crate) fn is_elided(&self, id: TypeId) -> bool {
+        self.elided.contains(&id)
+    }
+
+    /// Iterate the `(id, def)` pairs the output carries, in insertion order: every definition but
+    /// the [`elide`](Self::elide)d ones.
+    pub(crate) fn emitted(&self) -> impl Iterator<Item = (TypeId, &TypeDef)> {
+        self.iter().filter(|(id, _)| !self.is_elided(*id))
     }
 
     /// The id of the most recently inserted definition, if any. Paired with
@@ -81,7 +115,9 @@ impl TypeGraph {
         self.defs.get_mut(&id)
     }
 
-    /// Iterate `(id, def)` pairs in insertion order.
+    /// Iterate `(id, def)` pairs in insertion order, [`elide`](Self::elide)d ones included. Naming
+    /// allocates over this, so eliding a definition renames nothing; codegen, the API surface, and
+    /// the post-lowering passes that report on a type read [`emitted`](Self::emitted) instead.
     pub(crate) fn iter(&self) -> impl Iterator<Item = (TypeId, &TypeDef)> {
         self.defs.iter().map(|(id, def)| (*id, def))
     }
@@ -335,18 +371,32 @@ pub(crate) enum UnionStrategy {
     /// A `discriminator` → a custom `Deserialize`/`Serialize` that reads/writes the tag field on a
     /// buffered `serde_json::Value` (NOT serde's `#[serde(tag = ...)]`, which would consume the tag
     /// out of the buffer and break variants that declare the discriminator as a required property).
-    /// Object variants carry the tag value that selects them. A non-object variant may coexist
+    /// Object variants carry the tag values that select them. A non-object variant may coexist
     /// when its JSON category is unique (for example an array beside tagged objects).
     Discriminated {
         /// The discriminator `propertyName` — the tag field read from / written into the object.
         tag_field: String,
-        /// The object tag value per variant, parallel to [`Union::variants`].
-        tags: Vec<Option<String>>,
+        /// Every tag value that selects each variant, parallel to [`Union::variants`], in dispatch
+        /// order: each `mapping` key naming the variant's member in document order, then its
+        /// implicit component name unless a `mapping` key claims that value. Deserialization
+        /// accepts every entry; serialization writes the first. Empty for a variant routed by
+        /// `categories`, for an object variant reached only as the `default_variant` fallback, and
+        /// for an `untagged` variant.
+        tags: Vec<Vec<String>>,
         /// The JSON category per non-object variant, parallel to [`Union::variants`].
         categories: Vec<Option<JsonCategory>>,
-        /// OpenAPI 3.2 `defaultMapping`: the variant used when the tag is absent or unrecognized.
-        /// Without one, either case is a deserialization error.
+        /// OpenAPI 3.2 `defaultMapping`: the variant used when the tag is absent or unrecognized
+        /// and no `untagged` variant matches. Without one, either case is a deserialization error.
         default_variant: Option<usize>,
+        /// The trial priority of each object variant that no tag selects and that is not the
+        /// `default_variant`, parallel to [`Union::variants`]; `None` for every other variant. Such
+        /// a variant (inline, or a pointer into another schema, that no `mapping` entry names) has
+        /// no discriminator value, so it is tried against the buffered value, with `mode`'s
+        /// semantics, only when the tag is absent or selects no tagged variant; a tag that does
+        /// select one dispatches to it alone. Serialization writes no tag for it.
+        untagged: Vec<Option<u32>>,
+        /// How the `untagged` variants are matched: the source applicator's semantics.
+        mode: UnionMode,
     },
     /// No discriminator, but the variants were proven statically disjoint → a custom
     /// content-inspecting `Deserialize`/`Serialize`. Each variant carries the feature that
@@ -516,6 +566,10 @@ pub(crate) struct FieldDefault {
     /// The scalar to wire through a generated serde default provider, when the default is
     /// representable *and* the field is a plain optional (non-required, non-nullable) scalar.
     pub(crate) applied: Option<DefaultValue>,
+    /// The `default` keyword that declared the value, so a disposition decided after the field's
+    /// own lowering — an intersection that narrows the field's type to one the value is not a
+    /// member of — is reported where the value was written.
+    pub(crate) provenance: crate::diag::Provenance,
 }
 
 /// A representable scalar `default`, carried so codegen can render it as a correct Rust literal for
@@ -562,14 +616,37 @@ pub(crate) struct ScalarEnum {
     pub(crate) repr: ScalarRepr,
     /// The variant wire values, in declared order.
     pub(crate) variants: Vec<ScalarValue>,
-    /// Whether the set is **open**: a string enum whose values name the members the description
-    /// lists, beside one more variant that holds any other string. Only `open_narrowing` produces
-    /// one, for a string `enum`/`const` that narrows a property another `allOf` member (or the
-    /// `$ref` it sits beside) declares as a plain `string`, inside a response body's own schema.
-    /// The open set's domain is that wider declaration's, so it is still exactly what the
-    /// description admits there, minus the narrowing. Always `false` for an integer or boolean
+    /// Whether the set is open, closed, or closed for good. Only an [`Openness::Open`] set emits
+    /// a variant beyond the listed values. Always [`Openness::Closed`] for an integer or boolean
     /// set.
-    pub(crate) open: bool,
+    pub(crate) openness: Openness,
+}
+
+impl ScalarEnum {
+    /// Whether the set is [`Openness::Open`]: it emits a variant holding any unlisted string.
+    pub(crate) fn is_open(&self) -> bool {
+        self.openness == Openness::Open
+    }
+}
+
+/// How a [`ScalarEnum`]'s value set relates to the strings beyond it. Only `open_narrowing`
+/// produces anything but [`Openness::Closed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Openness {
+    /// The listed values and nothing else. A plain `string` it narrows inside a response body's
+    /// own schema opens it under `open_narrowing`.
+    Closed,
+    /// A string enum whose values name the members the description lists, beside one more
+    /// variant that holds any other string: a string `enum`/`const` that narrows a property
+    /// another `allOf` member (or the `$ref` it sits beside) declares as a plain `string`, inside
+    /// a response body's own schema. The open set's domain is that wider declaration's, so it is
+    /// still exactly what the description admits there, minus the narrowing.
+    Open,
+    /// The listed values and nothing else, narrowed against a `uuid`, `date`, or `date-time`
+    /// string (in its own schema, or in a schema it met). That format admits no arbitrary string,
+    /// so no plain `string` it later meets opens it, and an open set meeting it closes: the set
+    /// stays closed whichever order an `allOf` lists its members in.
+    Locked,
 }
 
 /// The scalar kind backing a [`ScalarEnum`].
@@ -601,7 +678,8 @@ mod tests {
     //! A dedicated variant turns a read site into a compile error only where its `match` is
     //! exhaustive; a catch-all arm absorbs it silently. This walks every `match` in the crate's
     //! sources and holds each one that classifies a [`TypeKind`] to stating its answer for a
-    //! reservation, so the audit is checked rather than counted by hand.
+    //! reservation, so the audit is checked rather than counted by hand. The graph's elision
+    //! bookkeeping is pinned here too.
 
     use std::path::{Path, PathBuf};
 
@@ -776,5 +854,61 @@ mod tests {
              undecided:\n{}",
             absorbers.join("\n")
         );
+    }
+
+    fn primitive(hint: &str) -> super::TypeDef {
+        super::TypeDef {
+            name_hint: hint.to_owned(),
+            kind: super::TypeKind::Primitive(super::Prim::String),
+            docs: super::Docs::default(),
+            provenance: crate::diag::Provenance::new(crate::diag::JsonPointer::root(), None),
+            document: String::new(),
+        }
+    }
+
+    /// Eliding withholds a definition from [`super::TypeGraph::emitted`] and from nothing else: it
+    /// keeps its id and its place in `iter`, which naming allocates over, so the definitions
+    /// around it keep their ids, order, and names (#428).
+    #[test]
+    fn an_elided_definition_keeps_its_place_and_leaves_the_output() {
+        let mut graph = super::TypeGraph::default();
+        let ids: Vec<_> = ["A", "B", "C"]
+            .into_iter()
+            .map(|hint| graph.insert(primitive(hint)))
+            .collect();
+        graph.elide(ids[1]);
+        let hints = |defs: Vec<(super::TypeId, &super::TypeDef)>| {
+            defs.into_iter()
+                .map(|(id, def)| (id, def.name_hint.clone()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            hints(graph.iter().collect()),
+            vec![
+                (ids[0], "A".to_owned()),
+                (ids[1], "B".to_owned()),
+                (ids[2], "C".to_owned()),
+            ]
+        );
+        assert_eq!(
+            hints(graph.emitted().collect()),
+            vec![(ids[0], "A".to_owned()), (ids[2], "C".to_owned())]
+        );
+        assert!(graph.is_elided(ids[1]) && !graph.is_elided(ids[0]) && !graph.is_elided(ids[2]));
+    }
+
+    /// An id `pop_last` frees is reused by the next insert, which is a new definition: popping an
+    /// elided one clears its elision, so the definition that takes the id is emitted.
+    #[test]
+    fn popping_an_elided_definition_frees_its_id_unelided() {
+        let mut graph = super::TypeGraph::default();
+        graph.insert(primitive("A"));
+        let popped = graph.insert(primitive("B"));
+        graph.elide(popped);
+        graph.pop_last();
+        let reused = graph.insert(primitive("C"));
+        assert_eq!(reused, popped);
+        assert!(!graph.is_elided(reused));
+        assert_eq!(graph.emitted().count(), 2);
     }
 }

@@ -5,12 +5,12 @@ use std::io::Write as _;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
-use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, Span};
+use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
 use crate::runtime_contract::RuntimeRequirements;
 use crate::source::{sha256_hex, InputBundle};
 use crate::{Build, Code, OmitRule, Spec};
 
-const CACHE_FORMAT: u32 = 2;
+const CACHE_FORMAT: u32 = 3;
 const INPUT_PREFIX: &str = "// input-sha256: ";
 const CONTENT_PREFIX: &str = "// content-sha256: ";
 
@@ -101,17 +101,29 @@ impl InputSnapshot {
 }
 
 pub(crate) fn cargo_directives(build: &Build, snapshot: Option<&InputSnapshot>) {
+    for directive in rerun_directives(build, snapshot) {
+        println!("{directive}");
+    }
+}
+
+/// One `cargo:rerun-if-changed` line per input the snapshot read (only the root spec when there is
+/// no snapshot) and for the output module, sorted and deduplicated.
+///
+/// Cargo reads build-script output line by line and has no escape for a line break, so a path
+/// carrying one cannot be named: written out, everything after the break would reach Cargo as a
+/// directive of its own. Such a path is left out rather than split.
+fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<String> {
     let mut paths = snapshot
         .map(|snapshot| snapshot.paths.clone())
         .unwrap_or_else(|| vec![build.spec.path.clone()]);
     paths.push(build.output.clone());
     paths.sort();
     paths.dedup();
-    for path in paths {
-        if !path.as_str().contains(['\n', '\r']) {
-            println!("cargo:rerun-if-changed={path}");
-        }
-    }
+    paths
+        .iter()
+        .filter(|path| !path.as_str().contains(['\n', '\r']))
+        .map(|path| format!("cargo:rerun-if-changed={path}"))
+        .collect()
 }
 
 pub(crate) fn cache_dir() -> Option<Utf8PathBuf> {
@@ -261,6 +273,7 @@ fn cache_diagnostic(message: String) -> Diagnostic {
         message,
         remedy: None,
         interpretation: None,
+        claim: OutcomeClaim::of(Code::InvalidInput.severity()),
     }
 }
 
@@ -281,6 +294,9 @@ struct CachedDiagnostic {
     message: String,
     remedy: Option<String>,
     interpretation: Option<u16>,
+    /// Persisted rather than re-derived from the code's severity, so a replayed diagnostic makes
+    /// the claim the fresh run's diagnostic made.
+    claim: OutcomeClaim,
 }
 
 impl From<&Diagnostic> for CachedDiagnostic {
@@ -292,6 +308,7 @@ impl From<&Diagnostic> for CachedDiagnostic {
             message: value.message.clone(),
             remedy: value.remedy.clone(),
             interpretation: value.interpretation.map(|id| id.0),
+            claim: value.claim,
         }
     }
 }
@@ -307,6 +324,7 @@ impl CachedDiagnostic {
             message: self.message,
             remedy: self.remedy,
             interpretation: self.interpretation.map(InterpId),
+            claim: self.claim,
         })
     }
 }
@@ -367,7 +385,10 @@ impl CachedLoc {
 
 #[cfg(test)]
 mod tests {
-    use super::{cache_path, finalized, verified_output, InputSnapshot};
+    use super::{
+        cache_path, finalized, rerun_directives, verified_output, CachedDiagnostic, Diagnostic,
+        InputSnapshot, JsonPointer, OutcomeClaim,
+    };
     use crate::{Build, CargoIntegration, OmitRule, Outcome, Spec};
     use camino::Utf8PathBuf;
 
@@ -393,6 +414,60 @@ components:
             // saying so keeps these reports free of `W013`.
             .cargo(CargoIntegration::Off);
         (temp, build)
+    }
+
+    #[test]
+    fn an_input_path_with_a_line_break_is_never_written_as_a_directive() {
+        // Deleting the guard left the whole suite green (#408), as it had for the twin in
+        // `runtime_contract` (#202). Written out, the text after the break would reach Cargo as a
+        // directive of its own, so a crafted file name could inject one. Every other path, the
+        // output module included, is still named, sorted and deduplicated.
+        let build = Spec::new(Utf8PathBuf::from("/work/openapi.yaml"))
+            .build(Utf8PathBuf::from("/work/out/api.rs"));
+        let snapshot = InputSnapshot {
+            digest: String::new(),
+            paths: vec![
+                Utf8PathBuf::from("/work/openapi.yaml"),
+                Utf8PathBuf::from("/work/x\ncargo:rustc-cfg=injected.yaml"),
+                Utf8PathBuf::from("/work/y\rcargo:rustc-cfg=injected.yaml"),
+                Utf8PathBuf::from("/work/openapi.yaml"),
+                Utf8PathBuf::from("/work/a.yaml"),
+            ],
+        };
+        assert_eq!(
+            rerun_directives(&build, Some(&snapshot)),
+            [
+                "cargo:rerun-if-changed=/work/a.yaml",
+                "cargo:rerun-if-changed=/work/openapi.yaml",
+                "cargo:rerun-if-changed=/work/out/api.rs",
+            ]
+        );
+
+        // Without a snapshot only the root spec and the output are named, under the same guard.
+        let crafted = Spec::new(Utf8PathBuf::from("/work/z\ncargo:rustc-cfg=injected.yaml"))
+            .build(Utf8PathBuf::from("/work/out/api.rs"));
+        assert_eq!(
+            rerun_directives(&crafted, None),
+            ["cargo:rerun-if-changed=/work/out/api.rs"]
+        );
+    }
+
+    #[test]
+    fn a_replayed_diagnostic_makes_the_claim_the_fresh_one_made() {
+        // A cache hit replays the fresh run's warnings under `Outcome::Cached`. The claim is not
+        // re-derived from the code, so one that differs from its severity's survives the replay.
+        for claim in [OutcomeClaim::Independent, OutcomeClaim::Generated] {
+            let fresh = Diagnostic {
+                claim,
+                ..Diagnostic::warning(
+                    crate::Code::AlternativeMediaIgnored,
+                    crate::diag::Provenance::new(JsonPointer::root(), None),
+                )
+                .build()
+            };
+            let replayed = CachedDiagnostic::from(&fresh).into_diagnostic().unwrap();
+            assert_eq!(replayed.claim, claim);
+        }
     }
 
     #[test]

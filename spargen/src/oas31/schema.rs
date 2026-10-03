@@ -206,16 +206,33 @@ pub(crate) enum JsonType {
 
 /// An OAS `discriminator` object, consumed by discriminated-union lowering to build an
 /// internally-tagged enum: `property_name` is the serde tag field and `mapping` supplies each
-/// variant's tag value (falling back to the variant's `$ref` component name).
+/// variant's tag value (falling back to the variant's `$ref` component name). One on a schema with
+/// no `oneOf`/`anyOf` of its own selects nothing; lowering still resolves its targets and reports
+/// it as `W011`.
 #[derive(Debug, Clone)]
 pub(crate) struct Discriminator {
+    /// Where the Discriminator Object itself sits (`…/discriminator`).
+    pub(crate) provenance: Provenance,
     /// `propertyName`.
     pub(crate) property_name: String,
-    /// `mapping`: discriminator value → schema name/`$ref`.
-    pub(crate) mapping: IndexMap<String, String>,
+    /// `mapping`: discriminator value → the schema it names.
+    pub(crate) mapping: IndexMap<String, DiscriminatorTarget>,
     /// OpenAPI 3.2 `defaultMapping`: the schema to use when the discriminating property is absent
     /// or carries a value with no mapping.
-    pub(crate) default_mapping: Option<String>,
+    pub(crate) default_mapping: Option<DiscriminatorTarget>,
+}
+
+/// One schema a Discriminator Object names — a `mapping` value or the `defaultMapping` — as a
+/// schema name or a URI reference, with the provenance of the entry itself. Each is a reference
+/// lowering must resolve against the union's members, and a diagnostic about one belongs at the
+/// entry, not at the union around it.
+#[derive(Debug, Clone)]
+pub(crate) struct DiscriminatorTarget {
+    /// The value as written: a component name (`Cat`) or a URI reference
+    /// (`#/components/schemas/Cat`, `./pets.yaml#/Cat`).
+    pub(crate) value: String,
+    /// Where the value sits (`…/discriminator/mapping/cat`, `…/discriminator/defaultMapping`).
+    pub(crate) provenance: Provenance,
 }
 
 /// The validation-only JSON Schema keywords spargen retains but does not enforce at runtime

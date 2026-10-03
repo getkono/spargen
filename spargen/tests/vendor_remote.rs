@@ -119,6 +119,12 @@ const TAG_YAML: &str = "type: object\n\
 
 /// A root description whose two operations both `$ref` the same remote document.
 fn root_spec(remote: &str) -> String {
+    root_spec_naming(remote, remote)
+}
+
+/// A root description whose first operation `$ref`s `first` and whose second `$ref`s `second`,
+/// in that document order.
+fn root_spec_naming(first: &str, second: &str) -> String {
     format!(
         "openapi: 3.1.0\n\
          info: {{ title: T, version: 1.0.0 }}\n\
@@ -132,7 +138,7 @@ fn root_spec(remote: &str) -> String {
          description: ok\n          \
          content:\n            \
          application/json:\n              \
-         schema: {{ $ref: '{remote}' }}\n  \
+         schema: {{ $ref: '{first}' }}\n  \
          /pet/again:\n    \
          get:\n      \
          operationId: getPetAgain\n      \
@@ -141,7 +147,7 @@ fn root_spec(remote: &str) -> String {
          description: ok\n          \
          content:\n            \
          application/json:\n              \
-         schema: {{ $ref: '{remote}' }}\n"
+         schema: {{ $ref: '{second}' }}\n"
     )
 }
 
@@ -257,6 +263,265 @@ fn a_redirect_is_followed_and_pinned_under_the_url_the_spec_names() {
     assert_eq!(report.refs.len(), 1, "{report:?}");
     assert_eq!(report.refs[0].url, url);
     assert_eq!(report.refs[0].sha256, sha256_hex(TAG_YAML.as_bytes()));
+}
+
+/// A redirected document's relative `$ref`s resolve against the URL it was retrieved from, not the
+/// one the spec names (RFC 3986 §5.1.3, #405): `tag.yaml` inside `/old/pet.yaml`, which redirects
+/// to `/new/pet.yaml`, is `/new/tag.yaml`. `/old/tag.yaml` does not exist, so resolving against
+/// the requested URL fails the lock with `E025`. The lock records the retrieval URL beside the
+/// pin, and generation resolves the vendored copy's references against it, offline — the
+/// relative one and the in-document one, which is made absolute against that same base.
+#[test]
+fn a_redirected_documents_relative_refs_resolve_against_the_url_it_was_retrieved_from() {
+    const MOVED_PET_YAML: &str = "type: object\n\
+                                  required: [id]\n\
+                                  properties:\n  \
+                                  id: { type: integer, format: int64 }\n  \
+                                  tag: { $ref: 'tag.yaml' }\n  \
+                                  owner: { $ref: '#/$defs/Owner' }\n\
+                                  $defs:\n  \
+                                  Owner:\n    \
+                                  type: object\n    \
+                                  required: [name]\n    \
+                                  properties:\n      \
+                                  name: { type: string }\n";
+    let server = MockServer::start(&[
+        ("/old/pet.yaml", Reply::Redirect("/new/pet.yaml")),
+        ("/new/pet.yaml", Reply::Body(MOVED_PET_YAML)),
+        ("/new/tag.yaml", Reply::Body(TAG_YAML)),
+    ]);
+    let requested = server.url("/old/pet.yaml");
+    let retrieved = server.url("/new/pet.yaml");
+    let tag_url = server.url("/new/tag.yaml");
+    let (_temp, spec_path) = workspace(&requested);
+    let spec = Spec::new(spec_path.clone());
+
+    let report = spargen::vendor(&spec).unwrap_or_else(|r| panic!("{r:#?}"));
+
+    assert_eq!(
+        server.hits(),
+        ["/old/pet.yaml", "/new/pet.yaml", "/new/tag.yaml"]
+    );
+    let urls: Vec<&str> = report.refs.iter().map(|r| r.url.as_str()).collect();
+    assert_eq!(urls, [tag_url.as_str(), requested.as_str()]);
+    let lock = std::fs::read_to_string(&report.lock_path).unwrap();
+    assert!(
+        lock.contains(&format!(
+            "url = \"{requested}\"\nretrieval_url = \"{retrieved}\"\n"
+        )),
+        "{lock}"
+    );
+    assert!(
+        !lock.contains(&format!("url = \"{tag_url}\"\nretrieval_url")),
+        "an unredirected pin records no retrieval URL: {lock}"
+    );
+
+    let out = spec_path.with_file_name("client.rs");
+    let generated =
+        spargen::generate(&spec.clone().build(out.clone()).cargo(CargoIntegration::Off));
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    let code = std::fs::read_to_string(&out).unwrap();
+    assert!(code.contains("pub label"), "{code}");
+    assert!(code.contains("pub tag"), "{code}");
+    assert!(code.contains("pub name"), "{code}");
+    assert_eq!(server.hits().len(), 3, "generation must not fetch");
+}
+
+/// Generate `spec_path` offline into a sibling `client.rs`, require it not be rejected, and return
+/// the emitted source.
+fn generate_offline(spec_path: &Utf8PathBuf) -> String {
+    let out = spec_path.with_file_name("client.rs");
+    let generated = spargen::generate(
+        &Spec::new(spec_path.clone())
+            .build(out.clone())
+            .cargo(CargoIntegration::Off),
+    );
+    assert_ne!(generated.outcome(), Outcome::Rejected, "{generated:#?}");
+    std::fs::read_to_string(&out).unwrap()
+}
+
+/// The URL each `[[remote]]` pin in the lock at `report.lock_path` is keyed by, in lock order.
+fn pinned_urls(report: &spargen::VendorReport) -> Vec<String> {
+    std::fs::read_to_string(&report.lock_path)
+        .unwrap()
+        .lines()
+        .filter_map(|line| line.strip_prefix("url = \""))
+        .map(|rest| rest.trim_end_matches('"').to_owned())
+        .collect()
+}
+
+/// A redirected document that names itself by its retrieval URL (`pet.yaml#/$defs/Owner` inside
+/// `/new/pet.yaml`, reached through `/old/pet.yaml`) is the document already fetched, as the build
+/// treats it: the build registers the vendored copy under its retrieval URL too, so it never reads
+/// a pin for `/new/pet.yaml`, and `spargen lock` must neither fetch that URL again nor pin it.
+#[test]
+fn a_redirected_document_naming_itself_by_its_retrieval_url_is_not_fetched_again() {
+    const SELF_NAMING_PET_YAML: &str = "type: object\n\
+                                        required: [id]\n\
+                                        properties:\n  \
+                                        id: { type: integer, format: int64 }\n  \
+                                        owner: { $ref: 'pet.yaml#/$defs/Owner' }\n\
+                                        $defs:\n  \
+                                        Owner:\n    \
+                                        type: object\n    \
+                                        required: [name]\n    \
+                                        properties:\n      \
+                                        name: { type: string }\n";
+    let server = MockServer::start(&[
+        ("/old/pet.yaml", Reply::Redirect("/new/pet.yaml")),
+        ("/new/pet.yaml", Reply::Body(SELF_NAMING_PET_YAML)),
+    ]);
+    let requested = server.url("/old/pet.yaml");
+    let (_temp, spec_path) = workspace(&requested);
+
+    let report =
+        spargen::vendor(&Spec::new(spec_path.clone())).unwrap_or_else(|r| panic!("{r:#?}"));
+
+    assert_eq!(server.hits(), ["/old/pet.yaml", "/new/pet.yaml"]);
+    assert_eq!(pinned_urls(&report), [requested]);
+    let code = generate_offline(&spec_path);
+    assert!(code.contains("pub owner"), "{code}");
+    assert!(code.contains("pub name"), "{code}");
+    assert_eq!(server.hits().len(), 2, "generation must not fetch");
+}
+
+/// A spec that names a redirect's target before the redirecting URL pins both: the target is met
+/// first, so it is fetched under its own name and the build loads it from its own pin, and the
+/// redirecting URL is pinned beside it with `retrieval_url` naming the target. The build keeps the
+/// target's own pin under the target URL rather than re-registering the redirected copy there.
+/// Named the other way round, the target is the document the redirect already fetched, and it is
+/// pinned once.
+#[test]
+fn a_spec_naming_a_redirect_and_its_target_pins_what_the_build_reads_in_either_order() {
+    let server = MockServer::start(&[
+        ("/old/pet.yaml", Reply::Redirect("/new/pet.yaml")),
+        ("/new/pet.yaml", Reply::Body(PET_YAML)),
+        ("/new/tag.yaml", Reply::Body(TAG_YAML)),
+    ]);
+    let requested = server.url("/old/pet.yaml");
+    let retrieved = server.url("/new/pet.yaml");
+    let tag_url = server.url("/new/tag.yaml");
+
+    // Target first: every named URL is fetched once, and both are pinned.
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let spec_path = dir.join("openapi.yaml");
+    std::fs::write(&spec_path, root_spec_naming(&retrieved, &requested)).unwrap();
+    let report =
+        spargen::vendor(&Spec::new(spec_path.clone())).unwrap_or_else(|r| panic!("{r:#?}"));
+    assert_eq!(
+        server.hits(),
+        [
+            "/new/pet.yaml",
+            "/old/pet.yaml",
+            "/new/pet.yaml",
+            "/new/tag.yaml"
+        ]
+    );
+    assert_eq!(
+        pinned_urls(&report),
+        [retrieved.clone(), tag_url.clone(), requested.clone()]
+    );
+    let lock = std::fs::read_to_string(&report.lock_path).unwrap();
+    assert!(
+        lock.contains(&format!(
+            "url = \"{requested}\"\nretrieval_url = \"{retrieved}\"\n"
+        )),
+        "{lock}"
+    );
+    let code = generate_offline(&spec_path);
+    assert!(code.contains("pub label"), "{code}");
+    assert_eq!(server.hits().len(), 4, "generation must not fetch");
+
+    // Redirect first: the target is the document already retrieved, so it is not pinned again.
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let spec_path = dir.join("openapi.yaml");
+    std::fs::write(&spec_path, root_spec_naming(&requested, &retrieved)).unwrap();
+    let report =
+        spargen::vendor(&Spec::new(spec_path.clone())).unwrap_or_else(|r| panic!("{r:#?}"));
+    assert_eq!(
+        server.hits()[4..],
+        ["/old/pet.yaml", "/new/pet.yaml", "/new/tag.yaml"]
+    );
+    assert_eq!(pinned_urls(&report), [tag_url, requested]);
+    let code = generate_offline(&spec_path);
+    assert!(code.contains("pub label"), "{code}");
+    assert_eq!(server.hits().len(), 7, "generation must not fetch");
+}
+
+/// A relative `$self` in a redirected document resolves against the URL the document was
+/// retrieved from, like its relative `$ref`s: `$self: pet-canonical.yaml` inside `/new/pet.yaml`,
+/// reached through `/old/pet.yaml`, is `/new/pet-canonical.yaml`, so `tag.yaml` is the pinned
+/// `/new/tag.yaml`. Resolved against the requested URL instead, the identity would be
+/// `/old/pet-canonical.yaml` and `tag.yaml` the unpinned `/old/tag.yaml` (`E003`). The in-document
+/// reference is made absolute against that identity, under which the document is registered.
+#[test]
+fn a_redirected_documents_relative_self_resolves_against_the_url_it_was_retrieved_from() {
+    const SELF_PET_YAML: &str = "$self: pet-canonical.yaml\n\
+                                 type: object\n\
+                                 required: [id]\n\
+                                 properties:\n  \
+                                 id: { type: integer, format: int64 }\n  \
+                                 tag: { $ref: 'tag.yaml' }\n  \
+                                 owner: { $ref: '#/$defs/Owner' }\n\
+                                 $defs:\n  \
+                                 Owner:\n    \
+                                 type: object\n    \
+                                 required: [name]\n    \
+                                 properties:\n      \
+                                 name: { type: string }\n";
+    let server = MockServer::start(&[
+        ("/old/pet.yaml", Reply::Redirect("/new/pet.yaml")),
+        ("/new/pet.yaml", Reply::Body(SELF_PET_YAML)),
+        ("/new/tag.yaml", Reply::Body(TAG_YAML)),
+    ]);
+    let (_temp, spec_path) = workspace(&server.url("/old/pet.yaml"));
+
+    spargen::vendor(&Spec::new(spec_path.clone())).unwrap_or_else(|r| panic!("{r:#?}"));
+
+    let code = generate_offline(&spec_path);
+    assert!(code.contains("pub label"), "{code}");
+    assert!(code.contains("pub name"), "{code}");
+    assert_eq!(server.hits().len(), 3, "generation must not fetch");
+}
+
+/// A fetched document whose `$self` names another directory resolves its relative `$ref`s from
+/// that identity, in `spargen lock` as in the build (#426): `$self: ../b/pet.yaml` inside
+/// `/a/pet.yaml` makes `tag.yaml` the document at `/b/tag.yaml`. `/a/tag.yaml` exists too, with
+/// a different shape, so a lock that resolved from the retrieval URL would succeed, pin the wrong
+/// document, and leave the build rejecting `/b/tag.yaml` as unpinned (`E003`).
+#[test]
+fn a_remote_documents_self_in_another_directory_is_the_base_lock_resolves_from() {
+    const SELF_ELSEWHERE_PET_YAML: &str = "$self: ../b/pet.yaml\n\
+                                           type: object\n\
+                                           required: [id]\n\
+                                           properties:\n  \
+                                           id: { type: integer, format: int64 }\n  \
+                                           tag: { $ref: 'tag.yaml' }\n";
+    const DECOY_TAG_YAML: &str = "type: object\n\
+                                  required: [decoy]\n\
+                                  properties:\n  \
+                                  decoy: { type: string }\n";
+    let server = MockServer::start(&[
+        ("/a/pet.yaml", Reply::Body(SELF_ELSEWHERE_PET_YAML)),
+        ("/a/tag.yaml", Reply::Body(DECOY_TAG_YAML)),
+        ("/b/tag.yaml", Reply::Body(TAG_YAML)),
+    ]);
+    let pet_url = server.url("/a/pet.yaml");
+    let (_temp, spec_path) = workspace(&pet_url);
+
+    let report =
+        spargen::vendor(&Spec::new(spec_path.clone())).unwrap_or_else(|r| panic!("{r:#?}"));
+
+    assert_eq!(server.hits(), ["/a/pet.yaml", "/b/tag.yaml"]);
+    assert_eq!(pinned_urls(&report), [pet_url, server.url("/b/tag.yaml")]);
+    let code = generate_offline(&spec_path);
+    assert!(code.contains("pub label"), "{code}");
+    assert!(!code.contains("pub decoy"), "{code}");
+    let checked = spargen::check(&Spec::new(spec_path));
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert_eq!(server.hits().len(), 2, "generation must not fetch");
 }
 
 #[test]

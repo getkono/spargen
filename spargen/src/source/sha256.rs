@@ -122,12 +122,15 @@ mod tests {
     /// hand-rolled hasher against multi-megabyte real-world inputs.
     #[test]
     fn the_pinned_corpus_files_still_hash_to_their_manifest_sha256() {
-        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/.."));
-        let Ok(manifest) = std::fs::read_to_string(root.join("corpus/manifest.toml")) else {
-            // Absent when this crate is tested from a packaged `.crate`, which ships no corpus.
-            eprintln!("skipping: corpus/manifest.toml is not present");
+        // A packaged `.crate` ships no corpus, so the check is skipped there — gated on the
+        // workspace marker, not on the file, so that inside the repository a missing or renamed
+        // manifest fails instead of passing with a line on stderr nobody reads.
+        let Some(root) = repo_root() else {
+            eprintln!("skipping: not tested from the workspace");
             return;
         };
+        let root = root.as_path();
+        let manifest = read_repo_file(root, "corpus/manifest.toml");
 
         // The manifest is a list of `[[case]]` tables; `path` and `sha256` are the two keys here.
         fn value(line: &str) -> &str {
@@ -159,5 +162,32 @@ mod tests {
             checked >= 9,
             "expected every manifest case to carry a sha256; checked {checked}"
         );
+    }
+
+    /// The workspace root, or `None` when this crate is tested from a packaged `.crate`, which
+    /// carries neither the workspace manifest nor the corpus. Gating on the *workspace marker*
+    /// rather than on the file under inspection is deliberate: inside the repository a missing
+    /// `corpus/manifest.toml` must fail the test, not silently skip it.
+    fn repo_root() -> Option<std::path::PathBuf> {
+        let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/..")).to_path_buf();
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+        manifest.contains("[workspace]").then_some(root)
+    }
+
+    /// Read a file the repository must carry, failing — never skipping — when it is absent.
+    /// Only call this under [`repo_root`], which is what decides whether the file must exist.
+    fn read_repo_file(root: &std::path::Path, relative: &str) -> String {
+        std::fs::read_to_string(root.join(relative)).unwrap_or_else(|error| {
+            panic!("{relative} must exist in the repository, and reading it failed: {error}")
+        })
+    }
+
+    /// Once the workspace gate has passed, a missing input is a failure: a skip keyed on the file
+    /// itself turned a renamed `corpus/manifest.toml` into a silent pass (#409).
+    #[test]
+    #[should_panic(expected = "must exist in the repository")]
+    fn a_missing_repository_file_fails_rather_than_skips() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        read_repo_file(root, "no-such-dir/no-such-manifest.toml");
     }
 }

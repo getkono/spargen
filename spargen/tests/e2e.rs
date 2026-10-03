@@ -352,6 +352,196 @@ fn a_schema_named_after_a_name_the_types_module_uses_still_compiles() {
     );
 }
 
+/// Closed `prefixItems` tuples of one and two positions, named and as an inline property, so the
+/// one-position case is emitted both as a component alias and as a field type (issue #415).
+const TUPLE_ARITY_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /pair:
+    get:
+      operationId: getPair
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Holder' }
+components:
+  schemas:
+    Single: { type: array, prefixItems: [{ type: integer }], items: false }
+    Pair: { type: array, prefixItems: [{ type: integer }, { type: string }], items: false }
+    Holder:
+      type: object
+      required: [single, pair, inline]
+      properties:
+        single: { $ref: '#/components/schemas/Single' }
+        pair: { $ref: '#/components/schemas/Pair' }
+        inline: { type: array, prefixItems: [{ type: string }], items: false }
+"#;
+
+/// A one-position tuple must be emitted as `(T,)`, a tuple, and not `(T)`, which Rust reads as a
+/// parenthesized `T` that decodes from a bare scalar and rejects the one-element array the schema
+/// describes (issue #415). The fixture's own test decodes the wire shapes through the generated
+/// types and reaches each position by index, which a parenthesized scalar has no field for.
+#[test]
+fn a_one_position_tuple_is_a_tuple_on_the_wire() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, TUPLE_ARITY_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "tuple_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/tuple.rs"),
+        r##"
+use tuple_client::types::{Holder, Pair, Single};
+
+#[test]
+fn a_one_element_array_decodes_into_a_one_position_tuple() {
+    let single: Single = serde_json::from_str("[1]").unwrap();
+    assert_eq!(single.0, 1);
+    assert_eq!(serde_json::to_string(&single).unwrap(), "[1]");
+    assert!(serde_json::from_str::<Single>("1").is_err());
+    assert!(serde_json::from_str::<Single>("[1, 2]").is_err());
+
+    let pair: Pair = serde_json::from_str(r#"[1, "a"]"#).unwrap();
+    assert_eq!((pair.0, pair.1.as_str()), (1, "a"));
+
+    let holder: Holder =
+        serde_json::from_str(r#"{"single": [7], "pair": [2, "b"], "inline": ["c"]}"#).unwrap();
+    assert_eq!(holder.single.0, 7);
+    assert_eq!(holder.inline.0, "c");
+    assert_eq!(
+        serde_json::to_value(&holder).unwrap(),
+        serde_json::json!({"single": [7], "pair": [2, "b"], "inline": ["c"]})
+    );
+}
+"##,
+    )
+    .unwrap();
+
+    let status = fixture_cargo(&out).arg("test").status().unwrap();
+    assert!(
+        status.success(),
+        "a one-position tuple must decode from a one-element array"
+    );
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(status.success(), "the tuple fixture must lint clean");
+}
+
+const ALL_OF_BESIDE_UNION_SPEC: &str = r#"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /holder:
+    get:
+      operationId: getHolder
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Holder' }
+components:
+  schemas:
+    Cat: { type: object, required: [kind], properties: { kind: { type: string } } }
+    Member:
+      allOf: [{ required: [kind] }]
+      oneOf: [{ type: string }, { $ref: '#/components/schemas/Cat' }]
+    Sibling:
+      required: [kind]
+      allOf: [{ description: a pet }]
+      oneOf: [{ type: string }, { $ref: '#/components/schemas/Cat' }]
+    Untyped:
+      allOf: [{ properties: { name: { type: string } } }]
+      oneOf: [{ $ref: '#/components/schemas/Cat' }, { type: 'null' }]
+    Typed:
+      allOf: [{ type: [object, 'null'], properties: { name: { type: string } } }]
+      oneOf: [{ $ref: '#/components/schemas/Cat' }, { type: 'null' }]
+    Holder:
+      type: object
+      required: [member, sibling, untyped, typed]
+      properties:
+        member: { $ref: '#/components/schemas/Member' }
+        sibling: { $ref: '#/components/schemas/Sibling' }
+        untyped: { $ref: '#/components/schemas/Untyped' }
+        typed: { $ref: '#/components/schemas/Typed' }
+"#;
+
+/// Issue #419: an `allOf` beside the schema's own `oneOf`/`anyOf` keeps every branch it does not
+/// constrain away. An untyped `allOf` member and the schema's own keywords refine only the object
+/// branch, so a string still decodes; where the union has a `null` branch and the `allOf` admits
+/// `null` (an untyped member says nothing of it, a typed one lists it), `null` still decodes. The
+/// fixture's own test decodes each wire shape through the generated types.
+#[test]
+fn an_all_of_beside_a_union_decodes_every_value_both_accept() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, ALL_OF_BESIDE_UNION_SPEC).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "all_of_union_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+
+    std::fs::create_dir_all(out.join("tests")).unwrap();
+    std::fs::write(
+        out.join("tests/all_of_union.rs"),
+        r##"
+use all_of_union_client::types::Holder;
+
+#[test]
+fn strings_and_nulls_decode_beside_the_refined_object_branch() {
+    let scalars = serde_json::json!({
+        "member": "plain", "sibling": "plain", "untyped": null, "typed": null
+    });
+    let holder: Holder = serde_json::from_value(scalars.clone()).unwrap();
+    assert!(holder.untyped.is_none());
+    assert!(holder.typed.is_none());
+    assert_eq!(serde_json::to_value(&holder).unwrap(), scalars);
+
+    let objects = serde_json::json!({
+        "member": { "kind": "cat" },
+        "sibling": { "kind": "cat" },
+        "untyped": { "kind": "cat", "name": "a" },
+        "typed": { "kind": "cat", "name": "b" }
+    });
+    let holder: Holder = serde_json::from_value(objects.clone()).unwrap();
+    assert!(holder.untyped.is_some());
+    assert!(holder.typed.is_some());
+    assert_eq!(serde_json::to_value(&holder).unwrap(), objects);
+
+    // The object branch is still `Cat`: its required `kind` is enforced.
+    let kindless = serde_json::json!({
+        "member": {}, "sibling": "plain", "untyped": null, "typed": null
+    });
+    assert!(serde_json::from_value::<Holder>(kindless).is_err());
+}
+"##,
+    )
+    .unwrap();
+
+    let status = fixture_cargo(&out).arg("test").status().unwrap();
+    assert!(
+        status.success(),
+        "every value both the `allOf` and the union accept must decode"
+    );
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--all-targets", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the allOf-beside-union fixture must lint clean"
+    );
+}
+
 /// One operation per fixed inherent method of `Client` and `BlockingClient` (issue #286). The spec
 /// declares a server, so `with_default_server` is emitted too, and the fixture is checked with the
 /// `blocking` feature on, so the `BlockingClient` methods (`inner` among them) are compiled.
@@ -488,12 +678,140 @@ fn generated_output_compiles_against_exactly_the_dependencies_it_asks_for() {
 /// Whether `name` is a TLS crate, by the same rule the `example` gate applies to each example
 /// lockfile in `mise.toml` and `ci.yml`: it names `rustls`, `native-tls`, `openssl` or `webpki`,
 /// or ends in `-tls`. The two share a rule so that "no TLS crate" there and "a TLS crate" here
-/// mean the same set.
+/// mean the same set; `is_tls_crate_classifies_exactly_what_the_example_gate_greps` holds the two
+/// copies of the rule equal.
 fn is_tls_crate(name: &str) -> bool {
     ["rustls", "native-tls", "openssl", "webpki"]
         .iter()
         .any(|family| name.contains(family))
         || name.ends_with("-tls")
+}
+
+/// The extended regular expression the `example` gate's lockfile step passes to `grep -En` in
+/// `file`, read from the file itself. Exactly one such call must be there: a second would be a
+/// second rule this test does not compare, and none means the step moved out from under it.
+fn example_gate_tls_pattern(file: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join(file);
+    let text = std::fs::read_to_string(&path).unwrap();
+    let patterns: Vec<&str> = text
+        .match_indices("grep -En '")
+        .map(|(at, call)| {
+            let rest = &text[at + call.len()..];
+            &rest[..rest.find('\'').expect("the grep pattern's quote closes")]
+        })
+        .collect();
+    assert_eq!(
+        patterns.len(),
+        1,
+        "{file} must carry exactly one `grep -En '…'` (the example gate's TLS-crate rule), found \
+         {patterns:?}"
+    );
+    patterns[0].to_owned()
+}
+
+/// The `example` gate's TLS-crate regex (`mise.toml`, and its CI copy in `ci.yml`) and
+/// `is_tls_crate` are two spellings of one rule; this runs both over the same names and requires
+/// they agree on every one, so neither can drift alone (#411). The regex runs through `grep -E`
+/// itself, the engine the gate uses, over lines shaped as `Cargo.lock` writes them, since the
+/// regex is anchored on that shape.
+///
+/// The names are every package in the four committed lockfiles plus edge cases each half of the
+/// rule turns on (a family inside a longer name, a `-tls` suffix, `tls` without the hyphen or not
+/// at the end). The set must carry names on both sides of the rule, or agreement proves nothing.
+#[test]
+fn is_tls_crate_classifies_exactly_what_the_example_gate_greps() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let mut names = std::collections::BTreeSet::new();
+    for lock in [
+        "Cargo.lock",
+        "examples/petstore/Cargo.lock",
+        "examples/petstore-macro/Cargo.lock",
+        "examples/github-api/Cargo.lock",
+    ] {
+        let text = std::fs::read_to_string(root.join(lock)).unwrap();
+        names.extend(
+            text.lines()
+                .filter_map(|line| line.strip_prefix("name = \"")?.strip_suffix('"'))
+                .map(str::to_owned),
+        );
+    }
+    names.extend(
+        [
+            "rustls",
+            "tokio-rustls",
+            "rustls-pki-types",
+            "native-tls",
+            "tokio-native-tls",
+            "openssl",
+            "openssl-sys",
+            "webpki-roots",
+            "rustls-webpki",
+            "async-tls",
+            "tls",
+            "tls-foo",
+            "mytls",
+            "foo-tlsx",
+            "native_tls",
+            "serde",
+        ]
+        .map(str::to_owned),
+    );
+    let tls: Vec<&str> = names
+        .iter()
+        .map(String::as_str)
+        .filter(|name| is_tls_crate(name))
+        .collect();
+    assert!(
+        !tls.is_empty() && tls.len() < names.len(),
+        "the compared names must include TLS crates and non-TLS crates alike"
+    );
+
+    let input: String = names
+        .iter()
+        .map(|name| format!("name = \"{name}\"\n"))
+        .collect();
+    for file in ["mise.toml", ".github/workflows/ci.yml"] {
+        let pattern = example_gate_tls_pattern(file);
+        let mut grep = Command::new("grep")
+            .args(["-E", &pattern])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            grep.stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+        }
+        let output = grep.wait_with_output().unwrap();
+        // 0 is a match and 1 no match; anything else (2) is grep rejecting the pattern.
+        assert!(
+            matches!(output.status.code(), Some(0 | 1)),
+            "`grep -E` rejected {file}'s pattern {pattern:?}: {:?}",
+            output.status
+        );
+        let grepped: Vec<&str> = std::str::from_utf8(&output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                line.strip_prefix("name = \"")
+                    .and_then(|line| line.strip_suffix('"'))
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(
+            grepped, tls,
+            "{file}'s TLS-crate regex {pattern:?} and `is_tls_crate` classify different crates"
+        );
+    }
 }
 
 /// The distinct package names in this workspace's resolved graph, from `Cargo.lock` as committed
@@ -2010,6 +2328,39 @@ fn an_uninhabited_optional_field_drops_its_members_default() {
     );
 }
 
+#[test]
+fn a_narrowing_meet_retypes_or_drops_its_members_default() {
+    // Absent, `valid` takes the default as the enum's variant and `ratio` as an integer, on both
+    // spellings of the meet; `bad` and `fraction` admit no default of the narrowed type.
+    let merged: basic_client::types::NarrowDefault = serde_json::from_str("{}").unwrap();
+    let sibling: basic_client::types::NarrowDefaultSibling = serde_json::from_str("{}").unwrap();
+    // The two spellings name their enums differently, so each is compared through its wire form.
+    for (valid, bad, ratio, fraction) in [
+        (
+            serde_json::to_value(&merged.valid).unwrap(),
+            serde_json::to_value(&merged.bad).unwrap(),
+            merged.ratio,
+            merged.fraction,
+        ),
+        (
+            serde_json::to_value(&sibling.valid).unwrap(),
+            serde_json::to_value(&sibling.bad).unwrap(),
+            sibling.ratio,
+            sibling.fraction,
+        ),
+    ] {
+        assert_eq!(valid, serde_json::json!("a"));
+        assert!(bad.is_null());
+        assert_eq!(ratio, Some(3_i64));
+        assert!(fraction.is_none());
+    }
+    // The wider member keeps its own defaults as it wrote them.
+    let base: basic_client::types::NarrowDefaultBase = serde_json::from_str("{}").unwrap();
+    assert_eq!(base.valid.as_deref(), Some("a"));
+    assert_eq!(base.bad.as_deref(), Some("zzz"));
+    assert_eq!(base.fraction, Some(2.5));
+}
+
 // An optional uninhabited field is `Option<Never>`, and serde's `Option<T>` maps a JSON `null` to
 // `None` without ever calling `T::deserialize` — so without a field-level deserializer the
 // uninhabited type is never consulted and `{"x": null}`, which no schema here admits, decodes and
@@ -2258,6 +2609,58 @@ fn discriminated_union_round_trips_with_tag() {
     let json = serde_json::to_value(&dog).unwrap();
     assert_eq!(json["petType"], "dog");
     assert_eq!(json["bark"], true);
+
+    // Every value that names a member selects it (#263): the second mapping key `kitty`, and each
+    // component name, which no mapping key claims. Cat keeps the tag it was decoded with in its own
+    // field; Dog re-serializes with its first mapping key, `dog`.
+    for tag in ["kitty", "Cat"] {
+        let pet: basic_client::types::Pet = serde_json::from_value(
+            serde_json::json!({"petType": tag, "name": "Whiskers"}),
+        )
+        .unwrap();
+        match &pet {
+            basic_client::types::Pet::Cat(cat) => assert_eq!(cat.pet_type, tag),
+            other => panic!("{tag}: expected Cat variant, got {other:?}"),
+        }
+        assert_eq!(serde_json::to_value(&pet).unwrap()["petType"], tag);
+    }
+    let dog: basic_client::types::Pet =
+        serde_json::from_str(r#"{"petType": "Dog", "bark": false}"#).unwrap();
+    assert!(matches!(dog, basic_client::types::Pet::Dog(_)));
+    assert_eq!(serde_json::to_value(&dog).unwrap()["petType"], "dog");
+    assert!(
+        serde_json::from_str::<basic_client::types::Pet>(r#"{"petType": "cow", "bark": true}"#)
+            .is_err()
+    );
+}
+
+#[test]
+fn an_untagged_discriminated_member_leaves_the_tagged_dispatch_in_place() {
+    use basic_client::types::LooseAnimal;
+    // `Cat` (two required fields) outranks `Dog` in a trial, and accepts this payload too; the tag
+    // names `Dog`, so `Dog` it is.
+    let dog: LooseAnimal =
+        serde_json::from_str(r#"{"petType": "Dog", "name": "Rex", "bark": true}"#).unwrap();
+    assert!(matches!(dog, LooseAnimal::Dog(_)), "{dog:?}");
+    // `Dog` declares no `petType`, so serialization re-inserts its tag.
+    assert_eq!(serde_json::to_value(&dog).unwrap()["petType"], "Dog");
+    let cat: LooseAnimal =
+        serde_json::from_str(r#"{"petType": "Cat", "name": "Tom"}"#).unwrap();
+    assert!(matches!(cat, LooseAnimal::Cat(_)), "{cat:?}");
+    // A tag naming a tagged member never falls through to the untagged one.
+    assert!(
+        serde_json::from_str::<LooseAnimal>(r#"{"petType": "Dog", "fins": 3}"#).is_err()
+    );
+    // An unrecognized or absent tag tries the untagged member by its schema, and it writes no tag
+    // of its own beyond the field it holds.
+    let fish: LooseAnimal =
+        serde_json::from_str(r#"{"petType": "Shark", "fins": 3}"#).unwrap();
+    assert!(matches!(fish, LooseAnimal::LooseAnimalVariant2(_)), "{fish:?}");
+    assert_eq!(
+        serde_json::to_value(&fish).unwrap(),
+        serde_json::json!({"petType": "Shark", "fins": 3})
+    );
+    assert!(serde_json::from_str::<LooseAnimal>(r#"{"bark": true}"#).is_err());
 }
 
 #[test]
@@ -4861,6 +5264,35 @@ components:
       $ref: "#/components/schemas/ConflictDefaultTarget"
       properties:
         x: { type: integer }
+    # Issue #404: a meet that narrows an optional property re-types the default a member wrote for
+    # the wider type. `valid` becomes the enum's variant and `ratio` an integer; `bad` and
+    # `fraction` are no value of the narrowed type and lose their default (`W005`). A provider
+    # returning `"a".to_owned()` for an enum field, or `2.5` for an `i64`, does not compile.
+    NarrowDefaultBase:
+      type: object
+      properties:
+        valid: { type: string, default: a }
+        bad: { type: string, default: zzz }
+        ratio: { type: number, default: 3 }
+        fraction: { type: number, default: 2.5 }
+    NarrowDefaultEnum:
+      type: object
+      properties:
+        valid: { enum: [a, b] }
+        bad: { enum: [a, b] }
+        ratio: { type: integer }
+        fraction: { type: integer }
+    NarrowDefault:
+      allOf:
+        - $ref: "#/components/schemas/NarrowDefaultBase"
+        - $ref: "#/components/schemas/NarrowDefaultEnum"
+    NarrowDefaultSibling:
+      $ref: "#/components/schemas/NarrowDefaultBase"
+      properties:
+        valid: { enum: [a, b] }
+        bad: { enum: [a, b] }
+        ratio: { type: integer }
+        fraction: { type: integer }
     # The direct spelling of an uninhabited optional property: a `false` subschema. Absence is the
     # only valid form, `null` included among the rejected values.
     ForbiddenProperty:
@@ -4974,6 +5406,8 @@ components:
         # Discriminated union: an internally-tagged enum over object `$ref` variants.
         pet:
           $ref: "#/components/schemas/Pet"
+        animal:
+          $ref: "#/components/schemas/LooseAnimal"
         # Undiscriminated but provably-disjoint union (string vs array JSON category): an enum with a
         # content-inspecting custom Deserialize/Serialize — no wrapper on the wire.
         alias:
@@ -5019,9 +5453,24 @@ components:
         - $ref: "#/components/schemas/Dog"
       discriminator:
         propertyName: petType
+        # Two keys name `Cat`; `cat`, the first, is the one serialization writes.
         mapping:
           cat: "#/components/schemas/Cat"
           dog: "#/components/schemas/Dog"
+          kitty: Cat
+    # An inline member no mapping entry names has no discriminator value (W011); Cat and Dog keep
+    # their implicit tags, and the inline member is tried only when the tag names neither.
+    LooseAnimal:
+      anyOf:
+        - $ref: "#/components/schemas/Cat"
+        - $ref: "#/components/schemas/Dog"
+        - type: object
+          required: [petType, fins]
+          properties:
+            petType: { type: string }
+            fins: { type: integer }
+      discriminator:
+        propertyName: petType
     # Disjoint by JSON type category: a bare string or a list of strings. Serializes WITHOUT any tag
     # or wrapper — the active variant's inner value is emitted directly.
     StringOrList:
@@ -7333,7 +7782,8 @@ fn a_gen_named_spec_compiles_under_edition_2024() {
 /// The RFC 9457 shape from #268: each documented error status narrows the shared `Problem`'s
 /// `type` with a `const`, spelled as an `allOf` member (`404`) and as `$ref` siblings (`409`). The
 /// positions `open_narrowing` leaves closed sit beside them: a union of narrowed problems (`400`),
-/// a narrowing inside a component (`410`), and a request body.
+/// a narrowing inside a component (`410`), a set narrowed against a `uuid` string in either member
+/// order (`428`, `429`), and a request body.
 const OPEN_NARROWING_SPEC: &str = r##"
 openapi: 3.1.0
 info: { title: Problems, version: 1.0.0 }
@@ -7476,6 +7926,32 @@ paths:
                       - oneOf: [{ const: a }, { type: string }]
                       - { enum: [a, b, c] }
                       - { type: string }
+        "428":
+          description: a set narrowed against a uuid string after a plain string opened it
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string }
+                      - { enum: ["00000000-0000-0000-0000-000000000001"] }
+                      - { type: string, format: uuid }
+        "429":
+          description: the same set with the uuid string first and the plain string last
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [kind]
+                properties:
+                  kind:
+                    allOf:
+                      - { type: string, format: uuid }
+                      - { enum: ["00000000-0000-0000-0000-000000000001"] }
+                      - { type: string }
 components:
   schemas:
     Problem:
@@ -7522,6 +7998,7 @@ fn open_narrowing_decodes_an_unlisted_problem_type_and_keeps_it_typed() {
     // `424`/`425` `kind`, whose union narrows to one branch. The `{enum: [a, b, c]}` members of
     // `422`, `423`, `426`, and `427` open in place too, as intermediates no field uses: a union
     // that keeps two branches meets them into closed branch sets (`tests/open.rs` decodes both).
+    // The `428`/`429` `kind`, narrowed against a `uuid` string, stays closed in either order.
     // Only an open enum emits `as_str`.
     let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
     assert_eq!(
@@ -7670,6 +8147,26 @@ fn a_union_meeting_an_open_set_decodes_in_either_member_order() {
     }
     closed_beside_another!(PostProblemsError::Status426, "union last");
     closed_beside_another!(PostProblemsError::Status427, "union first");
+}
+
+#[test]
+fn a_set_narrowed_against_a_uuid_stays_closed_in_either_member_order() {
+    // `428` opens the set before the `uuid` string meets it; `429` meets the `uuid` string first.
+    // Either way the listed value decodes and an unlisted one, a uuid or not, is refused.
+    macro_rules! closed_against_uuid {
+        ($status:expr, $order:literal) => {
+            decode($status, r#"{"kind":"00000000-0000-0000-0000-000000000001"}"#)
+                .unwrap_or_else(|error| panic!("{}: listed: {error}", $order));
+            assert!(
+                decode($status, r#"{"kind":"00000000-0000-0000-0000-000000000002"}"#).is_err(),
+                "{}: unlisted uuid",
+                $order
+            );
+            assert!(decode($status, r#"{"kind":"z"}"#).is_err(), "{}: unlisted string", $order);
+        };
+    }
+    closed_against_uuid!(PostProblemsError::Status428, "uuid last");
+    closed_against_uuid!(PostProblemsError::Status429, "uuid first");
 }
 
 #[test]

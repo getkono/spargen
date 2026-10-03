@@ -13,11 +13,12 @@ use crate::name::{Names, OperationBindings};
 
 use super::CodegenOptions;
 
-/// Emit the `types` (models) module for every type in the graph, in deterministic order.
+/// Emit the `types` (models) module for every type the graph emits (every one but those lowering
+/// elided), in deterministic order.
 pub(crate) fn emit_models(api: &Api, names: &Names, options: &CodegenOptions) -> TokenStream {
     let items = api
         .types
-        .iter()
+        .emitted()
         .map(|(id, def)| emit_type_def(id, def, api, names, options));
     let decode_present = format_ident!("{DECODE_PRESENT}");
     // The RFC 3339 newtypes live beside `types`, so bring them into scope under the same bare names
@@ -2755,7 +2756,7 @@ fn emit_type_def(
                     .expect("variant name allocated");
                 quote! { #ident::#variant_ident => #value, }
             });
-            if enumeration.open {
+            if enumeration.is_open() {
                 return emit_open_string_enum(
                     id,
                     ident,
@@ -2832,6 +2833,8 @@ fn emit_type_def(
                     tags,
                     categories,
                     default_variant,
+                    untagged,
+                    mode,
                 } => {
                     let variant_defs = union.variants.iter().map(|variant| {
                         let variant_ident = names
@@ -2871,24 +2874,26 @@ fn emit_type_def(
                         .variants
                         .iter()
                         .zip(tags)
-                        .filter_map(|(variant, tag)| {
-                            let tag = tag.as_ref()?;
+                        .filter(|(_, accepted)| !accepted.is_empty())
+                        .map(|(variant, accepted)| {
                             let variant_ident = names
                                 .variants
                                 .get(&(id, variant.name_hint.clone()))
                                 .expect("union variant name allocated");
-                            Some(quote! {
-                                #tag => serde_json::from_value(value)
+                            // One arm per variant, matching every tag that selects it.
+                            quote! {
+                                #(#accepted)|* => serde_json::from_value(value)
                                     .map(#ident::#variant_ident)
                                     .map_err(serde::de::Error::custom),
-                            })
+                            }
                         });
-                    let ser_arms = union.variants.iter().zip(tags).map(|(variant, tag)| {
+                    let ser_arms = union.variants.iter().zip(tags).map(|(variant, accepted)| {
                         let variant_ident = names
                             .variants
                             .get(&(id, variant.name_hint.clone()))
                             .expect("union variant name allocated");
-                        let tag = match tag {
+                        // The first accepted tag is the canonical one written back.
+                        let tag = match accepted.first() {
                             Some(tag) => quote! { Some(#tag) },
                             None => quote! { None },
                         };
@@ -2931,6 +2936,43 @@ fn emit_type_def(
                         Some(fallback) => fallback.clone(),
                         None => quote! { Err(serde::de::Error::custom(#unknown_tag)) },
                     };
+                    // Variants no tag selects are tried by their own schemas — with the source
+                    // applicator's semantics, as `Trial` tries them — before the absent or
+                    // unrecognized tag falls through to `defaultMapping` or the error. A tag that
+                    // names a tagged variant never reaches them.
+                    let attempts: Vec<TokenStream> = union
+                        .variants
+                        .iter()
+                        .zip(untagged)
+                        .filter_map(|(variant, priority)| {
+                            let priority = (*priority)?;
+                            let variant_ident = names
+                                .variants
+                                .get(&(id, variant.name_hint.clone()))
+                                .expect("union variant name allocated");
+                            let ty = union_variant_ty_tokens(variant.ty, names, options);
+                            Some(trial_attempt_tokens(ident, variant_ident, &ty, priority))
+                        })
+                        .collect();
+                    let untagged_trial = |otherwise: TokenStream| {
+                        if attempts.is_empty() {
+                            return otherwise;
+                        }
+                        let valid = trial_match_rule_tokens(*mode);
+                        quote! {
+                            {
+                                let mut match_count = 0_usize;
+                                let mut selected: Option<(u32, Self)> = None;
+                                #(#attempts)*
+                                match selected {
+                                    Some((_, selected)) if #valid => Ok(selected),
+                                    _ => #otherwise,
+                                }
+                            }
+                        }
+                    };
+                    let missing_tag_arm = untagged_trial(missing_tag_arm);
+                    let unknown_tag_arm = untagged_trial(unknown_tag_arm);
                     quote! {
                         #docs
                         #deprecated
@@ -3071,27 +3113,19 @@ fn emit_type_def(
                         let ty = union_variant_ty_tokens(variant.ty, names, options);
                         quote! { #variant_ident(#ty), }
                     });
-                    let attempts = union.variants.iter().zip(priorities).map(
-                    |(variant, priority)| {
-                        let variant_ident = names
+                    let attempts =
+                        union
                             .variants
-                            .get(&(id, variant.name_hint.clone()))
-                            .expect("union variant name allocated");
-                        let ty = union_variant_ty_tokens(variant.ty, names, options);
-                        quote! {
-                            if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
-                                match_count += 1;
-                                let replace = match &selected {
-                                    Some((selected_priority, _)) => #priority > *selected_priority,
-                                    None => true,
-                                };
-                                if replace {
-                                    selected = Some((#priority, #ident::#variant_ident(inner)));
-                                }
-                            }
-                        }
-                    },
-                );
+                            .iter()
+                            .zip(priorities)
+                            .map(|(variant, priority)| {
+                                let variant_ident = names
+                                    .variants
+                                    .get(&(id, variant.name_hint.clone()))
+                                    .expect("union variant name allocated");
+                                let ty = union_variant_ty_tokens(variant.ty, names, options);
+                                trial_attempt_tokens(ident, variant_ident, &ty, *priority)
+                            });
                     let ser_arms = union.variants.iter().map(|variant| {
                         let variant_ident = names
                             .variants
@@ -3115,10 +3149,7 @@ fn emit_type_def(
                         UnionMode::OneOf => "exactly one",
                         UnionMode::AnyOf => "at least one",
                     };
-                    let de_valid = match mode {
-                        UnionMode::OneOf => quote! { match_count == 1 },
-                        UnionMode::AnyOf => quote! { match_count >= 1 },
-                    };
+                    let de_valid = trial_match_rule_tokens(*mode);
                     let ser_valid = de_valid.clone();
                     let de_error = format!(
                         "data must match {expected} typed variant of union {}",
@@ -3348,7 +3379,9 @@ fn type_kind_tokens(
         }
         TypeKind::Tuple(items) => {
             let items = items.iter().map(|ty| ty_tokens(*ty, names, options, false));
-            quote! { (#(#items),*) }
+            // Every position carries its comma: `(T,)` is a one-position tuple, while `(T)` is a
+            // parenthesized `T` that decodes from a bare scalar instead of a one-element array.
+            quote! { (#(#items,)*) }
         }
         TypeKind::Bytes => quote! { bytes::Bytes },
         TypeKind::Null => quote! { () },
@@ -3389,6 +3422,40 @@ fn ty_tokens(ty: Ty, names: &Names, _options: &CodegenOptions, qualified: bool) 
 /// boolean representation flag, so setting it again never produces `Box<Box<T>>`.
 fn union_variant_ty_tokens(ty: Ty, names: &Names, options: &CodegenOptions) -> TokenStream {
     ty_tokens(Ty { boxed: true, ..ty }, names, options, false)
+}
+
+/// One variant's attempt in a trial decode: decode `value` as the variant's type, count the
+/// match, and keep it when its priority beats the one selected so far (the earlier variant wins a
+/// tie). The emitted block expects `value`, `match_count`, and `selected: Option<(u32, Self)>` in
+/// scope. `Trial` tries every variant through it, and `Discriminated` its untagged variants, so
+/// the two strategies share one selection rule.
+fn trial_attempt_tokens(
+    ident: &crate::name::Ident,
+    variant_ident: &crate::name::Ident,
+    ty: &TokenStream,
+    priority: u32,
+) -> TokenStream {
+    quote! {
+        if let Ok(inner) = serde_json::from_value::<#ty>(value.clone()) {
+            match_count += 1;
+            let replace = match &selected {
+                Some((selected_priority, _)) => #priority > *selected_priority,
+                None => true,
+            };
+            if replace {
+                selected = Some((#priority, #ident::#variant_ident(inner)));
+            }
+        }
+    }
+}
+
+/// The condition a trial's `match_count` must meet for the union's applicator: exactly one
+/// matching variant for `oneOf`, at least one for `anyOf`.
+fn trial_match_rule_tokens(mode: UnionMode) -> TokenStream {
+    match mode {
+        UnionMode::OneOf => quote! { match_count == 1 },
+        UnionMode::AnyOf => quote! { match_count >= 1 },
+    }
 }
 
 /// Multi-status response payloads are uniformly indirect for the same bounded-enum-size reason as

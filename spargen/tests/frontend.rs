@@ -4,9 +4,14 @@
 //! about one case: every fixture there must reach the same accept/reject verdict and report the
 //! same codes through both entry points, and a companion test keeps that set spanning rejections,
 //! warnings and clean runs so it cannot pass vacuously.
+//!
+//! Every run any fixture makes goes through `run_generate` or `run_check`, which hold each
+//! diagnostic's declared `OutcomeClaim` to the run's own outcome (#413).
 
 use camino::Utf8PathBuf;
-use spargen::{Build, CargoIntegration, Code, Outcome, Report, Severity, Spec};
+use spargen::{
+    Build, CargoIntegration, Code, Diagnostic, Outcome, OutcomeClaim, Report, Severity, Spec,
+};
 
 /// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
 /// tempdir (and any written output) is discarded once the report — which owns its data — is built.
@@ -17,12 +22,99 @@ fn build(spec: Utf8PathBuf, out: Utf8PathBuf) -> Build {
     Spec::new(spec).build(out).cargo(CargoIntegration::Off)
 }
 
+/// `spargen::generate`, then [`assert_claims_hold`] on the report. Every fixture here reaches
+/// `generate` through this function, so every diagnostic any fixture provokes is held to its run.
+fn run_generate(build: &Build) -> Report {
+    let report = spargen::generate(build);
+    assert_claims_hold(&report);
+    report
+}
+
+/// `spargen::check`, then [`assert_claims_hold`] on the report, as [`run_generate`].
+fn run_check(spec: &Spec) -> Report {
+    let report = spargen::check(spec);
+    assert_claims_hold(&report);
+    report
+}
+
+/// Fail unless every diagnostic in `report` makes a claim its run's outcome admits (#413).
+fn assert_claims_hold(report: &Report) {
+    let violations = claim_violations(report.outcome(), report.diagnostics());
+    assert!(
+        violations.is_empty(),
+        "a `{}` run reported diagnostics whose claims are false of it: {violations:#?}",
+        report.outcome()
+    );
+}
+
+/// Each diagnostic in `diagnostics` that says something false about a run whose outcome is
+/// `outcome`, with the reason.
+///
+/// A message is composed where it is emitted, before the outcome is known, and `check` and
+/// `generate` emit the same diagnostics. A message that asserted an outcome was false on every run
+/// that ended differently, such as `W014`'s old "is generated" on a `check` run (#174). Two things
+/// are checked. The declared [`OutcomeClaim`] must be one `outcome` admits. And a message that
+/// states an outcome in so many words ([`stated_claim`]) must declare that claim, so the first
+/// check reads what the message says.
+fn claim_violations(outcome: Outcome, diagnostics: &[Diagnostic]) -> Vec<String> {
+    diagnostics
+        .iter()
+        .filter_map(|diagnostic| {
+            let claim = diagnostic.claim;
+            let stated = stated_claim(&diagnostic.message);
+            if !outcome.admits(claim) {
+                Some(format!(
+                    "{claim:?} is false of a `{outcome}` run: {diagnostic:?}"
+                ))
+            } else if stated.is_some_and(|stated| stated != claim) {
+                Some(format!(
+                    "the message states {stated:?} but the claim is {claim:?}: {diagnostic:?}"
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The outcome a message states in so many words, if it states one: an unnegated "is generated"
+/// or "is rejected" (or "are", "be", "been").
+///
+/// This reads prose, so it is a backstop and not the check. [`claim_violations`] is the check,
+/// and it trusts the declared [`OutcomeClaim`]. This catches the case where the two disagree: a
+/// message that asserts an outcome while its diagnostic declares a different claim. That is the
+/// shape of `W014`'s old "`{media}` is generated", whose claim was never declared (#174). A
+/// rephrasing it does not recognise ("gets emitted") gets past it. Backticked spans are dropped
+/// first, so a quoted name cannot supply the predicate or the negation.
+fn stated_claim(message: &str) -> Option<OutcomeClaim> {
+    let prose: String = message
+        .split('`')
+        .step_by(2)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    prose.split([';', ':', ',', '.']).find_map(|clause| {
+        let words: Vec<&str> = clause.split_whitespace().collect();
+        words.windows(2).enumerate().find_map(|(at, pair)| {
+            let claim = match pair {
+                ["is" | "are" | "be" | "been", "generated"] => OutcomeClaim::Generated,
+                ["is" | "are" | "be" | "been", "rejected"] => OutcomeClaim::Rejected,
+                _ => return None,
+            };
+            let negated = words[..at]
+                .iter()
+                .any(|word| matches!(*word, "no" | "not" | "never" | "nothing" | "none"));
+            (!negated).then_some(claim)
+        })
+    })
+}
+
 fn generate(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
     let out = temp.path().join("client.rs");
-    spargen::generate(&build(
+    run_generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out).unwrap(),
     ))
@@ -33,7 +125,7 @@ fn check(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
-    spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
+    run_check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
 }
 
 fn generate_with_code(spec: &str) -> (Report, String) {
@@ -41,7 +133,7 @@ fn generate_with_code(spec: &str) -> (Report, String) {
     let spec_path = temp.path().join("openapi.yaml");
     std::fs::write(&spec_path, spec).unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&build(
+    let report = run_generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
@@ -1577,8 +1669,9 @@ components:
 /// shortcutting to the parsed component map only for the root document. `ensure_component` bypassed
 /// the resolver for anything carrying the `#/components/schemas/` prefix and looked every such name
 /// up in the ROOT document's map whatever file it sat in, so the sibling reference missed. Before
-/// E004 fired that miss was a silent drop — the property simply vanished — which is the same bug
-/// this branch is about, just reached from a sub-file.
+/// E004 fired that miss was a silent drop — the property simply vanished — which is the same
+/// silent drop of an unresolved component reference that E004 exists to replace, just reached from
+/// a sub-file.
 ///
 /// `corpus-smoke` cannot see this: the one multi-file corpus case uses whole-file `$ref`s, and the
 /// other relative-file fixture here uses a non-component fragment (`#/Pet`), which never enters
@@ -1625,7 +1718,7 @@ components:
     .unwrap();
 
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
     let code = std::fs::read_to_string(&out).unwrap();
@@ -1635,7 +1728,7 @@ components:
     assert!(code.contains("pub id"), "{code}");
 
     // `check` must agree — it runs the same lowering.
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
     assert!(!has_code(&checked, Code::UnresolvedRef), "{checked:#?}");
 }
@@ -1670,9 +1763,9 @@ fn split(target: &str, lib: &str) -> (Report, Report, String) {
     .unwrap();
     std::fs::write(dir.join("lib.yaml"), lib).unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     (generated, checked, code)
 }
 
@@ -2470,7 +2563,7 @@ paths:
         )
         .unwrap();
         let out = dir.join("client.rs");
-        let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
         (report, code)
     };
@@ -2527,17 +2620,17 @@ components:
 /// operation and the **JSON** body of another.
 ///
 /// A serde `rename` applies to every format, so `gate_xml_field_renames` suppresses XML hints on any
-/// type that is not used exclusively as an XML body. That policy is right and pre-dates this branch.
-/// What changed is what it sees: before the resolved-reference memo, the two operations lowered the
-/// sub-file schema to two types — the XML one dedicated and keeping `#[serde(rename = "@Ident")]`,
-/// the JSON one suppressed — and now they share one type, which is reachable from both and is
-/// therefore suppressed for both. **The XML on the wire moved**, and the `W006` count did not change,
-/// so an upgrading consumer had nothing to compare.
+/// type that is not used exclusively as an XML body. The resolved-reference memo changed what that
+/// policy sees: before it, the two operations lowered the sub-file schema to two types — the XML
+/// one dedicated and keeping `#[serde(rename = "@Ident")]`, the JSON one suppressed — and now they
+/// share one type, which is reachable from both and is therefore suppressed for both. **The XML on
+/// the wire moved**, and the `W006` count did not change, so an upgrading consumer had nothing to
+/// compare.
 ///
-/// The verdict is not being reversed here: giving an XML use its own type would reintroduce two
-/// types for one target, which is the defect this branch exists to remove. What is being fixed is
-/// that the warning must say which of its two quite different situations it is in, so a consumer can
-/// tell "your hint was inert" from "your XML body's field names just changed".
+/// The suppression stands: giving an XML use its own type would reintroduce two types for one
+/// target, which the memo exists to prevent. What this test pins is that the warning says which of
+/// its two quite different situations it is in, so a consumer can tell "your hint was inert" from
+/// "your XML body's field names just changed".
 #[test]
 fn a_schema_shared_between_an_xml_and_a_non_xml_body_says_so() {
     let temp = tempfile::tempdir().unwrap();
@@ -2584,11 +2677,11 @@ components:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap();
 
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
-    // One target, one type — the repair this branch exists for, unchanged.
+    // One target, one type — what the resolved-reference memo guarantees.
     assert_eq!(
         declared_types(&code, "Item", |tail| tail.is_empty()).len(),
         1,
@@ -2876,7 +2969,7 @@ fn generate_two_file_shapes(b_first: bool) -> String {
     std::fs::write(dir.join("a.yaml"), SHAPE_ALPHA_YAML).unwrap();
     std::fs::write(dir.join("b.yaml"), SHAPE_BETA_YAML).unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     std::fs::read_to_string(&out).unwrap()
 }
@@ -2933,7 +3026,7 @@ fn a_contested_type_name_ranks_a_file_outside_the_root_directory_by_its_full_loa
         std::fs::write(root_dir.join("a.yaml"), SHAPE_BETA_YAML).unwrap();
         std::fs::write(dir.join("z.yaml"), SHAPE_ALPHA_YAML).unwrap();
         let out = dir.join("client.rs");
-        let report = spargen::generate(&build(root_dir.join("openapi.yaml"), out.clone()));
+        let report = run_generate(&build(root_dir.join("openapi.yaml"), out.clone()));
         assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
         let code = std::fs::read_to_string(&out).unwrap();
         assert_eq!(
@@ -3064,7 +3157,7 @@ components:
     }
 
     // The same shape in the root document. It is pinned for the same reason and not as a control:
-    // it reproduces identically on the merge base, so the fault is older than this branch.
+    // the fault is not specific to sub-files, and the root spelling must reject the same way.
     let root = format!(
         r##"
 openapi: 3.1.0
@@ -3673,8 +3766,8 @@ components:
         )
         .unwrap();
         let out = dir.join("client.rs");
-        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
-        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
         for (run, report) in [("generate", &generated), ("check", &checked)] {
             assert!(
                 !has_code(report, Code::AllOfIrreconcilable),
@@ -3694,11 +3787,11 @@ components:
 /// A sub-file schema that reaches a **root document** component twice, by explicit file reference.
 ///
 /// `ensure_resolved` routes a resolved target that lands inside the root document's own component
-/// map back through `ensure_component`, so `components` stays that target's single identity. Round 4
-/// filed this branch as "executes but constrains nothing". That reading was wrong: disabling the
-/// branch leaves every suite green and gives **`["RootOne", "RootOne55e60dbe"]`** — two public types
-/// for one declared component, which is the precise defect this change exists to remove, in a shape
-/// it wrote a dedicated branch for.
+/// map back through `ensure_component`, so `components` stays that target's single identity. That
+/// routing can look like code that executes but constrains nothing, and without this test it is:
+/// disabling it leaves every other suite green and gives **`["RootOne", "RootOne55e60dbe"]`** —
+/// two public types for one declared component, which is the precise defect the resolved-reference
+/// memo exists to prevent.
 ///
 /// The reason a second memo is not harmless is that it is a second *identity*: `resolved_components`
 /// would key the same schema by `file#pointer` while `components` keys it by name, and neither would
@@ -3748,7 +3841,7 @@ components:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(&out).unwrap();
 
@@ -4272,10 +4365,10 @@ components:
 /// back a back-edge against `Node`'s reservation, whose placeholder `push_ref_member` read as a
 /// scalar.
 ///
-/// So this document is `clean` on `2aa5ada` and rejected here, verified by building the merge base
-/// and running it. The rejection is right — base emitted `serde_json::Value` for a typed schema with
-/// no diagnostic — but "regenerating from an unchanged description is otherwise unaffected" was not,
-/// and this is a description that uses none of the multi-file machinery the change is about.
+/// So this document was `clean` at `2aa5ada` (verified by building that commit and running it) and
+/// is rejected now. The rejection is right — `2aa5ada` emitted `serde_json::Value` for a typed
+/// schema with no diagnostic — but "regenerating from an unchanged description is otherwise
+/// unaffected" was not, and this is a description that uses none of the multi-file machinery.
 #[test]
 fn a_recursive_all_of_member_reached_through_a_root_alias_is_rejected() {
     let spec = r##"
@@ -4346,8 +4439,8 @@ components:
 /// pre-lowered in key order, and a description that generated in one file stopped generating when
 /// split, because sub-file components are never pre-lowered.
 ///
-/// Every row below was measured against a build of the merge base. The D8 rows are the ones that
-/// must still reject; everything else must still generate.
+/// Every row below was measured against a build of `2aa5ada`. The D8 rows are the ones that must
+/// still reject; everything else must still generate.
 #[test]
 fn a_union_member_that_is_a_different_recursive_type_still_generates() {
     // The union sits in a property, so it is not the component's own reservation.
@@ -4514,7 +4607,7 @@ components:
 /// The guard written for exactly this class sits inside the multi-member loop, which the
 /// `real_members.len() == 1` early return jumps straight over.
 ///
-/// Restoring the merge base's behaviour is **not** the fix. At `2aa5ada` a reservation's kind was
+/// Restoring `2aa5ada`'s behaviour is **not** the fix. At `2aa5ada` a reservation's kind was
 /// `TypeKind::Any`, so the clone emitted `Option<serde_json::Value>` — the silent degradation of a
 /// typed schema the standing invariants forbid outright. The answer `docs/support-matrix.md` and
 /// the direct `{$ref: Node}` spelling both already promise is `Option<Box<Node>>`, so that is what
@@ -4571,7 +4664,7 @@ components:
         // Boxed, because the cycle needs a finite size; `Option`, because the `null` member is what
         // the union collapsed away. Both halves are the matrix's promise.
         assert!(code.contains("Option<Box<Node>>"), "{applicator}: {code}");
-        // And never the merge base's answer.
+        // And never `2aa5ada`'s answer.
         assert!(!code.contains("serde_json::Value>"), "{applicator}: {code}");
     }
 }
@@ -4787,7 +4880,7 @@ paths:
     std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
     std::fs::write(&vendored, &node).unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
     assert_ne!(report.outcome(), Outcome::Rejected, "remote: {report:#?}");
     let control = field_type(&code, "pub n:").expect("remote: `W.n` is emitted");
@@ -4894,8 +4987,8 @@ paths:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let routed = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
-    let routed_checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let routed = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let routed_checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for (entry, report) in [
         ("routed/generate", &routed),
         ("routed/check", &routed_checked),
@@ -4944,7 +5037,7 @@ paths:
     std::fs::create_dir_all(vendored.parent().unwrap()).unwrap();
     std::fs::write(&vendored, &lib).unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "remote: {report:#?}");
     assert_optional("remote", &std::fs::read_to_string(&out).unwrap_or_default());
 }
@@ -5342,9 +5435,9 @@ components:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
         assert!(
@@ -5430,9 +5523,9 @@ components:
         std::fs::write(dir.join("openapi.yaml"), root).unwrap();
         std::fs::write(dir.join("lib.yaml"), lib(spelling)).unwrap();
         let out = dir.join("client.rs");
-        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
-        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
 
         for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_ne!(
@@ -5535,9 +5628,9 @@ components:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
 
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
@@ -5849,11 +5942,11 @@ paths:
 /// lowered. Nothing true can be said about that intersection, so it must be refused — not guessed
 /// at, and not quietly dropped.
 ///
-/// Three positions, all of which the merge base accepted by guessing: the sole member of a nested
+/// Three positions, all of which `2aa5ada` accepted by guessing: the sole member of a nested
 /// property's union, the sole member of an array `items` union, and one member of a multi-member
 /// union. At `2aa5ada` `intersect_non_null`'s `TypeKind::Any` arm absorbed the placeholder and
 /// returned the *sibling*, silently retyping the recursive branch to the inline object beside it.
-/// At this head the multi-member case instead drops the variant with a `W011` whose message —
+/// Without the refusal, the multi-member case drops the variant with a `W011` whose message —
 /// "cannot satisfy the enclosing schema's own constraints" — is false about the document: the
 /// member can satisfy them perfectly well, it simply has not been lowered yet.
 #[test]
@@ -6147,9 +6240,9 @@ components:
     .unwrap();
 
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
         let shadow = report
@@ -6290,9 +6383,9 @@ components:
         std::fs::write(dir.join("openapi.yaml"), root).unwrap();
         std::fs::write(dir.join("lib.yaml"), lib(spelling, declares_shared)).unwrap();
         let out = dir.join("client.rs");
-        let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
-        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
 
         for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_ne!(
@@ -6557,7 +6650,7 @@ Pet:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
@@ -6634,7 +6727,7 @@ Pet:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
@@ -6675,8 +6768,8 @@ components:
     .unwrap();
     let spec = dir.join("openapi.yaml");
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(spec.clone(), out.clone()));
-    let checked = spargen::check(&Spec::new(spec));
+    let generated = run_generate(&build(spec.clone(), out.clone()));
+    let checked = run_check(&Spec::new(spec));
     for (entry, report) in [("generate", &generated), ("check", &checked)] {
         assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
         assert!(
@@ -6745,9 +6838,9 @@ mod remote {
         let out = dir.join("client.rs");
         let spec = Spec::new(dir.join("openapi.yaml"));
         let report = if check_only {
-            spargen::check(&spec)
+            run_check(&spec)
         } else {
-            spargen::generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
+            run_generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
         };
         (report, temp, out)
     }
@@ -6838,9 +6931,9 @@ mod remote {
         let out = dir.join("client.rs");
         let spec = Spec::new(dir.join("openapi.yaml"));
         let report = if check_only {
-            spargen::check(&spec)
+            run_check(&spec)
         } else {
-            spargen::generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
+            run_generate(&spec.build(out.clone()).cargo(CargoIntegration::Off))
         };
         (report, temp, out)
     }
@@ -6848,18 +6941,17 @@ mod remote {
     /// The remote counterpart of the direct-recursive `allOf` member, reached through an **alias**,
     /// which is the shape that needs the id-keyed guard rather than the spelling-keyed one.
     ///
-    /// `gather_member`'s remote arm has two checks. The pre-existing one keys on the reference
-    /// *string* — `remote_in_progress.contains_key(reference)` — and this branch added a second
-    /// keyed on the returned `Ty`'s id. Only the second can see this case: `node.yaml` composes
+    /// `gather_member`'s remote arm has two checks. One keys on the reference *string* —
+    /// `remote_in_progress.contains_key(reference)` — and the other on the returned `Ty`'s id.
+    /// Only the second can see this case: `node.yaml` composes
     /// `allOf: [alias.yaml]`, `alias.yaml` is a bare `$ref` back to `node.yaml`, so the member's own
     /// spelling is never the in-progress key, and `ensure_remote` chains through the alias and hands
     /// back a back-edge against `node.yaml`'s reservation.
     ///
     /// **Removing the id-keyed check leaves every other test in the workspace green.** Without it
     /// this document generates, with zero diagnostics, and emits
-    /// `pub type …child = serde_json::Value;` — the same silent degradation the component path was
-    /// repaired for in this branch, on a path nothing exercised. The guard was added here; the
-    /// fixture was not.
+    /// `pub type …child = serde_json::Value;` — the same silent degradation the component path
+    /// guards against, on a path no other test exercises.
     #[test]
     fn a_direct_recursive_remote_all_of_member_reached_through_an_alias_is_rejected() {
         const NODE_URL: &str = "https://api.example.com/schemas/node.yaml";
@@ -8188,13 +8280,1388 @@ components:
     }
 }
 
-/// A `discriminator.mapping` value is matched to a member by component name. A value that is not
-/// one — a pointer into a component, in the same-file or any file spelling, or a reference to
-/// another file — matches no member, so the tag it declares for that member would be replaced by
-/// an invented one on the wire. It is rejected rather than ignored; a component-name value, bare or
-/// as a full pointer, still generates.
+/// A `Pet` union over `Cat` and `Dog` (both declared) plus a declared non-member `Fish`, carrying
+/// the given `discriminator` body. `members` replaces the `oneOf` list when a case needs another
+/// member shape.
+fn discriminated_pet(version: &str, members: &str, discriminator: &str) -> String {
+    format!(
+        "openapi: {version}\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         paths: {{}}\n\
+         components:\n  \
+         schemas:\n    \
+         Pet:\n      \
+         oneOf:\n{members}      \
+         discriminator:\n{discriminator}    \
+         Cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }} }} }}\n    \
+         Dog: {{ type: object, required: [kind, bark], properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }} }}\n    \
+         Fish: {{ type: object, required: [kind, fins], properties: {{ kind: {{ type: string }}, fins: {{ type: integer }} }} }}\n"
+    )
+}
+
+const CAT_AND_DOG: &str = "        - { $ref: '#/components/schemas/Cat' }\n        \
+                           - { $ref: '#/components/schemas/Dog' }\n";
+
+/// Issue #124: a `discriminator.mapping` value is a reference to a schema, and one naming a schema
+/// that does not exist was dropped with no diagnostic — `check` said `clean` while the tag it
+/// described had no variant to decode into. It is an unresolved reference like any other, so it is
+/// `E004`, reported at the mapping entry itself so the rejection names (and auto-carve can reach)
+/// the site that is wrong. The same holds for 3.2 `defaultMapping`, which used to be reported as a
+/// membership problem (`E007`) about a schema that was never declared at all.
 #[test]
-fn e007_discriminator_mapping_value_that_is_not_a_component_name() {
+fn a_discriminator_mapping_value_naming_an_undeclared_schema_is_e004_at_the_entry() {
+    let cases = [
+        (
+            "pointer spelling",
+            discriminated_pet(
+                "3.1.0",
+                CAT_AND_DOG,
+                "        propertyName: kind\n        mapping:\n          \
+                 cat: '#/components/schemas/Cat'\n          \
+                 c: '#/components/schemas/MissingC'\n",
+            ),
+            "/components/schemas/Pet/discriminator/mapping/c",
+            "MissingC",
+        ),
+        (
+            "schema-name spelling",
+            discriminated_pet(
+                "3.1.0",
+                CAT_AND_DOG,
+                "        propertyName: kind\n        mapping:\n          c: MissingC\n",
+            ),
+            "/components/schemas/Pet/discriminator/mapping/c",
+            "MissingC",
+        ),
+        (
+            "3.2 defaultMapping",
+            discriminated_pet(
+                "3.2.0",
+                CAT_AND_DOG,
+                "        propertyName: kind\n        defaultMapping: MissingC\n",
+            ),
+            "/components/schemas/Pet/discriminator/defaultMapping",
+            "MissingC",
+        ),
+    ];
+    for (what, spec, pointer, named) in cases {
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}\n{spec}"
+            );
+            let e004: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::UnresolvedRef)
+                .collect();
+            assert!(
+                e004.iter()
+                    .any(|d| d.pointer.as_str() == pointer && d.message.contains(named)),
+                "{what} via {entry}: E004 must sit at `{pointer}` and name `{named}`: \
+                 {report:#?}"
+            );
+            // The schema does not exist, so saying it is "not a member" would send the reader to
+            // edit the union rather than to the dangling name.
+            assert!(
+                !has_code(&report, Code::NonDisjointUnion),
+                "{what} via {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The sibling shape issue #124 asked to settle. A mapping value that resolves, but to a schema the
+/// `oneOf`/`anyOf` does not list, describes a tag whose payload the generated enum has no variant
+/// for. The specification requires every possible schema to be listed explicitly beside the
+/// discriminator, so this is the same refusal `defaultMapping` already gets for a non-member —
+/// `E007` — now reported at the mapping entry. Checked on the sole-real-member collapse as well as
+/// the multi-member union, since that path returns before any discriminated dispatch is built and
+/// once dropped the mapping there without looking at it.
+#[test]
+fn a_discriminator_mapping_value_naming_a_non_member_is_e007_at_the_entry() {
+    let fish = "        propertyName: kind\n        mapping:\n          \
+                cat: Cat\n          fish: '#/components/schemas/Fish'\n";
+    let cases = [
+        ("two members", discriminated_pet("3.1.0", CAT_AND_DOG, fish)),
+        (
+            "one real member beside null",
+            discriminated_pet(
+                "3.1.0",
+                "        - { $ref: '#/components/schemas/Cat' }\n        \
+                 - { type: 'null' }\n",
+                fish,
+            ),
+        ),
+        (
+            "inline member",
+            discriminated_pet(
+                "3.1.0",
+                "        - { $ref: '#/components/schemas/Cat' }\n        \
+                 - { type: object, required: [kind, fins], properties: { kind: { type: string }, \
+                 fins: { type: integer } } }\n",
+                fish,
+            ),
+        ),
+    ];
+    for (what, spec) in cases {
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::NonDisjointUnion
+                        && d.pointer.as_str()
+                            == "/components/schemas/Pet/discriminator/mapping/fish"
+                        && d.message.contains("Fish")),
+                "{what} via {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::UnresolvedRef),
+                "{what} via {entry}: `Fish` is declared: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The well-formed control for the two rejections above: a mapping that names every member, in
+/// each spelling the specification allows, generates and dispatches on the mapped tags. The file
+/// spelling of a root component is the one that used to miss: matching compared strings, so
+/// `./openapi.yaml#/components/schemas/Dog` never equalled `Dog`, and the variant silently decoded
+/// on the tag `"Dog"` instead of the `"doggo"` the document gave it.
+#[test]
+fn a_discriminator_mapping_naming_every_member_in_any_spelling_generates_its_tags() {
+    let spec = discriminated_pet(
+        "3.1.0",
+        "        - { $ref: '#/components/schemas/Cat' }\n        \
+         - { $ref: '#/components/schemas/Dog' }\n        \
+         - { $ref: '#/components/schemas/Fish' }\n",
+        "        propertyName: kind\n        mapping:\n          \
+         kitty: Cat\n          \
+         doggo: './openapi.yaml#/components/schemas/Dog'\n          \
+         fishy: '#/components/schemas/Fish'\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    for tag in ["\"kitty\"", "\"doggo\"", "\"fishy\""] {
+        assert!(
+            code.contains(tag),
+            "the mapped tag {tag} must dispatch:\n{code}"
+        );
+    }
+    // The explicit tag is the one written back; the component name still selects the member
+    // (#263), since no mapping key claims it.
+    let arms = discriminated_arms(&code, "Pet");
+    assert_eq!(
+        arms.decode,
+        [
+            ("Cat", vec!["kitty", "Cat"]),
+            ("Dog", vec!["doggo", "Dog"]),
+            ("Fish", vec!["fishy", "Fish"]),
+        ]
+        .map(|(variant, tags)| (
+            variant.to_owned(),
+            tags.into_iter().map(str::to_owned).collect()
+        ))
+        .to_vec(),
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        [("Cat", "kitty"), ("Dog", "doggo"), ("Fish", "fishy")]
+            .map(|(variant, tag)| (variant.to_owned(), Some(tag.to_owned())))
+            .to_vec(),
+        "{code}"
+    );
+    let checked = check(&spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
+}
+
+/// A document whose `components.schemas` are `schemas`, beside a declared `Cat`.
+fn with_schemas(version: &str, schemas: &str) -> String {
+    format!(
+        "openapi: {version}\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         paths: {{}}\n\
+         components:\n  \
+         schemas:\n{schemas}    \
+         Cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }} }} }}\n"
+    )
+}
+
+/// The places a `discriminator` can sit with no `oneOf`/`anyOf` of its own, each with the pointer
+/// of the Discriminator Object. `mapping` is the body of its `mapping`, spliced in at the depth
+/// each placement needs.
+fn standalone_discriminators(mapping: &str) -> Vec<(&'static str, String, &'static str)> {
+    vec![
+        (
+            "allOf parent",
+            with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pet:\n      type: object\n      required: [kind]\n      \
+                     properties: {{ kind: {{ type: string }} }}\n      \
+                     discriminator:\n        propertyName: kind\n        \
+                     mapping: {{ {mapping} }}\n    \
+                     Kitten:\n      allOf:\n        - $ref: '#/components/schemas/Pet'\n        \
+                     - {{ properties: {{ meow: {{ type: boolean }} }} }}\n"
+                ),
+            ),
+            "/components/schemas/Pet/discriminator",
+        ),
+        (
+            "inline allOf member",
+            with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pet:\n      allOf:\n        \
+                     - type: object\n          properties: {{ kind: {{ type: string }} }}\n          \
+                     discriminator: {{ propertyName: kind, mapping: {{ {mapping} }} }}\n"
+                ),
+            ),
+            "/components/schemas/Pet/allOf/0/discriminator",
+        ),
+        (
+            "beside a $ref",
+            with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pet:\n      $ref: '#/components/schemas/Cat'\n      \
+                     discriminator: {{ propertyName: kind, mapping: {{ {mapping} }} }}\n"
+                ),
+            ),
+            "/components/schemas/Pet/discriminator",
+        ),
+        (
+            "on a union's $ref member",
+            with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pet:\n      oneOf:\n        \
+                     - $ref: '#/components/schemas/Cat'\n          \
+                     discriminator: {{ propertyName: kind, mapping: {{ {mapping} }} }}\n        \
+                     - {{ type: string }}\n"
+                ),
+            ),
+            "/components/schemas/Pet/oneOf/0/discriminator",
+        ),
+        (
+            "multi-type array",
+            with_schemas(
+                "3.1.0",
+                &format!(
+                    "    Pet:\n      type: [object, string]\n      \
+                     discriminator: {{ propertyName: kind, mapping: {{ {mapping} }} }}\n"
+                ),
+            ),
+            "/components/schemas/Pet/discriminator",
+        ),
+    ]
+}
+
+/// Issue #264: a `discriminator` on a schema with no `oneOf`/`anyOf` of its own — the `allOf`
+/// polymorphism form above all — was ignored with no diagnostic. spargen dispatches by tag only
+/// across a union's members, and no keyword of a parent lists the children that reach it through
+/// `allOf`, so the form is not generated: the schema lowers by its other keywords, and the
+/// discriminator is acknowledged as `W011` at its own site. A mapping naming declared schemas is
+/// otherwise fine — with no union there is no membership to check, so no `E007` either.
+#[test]
+fn a_discriminator_beside_no_union_is_w011_at_the_discriminator() {
+    for (what, spec, pointer) in standalone_discriminators("cat: Cat") {
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{what}: {report:#?}\n{spec}"
+        );
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            let w011: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .collect();
+            assert_eq!(
+                w011.len(),
+                1,
+                "{what} via {entry}: one W011, at the discriminator: {report:#?}"
+            );
+            assert_eq!(w011[0].pointer.as_str(), pointer, "{what} via {entry}");
+            assert!(
+                w011[0].message.contains("`discriminator`"),
+                "{what} via {entry}: {:?}",
+                w011[0].message
+            );
+            assert!(
+                !has_code(report, Code::UnresolvedRef) && !has_code(report, Code::NonDisjointUnion),
+                "{what} via {entry}: every mapping target is declared: {report:#?}"
+            );
+        }
+        assert!(
+            !code.contains("\"cat\""),
+            "{what}: an inert discriminator dispatches on nothing:\n{code}"
+        );
+    }
+}
+
+/// The #124 rule, carried to the discriminator #264 found unchecked: a `mapping` or
+/// `defaultMapping` value naming no schema is an unresolved reference (`E004`) at the entry,
+/// whether or not a union sits beside the discriminator. The `allOf`-parent case is the issue's
+/// own reproduction, which `check` used to call clean.
+#[test]
+fn a_discriminator_beside_no_union_naming_an_undeclared_schema_is_e004_at_the_entry() {
+    let mut cases: Vec<_> =
+        standalone_discriminators("cat: Cat, c: '#/components/schemas/MissingC'")
+            .into_iter()
+            .map(|(what, spec, pointer)| (what, spec, format!("{pointer}/mapping/c")))
+            .collect();
+    cases.push((
+        "3.2 defaultMapping",
+        with_schemas(
+            "3.2.0",
+            "    Pet:\n      type: object\n      \
+             discriminator: { propertyName: kind, defaultMapping: MissingC }\n",
+        ),
+        "/components/schemas/Pet/discriminator/defaultMapping".to_owned(),
+    ));
+    for (what, spec, pointer) in cases {
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::UnresolvedRef
+                        && d.pointer.as_str() == pointer
+                        && d.message.contains("MissingC")),
+                "{what} via {entry}: E004 must sit at `{pointer}` and name `MissingC`: \
+                 {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::NonDisjointUnion),
+                "{what} via {entry}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// Issue #419: a schema carrying `allOf` and `oneOf`/`anyOf` together lowered through the `allOf`
+/// arm alone, which never read the union, so the union — and a `discriminator` beside it — was
+/// dropped and `check` called the document clean. The two are a conjunction: the `allOf`
+/// composition is met with the union branch by branch, as a `$ref` is met with a union target, so
+/// a branch the composition excludes drops out. Where no branch is left, or a meet has no single
+/// type, it is `E013` at the schema.
+#[test]
+fn a_union_beside_all_of_that_contradicts_it_is_rejected() {
+    let cases = [
+        (
+            "issue reproduction (oneOf)",
+            "    Pet:\n      \
+             allOf: [ { type: object, properties: { id: { type: integer } } } ]\n      \
+             oneOf: [ { type: string } ]\n",
+            "/components/schemas/Pet",
+        ),
+        (
+            "anyOf",
+            "    Pet:\n      \
+             allOf: [ { type: object, properties: { id: { type: integer } } } ]\n      \
+             anyOf: [ { type: string } ]\n",
+            "/components/schemas/Pet",
+        ),
+        (
+            "scalar allOf against a disjoint union",
+            "    Pet:\n      \
+             allOf: [ { type: integer } ]\n      \
+             oneOf: [ { type: string }, { type: boolean } ]\n",
+            "/components/schemas/Pet",
+        ),
+        (
+            "nested allOf member carrying a union",
+            "    Pet:\n      allOf:\n        \
+             - allOf: [ { type: object, properties: { id: { type: integer } } } ]\n          \
+             oneOf: [ { type: string } ]\n",
+            "/components/schemas/Pet/allOf/0",
+        ),
+    ];
+    for (what, schemas, pointer) in cases {
+        let spec = with_schemas("3.1.0", schemas);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer),
+                "{what} via {entry}: E013 must sit at `{pointer}`: {report:#?}"
+            );
+        }
+    }
+}
+
+/// Issue #419, the inline-member spelling: an `allOf` member carrying object keywords beside its
+/// own `oneOf` was read as an object by its keywords and its union dropped. The member is lowered
+/// as the union it is, its object keywords refining the branches of their own category, so an
+/// explicit `type: object` beside a string-only union leaves no branch and is reported, and untyped
+/// `properties` beside it constrain nothing the union accepts.
+#[test]
+fn an_all_of_member_with_its_own_union_beside_object_keywords_keeps_the_union() {
+    let typed = with_schemas(
+        "3.1.0",
+        "    Pet:\n      allOf:\n        \
+         - type: object\n          properties: { id: { type: integer } }\n          \
+         oneOf: [ { type: string } ]\n",
+    );
+    for (entry, report) in [("generate", generate(&typed)), ("check", check(&typed))] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "via {entry}: an object no string is: {report:#?}"
+        );
+        assert!(
+            has_code(&report, Code::NonDisjointUnion),
+            "via {entry}: {report:#?}"
+        );
+    }
+
+    let untyped = with_schemas(
+        "3.1.0",
+        "    Pet:\n      allOf:\n        \
+         - properties: { id: { type: integer } }\n          \
+         oneOf: [ { type: string } ]\n",
+    );
+    let (report, code) = generate_with_code(&untyped);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub type Pet = String;"),
+        "the member is a string, not a struct with `id`:\n{types}"
+    );
+    assert!(
+        !types.contains("pub struct Pet "),
+        "the union must not be dropped for the object keywords:\n{types}"
+    );
+}
+
+/// Issue #419: the `discriminator` beside a union that `allOf` shadowed went unread, so a `mapping`
+/// naming no schema was never reported. It belongs to the union, and is checked as the union's own.
+#[test]
+fn a_discriminator_beside_all_of_and_a_union_has_its_mapping_checked() {
+    let spec = with_schemas(
+        "3.1.0",
+        "    Pet:\n      allOf: [ { description: a pet } ]\n      \
+         oneOf: [ { $ref: '#/components/schemas/Cat' } ]\n      \
+         discriminator: { propertyName: kind, mapping: { x: Nope } }\n",
+    );
+    for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+        assert_eq!(
+            report.outcome(),
+            Outcome::Rejected,
+            "via {entry}: {report:#?}"
+        );
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::UnresolvedRef
+                    && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/x"
+                    && d.message.contains("Nope")),
+            "via {entry}: E004 must sit at the mapping entry and name `Nope`: {report:#?}"
+        );
+    }
+}
+
+/// Issue #419: where the conjunction has a type, it is the union narrowed by the `allOf`, not the
+/// `allOf` alone. An annotation-only `allOf` leaves the discriminated union exactly as the same
+/// schema without it generates; a scalar `allOf` narrows the union to the branches it admits.
+#[test]
+fn a_union_beside_all_of_composes_with_it() {
+    let union = "      oneOf: [ { $ref: '#/components/schemas/Cat' }, { type: string } ]\n      \
+                 discriminator: { propertyName: kind, mapping: { cat: Cat } }\n";
+    let bare = with_schemas("3.1.0", &format!("    Pet:\n{union}"));
+    let shadowed = with_schemas(
+        "3.1.0",
+        &format!("    Pet:\n      allOf: [ {{ description: a pet }} ]\n{union}"),
+    );
+    let (bare_report, bare_code) = generate_with_code(&bare);
+    assert_ne!(bare_report.outcome(), Outcome::Rejected, "{bare_report:#?}");
+    assert_eq!(
+        enum_variants(&bare_code, "Pet"),
+        ["Cat(Box<Cat>)", "PetVariant1(Box<PetVariant1>)"],
+        "{bare_code}"
+    );
+    let (report, code) = generate_with_code(&shadowed);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    assert_eq!(types_module(&code), types_module(&bare_code));
+    assert!(
+        code.contains("\"cat\""),
+        "the discriminator still dispatches:\n{code}"
+    );
+    let checked = check(&shadowed);
+    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
+
+    // The `allOf` polymorphism parent spelled beside its own union: every branch is met with the
+    // shared base, so each variant carries the base's `id` as well as its own fields.
+    let based = with_schemas(
+        "3.1.0",
+        "    Base: { type: object, required: [id], properties: { id: { type: integer } } }\n    \
+         Dog: { type: object, required: [kind], properties: { kind: { type: string }, bark: { type: boolean } } }\n    \
+         Pet:\n      allOf: [ { $ref: '#/components/schemas/Base' } ]\n      \
+         oneOf: [ { $ref: '#/components/schemas/Cat' }, { $ref: '#/components/schemas/Dog' } ]\n      \
+         discriminator: { propertyName: kind }\n",
+    );
+    let (report, code) = generate_with_code(&based);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    let variants = enum_variants(&types, "Pet");
+    assert_eq!(variants.len(), 2, "{types}");
+    for variant in &variants {
+        let payload = variant
+            .split_once("(Box<")
+            .and_then(|(_, rest)| rest.strip_suffix(">)"))
+            .unwrap_or_else(|| panic!("{variant}: {types}"));
+        let fields = declared_fields(&types, payload);
+        assert!(
+            fields.iter().any(|field| field == "id") && fields.iter().any(|field| field == "kind"),
+            "{payload} must carry the base's `id` beside its own `kind`: {fields:?}\n{types}"
+        );
+    }
+
+    let narrowed = with_schemas(
+        "3.1.0",
+        "    Pet:\n      allOf: [ { type: integer } ]\n      \
+         oneOf: [ { type: string }, { type: integer, format: int32 } ]\n",
+    );
+    let (report, code) = generate_with_code(&narrowed);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    let types = types_module(&code);
+    assert!(
+        types.contains("pub type Pet = i32;"),
+        "only the integer branch meets `type: integer`:\n{types}"
+    );
+}
+
+/// Issue #419: an `allOf` beside the schema's own `oneOf`/`anyOf` excludes only the branches it
+/// constrains away. The schema's own keywords beside both are the union's siblings, refining its
+/// branches of their own category, and are not also an object member of the composition; an
+/// untyped `allOf` member is refined into the union the same way, as a `$ref` to a union refines
+/// with untyped siblings. Either, read as an object of the composition, dropped every string and
+/// `null` branch, so the generated client refused values the description accepts. A typed member
+/// that admits `null` keeps the union's `null` branch.
+#[test]
+fn a_union_beside_all_of_keeps_the_branches_and_null_the_composition_admits() {
+    let mixed = [
+        (
+            "the schema's own `required` beside an annotation-only allOf",
+            "    Pet:\n      required: [kind]\n      allOf: [ { description: a pet } ]\n      \
+             oneOf: [ { type: string }, { $ref: '#/components/schemas/Cat' } ]\n",
+        ),
+        (
+            "an untyped `required` allOf member",
+            "    Pet:\n      allOf: [ { required: [kind] } ]\n      \
+             oneOf: [ { type: string }, { $ref: '#/components/schemas/Cat' } ]\n",
+        ),
+    ];
+    for (what, schemas) in mixed {
+        let spec = with_schemas("3.1.0", schemas);
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let types = types_module(&code);
+        assert!(
+            !types.contains("pub struct Pet "),
+            "{what}: the string branch must survive:\n{types}"
+        );
+        let variants = enum_variants(&types, "Pet");
+        assert_eq!(variants.len(), 2, "{what}: {variants:?}\n{types}");
+        assert!(
+            variants.iter().any(|variant| {
+                variant
+                    .split_once("(Box<")
+                    .and_then(|(_, rest)| rest.strip_suffix(">)"))
+                    .is_some_and(|payload| types.contains(&format!("pub type {payload} = String;")))
+            }),
+            "{what}: one variant is the string branch: {variants:?}\n{types}"
+        );
+        let checked = check(&spec);
+        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
+    }
+
+    let owner = "    Owner:\n      type: object\n      required: [p]\n      \
+                 properties: { p: { $ref: '#/components/schemas/Pet' } }\n";
+    let nullable = [
+        (
+            "the schema's own `properties` beside an annotation-only allOf",
+            "    Pet:\n      properties: { name: { type: string } }\n      \
+             allOf: [ { description: a pet } ]\n      \
+             oneOf: [ { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]\n",
+        ),
+        (
+            "an untyped `properties` allOf member",
+            "    Pet:\n      allOf: [ { properties: { name: { type: string } } } ]\n      \
+             oneOf: [ { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]\n",
+        ),
+        (
+            "a typed allOf member admitting null",
+            "    Pet:\n      \
+             allOf: [ { type: [object, 'null'], properties: { name: { type: string } } } ]\n      \
+             oneOf: [ { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]\n",
+        ),
+    ];
+    for (what, schemas) in nullable {
+        let spec = with_schemas("3.1.0", &format!("{owner}{schemas}"));
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let types = types_module(&code);
+        let p = field_type(&types, "pub p:").unwrap_or_else(|| panic!("{what}: no `p`\n{types}"));
+        assert!(
+            p.starts_with("Option<"),
+            "{what}: `null` satisfies both, so `p` is nullable, not `{p}`:\n{types}"
+        );
+        let fields = declared_fields(&types, "Pet");
+        assert!(
+            fields.iter().any(|field| field == "name")
+                && fields.iter().any(|field| field == "kind"),
+            "{what}: the object branch is `Cat` refined by `name`: {fields:?}\n{types}"
+        );
+        let checked = check(&spec);
+        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
+    }
+}
+
+/// Issue #419: a union of two or more non-null branches plus `null` stays a nullable union when
+/// an untyped `allOf` member refines it, as it does when the same keywords sit beside a `$ref`
+/// to it or beside the union itself. The untyped keywords say nothing about `null`, so the union's
+/// `null` branch survives the refinement. The branch-by-branch meet built a new union without it,
+/// and a required property reaching the schema was typed `Pet`, refusing the `null` the
+/// description accepts.
+#[test]
+fn an_untyped_all_of_member_keeps_a_multi_branch_unions_null() {
+    let owner = "    Owner:\n      type: object\n      required: [p]\n      \
+                 properties: { p: { $ref: '#/components/schemas/Pet' } }\n";
+    let union =
+        "oneOf: [ { type: string }, { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]";
+    let cases = [
+        (
+            "an untyped `required` allOf member",
+            format!("    Pet:\n      allOf: [ {{ required: [kind] }} ]\n      {union}\n"),
+        ),
+        (
+            "an untyped `properties` allOf member",
+            format!(
+                "    Pet:\n      allOf: [ {{ properties: {{ name: {{ type: string }} }} }} ]\n      \
+                 {union}\n"
+            ),
+        ),
+        (
+            "two untyped allOf members",
+            format!(
+                "    Pet:\n      allOf: [ {{ required: [kind] }}, \
+                 {{ properties: {{ name: {{ type: string }} }} }} ]\n      {union}\n"
+            ),
+        ),
+        (
+            "the schema's own `required` beside an annotation-only allOf",
+            format!(
+                "    Pet:\n      required: [kind]\n      allOf: [ {{ description: a pet }} ]\n      \
+                 {union}\n"
+            ),
+        ),
+        (
+            "the same keywords beside a `$ref` to the union",
+            format!(
+                "    Pet:\n      $ref: '#/components/schemas/U'\n      required: [kind]\n    \
+                 U:\n      {union}\n"
+            ),
+        ),
+    ];
+    for (what, schemas) in cases {
+        let spec = with_schemas("3.1.0", &format!("{owner}{schemas}"));
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{what}: {report:#?}");
+        let types = types_module(&code);
+        let p = field_type(&types, "pub p:").unwrap_or_else(|| panic!("{what}: no `p`\n{types}"));
+        assert_eq!(
+            p, "Option<Pet>",
+            "{what}: `null` satisfies both, so `p` is nullable:\n{types}"
+        );
+        let variants = enum_variants(&types, "Pet");
+        assert_eq!(
+            variants.len(),
+            2,
+            "{what}: both non-null branches survive: {variants:?}\n{types}"
+        );
+        let checked = check(&spec);
+        assert_ne!(checked.outcome(), Outcome::Rejected, "{what}: {checked:#?}");
+    }
+}
+
+/// Issue #419, the `$ref` spelling of an `allOf` member beside a union (decision 10): the member
+/// is never a scoped refiner, so the union meets the target's lowered component type. A target
+/// holding only `required` lowers to an untyped schema, which excludes no branch, so the string
+/// branch and the `null` both survive, as with the inline spelling. A target holding `properties`
+/// lowers to an object, so the meet keeps only the object branch: the string branch and the `null`
+/// drop, and no diagnostic says so. This pins today's behaviour of both, so a change to either is
+/// a visible diff.
+#[test]
+fn a_ref_all_of_member_beside_a_union_meets_its_targets_lowered_type() {
+    let owner = "    Owner:\n      type: object\n      required: [p]\n      \
+                 properties: { p: { $ref: '#/components/schemas/Pet' } }\n";
+    let with_string =
+        "oneOf: [ { type: string }, { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]";
+    let without_string = "oneOf: [ { $ref: '#/components/schemas/Cat' }, { type: 'null' } ]";
+    // (target, union, `p`'s type, `Pet`'s variant count: 0 where it is not an enum).
+    let cases = [
+        (
+            "    HasKind:\n      required: [kind]\n",
+            with_string,
+            "Option<Pet>",
+            2,
+        ),
+        (
+            "    HasKind:\n      required: [kind]\n",
+            without_string,
+            "Option<Pet>",
+            0,
+        ),
+        (
+            "    HasName:\n      properties: { name: { type: string } }\n",
+            with_string,
+            "Pet",
+            0,
+        ),
+        (
+            "    HasName:\n      properties: { name: { type: string } }\n",
+            without_string,
+            "Pet",
+            0,
+        ),
+    ];
+    for (target, union, p_type, variant_count) in cases {
+        let name = target.trim().split(':').next().unwrap_or_default();
+        let what = format!("{name} beside {union}");
+        let spec = with_schemas(
+            "3.1.0",
+            &format!(
+                "{owner}{target}    Pet:\n      \
+                 allOf: [ {{ $ref: '#/components/schemas/{name}' }} ]\n      {union}\n"
+            ),
+        );
+        let (report, code) = generate_with_code(&spec);
+        assert_eq!(report.outcome(), Outcome::Generated, "{what}: {report:#?}");
+        assert!(report.diagnostics().is_empty(), "{what}: {report:#?}");
+        let types = types_module(&code);
+        let p = field_type(&types, "pub p:").unwrap_or_else(|| panic!("{what}: no `p`\n{types}"));
+        assert_eq!(p, p_type, "{what}:\n{types}");
+        let variants = enum_variants(&types, "Pet");
+        assert_eq!(
+            variants.len(),
+            variant_count,
+            "{what}: {variants:?}\n{types}"
+        );
+        if name == "HasName" {
+            assert!(
+                types.contains("pub struct Pet {"),
+                "{what}: the meet keeps only the object branch:\n{types}"
+            );
+        }
+        let checked = check(&spec);
+        assert!(checked.diagnostics().is_empty(), "{what}: {checked:#?}");
+    }
+}
+
+/// Issue #419: an untyped `allOf` member beside a union is reported as the same keywords are
+/// beside a `$ref` to it. Reaching no branch of its category it constrains nothing the union
+/// accepts (`W011` at the member, and the union generates); object and array keywords together
+/// against a branch that states no category are `E013` at the member; and a meet with the one
+/// object branch that leaves no value is `E013` at the schema carrying both keywords.
+#[test]
+fn an_untyped_all_of_member_beside_a_union_is_reported_as_a_ref_sibling_is() {
+    let unreached = with_schemas(
+        "3.1.0",
+        "    Pet:\n      allOf: [ { required: [kind] } ]\n      \
+         oneOf: [ { type: string }, { type: integer } ]\n",
+    );
+    for (entry, report) in [
+        ("generate", generate(&unreached)),
+        ("check", check(&unreached)),
+    ] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "via {entry}: {report:#?}"
+        );
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::DeclarationHasNoEffect
+                    && d.pointer.as_str() == "/components/schemas/Pet/allOf/0"),
+            "via {entry}: W011 must sit at the member: {report:#?}"
+        );
+    }
+
+    let rejected = [
+        (
+            "both kinds against a branch that states no category",
+            "    Pet:\n      allOf: [ { required: [kind], items: { type: string } } ]\n      \
+             oneOf: [ { type: string }, { description: anything } ]\n",
+            "/components/schemas/Pet/allOf/0",
+        ),
+        (
+            "a property type the object branch contradicts",
+            "    Pet:\n      \
+             allOf: [ { required: [kind], properties: { kind: { type: integer } } } ]\n      \
+             oneOf: [ { $ref: '#/components/schemas/Cat' } ]\n",
+            "/components/schemas/Pet",
+        ),
+    ];
+    for (what, schemas, pointer) in rejected {
+        let spec = with_schemas("3.1.0", schemas);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::AllOfIrreconcilable && d.pointer.as_str() == pointer),
+                "{what} via {entry}: E013 must sit at `{pointer}`: {report:#?}"
+            );
+        }
+    }
+}
+
+/// The dispatch a discriminated union `name` emits, read back from the generated source: per
+/// decode arm, the variant and every tag its pattern matches, and per encode arm, the variant and
+/// the tag serialization writes (`None` for one it writes no tag for).
+struct DiscriminatedArms {
+    decode: Vec<(String, Vec<String>)>,
+    encode: Vec<(String, Option<String>)>,
+}
+
+fn discriminated_arms(code: &str, name: &str) -> DiscriminatedArms {
+    let de_impl = code
+        .split(&format!("impl<'de> serde::Deserialize<'de> for {name} {{"))
+        .nth(1)
+        .unwrap_or_else(|| panic!("no Deserialize for {name}:\n{code}"));
+    // Layout is the formatter's business, so read whitespace-collapsed text.
+    let flat = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let de_body = de_impl
+        .split("match tag.as_str() {")
+        .nth(1)
+        .and_then(|rest| rest.split("_ =>").next())
+        .map(flat)
+        .unwrap_or_else(|| panic!("no tag dispatch for {name}:\n{code}"));
+    let pieces: Vec<&str> = de_body
+        .split(&format!("serde_json::from_value(value) .map({name}::"))
+        .collect();
+    let decode = pieces
+        .windows(2)
+        .map(|pair| {
+            let pattern = pair[0].rsplit_once(" =>").map_or(pair[0], |(head, _)| head);
+            let pattern = pattern.rsplit(['}', ',']).next().unwrap_or(pattern);
+            let tags = pattern
+                .split('|')
+                .map(|tag| tag.trim().trim_matches('"').to_owned())
+                .filter(|tag| !tag.is_empty())
+                .collect();
+            let variant = pair[1].split(')').next().unwrap_or_default().to_owned();
+            (variant, tags)
+        })
+        .collect();
+    let ser_impl = code
+        .split(&format!("impl serde::Serialize for {name} {{"))
+        .nth(1)
+        .and_then(|rest| rest.split("if let Some(tag) = tag").next())
+        .map(flat)
+        .unwrap_or_else(|| panic!("no Serialize for {name}:\n{code}"));
+    let pieces: Vec<&str> = ser_impl.split("(inner) =>").collect();
+    let encode = pieces
+        .windows(2)
+        .map(|pair| {
+            let variant = pair[0]
+                .rsplit(&format!("{name}::"))
+                .next()
+                .unwrap_or_default();
+            let tag = pair[1]
+                .split_once("?,")
+                .and_then(|(_, rest)| rest.split(',').next())
+                .unwrap_or_default()
+                .trim();
+            let tag = tag
+                .strip_prefix("Some(")
+                .map(|tag| tag.trim_end_matches(')').trim_matches('"').to_owned());
+            (variant.trim().to_owned(), tag)
+        })
+        .collect();
+    DiscriminatedArms { decode, encode }
+}
+
+/// Issue #263: a member several discriminator values name dispatched on only the first. Every
+/// `mapping` key naming it selects it, and so does its component name, which no key claims;
+/// serialization writes the first key.
+#[test]
+fn every_discriminator_value_naming_a_member_selects_it() {
+    let spec = discriminated_pet(
+        "3.1.0",
+        CAT_AND_DOG,
+        "        propertyName: kind\n        mapping:\n          \
+         a: Cat\n          \
+         d: Dog\n          \
+         a2: '#/components/schemas/Cat'\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let arms = discriminated_arms(&code, "Pet");
+    assert_eq!(
+        arms.decode,
+        vec![
+            (
+                "Cat".to_owned(),
+                vec!["a".to_owned(), "a2".to_owned(), "Cat".to_owned()]
+            ),
+            ("Dog".to_owned(), vec!["d".to_owned(), "Dog".to_owned()]),
+        ],
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        vec![
+            ("Cat".to_owned(), Some("a".to_owned())),
+            ("Dog".to_owned(), Some("d".to_owned())),
+        ],
+        "{code}"
+    );
+    let checked = check(&spec);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+    assert!(checked.diagnostics().is_empty(), "{checked:#?}");
+}
+
+/// A component name is read as one only "unless a `mapping` is present for that value": a key
+/// equal to `Cat` that names `Dog` makes the value `Cat` select `Dog`, and takes it away from
+/// `Cat`, which keeps the key that names it.
+#[test]
+fn a_mapping_key_equal_to_a_component_name_claims_that_value() {
+    let spec = discriminated_pet(
+        "3.1.0",
+        CAT_AND_DOG,
+        "        propertyName: kind\n        mapping:\n          \
+         Cat: Dog\n          \
+         kitty: Cat\n",
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let arms = discriminated_arms(&code, "Pet");
+    assert_eq!(
+        arms.decode,
+        vec![
+            ("Cat".to_owned(), vec!["kitty".to_owned()]),
+            ("Dog".to_owned(), vec!["Cat".to_owned(), "Dog".to_owned()]),
+        ],
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        vec![
+            ("Cat".to_owned(), Some("kitty".to_owned())),
+            ("Dog".to_owned(), Some("Cat".to_owned())),
+        ],
+        "{code}"
+    );
+}
+
+/// The claim above leaves a member nothing to be selected by when no key names it: the generated
+/// decoder would have no arm for it, and the tag it serializes would decode as the other member.
+/// That is refused (`E007`) at the entry that claims the name, in `check` as in `generate` —
+/// unless `defaultMapping` names the member, whose fallback still reaches it.
+#[test]
+fn a_member_no_discriminator_value_selects_is_e007_at_the_claiming_entry() {
+    let spec = discriminated_pet(
+        "3.1.0",
+        CAT_AND_DOG,
+        "        propertyName: kind\n        mapping:\n          \
+         Cat: Dog\n",
+    );
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let e007: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::NonDisjointUnion)
+            .collect();
+        assert_eq!(e007.len(), 1, "{report:#?}");
+        assert_eq!(
+            e007[0].pointer.as_str(),
+            "/components/schemas/Pet/discriminator/mapping/Cat",
+            "{report:#?}"
+        );
+        assert!(
+            e007[0]
+                .message
+                .contains("no discriminator value selects it"),
+            "{report:#?}"
+        );
+    }
+
+    let fallback = discriminated_pet(
+        "3.2.0",
+        CAT_AND_DOG,
+        "        propertyName: kind\n        mapping:\n          \
+         Cat: Dog\n        \
+         defaultMapping: Cat\n",
+    );
+    let (report, code) = generate_with_code(&fallback);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let arms = discriminated_arms(&code, "Pet");
+    assert_eq!(
+        arms.decode,
+        vec![("Dog".to_owned(), vec!["Cat".to_owned(), "Dog".to_owned()])],
+        "{code}"
+    );
+    assert_eq!(
+        arms.encode,
+        vec![
+            ("Cat".to_owned(), None),
+            ("Dog".to_owned(), Some("Cat".to_owned())),
+        ],
+        "{code}"
+    );
+    let checked = check(&fallback);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+}
+
+/// Issue #403: a member that is no schema component — inline, or a pointer into another schema —
+/// has no implicit discriminator value ("inline `oneOf` or `anyOf` subschemas are not considered").
+/// With no `mapping` entry naming it, the generated client dispatched on a tag spargen made up —
+/// the pointer text `Envelope/properties/cat`, or the hint `PetVariant1` — which no server sends,
+/// and serialized that tag into the payload. No discriminator value selects such a member: `W011`
+/// at the discriminator, in `check` as in `generate`. Beside a tagged member the tag dispatch stays
+/// for the tagged one and the untagged one takes no tag; with no tagged member at all the union is
+/// decoded by its members' schemas with no tag dispatch. A `mapping` entry naming it, or
+/// `defaultMapping` falling back to it, reaches it with no warning.
+#[test]
+fn a_member_with_no_component_name_and_no_mapping_entry_is_w011_and_takes_no_tag() {
+    let spec = |members: &str, discriminator: &str, version: &str| {
+        format!(
+            "openapi: {version}\n\
+             info: {{ title: T, version: 1.0.0 }}\n\
+             paths: {{}}\n\
+             components:\n  \
+             schemas:\n    \
+             Pet:\n      \
+             oneOf:\n{members}      \
+             discriminator:\n        \
+             propertyName: kind\n{discriminator}    \
+             Envelope:\n      \
+             type: object\n      \
+             properties:\n        \
+             cat: {{ type: object, required: [kind], properties: {{ kind: {{ type: string }}, purr: {{ type: string }} }} }}\n    \
+             Dog: {{ type: object, required: [kind, bark], properties: {{ kind: {{ type: string }}, bark: {{ type: boolean }} }} }}\n"
+        )
+    };
+    let deep = "        - { $ref: '#/components/schemas/Envelope/properties/cat' }\n        \
+                - { $ref: '#/components/schemas/Dog' }\n";
+    let inline = "        - { $ref: '#/components/schemas/Dog' }\n        \
+                  - { type: object, required: [kind, fins], properties: { kind: { type: string }, fins: { type: integer } } }\n";
+    // GitHub's `POST /repos/{owner}/{repo}/check-runs` body: two inline members, each pinning the
+    // discriminating property with an `enum` the discriminator never reads.
+    let both_inline = "        - { type: object, required: [kind, done], properties: { kind: { enum: [completed] }, done: { type: boolean } } }\n        \
+                       - { type: object, properties: { kind: { enum: [queued, in_progress] } } }\n";
+    // Beside the tagged `Dog`, the untagged member keeps Dog's dispatch (`dispatches`); with no
+    // tagged member at all, the discriminator dispatches nothing.
+    for (what, members, subject, dispatches) in [
+        (
+            "deep pointer",
+            deep,
+            "union member 0 is no schema component",
+            true,
+        ),
+        (
+            "inline",
+            inline,
+            "union member 1 is no schema component",
+            true,
+        ),
+        (
+            "both inline",
+            both_inline,
+            "union members 0, 1 are no schema components",
+            false,
+        ),
+    ] {
+        let spec = spec(members, "", "3.1.0");
+        let (generated, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::NonDisjointUnion),
+                "{what} {entry}: {report:#?}"
+            );
+            let w011: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .collect();
+            assert_eq!(w011.len(), 1, "{what} {entry}: {report:#?}");
+            assert_eq!(
+                w011[0].pointer.as_str(),
+                "/components/schemas/Pet/discriminator",
+                "{what} {entry}: {report:#?}"
+            );
+            assert!(
+                w011[0].message.contains(subject),
+                "{what} {entry}: {report:#?}"
+            );
+            let consequence = if dispatches {
+                "the tag dispatches only to the members a value names"
+            } else {
+                "this `discriminator` dispatches nothing"
+            };
+            assert!(
+                w011[0].message.contains(consequence),
+                "{what} {entry}: {report:#?}"
+            );
+        }
+        if dispatches {
+            // `Dog` keeps its implicit tag both ways; the untagged member is selected by no tag
+            // and written with none.
+            let arms = discriminated_arms(&code, "Pet");
+            assert_eq!(
+                arms.decode,
+                vec![("Dog".to_owned(), vec!["Dog".to_owned()])],
+                "{what}\n{code}"
+            );
+            let written: Vec<_> = arms
+                .encode
+                .iter()
+                .filter_map(|(_, tag)| tag.clone())
+                .collect();
+            assert_eq!(written, ["Dog"], "{what}\n{code}");
+            assert_eq!(arms.encode.len(), 2, "{what}\n{code}");
+        } else {
+            let de_impl = code
+                .split("impl<'de> serde::Deserialize<'de> for Pet {")
+                .nth(1)
+                .unwrap_or_else(|| panic!("{what}: no Deserialize for Pet\n{code}"));
+            let de_impl = de_impl.split("\nimpl").next().unwrap_or(de_impl);
+            assert!(!de_impl.contains("match tag"), "{what}\n{de_impl}");
+        }
+        // Either way no tag is invented: neither the pointer text nor a variant hint.
+        for invented in ["\"Envelope/properties/cat\"", "\"PetVariant"] {
+            assert!(!code.contains(invented), "{what}: {invented}\n{code}");
+        }
+    }
+
+    // A mapping entry naming the deep-pointer member gives it the declared tag and nothing else.
+    let mapped = spec(
+        deep,
+        "        mapping:\n          \
+         cat: '#/components/schemas/Envelope/properties/cat'\n",
+        "3.1.0",
+    );
+    let (report, code) = generate_with_code(&mapped);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let tags: Vec<Vec<String>> = discriminated_arms(&code, "Pet")
+        .decode
+        .into_iter()
+        .map(|(_, tags)| tags)
+        .collect();
+    assert_eq!(
+        tags,
+        [vec!["cat".to_owned()], vec!["Dog".to_owned()]],
+        "{code}"
+    );
+
+    // `defaultMapping` falling back to it reaches it with no tag of its own.
+    let fallback = spec(
+        deep,
+        "        defaultMapping: '#/components/schemas/Envelope/properties/cat'\n",
+        "3.2.0",
+    );
+    let (report, code) = generate_with_code(&fallback);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(report.diagnostics().is_empty(), "{report:#?}");
+    let tags: Vec<Vec<String>> = discriminated_arms(&code, "Pet")
+        .decode
+        .into_iter()
+        .map(|(_, tags)| tags)
+        .collect();
+    assert_eq!(tags, [vec!["Dog".to_owned()]], "{code}");
+    assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
+    let checked = check(&fallback);
+    assert_ne!(checked.outcome(), Outcome::Rejected, "{checked:#?}");
+}
+
+/// An untagged member beside tagged ones must not cost the tagged ones their dispatch. Dropping the
+/// discriminator for the whole union made `anyOf [Cat, Dog, inline]` decode by priority, then source
+/// order, so `{"kind": "Dog", …}` that `Cat` also accepts decoded as `Cat` against its own tag, and
+/// `Dog` lost the tag serialization re-inserts. The tag still selects `Cat` and `Dog`, which still
+/// write it; the inline member is tried by its schema, with the applicator's semantics, only when
+/// the tag is absent or names neither. (`e2e.rs` drives the decoded values.)
+#[test]
+fn an_untagged_discriminated_member_keeps_the_tag_dispatch_of_the_tagged_ones() {
+    let members = "        - { $ref: '#/components/schemas/Cat' }\n        \
+                   - { $ref: '#/components/schemas/Dog' }\n        \
+                   - { type: object, required: [kind, fins], properties: { kind: { type: string }, fins: { type: integer } } }\n";
+    for (applicator, valid) in [("oneOf", "match_count == 1"), ("anyOf", "match_count >= 1")] {
+        let spec = discriminated_pet("3.1.0", members, "        propertyName: kind\n").replacen(
+            "oneOf:",
+            &format!("{applicator}:"),
+            1,
+        );
+        let (generated, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{applicator} {entry}: {report:#?}"
+            );
+            let w011: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .collect();
+            assert_eq!(w011.len(), 1, "{applicator} {entry}: {report:#?}");
+            assert!(
+                w011[0]
+                    .message
+                    .contains("union member 2 is no schema component")
+                    && w011[0]
+                        .message
+                        .contains("the tag dispatches only to the members a value names"),
+                "{applicator} {entry}: {report:#?}"
+            );
+        }
+        let arms = discriminated_arms(&code, "Pet");
+        assert_eq!(
+            arms.decode,
+            vec![
+                ("Cat".to_owned(), vec!["Cat".to_owned()]),
+                ("Dog".to_owned(), vec!["Dog".to_owned()]),
+            ],
+            "{applicator}\n{code}"
+        );
+        assert_eq!(
+            arms.encode,
+            vec![
+                ("Cat".to_owned(), Some("Cat".to_owned())),
+                ("Dog".to_owned(), Some("Dog".to_owned())),
+                ("PetVariant2".to_owned(), None),
+            ],
+            "{applicator}\n{code}"
+        );
+        // The untagged member is the only one tried, after the tag finds no arm, and with the
+        // applicator's own match rule.
+        let de_impl = code
+            .split("impl<'de> serde::Deserialize<'de> for Pet {")
+            .nth(1)
+            .and_then(|rest| rest.split("impl serde::Serialize for Pet").next())
+            .unwrap_or_else(|| panic!("no Deserialize for Pet:\n{code}"));
+        let flat = de_impl.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            flat.matches("serde_json::from_value::<").count(),
+            2,
+            "{applicator}: one attempt in each of the absent and unknown tag paths\n{flat}"
+        );
+        assert!(flat.contains(valid), "{applicator}\n{flat}");
+        let tried = flat
+            .split("match tag.as_str() {")
+            .nth(1)
+            .and_then(|rest| rest.split("_ =>").nth(1))
+            .unwrap_or_else(|| panic!("{applicator}: no unknown-tag arm\n{flat}"));
+        assert!(
+            tried.contains("Pet::PetVariant2(inner)") && !tried.contains("Pet::Cat(inner)"),
+            "{applicator}\n{flat}"
+        );
+    }
+}
+
+/// A Discriminator Object whose fields have the wrong shape was read leniently and the bad part
+/// thrown away: a missing `propertyName` became the empty tag field, a non-string mapping value
+/// vanished from the map, a non-object `mapping` became no mapping at all. Each is a malformed
+/// document (`E011`), reported where the bad field sits.
+#[test]
+fn a_malformed_discriminator_object_is_e011_at_the_field() {
+    let cases = [
+        (
+            "missing propertyName",
+            "        mapping: { cat: Cat }\n",
+            "/components/schemas/Pet/discriminator",
+        ),
+        (
+            "non-string propertyName",
+            "        propertyName: 5\n",
+            "/components/schemas/Pet/discriminator/propertyName",
+        ),
+        (
+            "non-string mapping value",
+            "        propertyName: kind\n        mapping: { cat: 5 }\n",
+            "/components/schemas/Pet/discriminator/mapping/cat",
+        ),
+        (
+            "non-object mapping",
+            "        propertyName: kind\n        mapping: [Cat]\n",
+            "/components/schemas/Pet/discriminator/mapping",
+        ),
+        (
+            "non-string defaultMapping",
+            "        propertyName: kind\n        defaultMapping: 5\n",
+            "/components/schemas/Pet/discriminator/defaultMapping",
+        ),
+    ];
+    for (what, discriminator, pointer) in cases {
+        let spec = discriminated_pet("3.2.0", CAT_AND_DOG, discriminator);
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{what} via {entry}: {report:#?}\n{spec}"
+            );
+            assert!(
+                report
+                    .diagnostics()
+                    .iter()
+                    .any(|d| d.code == Code::InvalidInput && d.pointer.as_str() == pointer),
+                "{what} via {entry}: E011 must sit at `{pointer}`: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A union member written as a pointer into a component (`#/components/schemas/Envelope/properties/
+/// payload`) is a member like any other, and a `mapping` value naming it — in the same-file
+/// spelling or the root document's own relative-file spelling — resolves to the same `file#pointer`
+/// and supplies its tag. Matching by component name alone could not name such a member at all, so
+/// its variant would take an invented tag on the wire; matching by resolved target gives it the
+/// one the document declares.
+#[test]
+fn a_discriminator_mapping_value_spelled_as_a_deep_pointer_names_its_member() {
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -8227,57 +9694,42 @@ components:
         "./openapi.yaml#/components/schemas/Envelope/properties/payload",
     ] {
         let spec = spec.replace("TARGET", target);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
-            assert_eq!(
+        let (generated, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", generated), ("check", check(&spec))] {
+            assert_ne!(
                 report.outcome(),
                 Outcome::Rejected,
                 "{target} {entry}: {report:#?}"
             );
             assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::NonDisjointUnion
-                        && d.message.contains(&format!(
-                            "`discriminator.mapping` maps `payload` to `{target}`"
-                        ))
-                        && d.pointer.as_str() == "/components/schemas/Pet"),
+                report.diagnostics().is_empty(),
                 "{target} {entry}: {report:#?}"
             );
         }
-    }
-
-    // A component-name value in either spelling is matched to its member and generates.
-    let named = spec
-        .replace(
-            "'#/components/schemas/Envelope/properties/payload' }",
-            "'#/components/schemas/Cat' }",
-        )
-        .replace("payload: 'TARGET'", "cat: Cat")
-        .replace(
-            "    Dog:\n",
-            "    Cat:\n      type: object\n      properties: { kind: { type: string } }\n      \
-             required: [kind]\n    Dog:\n",
-        );
-    for (entry, report) in [("generate", generate(&named)), ("check", check(&named))] {
-        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
-        assert!(
-            !has_code(&report, Code::NonDisjointUnion),
-            "{entry}: {report:#?}"
+        // The pointer member has no component name to be selected by as well; `Dog` does (#263).
+        let tags: Vec<Vec<String>> = discriminated_arms(&code, "Pet")
+            .decode
+            .into_iter()
+            .map(|(_, tags)| tags)
+            .collect();
+        assert_eq!(
+            tags,
+            [vec!["payload"], vec!["dog", "Dog"]]
+                .map(|tags| tags.into_iter().map(str::to_owned).collect::<Vec<_>>()),
+            "{target}\n{code}"
         );
     }
 }
 
-/// The same silent fallback, reached by a `mapping` value with no `/` or `#` in it. `cat.yaml` is a
-/// relative file reference and also a legal component name (`^[a-zA-Z0-9.\-_]+$`); the
-/// specification leaves such a value implementation-defined and recommends reading it as a name,
-/// which spargen does. Read as a name it names no member here — the member is the file
-/// `$ref: 'cat.yaml'`, which has no component name — so, unrejected, it generated with the member's
-/// tag silently replaced by `PetVariant0`. A value naming a declared component that is not a member
-/// (`Bird`), or no component at all (`Ghost`), matches nothing for the same reason. Every value must
-/// name one of the union's members, as `defaultMapping`'s already must.
+/// A `mapping` value with no `/` or `#` in it is read as a component name, as the specification
+/// recommends for a value that is also a legal relative reference (`cat.yaml`). Read that way it
+/// names a schema the description does not hold even when a member is the file `$ref: 'cat.yaml'`,
+/// so it is `E004` at the entry — as is a name nothing declares (`Ghost`) — while a declared
+/// component that is not a member (`Bird`, in either spelling) is `E007` at the entry. Before
+/// either rejection the member's tag was silently replaced by an invented one. `./cat.yaml` is the
+/// unambiguous file spelling, and it names the file member.
 #[test]
-fn e007_discriminator_mapping_value_that_names_no_member() {
+fn a_discriminator_mapping_value_naming_no_member_is_rejected_at_the_entry() {
     let root = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -8318,13 +9770,7 @@ components:
 "##;
     let cat = "type: object\nproperties: { kind: { type: string }, purr: { type: string } }\n\
                required: [kind]\n";
-    let cases = [
-        ("cat.yaml", "cat.yaml"),
-        ("#/components/schemas/Cat", "Bird"),
-        ("#/components/schemas/Cat", "Ghost"),
-        ("#/components/schemas/Cat", "#/components/schemas/Bird"),
-    ];
-    for (member, target) in cases {
+    let run = |member: &str, target: &str| {
         let temp = tempfile::tempdir().unwrap();
         let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
         std::fs::write(
@@ -8333,8 +9779,23 @@ components:
         )
         .unwrap();
         std::fs::write(dir.join("cat.yaml"), cat).unwrap();
-        let generated = spargen::generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
-        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+        let generated = run_generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
+        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
+        let code = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
+        (generated, checked, code)
+    };
+    let rejected = [
+        ("cat.yaml", "cat.yaml", Code::UnresolvedRef),
+        ("#/components/schemas/Cat", "Ghost", Code::UnresolvedRef),
+        ("#/components/schemas/Cat", "Bird", Code::NonDisjointUnion),
+        (
+            "#/components/schemas/Cat",
+            "#/components/schemas/Bird",
+            Code::NonDisjointUnion,
+        ),
+    ];
+    for (member, target, code) in rejected {
+        let (generated, checked, _) = run(member, target);
         for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_eq!(
                 report.outcome(),
@@ -8342,43 +9803,55 @@ components:
                 "{member} / {target} {entry}: {report:#?}"
             );
             assert!(
-                report
-                    .diagnostics()
-                    .iter()
-                    .any(|d| d.code == Code::NonDisjointUnion
-                        && d.message.contains(&format!(
-                            "`discriminator.mapping` maps `meow` to `{target}`"
-                        ))
-                        && d.pointer.as_str() == "/components/schemas/Pet"),
-                "{member} / {target} {entry}: {report:#?}"
+                report.diagnostics().iter().any(|d| d.code == code
+                    && d.pointer.as_str() == "/components/schemas/Pet/discriminator/mapping/meow"
+                    && d.message.contains(&format!("`{target}`"))),
+                "{member} / {target} {entry}: {code:?} must sit at the entry: {report:#?}"
             );
         }
     }
 
-    // The member's own component name, bare or as a full pointer, is matched and generates.
-    for target in ["Cat", "#/components/schemas/Cat"] {
-        let spec = root
-            .replace("MEMBER", "#/components/schemas/Cat")
-            .replace("TARGET", target);
-        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+    // The member's own name, bare or as a pointer, and the file member's unambiguous spelling are
+    // matched to their member and supply its tag.
+    for (member, target) in [
+        ("#/components/schemas/Cat", "Cat"),
+        ("#/components/schemas/Cat", "#/components/schemas/Cat"),
+        ("cat.yaml", "./cat.yaml"),
+    ] {
+        let (generated, checked, code) = run(member, target);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_ne!(
                 report.outcome(),
                 Outcome::Rejected,
-                "{target} {entry}: {report:#?}"
+                "{member} / {target} {entry}: {report:#?}"
             );
             assert!(
-                !has_code(&report, Code::NonDisjointUnion),
-                "{target} {entry}: {report:#?}"
+                !has_code(report, Code::NonDisjointUnion) && !has_code(report, Code::UnresolvedRef),
+                "{member} / {target} {entry}: {report:#?}"
             );
         }
+        // The mapped tag leads the member's arm, so it is the one serialization writes; a
+        // component member also keeps its name (#263), a file member has none to keep.
+        let expected = match member {
+            "cat.yaml" => vec!["meow".to_owned()],
+            _ => vec!["meow".to_owned(), "Cat".to_owned()],
+        };
+        let arms = discriminated_arms(&code, "Pet");
+        assert!(
+            arms.decode.iter().any(|(_, tags)| *tags == expected),
+            "{member} / {target}: the mapped tag must dispatch\n{code}"
+        );
     }
 }
 
 /// A union declared in a sub-file whose members are that file's own deep pointers
 /// (`#/components/schemas/Envelope/properties/cat`) generated before the root document's same-file
 /// deep pointers resolved, and it keeps the output it had: each member is named from its pointer
-/// text, and a `mapping` value spelled the same way is matched to it and supplies its tag. Only the
-/// root spelling, which used to reject, derives no name.
+/// text, and a `mapping` value spelled the same way resolves, relative to the sub-file it is
+/// written in, to that member and supplies its tag. A deep pointer is no schema component, so
+/// without that `mapping` the members have no tag at all (issue #403): the discriminator
+/// dispatches nothing (`W011`) rather than on the pointer text, which no server sends, and the
+/// members keep their names.
 #[test]
 fn a_sub_file_union_of_deep_pointer_members_keeps_its_names_and_mapping() {
     let root = r##"
@@ -8421,38 +9894,64 @@ MAPPING
     let mapping = "        mapping:\n          \
                    meow: '#/components/schemas/Envelope/properties/cat'\n          \
                    woof: '#/components/schemas/Envelope/properties/dog'";
-    // With the mapping, its tags; without, the implicit tags the pointer text has always given.
-    for (with, cat_tag, dog_tag) in [
-        (mapping, "meow", "woof"),
-        ("", "Envelope/properties/cat", "Envelope/properties/dog"),
-    ] {
+    let write = |with: &str| {
         let temp = tempfile::tempdir().unwrap();
         let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
         std::fs::write(dir.join("openapi.yaml"), root).unwrap();
         std::fs::write(dir.join("lib.yaml"), lib.replace("MAPPING", with)).unwrap();
-        let generated = spargen::generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
-        let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
-        for (entry, report) in [("generate", &generated), ("check", &checked)] {
-            assert_ne!(
-                report.outcome(),
-                Outcome::Rejected,
-                "{cat_tag} {entry}: {report:#?}"
-            );
-            assert!(
-                !has_code(report, Code::NonDisjointUnion),
-                "{cat_tag} {entry}: {report:#?}"
-            );
-        }
-        let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
-        for expected in [
-            "EnvelopePropertiesCat(Box<Cat>)".to_owned(),
-            "EnvelopePropertiesDog(Box<Dog>)".to_owned(),
-            format!("\"{cat_tag}\" => {{"),
-            format!("\"{dog_tag}\" => {{"),
-        ] {
-            assert!(code.contains(&expected), "{cat_tag}: {expected}\n{code}");
-        }
+        let generated = run_generate(&build(dir.join("openapi.yaml"), dir.join("client.rs")));
+        let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
+        (temp, dir, generated, checked)
+    };
+
+    let (_temp, dir, generated, checked) = write(mapping);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::NonDisjointUnion),
+            "{entry}: {report:#?}"
+        );
     }
+    let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
+    for expected in [
+        "EnvelopePropertiesCat(Box<Cat>)",
+        "EnvelopePropertiesDog(Box<Dog>)",
+        "\"meow\" => {",
+        "\"woof\" => {",
+    ] {
+        assert!(code.contains(expected), "{expected}\n{code}");
+    }
+    assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
+
+    let (_temp, dir, generated, checked) = write("");
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::NonDisjointUnion),
+            "{entry}: {report:#?}"
+        );
+        let w011: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::DeclarationHasNoEffect)
+            .collect();
+        assert_eq!(w011.len(), 1, "{entry}: {report:#?}");
+        assert!(
+            w011[0]
+                .message
+                .contains("union members 0, 1 are no schema components"),
+            "{entry}: {report:#?}"
+        );
+    }
+    let code = std::fs::read_to_string(dir.join("client.rs")).unwrap();
+    for expected in [
+        "EnvelopePropertiesCat(Box<Cat>)",
+        "EnvelopePropertiesDog(Box<Dog>)",
+    ] {
+        assert!(code.contains(expected), "{expected}\n{code}");
+    }
+    assert!(!code.contains("\"Envelope/properties/cat\""), "{code}");
+    assert!(!code.contains("\"Envelope/properties/dog\""), "{code}");
 }
 
 #[test]
@@ -10406,6 +11905,116 @@ ADDITIONAL      responses:
     }
 }
 
+/// A `simple`/`form`/`deepObject` parameter whose schema, or a property or item schema at a
+/// position the style serializes, admits no value — `false`, or an `allOf` whose members give a
+/// property disjoint types — rejects with `E010` naming that schema as uninhabited (#407). Before,
+/// the only message was the generic "nested arrays or objects", which describes nothing the author
+/// wrote. An uninhabited schema below a genuinely nested object is still reported as the nesting,
+/// since that is the shape the style cannot serialize whatever the inner schema says.
+#[test]
+fn a_parameter_with_an_uninhabited_schema_is_reported_as_uninhabited() {
+    const TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: f
+          in: query
+          style: STYLE
+          schema: SCHEMA
+      responses:
+        "204": { description: No Content }
+"##;
+    let conflicting = "{ allOf: [{ properties: { a: { type: string } } }, \
+                       { properties: { a: { type: integer } } }] }";
+    let cases = [
+        ("deepObject", "false", "`f`"),
+        ("form", "false", "`f`"),
+        ("deepObject", conflicting, "`f.a`"),
+        ("form", conflicting, "`f.a`"),
+        (
+            "deepObject",
+            "{ type: object, additionalProperties: false, properties: { a: false } }",
+            "`f.a`",
+        ),
+        ("form", "{ type: array, items: false }", "`f[]`"),
+    ];
+    for (style, schema, named) in cases {
+        let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{style} {schema}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+            assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+            assert!(
+                messages[0].contains(named)
+                    && messages[0].contains("uninhabited")
+                    && !messages[0].contains("nested arrays or objects"),
+                "{style} {schema}: {messages:?}"
+            );
+        }
+    }
+    // A union with an uninhabited member still admits its other members' values, so it is not
+    // uninhabited; only the member is, and the message names that member rather than the union.
+    let partly = [
+        ("form", "{ oneOf: [{ type: string }, false] }", "`f`"),
+        (
+            "deepObject",
+            "{ type: object, properties: { a: { anyOf: [{ type: integer }, false] } } }",
+            "`f.a`",
+        ),
+    ];
+    for (style, schema, named) in partly {
+        let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{schema}: {report:#?}");
+            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+            assert_eq!(messages.len(), 1, "{schema}: {report:#?}");
+            assert!(
+                messages[0].contains(&format!(
+                    "{named} has a `oneOf`/`anyOf` member that is uninhabited"
+                )) && !messages[0].contains(&format!("{named} is uninhabited"))
+                    && !messages[0].contains("nested arrays or objects"),
+                "{schema}: {messages:?}"
+            );
+        }
+    }
+    // One `E010` per parameter, for the first cause in a fixed order: an uninhabited part, then
+    // an unconstrained property, then nesting. So an uninhabited property is reported while a
+    // nested sibling is not, and the sibling surfaces once the first is fixed.
+    let both = TEMPLATE.replace("STYLE", "deepObject").replace(
+        "SCHEMA",
+        "{ type: object, properties: { a: false, b: { type: object } } }",
+    );
+    for report in [generate(&both), check(&both)] {
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("`f.a` is uninhabited")
+                && !messages[0].contains("nested arrays or objects"),
+            "{messages:?}"
+        );
+    }
+    let nested = TEMPLATE.replace("STYLE", "deepObject").replace(
+        "SCHEMA",
+        "{ type: object, properties: { a: { type: object, properties: { b: false } } } }",
+    );
+    for report in [generate(&nested), check(&nested)] {
+        let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("nested arrays or objects")
+                && !messages[0].contains("uninhabited"),
+            "{messages:?}"
+        );
+    }
+}
+
 #[test]
 fn matrix_and_label_path_styles_generate() {
     let spec = r##"
@@ -11006,9 +12615,9 @@ fn all_of_member_layout(member: &str) -> (Report, Report, String) {
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     (generated, checked, code)
 }
 
@@ -11600,10 +13209,10 @@ fn shape_bearing_keywords_the_explain_names() -> Vec<String> {
 /// category, where the `type` alone already rejected and the keyword beside it was never
 /// load-bearing; three rows proved nothing at all.
 ///
-/// The `$ref` sits at a response body rather than a component root. A component root whose value is
-/// a `$ref` with only non-shape-bearing siblings trips a release-level `assert_eq!` inside
-/// `ensure_component` (filed as #148, pre-existing on master), which would turn every "without"
-/// control here into an opaque panic instead of this fixture's own message.
+/// The `$ref` sits at a response body rather than a component root, so each row exercises the
+/// sibling gate alone. A component root whose value is a `$ref` with only non-shape-bearing
+/// siblings once tripped a release-level `assert_eq!` inside `ensure_component` (#148), which
+/// turned every "without" control into an opaque panic instead of this fixture's own message.
 ///
 /// Each target is chosen so the intersection is *genuinely empty*, never merely unrepresentable:
 /// the `contentEncoding`/`format: binary` rows sit against an integer, not a string, because a
@@ -11989,11 +13598,12 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
         "an untyped `required` sibling changed an exactly-`null` target's type:\n{types}"
     );
 
-    // A union target whose branches do not all share the inferred category. Intersecting branch by
-    // branch drops every branch of another category (the string one here), so `Sibling` would
-    // become a struct that rejects the strings `Target` accepts, with no diagnostic. Whether an
-    // untyped refiner beside a mixed-category union is vacuous for the other branches is #282's
-    // open design question, so the `$ref` spelling rejects rather than choosing silently.
+    // A union target whose branches do not all share the inferred category. Intersecting the whole
+    // union with the category would drop every branch of another category (the string one here),
+    // so `Sibling` would reject the strings `Target` accepts. The applicators refine the branches of
+    // their own category and keep the rest, as beside an inline union (#282): `Sibling` is still a
+    // two-branch union, and it differs from `Target` in the branch the keyword reaches. Object and
+    // array keywords together are no contradiction there: each set refines its own branches.
     for (keyword, target, sibling) in [
         (
             "required",
@@ -12005,22 +13615,80 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
             "{ oneOf: [{ type: string }, { type: array, items: { type: number } }] }",
             "items: { type: integer }",
         ),
+        (
+            "required + items",
+            "{ oneOf: [{ type: object, properties: { a: { type: string } } }, { type: array, \
+             items: { type: number } }] }",
+            "required: [a]\n      items: { type: integer }",
+        ),
     ] {
         let spec = format!(
             "{HEAD}    Target: {target}\n    Sibling:\n      $ref: \
              '#/components/schemas/Target'\n      {sibling}\n{holder}"
         );
         for report in [generate(&spec), check(&spec)] {
-            assert_eq!(
+            assert_ne!(
                 report.outcome(),
                 Outcome::Rejected,
-                "an untyped `{keyword}` sibling silently dropped a union target's branch of \
-                 another category: {report:#?}"
+                "an untyped `{keyword}` sibling on a mixed union target rejected: {report:#?}"
             );
-            let messages = messages_for(&report, Code::AllOfIrreconcilable);
-            assert_eq!(messages.len(), 1, "{keyword}: {report:#?}");
-            assert!(messages[0].contains("branch"), "{keyword}: {messages:?}");
+            for code in [Code::AllOfIrreconcilable, Code::DeclarationHasNoEffect] {
+                assert!(!has_code(&report, code), "{keyword}: {report:#?}");
+            }
         }
+        let (_, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        let target = enum_variants(&types, "Target");
+        let refined = enum_variants(&types, "Sibling");
+        assert_eq!(
+            refined.len(),
+            2,
+            "an untyped `{keyword}` sibling dropped a branch of its union target:\n{types}"
+        );
+        assert_ne!(
+            target, refined,
+            "an untyped `{keyword}` sibling changed no branch of its union target:\n{types}"
+        );
+    }
+    // Where no branch of the target union has the category, the sibling constrains nothing the
+    // target accepts: `Sibling` is the target's union unchanged, and the keyword is `W011`, as it is
+    // beside the inline union.
+    let spec = format!(
+        "{HEAD}    Target: {{ oneOf: [{{ type: string }}, {{ type: integer }}] }}\n    Sibling:\n      \
+         $ref: '#/components/schemas/Target'\n      required: [a]\n{holder}"
+    );
+    for report in [generate(&spec), check(&spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
+        let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("no branch of its target union has that category"),
+            "{messages:?}"
+        );
+    }
+    let (_, code) = generate_with_code(&spec);
+    let types = types_module(&code);
+    assert_eq!(
+        enum_variants(&types, "Target"),
+        enum_variants(&types, "Sibling"),
+        "{types}"
+    );
+    // Object and array keywords together beside a target branch that states no category have no
+    // single category to establish for it.
+    let spec = format!(
+        "{HEAD}    Target: {{ oneOf: [{{}}, {{ type: string }}] }}\n    Sibling:\n      $ref: \
+         '#/components/schemas/Target'\n      required: [a]\n      items: {{ type: integer \
+         }}\n{holder}"
+    );
+    for report in [generate(&spec), check(&spec)] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::AllOfIrreconcilable);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(
+            messages[0].contains("states no JSON category"),
+            "{messages:?}"
+        );
     }
     // A union whose every branch has the inferred category loses no branch, so it still composes.
     let spec = format!(
@@ -12048,6 +13716,409 @@ fn a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null(
             "{messages:?}"
         );
     }
+}
+
+/// An untyped object or array applicator beside `oneOf`/`anyOf` lowered to `TypeKind::Any`, which
+/// intersects as identity, so `required`, `additionalProperties`, `items` and `prefixItems` alone
+/// vanished from every branch with no diagnostic (#282). In JSON Schema 2020-12 such a keyword is
+/// vacuously satisfied by an instance of another category, so it refines exactly the branches of
+/// its own category and leaves the rest as they are; where no branch has its category it reaches
+/// nothing the union accepts, which is the contradiction the `$ref` spelling already rejects.
+#[test]
+fn an_untyped_union_sibling_refines_only_the_branches_of_its_category() {
+    const HEAD: &str = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: \
+                        'https://e.com' }]\npaths: {}\ncomponents:\n  schemas:\n";
+    const AB: &str = "    A: { type: object, properties: { a: { type: string } } }\n    B: { \
+                      type: object, properties: { b: { type: string } } }\n";
+    // Every variant of `pub enum {name}`, each as the type it wraps.
+    let variants_of = |types: &str, name: &str| -> Vec<String> {
+        enum_variants(types, name)
+            .iter()
+            .filter_map(|variant| {
+                let (_, inner) = variant.split_once('(')?;
+                let inner = inner.trim_end_matches(')');
+                let inner = inner
+                    .strip_prefix("Box<")
+                    .and_then(|boxed| boxed.strip_suffix('>'))
+                    .unwrap_or(inner);
+                Some(inner.to_owned())
+            })
+            .collect()
+    };
+    let variant_types = |types: &str| variants_of(types, "U");
+    // The declaration of field `a` inside `pub struct {name}`, or empty where it has none.
+    let field_a = |types: &str, name: &str| -> String {
+        types
+            .lines()
+            .map(str::trim_start)
+            .skip_while(|line| !line.starts_with(&format!("pub struct {name} ")))
+            .skip(1)
+            .take_while(|line| !line.starts_with('}'))
+            .find(|line| line.starts_with("pub a: "))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let generates = |spec: &str| -> String {
+        for report in [check(spec), generate(spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{spec}\n{report:#?}");
+            for code in [Code::DeclarationHasNoEffect, Code::AllOfIrreconcilable] {
+                assert!(!has_code(&report, code), "{spec}\n{report:#?}");
+            }
+        }
+        types_module(&generate_with_code(spec).1)
+    };
+
+    // The issue's reproduction: both branches are objects, so both now require `a`. `A` declares
+    // it and keeps its type; `B` does not, so `a` joins it as a required unconstrained field.
+    let spec = format!(
+        "{HEAD}{AB}    U:\n      oneOf: [{{ $ref: '#/components/schemas/A' }}, {{ $ref: \
+         '#/components/schemas/B' }}]\n      required: [a]\n"
+    );
+    let types = generates(&spec);
+    let variants = variant_types(&types);
+    assert_eq!(variants.len(), 2, "{types}");
+    for variant in &variants {
+        assert!(
+            declared_fields(&types, variant).contains(&"a".to_owned()),
+            "`{variant}` does not carry `a`:\n{types}"
+        );
+        let a = field_a(&types, variant);
+        assert!(
+            !a.is_empty() && !a.contains("Option<"),
+            "`required: [a]` beside the union left `a` optional in `{variant}`: {a}\n{types}"
+        );
+    }
+
+    // A mixed-category union: each refiner reaches its own category's branch and leaves the
+    // string branch alone, so no branch is dropped and nothing warns.
+    for (keyword, other, sibling, requires_a) in [
+        (
+            "required",
+            "{ type: object, properties: { a: { type: string } } }",
+            "required: [a]",
+            true,
+        ),
+        (
+            "additionalProperties",
+            "{ type: object, properties: { a: { type: string } } }",
+            "additionalProperties: false",
+            false,
+        ),
+        (
+            "items",
+            "{ type: array, items: { type: number } }",
+            "items: { type: integer }",
+            false,
+        ),
+        (
+            "prefixItems",
+            "{ type: array }",
+            "prefixItems: [{ type: integer }]",
+            false,
+        ),
+    ] {
+        let spec =
+            format!("{HEAD}    U:\n      oneOf: [{{ type: string }}, {other}]\n      {sibling}\n");
+        let types = generates(&spec);
+        let variants = variant_types(&types);
+        assert_eq!(
+            variants.len(),
+            2,
+            "`{keyword}` beside a mixed union dropped a branch:\n{types}"
+        );
+        assert!(
+            types.contains(&format!("pub type {} = String;", variants[0])),
+            "`{keyword}` beside a mixed union touched the string branch:\n{types}"
+        );
+        if requires_a {
+            let line = field_a(&types, &variants[1]);
+            assert!(
+                !line.is_empty() && !line.contains("Option<"),
+                "`{keyword}` did not reach the object branch: {line}\n{types}"
+            );
+        }
+    }
+    // The refiners change the branches they reach: compared with the same union bare.
+    for (sibling, branch) in [
+        (
+            "required: [a]",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        (
+            "additionalProperties: false",
+            "{ type: object, properties: { a: { type: string } } }",
+        ),
+        (
+            "items: { type: integer }",
+            "{ type: array, items: { type: number } }",
+        ),
+        ("prefixItems: [{ type: integer }]", "{ type: array }"),
+    ] {
+        let bare = generates(&format!(
+            "{HEAD}    U:\n      oneOf: [{{ type: string }}, {branch}]\n"
+        ));
+        let refined = generates(&format!(
+            "{HEAD}    U:\n      oneOf: [{{ type: string }}, {branch}]\n      {sibling}\n"
+        ));
+        assert_ne!(
+            bare, refined,
+            "`{sibling}` changed nothing beside the union"
+        );
+    }
+
+    // Object and array refiners with no `type` beside a union are not a contradiction there: each
+    // set refines its own category's branches.
+    let spec = format!(
+        "{HEAD}    U:\n      oneOf: [{{ type: string }}, {{ type: object, properties: {{ a: {{ \
+         type: string }} }} }}, {{ type: array, items: {{ type: number }} }}]\n      required: \
+         [a]\n      items: {{ type: integer }}\n"
+    );
+    let types = generates(&spec);
+    assert_eq!(variant_types(&types).len(), 3, "{types}");
+
+    // A nested union branch is refined branch by branch too, so its string branch stays.
+    let spec = format!(
+        "{HEAD}    U:\n      oneOf: [{{ oneOf: [{{ type: string }}, {{ type: object, properties: \
+         {{ a: {{ type: string }} }} }}] }}, {{ type: integer }}]\n      required: [a]\n"
+    );
+    let types = generates(&spec);
+    let variants = variant_types(&types);
+    assert_eq!(variants.len(), 2, "{types}");
+    let nested = variants_of(&types, &variants[0]);
+    assert_eq!(nested.len(), 2, "the nested union lost a branch:\n{types}");
+    assert!(
+        nested
+            .iter()
+            .any(|inner| types.contains(&format!("pub type {inner} = String;"))),
+        "the nested union lost its string branch:\n{types}"
+    );
+
+    // The sole non-null member is refined the same way, and keeps the union's `null`.
+    let spec = format!(
+        "{HEAD}    U:\n      oneOf: [{{ type: object, properties: {{ a: {{ type: string }} }} }}, \
+         {{ type: 'null' }}]\n      required: [a]\n    Holder:\n      type: object\n      \
+         required: [u]\n      properties:\n        u: {{ $ref: '#/components/schemas/U' }}\n"
+    );
+    let types = generates(&spec);
+    assert!(types.contains("pub u: Option<U>"), "{types}");
+    let a = field_a(&types, "U");
+    assert!(
+        !a.is_empty() && !a.contains("Option<"),
+        "`required: [a]` did not reach the sole member: {a}\n{types}"
+    );
+
+    // A branch that states no category takes the one the keywords establish, as an untyped `$ref`
+    // target does. This is the shape of GitHub's `secret-scanning-custom-pattern-to-update`:
+    // `properties` beside an `anyOf` of `required`-only branches is an object in every branch, so
+    // every branch requires `v`. (What each branch's own `required` contributes is decided where
+    // the branch is lowered, not here.)
+    let spec = format!(
+        "{HEAD}    U:\n      required: [v]\n      properties:\n        v: {{ type: integer \
+         }}\n        x: {{ type: string }}\n        y: {{ type: string }}\n      anyOf: [{{ \
+         required: [x] }}, {{ required: [y] }}]\n"
+    );
+    let types = generates(&spec);
+    let variants = variant_types(&types);
+    assert_eq!(variants.len(), 2, "{types}");
+    for variant in &variants {
+        let line = types
+            .lines()
+            .map(str::trim_start)
+            .skip_while(|line| !line.starts_with(&format!("pub struct {variant} ")))
+            .skip(1)
+            .take_while(|line| !line.starts_with('}'))
+            .find(|line| line.starts_with("pub v: "))
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            !line.is_empty() && !line.contains("Option<"),
+            "branch `{variant}` is not the object that requires `v`: {line}\n{types}"
+        );
+    }
+
+    // A refiner that reaches no branch of its category constrains nothing the union accepts: the
+    // union generates exactly as it is, and the keyword is acknowledged with `W011` rather than
+    // dropped in silence, through both entry points.
+    for (case, members, sibling) in [
+        (
+            "no object branch",
+            "[{ type: string }, { type: integer }]",
+            "required: [a]",
+        ),
+        (
+            "no array branch",
+            "[{ type: string }, { type: object }]",
+            "items: { type: integer }",
+        ),
+        (
+            "sole member of another category",
+            "[{ type: string }, { type: 'null' }]",
+            "required: [a]",
+        ),
+    ] {
+        let spec = format!("{HEAD}    U:\n      oneOf: {members}\n      {sibling}\n");
+        for report in [check(&spec), generate(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{case}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+            assert_eq!(messages.len(), 1, "{case}: {report:#?}");
+            assert!(
+                messages[0].contains("no branch of its union has that category"),
+                "{case}: {messages:?}"
+            );
+        }
+        // The union and the types its branches wrap are the bare union's. (The lowered keyword
+        // itself is still emitted as an unused type of its own, as every lowered sibling is.)
+        let shape = |spec: &str| {
+            let types = types_module(&generate_with_code(spec).1);
+            let mut shape = enum_variants(&types, "U");
+            if shape.is_empty() {
+                shape.extend(
+                    types
+                        .lines()
+                        .map(str::trim_start)
+                        .filter(|line| line.starts_with("pub type U "))
+                        .map(str::to_owned),
+                );
+            }
+            for inner in variants_of(&types, "U") {
+                shape.extend(
+                    types
+                        .lines()
+                        .map(str::trim_start)
+                        .filter(|line| line.starts_with(&format!("pub type {inner} ")))
+                        .map(str::to_owned),
+                );
+            }
+            shape
+        };
+        let bare = format!("{HEAD}    U:\n      oneOf: {members}\n");
+        let refined = shape(&spec);
+        assert!(!refined.is_empty(), "{case}: no shape for `U`");
+        assert_eq!(
+            refined,
+            shape(&bare),
+            "{case}: a keyword that reaches no branch changed the union"
+        );
+    }
+
+    // Where the sibling carries both halves and neither reaches a branch of its category, each
+    // half is acknowledged with a `W011` of its own: reporting only the object half dropped the
+    // array keywords in silence. All three sites that meet a scoped sibling are covered: a
+    // multi-variant union, a sole non-null member, and a `$ref` to a union.
+    for (case, schema, needle) in [
+        (
+            "multi-variant union",
+            "    U:\n      oneOf: [{ type: string }, { type: integer }]\n      required: [a]\n      \
+             items: { type: integer }\n",
+            "no branch of its union has that category",
+        ),
+        (
+            "sole non-null member",
+            "    U:\n      oneOf: [{ type: string }, { type: 'null' }]\n      required: [a]\n      \
+             items: { type: integer }\n",
+            "no branch of its union has that category",
+        ),
+        (
+            "`$ref` to a union",
+            "    Target: { oneOf: [{ type: string }, { type: integer }] }\n    U:\n      $ref: \
+             '#/components/schemas/Target'\n      required: [a]\n      items: { type: integer }\n",
+            "no branch of its target union has that category",
+        ),
+    ] {
+        let spec = format!("{HEAD}{schema}");
+        for report in [check(&spec), generate(&spec)] {
+            assert_ne!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{case}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+            assert_eq!(
+                messages.len(),
+                2,
+                "{case}: one W011 per unreached half: {report:#?}"
+            );
+            assert!(
+                messages.iter().all(|message| message.contains(needle)),
+                "{case}: {messages:?}"
+            );
+            for keywords in ["`required`", "`items`"] {
+                assert_eq!(
+                    messages
+                        .iter()
+                        .filter(|message| message.contains(keywords))
+                        .count(),
+                    1,
+                    "{case}: exactly one W011 names {keywords}: {messages:?}"
+                );
+            }
+        }
+    }
+
+    // A branch that states no category can be given none when object and array keywords come
+    // together, or when a multi-type `type` array beside them admits another category too: that is
+    // rejected through both entry points rather than generated without them.
+    for (case, schema) in [
+        (
+            "both kinds",
+            "      oneOf: [{}, { type: string }]\n      required: [a]\n      items: { type: \
+             integer }",
+        ),
+        (
+            "a type array admitting another category",
+            "      type: [object, string]\n      oneOf: [{}, { type: string }]\n      required: \
+             [a]",
+        ),
+    ] {
+        let spec = format!("{HEAD}    U:\n{schema}\n");
+        for report in [check(&spec), generate(&spec)] {
+            assert_eq!(report.outcome(), Outcome::Rejected, "{case}: {report:#?}");
+            let messages = messages_for(&report, Code::AllOfIrreconcilable);
+            assert_eq!(messages.len(), 1, "{case}: {report:#?}");
+            assert!(
+                messages[0].contains("union member 0 states no JSON category"),
+                "{case}: {messages:?}"
+            );
+        }
+    }
+
+    // A multi-type `type` array deleted for lowering still excludes the branches of the categories
+    // it omits, and its object keywords still reach the object branch.
+    let spec = format!(
+        "{HEAD}    U:\n      type: [object, integer]\n      oneOf: [{{ type: string }}, {{ type: \
+         integer }}, {{ type: object, properties: {{ a: {{ type: string }} }} }}]\n      required: \
+         [a]\n"
+    );
+    for report in [check(&spec), generate(&spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let messages = messages_for(&report, Code::DeclarationHasNoEffect);
+        assert_eq!(messages.len(), 1, "{report:#?}");
+        assert!(messages[0].contains("union member 0"), "{messages:?}");
+    }
+    let types = types_module(&generate_with_code(&spec).1);
+    let variants = variant_types(&types);
+    assert_eq!(variants.len(), 2, "{types}");
+    let a = field_a(&types, &variants[1]);
+    assert!(
+        !a.is_empty() && !a.contains("Option<"),
+        "`required: [a]` beside a type array did not reach the object branch: {a}\n{types}"
+    );
+
+    // A typed sibling still speaks for every branch: `type: object` excludes the string one.
+    let spec = format!(
+        "{HEAD}    U:\n      type: object\n      oneOf: [{{ type: string }}, {{ type: object, \
+         properties: {{ a: {{ type: string }} }} }}]\n      required: [a]\n"
+    );
+    let report = generate(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::DeclarationHasNoEffect),
+        "{report:#?}"
+    );
 }
 
 /// `object_body` consumed `required` only as a per-property flag, so a `required` name that no
@@ -12402,8 +14473,9 @@ fn the_composition_explain_covers_every_cause_that_reports_it() {
         explain.contains("A sibling bears a shape of its own through"),
         "{explain}"
     );
-    // The category rule for untyped applicators, and the two consequences
-    // `a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null` and
+    // The category rule for untyped applicators, and the consequences
+    // `a_ref_sibling_applicator_establishes_its_category_and_keeps_the_targets_null`,
+    // `an_untyped_union_sibling_refines_only_the_branches_of_its_category` and
     // `a_required_name_no_property_declares_is_still_required` pin against the code.
     assert!(
         explain.contains("establish an object and the array keywords"),
@@ -12414,7 +14486,11 @@ fn the_composition_explain_covers_every_cause_that_reports_it() {
         "{explain}"
     );
     assert!(
-        explain.contains("Beside a `$ref` to a union, such a sibling is rejected"),
+        explain.contains("refine only the branches of their own category"),
+        "{explain}"
+    );
+    assert!(
+        explain.contains("are acknowledged with `W011` rather than rejected"),
         "{explain}"
     );
     assert!(
@@ -12875,9 +14951,9 @@ components:
                 .unwrap();
                 std::fs::write(dir.join("lib.yaml"), lib).unwrap();
                 let out = dir.join("client.rs");
-                let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+                let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
                 let code = std::fs::read_to_string(&out).unwrap_or_default();
-                let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+                let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
                 (generated, checked, code)
             };
             let what = format!(
@@ -13213,6 +15289,224 @@ components:
             .all(|d| d.severity != spargen::Severity::Error),
         "{report:#?}"
     );
+}
+
+/// Issue #404: an intersection that narrows a property's type re-types the `default` a member
+/// declared for the wider type. Every spelling of the meet is held — `allOf` members over `$ref`s,
+/// a `$ref` with sibling `properties`, and two object-typed properties met inside an `allOf` — and
+/// so is a `number` narrowed to `integer`. A default the narrowed type still admits is applied as a value
+/// of it (an enum variant, not the string it was written as); one it no longer admits is reported
+/// at the `default` that wrote it (`W005`) rather than wired into code that cannot compile.
+const NARROWED_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Base:
+      type: object
+      properties:
+        valid: { type: string, default: a }
+        bad: { type: string, default: zzz }
+        ratio: { type: number, default: 3 }
+        fraction: { type: number, default: 2.5 }
+    Narrow:
+      type: object
+      properties:
+        valid: { enum: [a, b] }
+        bad: { enum: [a, b] }
+        ratio: { type: integer }
+        fraction: { type: integer }
+    Both:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - $ref: '#/components/schemas/Narrow'
+    Nested:
+      type: object
+      properties:
+        inner:
+          type: object
+          properties:
+            bad: { type: string, default: zzz }
+    NestedNarrow:
+      type: object
+      properties:
+        inner:
+          type: object
+          properties:
+            bad: { enum: [a, b] }
+    NestedBoth:
+      allOf:
+        - $ref: '#/components/schemas/Nested'
+        - $ref: '#/components/schemas/NestedNarrow'
+    Sibling:
+      $ref: '#/components/schemas/Base'
+      properties:
+        valid: { enum: [a, b] }
+        bad: { enum: [a, b] }
+"##;
+
+#[test]
+fn a_default_an_intersection_narrows_away_is_reported_not_applied() {
+    for (entry, report) in [
+        ("generate", generate(NARROWED_DEFAULT_SPEC)),
+        ("check", check(NARROWED_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let mut pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        pointers.sort_unstable();
+        pointers.dedup();
+        // `bad` and `fraction` lose their defaults; `valid` and `ratio` keep theirs, re-typed. The
+        // nested `bad` is narrowed by the meet of two object-typed properties, not by flattening.
+        assert_eq!(
+            pointers,
+            [
+                "/components/schemas/Base/properties/bad/default",
+                "/components/schemas/Base/properties/fraction/default",
+                "/components/schemas/Nested/properties/inner/properties/bad/default",
+            ],
+            "{entry}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+        for narrowed in ["/components/schemas/Both", "/components/schemas/Sibling"] {
+            assert!(
+                messages.iter().any(|message| message.contains(narrowed)),
+                "{entry}: `{narrowed}` drops `bad`'s default and must say so: {messages:#?}"
+            );
+        }
+    }
+
+    let (report, code) = generate_with_code(NARROWED_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    // The string literal survives only where the field is still a string: `Base` itself.
+    assert_eq!(
+        code.matches("Some(\"a\".to_owned())").count(),
+        1,
+        "only `Base.valid` is still a `String`: {code}"
+    );
+}
+
+/// An object `allOf` whose members repeat an object property meets that property pair by pair, and
+/// the struct an earlier pair met it in is superseded by the next meet and not emitted (#428). The
+/// post-lowering passes that report `W005` (#404) and `W006` read only emitted types, so a
+/// superseded meet reports nothing of its own: three members say exactly what the two members
+/// without the superseded one say. Before #428 the three-member `string`/`enum`/`integer` spelling
+/// warned `W005` against the dead `string`∩`enum` struct while the two-member spelling, whose
+/// result is the same uninhabited field, was clean.
+///
+/// This pins the two spellings agreeing, not what they say: how a default on a field an
+/// intersection empties should be reported is the two-member spelling's question. The second case
+/// keeps the fixture from passing vacuously, since there the emitted struct itself drops the
+/// default and both spellings must report it once.
+#[test]
+fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
+    fn spec(media: &str, members: &[&str]) -> String {
+        let mut spec = format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\nservers: [{{ url: 'https://e.com' }}]\n\
+             paths:\n  /u:\n    get:\n      operationId: fetch\n      responses:\n        '200':\n          \
+             description: ok\n          content:\n            {media}:\n              \
+             schema:\n                allOf:\n",
+        );
+        for k in members {
+            spec.push_str(&format!(
+                "                  - {{ type: object, properties: {{ inner: {{ type: object, \
+                 properties: {{ k: {k} }} }} }} }}\n"
+            ));
+        }
+        spec
+    }
+    fn reported(report: &Report) -> Vec<(&'static str, String, String)> {
+        let mut reported: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| matches!(d.code, Code::SchemaDefaultNotApplied | Code::XmlHintIgnored))
+            .map(|d| (d.code.as_str(), d.pointer.to_string(), d.message.clone()))
+            .collect();
+        reported.sort();
+        reported
+    }
+
+    // (body media type, three members, the two left once the superseded middle one is dropped,
+    // `W005`/`W006` count)
+    let json = "application/json";
+    let cases: [(&str, [&str; 3], [&str; 2], usize); 4] = [
+        (
+            json,
+            [
+                "{ type: string, default: z }",
+                "{ enum: [a, b] }",
+                "{ type: integer }",
+            ],
+            ["{ type: string, default: z }", "{ type: integer }"],
+            0,
+        ),
+        (
+            json,
+            [
+                "{ type: string, default: z }",
+                "{ enum: [a, b, c] }",
+                "{ enum: [a, b] }",
+            ],
+            ["{ type: string, default: z }", "{ enum: [a, b] }"],
+            1,
+        ),
+        (
+            json,
+            [
+                "{ type: string, xml: { name: kay } }",
+                "{ type: string, maxLength: 9 }",
+                "{ type: string, minLength: 1 }",
+            ],
+            [
+                "{ type: string, xml: { name: kay } }",
+                "{ type: string, minLength: 1 }",
+            ],
+            2,
+        ),
+        // Under an XML body the merged struct is XML-dedicated and keeps its rename. Both spellings
+        // report one `W006`, for the first member's own `inner` struct, which no body reaches. The
+        // superseded meet is reached from no body either, so a pass reading it would report a
+        // second `W006` for a type the output does not have.
+        (
+            "application/xml",
+            [
+                "{ type: string, xml: { name: kay } }",
+                "{ type: string, maxLength: 9 }",
+                "{ type: string, minLength: 1 }",
+            ],
+            [
+                "{ type: string, xml: { name: kay } }",
+                "{ type: string, minLength: 1 }",
+            ],
+            1,
+        ),
+    ];
+    for (media, three, two, count) in cases {
+        let (three, two) = (spec(media, &three), spec(media, &two));
+        for (entry, run) in [
+            ("generate", generate as fn(&str) -> Report),
+            ("check", check),
+        ] {
+            let (with_superseded, without) = (run(&three), run(&two));
+            assert_ne!(
+                with_superseded.outcome(),
+                Outcome::Rejected,
+                "{entry}: {with_superseded:#?}"
+            );
+            assert_eq!(
+                reported(&with_superseded),
+                reported(&without),
+                "{entry}: the superseded meet must report nothing the two-member spelling does \
+                 not:\n{three}"
+            );
+            assert_eq!(reported(&without).len(), count, "{entry}: {without:#?}");
+        }
+    }
 }
 
 /// A parameter `default` is documented in rustdoc (never serde-wired) — generation is clean and
@@ -13563,7 +15857,7 @@ components:
     )
     .unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&build(
+    let report = run_generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
@@ -13646,7 +15940,7 @@ components:
     )
     .unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&build(
+    let report = run_generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
     ));
@@ -14515,7 +16809,7 @@ paths:
     )
     .unwrap();
     let out = temp.path().join("client.rs");
-    let report = spargen::generate(&build(
+    let report = run_generate(&build(
         Utf8PathBuf::from_path_buf(spec_path).unwrap(),
         Utf8PathBuf::from_path_buf(out).unwrap(),
     ));
@@ -15359,8 +17653,8 @@ paths:
         );
     }
 
-    // (v) The `text/*` range keeps a response too: it generated as text beside an unclassified
-    // `image/png` on master, and a concrete family member ranks below it.
+    // (v) The `text/*` range keeps a response too: it generates as text beside an `image/png` of
+    // another family, and a concrete family member ranks below it.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -15413,10 +17707,9 @@ paths:
     assert!(code.contains("pub type ResponseBody = String;"), "{code}");
     assert_ne!(check(spec).outcome(), Outcome::Rejected);
 
-    // (vii) `*/*` keeps a response the same way: it generated as bytes beside an unclassified
-    // `image/png` on master, and it still does whatever schema `image/png` carries — an object
-    // there is reported as the alternative not generated (`W014`), never rejected by the octet
-    // gate (`E009`).
+    // (vii) `*/*` keeps a response the same way: it generates as bytes beside an `image/png`
+    // whatever schema `image/png` carries — an object there is reported as the alternative not
+    // generated (`W014`), never rejected by the octet gate (`E009`).
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -15452,7 +17745,7 @@ paths:
     assert_ne!(check(spec).outcome(), Outcome::Rejected);
 
     // (viii) The family's own range outranks its concrete member: `image/*` beside `image/png`
-    // with a constraining schema generates from the range, as on master.
+    // with a constraining schema generates from the range.
     let spec = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
@@ -16039,9 +18332,20 @@ fn e009_a_form_urlencoded_string_property_declaring_a_binary_family_content_type
     // property whose `contentType` names `image/png` is binary, which a form body cannot carry —
     // the disposition `application/octet-stream` already has there — and the message names what
     // was declared, since the schema itself is a plain string a reader cannot call binary.
-    let spec = r##"
+    //
+    // #399: the classification is case-insensitive, so `Application/Octet-Stream` is the binary
+    // declaration its lowercase spelling is. Before, the mixed-case spelling missed every
+    // classifier arm, fell through to the string's natural codec, and was generated as
+    // `FormMode::Text`.
+    for declared in [
+        "image/png",
+        "application/octet-stream",
+        "Application/Octet-Stream",
+    ] {
+        let spec = format!(
+            r##"
 openapi: 3.1.0
-info: { title: T, version: 1.0.0 }
+info: {{ title: T, version: 1.0.0 }}
 paths:
   /profile:
     post:
@@ -16052,22 +18356,28 @@ paths:
             schema:
               type: object
               properties:
-                pic: { type: string }
+                pic: {{ type: string }}
             encoding:
-              pic: { contentType: image/png }
+              pic: {{ contentType: {declared} }}
       responses:
-        '204': { description: ok }
-"##;
-    for report in [generate(spec), check(spec)] {
-        assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
-        assert!(
-            report.diagnostics().iter().any(|d| {
-                d.code == Code::UnsupportedMediaType
-                    && d.message.contains("`pic`")
-                    && d.message.contains("`contentType: image/png`")
-            }),
-            "{report:#?}"
+        '204': {{ description: ok }}
+"##
         );
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{declared}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::UnsupportedMediaType
+                        && d.message.contains("`pic`")
+                        && d.message.contains(&format!("`contentType: {declared}`"))
+                }),
+                "{declared}: {report:#?}"
+            );
+        }
     }
 }
 
@@ -16107,6 +18417,34 @@ paths:
                     && !d.message.contains("declares `contentType:")
             }),
             "{report:#?}"
+        );
+    }
+}
+
+#[test]
+fn a_form_urlencoded_binary_property_declaring_text_is_judged_case_insensitively() {
+    // #399: a binary property's declared `contentType` is classified lowercased, so `Text/Plain`
+    // reaches the outcome `text/plain` does. Before, the mixed-case spelling missed the `text/`
+    // arm, fell through to the property's natural octet-stream codec, and was rejected `E009`
+    // while its lowercase spelling generated.
+    let binary = "{ type: string, contentEncoding: base64 }";
+    for declared in ["text/plain", "Text/Plain", "TEXT/PLAIN"] {
+        let spec = form_field_declaring(binary, declared);
+        assert_ne!(check(&spec).outcome(), Outcome::Rejected, "{declared}");
+        let (report, code) = generate_with_code(&spec);
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "{declared}: {report:#?}"
+        );
+        assert!(
+            !has_code(&report, Code::UnsupportedMediaType),
+            "{declared}: {report:#?}"
+        );
+        let flat = code.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("name: \"part\", mode: support::FormMode::Text"),
+            "{declared}: {flat}"
         );
     }
 }
@@ -16361,6 +18699,17 @@ fn a_form_urlencoded_field_keeps_a_declared_content_type_it_is_serialized_in() {
         ("{ type: string }", "text/plain", "FormMode::Text"),
         ("{ type: string }", "application/xml", "FormMode::Text"),
         ("{ type: integer }", "application/json", "FormMode::Json"),
+        // #399: the codec is chosen from the declared media type case-insensitively, as the
+        // refusal above judges it, so a scalar declaring `Application/JSON` is the JSON value its
+        // lowercase spelling is, not the text its natural codec would make it.
+        ("{ type: integer }", "Application/JSON", "FormMode::Json"),
+        ("{ type: object }", "Application/JSON", "FormMode::Json"),
+        (
+            "{ type: string }",
+            "Application/Vnd.Api+JSON",
+            "FormMode::Json",
+        ),
+        ("{ type: string }", "TEXT/PLAIN", "FormMode::Text"),
     ];
     for (schema, declared, rendering) in cases {
         let spec = form_field_declaring(schema, declared);
@@ -18163,19 +20512,9 @@ paths:
     }
 }
 
-#[test]
-fn w014_on_a_document_rejected_elsewhere_claims_only_the_selection() {
-    // `/page` passes every one of its own gates, so its `W014` is emitted; `/doc` is rejected, so
-    // the run generates nothing — and `check` never generates on any document. The message must
-    // therefore assert only what its emission site decides, the selection, and never that anything
-    // "is generated" (#174). The `openai_openapi` corpus snapshot carries this shape at scale:
-    // `Rejected` with `E009` beside many `W014`s.
-    //
-    // This pins the wording, not the principle: `Diagnostic` has no structured field recording what
-    // its message asserts about the run, so nothing here compares a message's claim against the
-    // outcome, and a different outcome claim in a future rewording would have to be caught by
-    // whoever rewrites this expected string.
-    let spec = r##"
+/// A document whose `/page` selects `text/plain` over `text/html` and passes every gate of its
+/// own, so it emits `W014`, while `/doc` is rejected (`E009`).
+const W014_REJECTED_ELSEWHERE: &str = r##"
 openapi: 3.1.0
 info: { title: T, version: 1.0.0 }
 paths:
@@ -18197,6 +20536,153 @@ paths:
           content:
             application/pdf: { schema: {} }
 "##;
+
+/// [`W014_REJECTED_ELSEWHERE`] without the rejected `/doc`.
+const W014_CLEAN: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /page:
+    get:
+      operationId: getPage
+      responses:
+        "200":
+          description: OK
+          content:
+            text/plain: { schema: { type: string } }
+            text/html: { schema: { type: string } }
+"##;
+
+/// `W014`'s message before #319. It claimed generation, which was false on every `check` run and
+/// on every run rejected elsewhere (#174).
+const W014_GENERATION_WORDING: &str =
+    "`text/plain` is generated; the alternative media type(s) `text/html` are not";
+
+#[test]
+fn a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false() {
+    // #174's four axes reduce to two outcomes for this message: `check`, which generates nothing
+    // on any document, and a run rejected on another path. On each, a `W014` that declared the
+    // generation its old wording asserted is refused by the claim check, and the old wording,
+    // left undeclared, is caught by the prose backstop. Only a run that generates admits the
+    // claim. So the check distinguishes runs; it does not refuse the claim outright.
+    let refusing = [
+        (check(W014_CLEAN), Outcome::Clean),
+        (check(W014_REJECTED_ELSEWHERE), Outcome::Rejected),
+        (generate(W014_REJECTED_ELSEWHERE), Outcome::Rejected),
+    ];
+    for (report, outcome) in &refusing {
+        assert_eq!(report.outcome(), *outcome, "{report:#?}");
+        let w014 = report
+            .diagnostics()
+            .iter()
+            .find(|diagnostic| diagnostic.code == Code::AlternativeMediaIgnored)
+            .unwrap_or_else(|| panic!("{report:#?}"));
+        // As emitted: the selection, which every outcome admits.
+        assert_eq!(w014.claim, OutcomeClaim::Independent, "{w014:#?}");
+        assert!(claim_violations(*outcome, std::slice::from_ref(w014)).is_empty());
+        // As #174 found it, with the claim declared: the outcome refuses it.
+        let declared = Diagnostic {
+            message: W014_GENERATION_WORDING.to_owned(),
+            claim: OutcomeClaim::Generated,
+            ..w014.clone()
+        };
+        // As #174 found it, undeclared: the message states a claim the field does not carry.
+        let undeclared = Diagnostic {
+            message: W014_GENERATION_WORDING.to_owned(),
+            ..w014.clone()
+        };
+        for diagnostic in [declared, undeclared] {
+            assert_eq!(
+                claim_violations(*outcome, std::slice::from_ref(&diagnostic)).len(),
+                1,
+                "{outcome}: {diagnostic:#?}"
+            );
+        }
+    }
+
+    // A run that generates admits the declared claim, so the check tells runs apart rather than
+    // refusing the claim outright.
+    let generated = generate(W014_CLEAN);
+    assert_eq!(generated.outcome(), Outcome::Generated, "{generated:#?}");
+    let w014 = generated
+        .diagnostics()
+        .iter()
+        .find(|diagnostic| diagnostic.code == Code::AlternativeMediaIgnored)
+        .unwrap_or_else(|| panic!("{generated:#?}"));
+    let declared = Diagnostic {
+        message: W014_GENERATION_WORDING.to_owned(),
+        claim: OutcomeClaim::Generated,
+        ..w014.clone()
+    };
+    assert!(claim_violations(Outcome::Generated, &[declared]).is_empty());
+}
+
+#[test]
+fn every_outcome_admits_exactly_the_claims_true_of_it() {
+    for outcome in [
+        Outcome::Generated,
+        Outcome::Cached,
+        Outcome::Clean,
+        Outcome::Rejected,
+    ] {
+        assert!(outcome.admits(OutcomeClaim::Independent), "{outcome}");
+        assert_eq!(
+            outcome.admits(OutcomeClaim::Rejected),
+            outcome == Outcome::Rejected,
+            "{outcome}"
+        );
+        assert_eq!(
+            outcome.admits(OutcomeClaim::Generated),
+            matches!(outcome, Outcome::Generated | Outcome::Cached),
+            "{outcome}"
+        );
+    }
+}
+
+#[test]
+fn the_prose_backstop_reads_only_an_unnegated_outcome_predicate() {
+    for (message, stated) in [
+        (W014_GENERATION_WORDING, Some(OutcomeClaim::Generated)),
+        ("the body is rejected", Some(OutcomeClaim::Rejected)),
+        ("these would be generated", Some(OutcomeClaim::Generated)),
+        // Negated in its own clause: true on every run.
+        (
+            "webhooks describe server-initiated calls; no client code is generated for them",
+            None,
+        ),
+        (
+            "a header that is not a single value, so no typed accessor is generated",
+            None,
+        ),
+        ("the polymorphism form is not generated", None),
+        // A negation in an earlier clause does not reach a later one.
+        (
+            "nothing is selected; the rest is generated",
+            Some(OutcomeClaim::Generated),
+        ),
+        // A quoted name supplies neither the predicate nor the negation.
+        ("`is generated` names a schema", None),
+        ("`no` is generated", Some(OutcomeClaim::Generated)),
+        // An adjective is not a predicate.
+        ("the generated item is shared across every use", None),
+        ("`text/plain` is selected; the alternatives are not", None),
+    ] {
+        assert_eq!(stated_claim(message), stated, "{message}");
+    }
+}
+
+#[test]
+fn w014_on_a_document_rejected_elsewhere_claims_only_the_selection() {
+    // `/page` passes every one of its own gates, so its `W014` is emitted; `/doc` is rejected, so
+    // the run generates nothing — and `check` never generates on any document. The message must
+    // therefore assert only what its emission site decides, the selection, and never that anything
+    // "is generated" (#174). The `openai_openapi` corpus snapshot carries this shape at scale:
+    // `Rejected` with `E009` beside many `W014`s.
+    //
+    // This pins the wording. The principle is held by `run_generate`/`run_check`, which compare
+    // each diagnostic's structured `claim` with the run's outcome (#413); see
+    // `a_generation_claim_on_w014_is_contradicted_wherever_174_found_it_false`.
+    let spec = W014_REJECTED_ELSEWHERE;
     for report in [generate(spec), check(spec)] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(&report, Code::UnsupportedMediaType), "{report:#?}");
@@ -18481,7 +20967,7 @@ PetBody:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::UnresolvedRef), "{report:#?}");
     let code = std::fs::read_to_string(&out).unwrap();
@@ -18586,12 +21072,12 @@ fn a_report_that_hit_the_batch_cap_says_it_is_truncated() {
     std::fs::write(&path, &spec).unwrap();
     let spec_path = Utf8PathBuf::from_path_buf(path).unwrap();
 
-    let uncapped = spargen::check(&Spec::new(spec_path.clone()).batch_cap(100));
+    let uncapped = run_check(&Spec::new(spec_path.clone()).batch_cap(100));
     assert!(!uncapped.truncated(), "{uncapped:#?}");
     let all = uncapped.diagnostics().len();
     assert!(all > 3, "need more than the cap to prove truncation: {all}");
 
-    let capped = spargen::check(&Spec::new(spec_path).batch_cap(3));
+    let capped = run_check(&Spec::new(spec_path).batch_cap(3));
     assert!(capped.truncated(), "{capped:#?}");
     assert_eq!(capped.diagnostics().len(), 3, "{capped:#?}");
     assert!(
@@ -18754,6 +21240,56 @@ components:
             has_code(&report, Code::DeclarationHasNoEffect),
             "{report:#?}"
         );
+    }
+}
+
+/// A Header Object `$ref` with its own `summary`/`description` is `W011`'s reference-docs case,
+/// like a Parameter, Request Body or Response reference (#398). The header resolver once skipped
+/// the note, so the override was dropped with nothing said, at both places a header is resolved:
+/// a response's `headers` and a multipart `encoding` entry's `headers`. Each documented reference
+/// is reported exactly once, and an undocumented one not at all.
+#[test]
+fn w011_header_reference_summary_documents_the_use_site() {
+    let spec = r##"
+openapi: 3.2.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    post:
+      requestBody:
+        content:
+          multipart/form-data:
+            schema: { type: object, properties: { a: { type: string } } }
+            encoding:
+              a:
+                headers:
+                  X-Part: { $ref: '#/components/headers/Part', summary: the part tag }
+      responses:
+        '200':
+          description: ok
+          headers:
+            X-Rate: { $ref: '#/components/headers/Rate', description: per-minute budget }
+            X-Plain: { $ref: '#/components/headers/Plain' }
+components:
+  headers:
+    Rate: { schema: { type: integer } }
+    Plain: { schema: { type: integer } }
+    Part: { schema: { type: string, const: tag } }
+"##;
+    for report in [generate(spec), check(spec)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+        let noted = |target: &str| {
+            let wanted = format!("the `summary`/`description` on the reference to `{target}`");
+            report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::DeclarationHasNoEffect)
+                .filter(|d| d.message.starts_with(&wanted))
+                .count()
+        };
+        assert_eq!(noted("#/components/headers/Rate"), 1, "{report:#?}");
+        assert_eq!(noted("#/components/headers/Part"), 1, "{report:#?}");
+        assert_eq!(noted("#/components/headers/Plain"), 0, "{report:#?}");
     }
 }
 
@@ -19082,8 +21618,8 @@ item:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out));
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for report in [&generated, &checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(report, Code::InvalidInput), "{report:#?}");
@@ -19120,8 +21656,8 @@ item:
     )
     .unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out));
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     for report in [&generated, &checked] {
         assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
         assert!(has_code(report, Code::InvalidInput), "{report:#?}");
@@ -19219,7 +21755,7 @@ const PARITY_FIXTURES: &[(&str, &str)] = &[
     ),
     ("E013 irreconcilable allOf", ALL_OF_CONFLICT_SPEC),
     // A nullable alias that generates cleanly. The suite's clean cases are all trivial documents;
-    // this one drives the lowering path this branch reworked, where `check` and `generate` take the
+    // this one drives the nullable-alias lowering path, where `check` and `generate` take the
     // same code and could silently stop agreeing.
     ("nullable alias carries its target", NULLABLE_ALIAS_CARRY_SPEC),
     ("W005 schema default", W005_SPEC),
@@ -19286,8 +21822,8 @@ fn generate_and_check_refd_path_item_with_code(path_item: &str) -> (Report, Repo
     .unwrap();
     std::fs::write(dir.join("pet.yaml"), path_item).unwrap();
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
-    let checked = spargen::check(&Spec::new(dir.join("openapi.yaml")));
+    let generated = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
+    let checked = run_check(&Spec::new(dir.join("openapi.yaml")));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
     (generated, checked, code)
 }
@@ -19661,8 +22197,8 @@ fn generate_and_check_files(files: &[(&str, &str)]) -> (Report, Report, String) 
     }
     let root = dir.join(files[0].0);
     let out = dir.join("client.rs");
-    let generated = spargen::generate(&build(root.clone(), out.clone()));
-    let checked = spargen::check(&Spec::new(root));
+    let generated = run_generate(&build(root.clone(), out.clone()));
+    let checked = run_check(&Spec::new(root));
     let code = std::fs::read_to_string(&out).unwrap_or_default();
     (generated, checked, code)
 }
@@ -20992,7 +23528,7 @@ fn a_cycle_closing_union_member_is_rejected_not_discarded() {
 /// `lower_union_sibling` deletes the enclosing `type` array whenever it holds more than one non-null
 /// type, because no single lowered type represents it. That deletion also throws away the array's
 /// `"null"`, so the lowered sibling reads as null-rejecting even where the array admitted null —
-/// **an under-accept that is a regression against master**, whose compiled client fails on a
+/// **an under-accept**, whose compiled client fails on a
 /// spec-legal `null` with `invalid type: null, expected struct …`. In the other direction, a sibling
 /// that speaks about null through `enum` or `const` rather than `type` was treated as silent, so the
 /// union's acceptance survived a sibling that denied it.
@@ -21270,7 +23806,7 @@ fn a_component_and_an_inline_schema_agree_about_null() {
             std::fs::write(&path, content).unwrap();
         }
         let out = dir.join("client.rs");
-        let report = spargen::generate(&build(dir.join("openapi.yaml"), out.clone()));
+        let report = run_generate(&build(dir.join("openapi.yaml"), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
         (report, code)
     }
@@ -21779,9 +24315,9 @@ fn run_placement_with_client(files: &[(&str, serde_json::Value)]) -> (Report, Re
     for (name, value) in files {
         std::fs::write(dir.join(name), serde_json::to_vec_pretty(value).unwrap()).unwrap();
     }
-    let generated = spargen::generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
+    let generated = run_generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
     let client = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
-    let checked = spargen::check(&Spec::new(dir.join("openapi.json")));
+    let checked = run_check(&Spec::new(dir.join("openapi.json")));
     (generated, checked, client)
 }
 
@@ -21996,9 +24532,9 @@ fn e004_a_chained_object_reference_is_followed_by_target_not_by_spelling() {
         ] {
             std::fs::write(dir.join(name), serde_json::to_vec_pretty(&value).unwrap()).unwrap();
         }
-        let generated = spargen::generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
+        let generated = run_generate(&build(dir.join("openapi.json"), dir.join("client.rs")));
         let client = std::fs::read_to_string(dir.join("client.rs")).unwrap_or_default();
-        let checked = spargen::check(&Spec::new(dir.join("openapi.json")));
+        let checked = run_check(&Spec::new(dir.join("openapi.json")));
         for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_ne!(
                 report.outcome(),
@@ -22017,6 +24553,293 @@ fn e004_a_chained_object_reference_is_followed_by_target_not_by_spelling() {
             "{kind}: the chain must reach the object inline declares"
         );
     }
+}
+
+/// One `#/components/<kind>/` position lowering resolves itself (#397): a valid inline document,
+/// the pointer of the object to move out of it, the `components` key of its kind, and a decoy of
+/// that kind whose client differs from the moved object's.
+struct ComponentScope {
+    kind: &'static str,
+    document: serde_json::Value,
+    split_at: &'static str,
+    key: &'static str,
+    decoy: serde_json::Value,
+}
+
+fn component_scopes() -> Vec<ComponentScope> {
+    use serde_json::json;
+    let placed = |split_at: &str| {
+        placement_fixtures()
+            .into_iter()
+            .find(|fixture| !fixture.rejects && fixture.split_at == split_at)
+            .unwrap_or_else(|| panic!("no valid placement fixture at {split_at}"))
+            .document
+    };
+    let integer_text = json!({ "text/plain": { "schema": { "type": "integer" } } });
+    vec![
+        ComponentScope {
+            kind: "parameter",
+            document: placed("/paths/~1pet/get/parameters/0"),
+            split_at: "/paths/~1pet/get/parameters/0",
+            key: "parameters",
+            decoy: json!({ "name": "rootOnly", "in": "header", "schema": { "type": "string" } }),
+        },
+        ComponentScope {
+            kind: "request body",
+            document: placed("/paths/~1pet/get/requestBody"),
+            split_at: "/paths/~1pet/get/requestBody",
+            key: "requestBodies",
+            decoy: json!({ "content": integer_text }),
+        },
+        ComponentScope {
+            kind: "response",
+            document: placed("/paths/~1pet/get/responses/200"),
+            split_at: "/paths/~1pet/get/responses/200",
+            key: "responses",
+            decoy: json!({ "description": "decoy", "content": integer_text }),
+        },
+        ComponentScope {
+            kind: "header",
+            document: placed("/paths/~1pet/get/responses/200/headers/X-Rate"),
+            split_at: "/paths/~1pet/get/responses/200/headers/X-Rate",
+            key: "headers",
+            decoy: json!({ "schema": { "type": "boolean" } }),
+        },
+        ComponentScope {
+            kind: "Media Type Object",
+            document: placement_document(
+                "3.2.0",
+                json!({ "operationId": "getPet", "responses": { "200": { "description": "ok",
+                "content": { "application/json": { "schema": { "type": "string" } } } } } }),
+                json!({}),
+            ),
+            split_at: "/paths/~1pet/get/responses/200/content/application~1json",
+            key: "mediaTypes",
+            decoy: json!({ "schema": { "type": "integer" } }),
+        },
+    ]
+}
+
+impl ComponentScope {
+    /// The inline document with `name` declared in the root's own `components.<key>`.
+    fn with_root_component(&self, name: &str, value: &serde_json::Value) -> serde_json::Value {
+        let mut document = self.document.clone();
+        document
+            .as_object_mut()
+            .unwrap()
+            .entry("components")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .unwrap()
+            .insert(self.key.to_owned(), serde_json::json!({ name: value }));
+        document
+    }
+
+    /// `document` with the object at `split_at` replaced by a `$ref` to `reference`.
+    fn referencing(&self, document: &serde_json::Value, reference: &str) -> serde_json::Value {
+        let mut document = document.clone();
+        *document.pointer_mut(self.split_at).unwrap() = serde_json::json!({ "$ref": reference });
+        document
+    }
+
+    /// The moved object.
+    fn moved(&self) -> serde_json::Value {
+        self.document.pointer(self.split_at).unwrap().clone()
+    }
+}
+
+/// A `#/components/<kind>/` reference written inside a referenced file addresses that file's own
+/// components, as a JSON Pointer fragment addresses the document it appears in (#397). Header,
+/// Parameter, Request Body, Response and Media Type references read the **root** document's
+/// components instead: a sub-file chain `A` → `#/components/<kind>/B` was rejected with `E004`
+/// when the root declared no `B`, and silently generated the root's `B` when it did. Both reach
+/// the client the inline document generates, through `generate` and `check` alike — and the root's
+/// decoy `B`, read in its place, is shown to generate a different one, so the comparison can fail.
+#[test]
+fn a_component_ref_in_a_sub_file_reads_that_files_components() {
+    let mut divergent = Vec::new();
+    for scope in component_scopes() {
+        let kind = scope.kind;
+        let reference = format!("./other.json#/components/{}/A", scope.key);
+        let other = serde_json::json!({ "components": { scope.key: {
+            "A": { "$ref": format!("#/components/{}/B", scope.key) },
+            "B": scope.moved(),
+        } } });
+        for (label, inline) in [
+            ("the root declares no `B`", scope.document.clone()),
+            (
+                "the root declares a decoy `B`",
+                scope.with_root_component("B", &scope.decoy),
+            ),
+        ] {
+            let (_, _, inline_client) =
+                run_placement_with_client(&[("openapi.json", inline.clone())]);
+            assert!(!inline_client.is_empty(), "{kind}/{label}: inline");
+            if label.contains("decoy") {
+                let (_, _, decoyed) = run_placement_with_client(&[(
+                    "openapi.json",
+                    scope.referencing(&inline, &format!("#/components/{}/B", scope.key)),
+                )]);
+                assert_ne!(
+                    client_body(&decoyed),
+                    client_body(&inline_client),
+                    "{kind}: the decoy must generate a different client than the moved object"
+                );
+            }
+            let (generated, checked, client) = run_placement_with_client(&[
+                ("openapi.json", scope.referencing(&inline, &reference)),
+                ("other.json", other.clone()),
+            ]);
+            for (entry, report) in [("generate", &generated), ("check", &checked)] {
+                if report.outcome() == Outcome::Rejected || has_code(report, Code::UnresolvedRef) {
+                    divergent.push(format!("{kind}/{label}/{entry}: {report:#?}"));
+                }
+            }
+            if client_body(&client) != client_body(&inline_client) {
+                divergent.push(format!(
+                    "{kind}/{label}: the sub-file's `B` must be the one generated\n\
+                     split:\n{client}\ninline:\n{inline_client}"
+                ));
+            }
+        }
+    }
+    assert!(divergent.is_empty(), "{}", divergent.join("\n\n"));
+}
+
+/// The other direction of #397: a `#/components/<kind>/B` written inside a referenced file that
+/// declares no `B` is unresolved, even where the root document declares one — the fragment names
+/// the file it is written in, so reading the root's would answer a reference nobody wrote. It is
+/// `E004`'s absent-target case in that kind's words, and its remedy says how to reach the root's.
+#[test]
+fn e004_a_component_ref_in_a_sub_file_does_not_read_the_roots_components() {
+    for scope in component_scopes() {
+        let kind = scope.kind;
+        let root = scope.referencing(
+            &scope.with_root_component("B", &scope.moved()),
+            &format!("./other.json#/components/{}/A", scope.key),
+        );
+        let other = serde_json::json!({ "components": { scope.key: {
+            "A": { "$ref": format!("#/components/{}/B", scope.key) },
+        } } });
+        let (generated, checked) = run_placement(&[("openapi.json", root), ("other.json", other)]);
+        let wanted = format!(
+            "{kind} reference target `#/components/{}/B` was not found in the input bundle",
+            scope.key
+        );
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{kind}/{entry}: {report:#?}"
+            );
+            let found: Vec<_> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.code == Code::UnresolvedRef && d.message == wanted)
+                .collect();
+            assert_eq!(found.len(), 1, "{kind}/{entry}: {report:#?}");
+            assert!(
+                found[0].remedy.as_deref().is_some_and(
+                    |remedy| remedy.contains("the root document declares `#/components/")
+                ),
+                "{kind}/{entry}: the remedy must point at the root's declaration: {report:#?}"
+            );
+        }
+    }
+}
+
+/// A Media Type Object chain's cycle check keys on the target each hop resolves to (#397), as the
+/// Parameter, Request Body, Response and Header chains' do. A real cycle — through the root's
+/// `components.mediaTypes`, or across a referenced file — is `E004`'s cycle case in Media Type
+/// words. `#/components/mediaTypes/A` written in the root and again in a sub-file names two
+/// targets, so a chain through both is followed to the sub-file's `A` rather than reported as a
+/// cycle, and reaches the client the inline document generates.
+#[test]
+fn e004_a_media_type_chain_is_followed_by_target_not_by_spelling() {
+    use serde_json::json;
+    let with_content = |content: serde_json::Value, extra: serde_json::Value| {
+        placement_document(
+            "3.2.0",
+            json!({ "operationId": "getPet", "responses": { "200": { "description": "ok",
+            "content": { "application/json": content } } } }),
+            extra,
+        )
+    };
+
+    for (label, files) in [
+        (
+            "through the root's components",
+            vec![(
+                "openapi.json",
+                with_content(
+                    json!({ "$ref": "#/components/mediaTypes/A" }),
+                    json!({ "components": { "mediaTypes": {
+                        "A": { "$ref": "#/components/mediaTypes/B" },
+                        "B": { "$ref": "#/components/mediaTypes/A" },
+                    } } }),
+                ),
+            )],
+        ),
+        (
+            "across a referenced file",
+            vec![
+                (
+                    "openapi.json",
+                    with_content(json!({ "$ref": "./c.json#/A" }), json!({})),
+                ),
+                (
+                    "c.json",
+                    json!({ "A": { "$ref": "#/B" }, "B": { "$ref": "#/A" } }),
+                ),
+            ],
+        ),
+    ] {
+        let (generated, checked) = run_placement(&files);
+        for (entry, report) in [("generate", &generated), ("check", &checked)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{label}/{entry}: {report:#?}"
+            );
+            assert!(
+                messages_for(report, Code::UnresolvedRef)
+                    .contains(&"media type reference cycle cannot be resolved"),
+                "{label}/{entry}: a media type cycle must say it is a cycle: {report:#?}"
+            );
+        }
+    }
+
+    // `#/components/mediaTypes/A` is written twice: in the root (naming the root's `A`, which
+    // hops to the sub-file) and in the sub-file (naming the sub-file's own `A`, the object).
+    let root = with_content(
+        json!({ "$ref": "#/components/mediaTypes/A" }),
+        json!({ "components": { "mediaTypes": {
+            "A": { "$ref": "./other.json#/components/mediaTypes/B" },
+        } } }),
+    );
+    let other = json!({ "components": { "mediaTypes": {
+        "B": { "$ref": "#/components/mediaTypes/A" },
+        "A": { "schema": { "type": "integer" } },
+    } } });
+    let (generated, checked, client) =
+        run_placement_with_client(&[("openapi.json", root), ("other.json", other)]);
+    for (entry, report) in [("generate", &generated), ("check", &checked)] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(report, Code::UnresolvedRef),
+            "{entry}: one spelling written in two files is not a cycle: {report:#?}"
+        );
+    }
+    let (_, _, inline) = run_placement_with_client(&[(
+        "openapi.json",
+        with_content(json!({ "schema": { "type": "integer" } }), json!({})),
+    )]);
+    assert!(!inline.is_empty(), "the inline document must generate");
+    assert_eq!(
+        client_body(&client),
+        client_body(&inline),
+        "the chain must reach the sub-file's `A`"
+    );
 }
 
 /// A `summary`/`description` on a Reference Object written in a sub-file, at the second hop of a
@@ -22134,9 +24957,9 @@ components:
     ] {
         std::fs::write(&root, spec(&reference)).unwrap();
         let out = dir.join("client.rs");
-        let generated = spargen::generate(&build(root.clone(), out.clone()));
+        let generated = run_generate(&build(root.clone(), out.clone()));
         let code = std::fs::read_to_string(&out).unwrap_or_default();
-        let checked = spargen::check(&Spec::new(root.clone()));
+        let checked = run_check(&Spec::new(root.clone()));
         for (entry, report) in [("generate", &generated), ("check", &checked)] {
             assert_ne!(
                 report.outcome(),
@@ -22153,5 +24976,319 @@ components:
             nodes, 1,
             "{reference}: `Node` emitted {nodes} times, so the root was loaded twice: {code}"
         );
+    }
+}
+
+/// `generate_and_check_files` over `root` and `lib.yaml`, as `(entry, report)` pairs.
+fn root_and_lib(root: &str, lib: &str) -> [(&'static str, Report); 2] {
+    let (generated, checked, _) =
+        generate_and_check_files(&[("openapi.yaml", root), ("lib.yaml", lib)]);
+    [("generate", generated), ("check", checked)]
+}
+
+/// A reachable `A` whose only content under test sits at `site` (indented as a schema keyword of
+/// `A`), with `Present` and `Wrapper` declared so a control can name something that exists.
+fn validation_ref_spec(site: &str) -> String {
+    format!(
+        "openapi: 3.1.0\n\
+         info: {{ title: T, version: 1.0.0 }}\n\
+         servers: [{{ url: 'https://e.com' }}]\n\
+         paths:\n  \
+         /a:\n    \
+         get:\n      \
+         operationId: getA\n      \
+         responses:\n        \
+         '200':\n          \
+         description: ok\n          \
+         content:\n            \
+         application/json:\n              \
+         schema: {{ $ref: '#/components/schemas/A' }}\n\
+         components:\n  \
+         schemas:\n    \
+         Present: {{ type: string }}\n    \
+         Wrapper:\n      \
+         type: object\n      \
+         properties:\n        \
+         w: {{ type: integer }}\n    \
+         A:\n      \
+         type: object\n\
+         {site}"
+    )
+}
+
+/// The keyword positions lowering never reads (#424): `not`, `if`/`then`/`else`, `contains`,
+/// `propertyNames`, `unevaluated*`, `dependentSchemas`, an unconsumed `contentSchema`, and an
+/// unreferenced `$defs` entry, each at depth one and nested inside another such subtree. `{target}`
+/// is the reference each one carries.
+fn unlowered_ref_sites(target: &str) -> Vec<(&'static str, String, String)> {
+    let at = "/components/schemas/A";
+    vec![
+        (
+            "not",
+            format!("      not: {{ $ref: '{target}' }}\n"),
+            format!("{at}/not"),
+        ),
+        (
+            "if",
+            format!("      if: {{ $ref: '{target}' }}\n"),
+            format!("{at}/if"),
+        ),
+        (
+            "then",
+            format!("      then: {{ $ref: '{target}' }}\n"),
+            format!("{at}/then"),
+        ),
+        (
+            "else",
+            format!("      else: {{ $ref: '{target}' }}\n"),
+            format!("{at}/else"),
+        ),
+        (
+            "contains",
+            format!(
+                "      properties:\n        l:\n          type: array\n          items: {{ type: string }}\n          contains: {{ $ref: '{target}' }}\n"
+            ),
+            format!("{at}/properties/l/contains"),
+        ),
+        (
+            "propertyNames",
+            format!("      propertyNames: {{ $ref: '{target}' }}\n"),
+            format!("{at}/propertyNames"),
+        ),
+        (
+            "unevaluatedProperties",
+            format!("      unevaluatedProperties: {{ $ref: '{target}' }}\n"),
+            format!("{at}/unevaluatedProperties"),
+        ),
+        (
+            "unevaluatedItems",
+            format!(
+                "      properties:\n        l:\n          type: array\n          unevaluatedItems: {{ $ref: '{target}' }}\n"
+            ),
+            format!("{at}/properties/l/unevaluatedItems"),
+        ),
+        (
+            "dependentSchemas",
+            format!("      dependentSchemas:\n        x: {{ $ref: '{target}' }}\n"),
+            format!("{at}/dependentSchemas/x"),
+        ),
+        (
+            "contentSchema",
+            format!(
+                "      properties:\n        s:\n          type: string\n          contentMediaType: application/json\n          contentSchema: {{ $ref: '{target}' }}\n"
+            ),
+            format!("{at}/properties/s/contentSchema"),
+        ),
+        (
+            "an unreferenced $defs entry",
+            format!("      $defs:\n        D: {{ $ref: '{target}' }}\n"),
+            format!("{at}/$defs/D"),
+        ),
+        (
+            "a property inside not",
+            format!(
+                "      not:\n        properties:\n          y: {{ $ref: '{target}' }}\n"
+            ),
+            format!("{at}/not/properties/y"),
+        ),
+        (
+            "an allOf member inside if",
+            format!("      if:\n        allOf:\n          - {{ $ref: '{target}' }}\n"),
+            format!("{at}/if/allOf/0"),
+        ),
+        (
+            "a not inside contains",
+            format!(
+                "      properties:\n        l:\n          type: array\n          contains:\n            not: {{ $ref: '{target}' }}\n"
+            ),
+            format!("{at}/properties/l/contains/not"),
+        ),
+    ]
+}
+
+/// #424: a `$ref` under a keyword lowering never reads was never resolved, so a dangling one
+/// audited clean beside only the parent's `W001`, where the same reference under `properties` is
+/// `E004`. The subschema is still not lowered, but its references are resolved, and one naming
+/// nothing is `E004` at the reference through both entry points — whether it is a component name
+/// the document does not declare or a pointer into a file that holds nothing there.
+#[test]
+fn a_dangling_ref_under_a_validation_only_keyword_is_e004() {
+    for target in [
+        "#/components/schemas/Missing",
+        "#/components/schemas/A/nothing",
+    ] {
+        for (what, site, pointer) in unlowered_ref_sites(target) {
+            let spec = validation_ref_spec(&site);
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                assert_eq!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{target} under {what} through {entry}: {report:#?}"
+                );
+                assert!(
+                    report
+                        .diagnostics()
+                        .iter()
+                        .any(|d| d.code == Code::UnresolvedRef && d.pointer.as_str() == pointer),
+                    "{target} under {what} through {entry}: E004 must sit at {pointer}: \
+                     {report:#?}"
+                );
+            }
+        }
+    }
+}
+
+/// The control for #424: the same positions naming a schema that exists — a root component, a
+/// pointer into the document, a sub-file — still resolve and generate with no `E004`, and the
+/// subschema is still not lowered, so the emitted types are those of the document without it.
+#[test]
+fn a_resolvable_ref_under_a_validation_only_keyword_stays_clean() {
+    let (_, base_code) = generate_with_code(&validation_ref_spec(""));
+    let base_types = types_module(&base_code);
+    for target in [
+        "#/components/schemas/Present",
+        "#/components/schemas/Wrapper/properties/w",
+        "#/components/schemas/A",
+    ] {
+        for (what, site, _) in unlowered_ref_sites(target) {
+            let spec = validation_ref_spec(&site);
+            for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{target} under {what} through {entry}: {report:#?}"
+                );
+                assert!(
+                    !has_code(&report, Code::UnresolvedRef),
+                    "{target} under {what} through {entry}: {report:#?}"
+                );
+            }
+            // `contains`/`unevaluatedItems` add an array property and `contentSchema` a string
+            // one, so only the positions that add no shape are compared with the baseline.
+            if !site.contains("properties:") {
+                let (_, code) = generate_with_code(&spec);
+                assert_eq!(
+                    types_module(&code),
+                    base_types,
+                    "{target} under {what} changed the emitted types, so it was lowered"
+                );
+            }
+        }
+    }
+}
+
+/// #424 across files: a target reached only through `not` is never lowered, so its own references
+/// are resolved by following it — a dangling one inside it is `E004` at that reference, in the
+/// file it is written in. A cycle of such targets terminates. A bare `#/components/schemas/<name>`
+/// written in a sub-file names the root's component when the root declares one, as lowering reads
+/// it, so it is not reported against the sub-file.
+#[test]
+fn a_ref_under_a_validation_only_keyword_is_followed_into_other_files() {
+    let root = validation_ref_spec("      not: { $ref: './lib.yaml#/Outer' }\n");
+
+    let dangling = "Outer:\n  type: object\n  properties:\n    y: { $ref: '#/Gone' }\n";
+    for (entry, report) in root_and_lib(&root, dangling) {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            report
+                .diagnostics()
+                .iter()
+                .any(|d| d.code == Code::UnresolvedRef
+                    && d.pointer.as_str() == "/Outer/properties/y"),
+            "{entry}: E004 must sit at lib.yaml's /Outer/properties/y: {report:#?}"
+        );
+    }
+
+    let resolvable = "Outer:\n  \
+                      type: object\n  \
+                      properties:\n    \
+                      y: { $ref: '#/Inner' }\n    \
+                      z: { $ref: '#/components/schemas/Present' }\n\
+                      Inner:\n  \
+                      not: { $ref: '#/Outer' }\n";
+    for (entry, report) in root_and_lib(&root, resolvable) {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnresolvedRef),
+            "{entry}: {report:#?}"
+        );
+    }
+
+    // A bare `#/components/schemas/<name>` written in a sub-file that the sub-file declares and
+    // the root does not addresses the sub-file, as lowering reads it: only a reference written in
+    // the root is a missing root component when the root does not declare its name.
+    let local_component = "Outer:\n  \
+                           type: object\n  \
+                           properties:\n    \
+                           y: { $ref: '#/components/schemas/Local' }\n\
+                           components:\n  \
+                           schemas:\n    \
+                           Local: { type: string }\n";
+    for (entry, report) in root_and_lib(&root, local_component) {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            !has_code(&report, Code::UnresolvedRef),
+            "{entry}: a sub-file's own component is not a missing root component: {report:#?}"
+        );
+    }
+
+    let missing_file = validation_ref_spec("      not: { $ref: './absent.yaml#/Outer' }\n");
+    for (entry, report) in [
+        ("generate", generate(&missing_file)),
+        ("check", check(&missing_file)),
+    ] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+    }
+}
+
+/// #424: a `discriminator` inside a subschema lowering never reads was never checked, so a
+/// `mapping` or `defaultMapping` value naming no schema went unreported. Each is resolved as a
+/// lowered discriminator's would be, and one naming nothing is `E004` at the entry; a value naming
+/// a schema that exists is not.
+#[test]
+fn a_discriminator_under_a_validation_only_keyword_resolves_its_mapping() {
+    let site = |target: &str| {
+        format!(
+            "      else:\n        \
+             discriminator:\n          \
+             propertyName: kind\n          \
+             mapping:\n            \
+             p: {target}\n          \
+             defaultMapping: Present\n        \
+             oneOf:\n          \
+             - {{ $ref: '#/components/schemas/Present' }}\n"
+        )
+    };
+    let dangling = validation_ref_spec(&site("Missing"));
+    for (entry, report) in [
+        ("generate", generate(&dangling)),
+        ("check", check(&dangling)),
+    ] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let e004: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::UnresolvedRef)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        assert_eq!(
+            e004,
+            ["/components/schemas/A/else/discriminator/mapping/p"],
+            "{entry}: only the dangling mapping entry is E004: {report:#?}"
+        );
+    }
+    for target in ["Present", "'#/components/schemas/Present'"] {
+        let clean = validation_ref_spec(&site(target));
+        for (entry, report) in [("generate", generate(&clean)), ("check", check(&clean))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{target}, {entry}: {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::UnresolvedRef),
+                "{target}, {entry}: {report:#?}"
+            );
+        }
     }
 }

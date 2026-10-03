@@ -340,7 +340,7 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
                         scope.alloc(&value, IdentRole::Variant, &def.provenance.pointer),
                     );
                 }
-                if enumeration.open {
+                if enumeration.is_open() {
                     names.open_variants.insert(
                         id,
                         scope.alloc("Other", IdentRole::Variant, &def.provenance.pointer),

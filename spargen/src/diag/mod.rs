@@ -59,6 +59,49 @@ pub struct Diagnostic {
     pub remedy: Option<String>,
     /// The governing interpretation, when this diagnostic's behavior depends on one.
     pub interpretation: Option<InterpId>,
+    /// What [`Self::message`] asserts about the outcome of the run that emitted it.
+    ///
+    /// The message is prose composed at the emission site. This field records the same claim as
+    /// data, so it can be checked against the run's `Outcome`, which the emission site does not
+    /// know. `Outcome::admits` is that check.
+    pub claim: OutcomeClaim,
+}
+
+/// What a diagnostic's message asserts about the outcome of the run that emitted it.
+///
+/// A diagnostic is emitted before the run's outcome is decided, and the same diagnostic is
+/// emitted by `check` and by `generate`. A message can only be true on every run if it claims
+/// nothing more than what its emission site decides, or if it declares the outcome it claims
+/// here. `Outcome::admits` then checks that claim against the run that emitted it (#413).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+#[non_exhaustive]
+pub enum OutcomeClaim {
+    /// The message asserts nothing that depends on the run's outcome, so it holds on every run.
+    ///
+    /// Negative claims belong here. "no client code is generated for them" is true on a run that
+    /// generates nothing too. So is a selection: "`{media}` is selected" names a decision made
+    /// where the message is emitted, and a rejection elsewhere does not change it. Every warning
+    /// is built with this claim.
+    Independent,
+    /// The message asserts that the run is rejected. It holds only when the outcome is
+    /// `Rejected`. Every error is built with this claim, because an error is the rejection.
+    Rejected,
+    /// The message asserts that the run generates client code, for example "`{media}` is
+    /// generated". It holds only when the outcome is `Generated` or `Cached`. It never holds on a
+    /// `check` run, which generates nothing, or on a run rejected anywhere in the document.
+    Generated,
+}
+
+impl OutcomeClaim {
+    /// The claim every diagnostic of `severity` is built with: an error is the rejection it
+    /// reports, and a warning claims nothing about the outcome.
+    pub(crate) fn of(severity: Severity) -> Self {
+        match severity {
+            Severity::Error => OutcomeClaim::Rejected,
+            Severity::Warning => OutcomeClaim::Independent,
+        }
+    }
 }
 
 impl std::fmt::Display for Diagnostic {
@@ -150,6 +193,7 @@ impl DiagnosticBuilder {
             message: self.message.unwrap_or_else(|| self.code.title().to_owned()),
             remedy: self.remedy,
             interpretation: self.interpretation,
+            claim: OutcomeClaim::of(self.severity),
         }
     }
 
@@ -161,7 +205,47 @@ impl DiagnosticBuilder {
 
 #[cfg(test)]
 mod tests {
-    use super::is_test_fn;
+    use super::{is_test_fn, Code, Diagnostic, JsonPointer, OutcomeClaim, Provenance};
+
+    #[test]
+    fn an_error_claims_the_rejection_and_a_warning_claims_nothing() {
+        // `frontend.rs` holds every claim to its run's outcome. If every diagnostic were built
+        // `Independent`, that check would pass on every run and hold nothing, including that an
+        // error only ever reaches a rejected run.
+        let at = || Provenance::new(JsonPointer::root(), None);
+        assert_eq!(
+            Diagnostic::error(Code::UnsupportedMediaType, at())
+                .build()
+                .claim,
+            OutcomeClaim::Rejected
+        );
+        assert_eq!(
+            Diagnostic::warning(Code::AlternativeMediaIgnored, at())
+                .build()
+                .claim,
+            OutcomeClaim::Independent
+        );
+    }
+
+    #[test]
+    fn a_serialized_diagnostic_carries_its_claim_in_kebab_case() {
+        // `--format json` renders a `Report`'s diagnostics through this `Serialize`, so the key
+        // and these spellings are what a JSON consumer reads.
+        let at = || Provenance::new(JsonPointer::root(), None);
+        let claim_of =
+            |diagnostic: Diagnostic| serde_json::to_value(diagnostic).unwrap()["claim"].clone();
+        assert_eq!(
+            claim_of(Diagnostic::error(Code::UnsupportedMediaType, at()).build()),
+            "rejected"
+        );
+        assert_eq!(
+            claim_of(Diagnostic::warning(Code::AlternativeMediaIgnored, at()).build()),
+            "independent"
+        );
+        let mut generated = Diagnostic::warning(Code::AlternativeMediaIgnored, at()).build();
+        generated.claim = OutcomeClaim::Generated;
+        assert_eq!(claim_of(generated), "generated");
+    }
 
     #[test]
     fn is_test_fn_accepts_a_function_its_test_attribute_immediately_precedes() {

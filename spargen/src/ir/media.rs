@@ -676,8 +676,8 @@ mod tests {
     use super::{ApiErrorBodyImpl, ErrorShape, Response, Responses, StatusSpec, SuccessShape, Ty};
     use crate::diag::{JsonPointer, Provenance};
     use crate::ir::{
-        AdditionalProps, Docs, Prim, ScalarEnum, ScalarRepr, ScalarValue, Struct, TypeDef,
-        TypeGraph, TypeId, TypeKind,
+        AdditionalProps, Docs, Openness, Prim, ScalarEnum, ScalarRepr, ScalarValue, Struct,
+        TypeDef, TypeGraph, TypeId, TypeKind,
     };
 
     fn ty(id: u32) -> Ty {
@@ -1500,7 +1500,7 @@ mod tests {
         TypeKind::Enum(ScalarEnum {
             repr: ScalarRepr::Int,
             variants: vec![ScalarValue::Int(1)],
-            open: false,
+            openness: Openness::Closed,
         })
     }
 
