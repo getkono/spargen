@@ -937,6 +937,88 @@ components:
     }
 }
 
+/// The partly shared `$ref`-sibling merge keeps the `oneOf` null rule (#402). Beside a nullable
+/// object `NB`, `required: [a]` and `required: [b]` each meet `NB` to one nullable struct, and the
+/// third branch's extra property `c` makes a second, so the union keeps two variants. `null` then
+/// matches both merged branches and fails exactly-one, so it is invalid: the merged variant does
+/// not carry `Option<_>`, and neither does the position. The third branch is written once
+/// non-nullable and once nullable, so the union itself would otherwise accept `null` in the second
+/// case and the position's own nullability is pinned too.
+#[test]
+fn a_partly_shared_ref_sibling_one_of_beside_a_nullable_target_is_not_nullable() {
+    for third in ["object", "[object, 'null']"] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    NB:
+      type: [object, 'null']
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Holder:
+      type: object
+      properties:
+        x:
+          $ref: '#/components/schemas/NB'
+          oneOf:
+            - {{ required: [a] }}
+            - {{ required: [b] }}
+            - {{ type: {third}, properties: {{ c: {{ type: integer }} }} }}
+      required: [x]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "third `type: {third}` via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+                }),
+                "third `type: {third}` via {entry}: the partial merge must warn at `x`: \
+                 {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        let x = field_type(&types, "pub x")
+            .unwrap_or_else(|| panic!("third `type: {third}`: no `x` field: {types}"));
+        assert!(
+            !x.starts_with("Option<"),
+            "third `type: {third}`: `x` is `{x}`, but `null` matches both merged branches, so it \
+             is invalid: {types}"
+        );
+        let variants = enum_variants(&types, &x);
+        assert_eq!(
+            variants.len(),
+            2,
+            "third `type: {third}`: the two required-only branches must be one variant beside \
+             the `c` branch: {types}"
+        );
+        assert!(
+            !variants.iter().any(|variant| variant.contains("(Option<")),
+            "third `type: {third}`: no variant may accept `null`, which matches both merged \
+             branches: {variants:?}"
+        );
+    }
+}
+
 /// The collapse above is reserved for a `$ref` whose own sibling is a `oneOf`/`anyOf`. A `$ref` to a
 /// union component beside a non-union sibling (`U: anyOf[...]`, `P: {$ref: U, const: x}`) is an
 /// intersection this change does not touch: its branches may intersect to one type, but it must
