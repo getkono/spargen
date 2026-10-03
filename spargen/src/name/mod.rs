@@ -33,9 +33,15 @@ pub(crate) struct Names {
     /// Optional-parameters `…Params` struct name per operation.
     pub(crate) params_structs: HashMap<OperationId, Ident>,
     /// Generator-owned signature and request-building bindings per operation. Required OpenAPI
-    /// parameters reserve their natural Rust spellings first, so these identifiers can never
-    /// shadow caller-provided values.
+    /// parameters are allocated in the same scope first, so these identifiers can never shadow
+    /// caller-provided values.
     pub(crate) operation_bindings: HashMap<OperationId, OperationBindings>,
+    /// Identifier per operation parameter, in `Operation::params` order: a method argument for a
+    /// required parameter, a `…Params` field (and setter) for an optional one. Each kind shares
+    /// one scope per operation, so two parameters whose names escape to the same spelling (a path
+    /// and a query `id`, a query `page-size` and a header `page_size`) are disambiguated instead
+    /// of emitting a duplicate argument or field.
+    pub(crate) parameters: HashMap<OperationId, Vec<Ident>>,
     /// Type name per type.
     pub(crate) types: HashMap<TypeId, Ident>,
     /// Field name per `(type, wire property name)`.
@@ -265,18 +271,17 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             ),
         );
 
-        // Required parameters are fixed by the generated public surface. Reserve their natural
-        // spellings, then allocate every generator-owned binding in the same lexical scope so the
-        // implementation yields on collision without renaming ordinary arguments.
-        let mut binding_scope = Scope::default();
-        for parameter in operation
-            .params
-            .iter()
-            .filter(|parameter| parameter.required)
-        {
-            binding_scope.reserve(&parameter.name, IdentRole::Param);
-        }
+        // Required parameters are fixed by the generated public surface. Allocate them first, then
+        // every generator-owned binding in the same lexical scope so the implementation yields on
+        // collision without renaming ordinary arguments. Optional parameters are fields of the
+        // `…Params` struct, a scope of their own.
         let pointer = &operation.provenance.pointer;
+        let mut binding_scope = Scope::default();
+        let mut field_scope = Scope::default();
+        names.parameters.insert(
+            operation.id.clone(),
+            allocate_parameters(operation, &mut binding_scope, &mut field_scope),
+        );
         let params = operation
             .params
             .iter()
@@ -376,6 +381,72 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     names
 }
 
+/// Allocate one identifier per parameter of `operation`, in `Operation::params` order: required
+/// parameters as method arguments in `arguments`, optional ones as `…Params` fields in `fields`.
+///
+/// Each kind is allocated as one ranked batch, so which of two parameters escaping to the same
+/// spelling keeps it depends on the parameters themselves and not on the order the spec lists
+/// them in: the earlier location (path, query, querystring, header, cookie) wins, then the
+/// lexically smaller wire name. The loser takes a suffix seeded from the operation's pointer, its
+/// location and its wire name, so it is as stable as the parameter is.
+fn allocate_parameters(
+    operation: &crate::ir::Operation,
+    arguments: &mut Scope,
+    fields: &mut Scope,
+) -> Vec<Ident> {
+    use crate::ir::ParamLoc;
+    let location = |location: ParamLoc| match location {
+        ParamLoc::Path => (0u8, "path"),
+        ParamLoc::Query => (1, "query"),
+        ParamLoc::QueryString => (2, "querystring"),
+        ParamLoc::Header => (3, "header"),
+        ParamLoc::Cookie => (4, "cookie"),
+    };
+    let seeds: Vec<crate::diag::JsonPointer> = operation
+        .params
+        .iter()
+        .map(|parameter| {
+            operation
+                .provenance
+                .pointer
+                .push("parameters")
+                .push(location(parameter.location).1)
+                .push(&parameter.name)
+        })
+        .collect();
+    let mut allocated: Vec<Option<Ident>> = vec![None; operation.params.len()];
+    for (required, scope, role) in [
+        (true, arguments, IdentRole::Param),
+        (false, fields, IdentRole::Field),
+    ] {
+        let indices: Vec<usize> = (0..operation.params.len())
+            .filter(|&index| operation.params[index].required == required)
+            .collect();
+        let requests: Vec<_> = indices
+            .iter()
+            .map(|&index| {
+                let parameter = &operation.params[index];
+                RankedRequest {
+                    hint: parameter.name.as_str(),
+                    provenance: &seeds[index],
+                    rank: (
+                        location(parameter.location).0,
+                        parameter.name.as_str(),
+                        index,
+                    ),
+                }
+            })
+            .collect();
+        for (index, ident) in indices.iter().zip(scope.alloc_ranked(&requests, role)) {
+            allocated[*index] = Some(ident);
+        }
+    }
+    allocated
+        .into_iter()
+        .map(|ident| ident.expect("every parameter is either required or optional"))
+        .collect()
+}
+
 /// The stable label for one documented status, shared by naming and codegen so a header struct and
 /// its response variant always agree.
 pub(crate) fn status_label(spec: crate::ir::StatusSpec) -> String {
@@ -383,5 +454,274 @@ pub(crate) fn status_label(spec: crate::ir::StatusSpec) -> String {
         crate::ir::StatusSpec::Exact(code) => format!("Status{code}"),
         crate::ir::StatusSpec::Range(prefix) => format!("Status{prefix}xx"),
         crate::ir::StatusSpec::Default => "Default".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{allocate, Ident, Names};
+    use crate::diag::{Diagnostics, JsonPointer, Provenance};
+    use crate::ir::{
+        Api, BodyEncoding, Info, MediaType, Method, Operation, OperationId, ParamLoc, ParamStyle,
+        Parameter, PathSegment, PathTemplate, Prim, RequestBody, Responses, Ty, TypeDef, TypeGraph,
+        TypeKind,
+    };
+    use indexmap::IndexMap;
+
+    fn parameter(name: &str, location: ParamLoc, required: bool) -> Parameter {
+        Parameter {
+            name: name.to_owned(),
+            location,
+            ty: Ty {
+                id: crate::ir::TypeId(0),
+                nullable: false,
+                boxed: false,
+            },
+            required,
+            style: match location {
+                ParamLoc::Path | ParamLoc::Header => ParamStyle::Simple,
+                ParamLoc::Query | ParamLoc::QueryString | ParamLoc::Cookie => ParamStyle::Form,
+            },
+            allow_reserved: false,
+            explode: false,
+            deprecated: false,
+            default_display: None,
+        }
+    }
+
+    /// An API with one `GET /items/{id}` operation carrying `params` and, when `body` is set, a
+    /// typed JSON request body, so the `body` binding is allocated too.
+    fn api(params: Vec<Parameter>, body: bool) -> Api {
+        let mut types = TypeGraph::default();
+        let string = types.insert(TypeDef {
+            name_hint: "Text".to_owned(),
+            kind: TypeKind::Primitive(Prim::String),
+            docs: Default::default(),
+            provenance: Provenance::new(JsonPointer::root(), None),
+            document: String::new(),
+        });
+        let ty = Ty {
+            id: string,
+            nullable: false,
+            boxed: false,
+        };
+        let params = params
+            .into_iter()
+            .map(|parameter| Parameter { ty, ..parameter })
+            .collect();
+        Api {
+            info: Info {
+                title: "T".to_owned(),
+                version: "1.0.0".to_owned(),
+                description: None,
+            },
+            servers: Vec::new(),
+            operations: vec![Operation {
+                id: OperationId("getItem".to_owned()),
+                method: Method::Get,
+                path: PathTemplate {
+                    raw: "/items/{id}".to_owned(),
+                    segments: vec![
+                        PathSegment::Literal("items".to_owned()),
+                        PathSegment::Param("id".to_owned()),
+                    ],
+                },
+                params,
+                request_body: body.then(|| RequestBody {
+                    media: MediaType::Json,
+                    content_type: "application/json".to_owned(),
+                    ty: Some(ty),
+                    required: true,
+                    encoding: BodyEncoding::default(),
+                }),
+                responses: Responses {
+                    by_status: Vec::new(),
+                    default: None,
+                },
+                security: Vec::new(),
+                deprecated: false,
+                docs: Default::default(),
+                server: None,
+                provenance: Provenance::new(
+                    JsonPointer::root()
+                        .push("paths")
+                        .push("/items/{id}")
+                        .push("get"),
+                    None,
+                ),
+            }],
+            types,
+            security_schemes: IndexMap::new(),
+        }
+    }
+
+    fn names(params: Vec<Parameter>, body: bool) -> Names {
+        allocate(&api(params, body), &mut Diagnostics::new(100))
+    }
+
+    /// The allocated identifier of every parameter, keyed by what identifies a parameter in
+    /// OpenAPI (`(in, name)`), so allocations of differently ordered lists compare directly.
+    fn by_parameter(params: &[Parameter], names: &Names) -> Vec<((u8, String), Ident)> {
+        let idents = &names.parameters[&OperationId("getItem".to_owned())];
+        assert_eq!(idents.len(), params.len(), "one identifier per parameter");
+        let mut keyed: Vec<_> = params
+            .iter()
+            .zip(idents)
+            .map(|(parameter, ident)| {
+                let location = match parameter.location {
+                    ParamLoc::Path => 0u8,
+                    ParamLoc::Query => 1,
+                    ParamLoc::QueryString => 2,
+                    ParamLoc::Header => 3,
+                    ParamLoc::Cookie => 4,
+                };
+                ((location, parameter.name.clone()), ident.clone())
+            })
+            .collect();
+        keyed.sort_by(|left, right| left.0.cmp(&right.0));
+        keyed
+    }
+
+    /// Parameters whose names escape to the same spelling in each scope: `id` twice and `ID`
+    /// among the method arguments, `page-size`, `page_size` and `Page Size` among the fields.
+    fn colliding() -> Vec<Parameter> {
+        vec![
+            parameter("page_size", ParamLoc::Header, false),
+            parameter("id", ParamLoc::Query, true),
+            parameter("Page Size", ParamLoc::Cookie, false),
+            parameter("ID", ParamLoc::Header, true),
+            parameter("id", ParamLoc::Path, true),
+            parameter("page-size", ParamLoc::Query, false),
+        ]
+    }
+
+    fn assert_distinct_per_scope(params: &[Parameter], names: &Names) {
+        let idents = &names.parameters[&OperationId("getItem".to_owned())];
+        for required in [true, false] {
+            let scope: Vec<&str> = params
+                .iter()
+                .zip(idents)
+                .filter(|(parameter, _)| parameter.required == required)
+                .map(|(_, ident)| ident.as_str())
+                .collect();
+            let mut unique = scope.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!(
+                unique.len(),
+                scope.len(),
+                "required={required} identifiers collide: {scope:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn colliding_parameter_identifiers_are_distinct_within_each_scope() {
+        let params = colliding();
+        let names = names(params.clone(), false);
+        assert_distinct_per_scope(&params, &names);
+
+        // The earliest location keeps the bare spelling; the others take a suffix.
+        let keyed = by_parameter(&params, &names);
+        let ident = |location: u8, name: &str| {
+            keyed
+                .iter()
+                .find(|(key, _)| *key == (location, name.to_owned()))
+                .map(|(_, ident)| ident.as_str().to_owned())
+                .expect("parameter is allocated")
+        };
+        assert_eq!(ident(0, "id"), "id");
+        assert_ne!(ident(1, "id"), "id");
+        assert_ne!(ident(3, "ID"), "id");
+        assert_eq!(ident(1, "page-size"), "page_size");
+        assert_ne!(ident(3, "page_size"), "page_size");
+        assert_ne!(ident(4, "Page Size"), "page_size");
+    }
+
+    #[test]
+    fn parameter_identifiers_do_not_depend_on_listing_order() {
+        let params = colliding();
+        let expected = by_parameter(&params, &names(params.clone(), false));
+        for rotation in 0..params.len() {
+            for reversed in [false, true] {
+                let mut reordered = params.clone();
+                reordered.rotate_left(rotation);
+                if reversed {
+                    reordered.reverse();
+                }
+                let names = names(reordered.clone(), false);
+                assert_distinct_per_scope(&reordered, &names);
+                assert_eq!(
+                    by_parameter(&reordered, &names),
+                    expected,
+                    "rotation {rotation}, reversed {reversed}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn generator_bindings_yield_to_every_parameter() {
+        let bindings = [
+            "params",
+            "body",
+            "path",
+            "query",
+            "raw_query",
+            "url",
+            "request",
+            "reconnect_request",
+            "cookies",
+        ];
+        let mut params: Vec<Parameter> = bindings
+            .iter()
+            .map(|name| parameter(name, ParamLoc::Query, true))
+            .collect();
+        // An optional parameter, so the `params` binding is allocated at all.
+        params.push(parameter("limit", ParamLoc::Query, false));
+        let names = names(params.clone(), true);
+        let operation = OperationId("getItem".to_owned());
+        let idents = &names.parameters[&operation];
+
+        // Every required parameter keeps its bare spelling.
+        for (parameter, ident) in params.iter().zip(idents) {
+            assert_eq!(ident.as_str(), parameter.name);
+        }
+
+        let allocated = &names.operation_bindings[&operation];
+        let generated = [
+            allocated.params.as_ref().expect("an optional parameter"),
+            allocated.body.as_ref().expect("a typed request body"),
+            &allocated.path,
+            &allocated.query,
+            &allocated.raw_query,
+            &allocated.url,
+            &allocated.request,
+            &allocated.reconnect_request,
+            &allocated.cookies,
+        ];
+        for (binding, ident) in bindings.iter().zip(generated) {
+            assert_ne!(
+                ident.as_str(),
+                *binding,
+                "`{binding}` kept its bare spelling"
+            );
+            assert!(
+                params
+                    .iter()
+                    .zip(idents)
+                    .filter(|(parameter, _)| parameter.required)
+                    .all(|(_, parameter)| parameter != ident),
+                "binding `{ident}` shadows a parameter"
+            );
+        }
+        let mut unique: Vec<&str> = generated.iter().map(|ident| ident.as_str()).collect();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            generated.len(),
+            "bindings collide: {generated:?}"
+        );
     }
 }

@@ -243,7 +243,7 @@ pub(crate) fn emit_operation(
         .filter(|param| param.location == ParamLoc::Path)
         .map(|param| {
             let placeholder = format!("{{{}}}", param.name);
-            let ident = param_ident(param, crate::name::IdentRole::Param);
+            let ident = param_ident(names, operation, param);
             let value = param_value_tokens(param, quote! { &#ident });
             quote! {
                 #path_binding = #path_binding.replace(#placeholder, &#value);
@@ -255,7 +255,7 @@ pub(crate) fn emit_operation(
         .filter(|param| param.required && param.location == ParamLoc::Query)
         .map(|param| {
             let name = param.name.clone();
-            let ident = param_ident(param, crate::name::IdentRole::Param);
+            let ident = param_ident(names, operation, param);
             query_param_tokens(param, &name, quote! { &#ident }, query_binding)
         });
     let optional_query = operation
@@ -264,7 +264,7 @@ pub(crate) fn emit_operation(
         .filter(|param| !param.required && param.location == ParamLoc::Query)
         .map(|param| {
             let name = param.name.clone();
-            let ident = param_ident(param, crate::name::IdentRole::Field);
+            let ident = param_ident(names, operation, param);
             let params_binding = bindings
                 .params
                 .as_ref()
@@ -296,7 +296,7 @@ pub(crate) fn emit_operation(
     // `unused_assignments` warning in every consumer's build.
     let raw_query_init = uses_querystring.then(|| match json_querystring {
         Some(parameter) if parameter.required => {
-            let ident = param_ident(parameter, crate::name::IdentRole::Param);
+            let ident = param_ident(names, operation, parameter);
             let encoded = json_querystring_tokens(quote! { &#ident });
             quote! { let #raw_query_binding: Option<String> = Some(#encoded); }
         }
@@ -315,7 +315,7 @@ pub(crate) fn emit_operation(
             )
         })
         .map(|parameter| {
-            let ident = param_ident(parameter, crate::name::IdentRole::Param);
+            let ident = param_ident(names, operation, parameter);
             querystring_param_tokens(
                 parameter,
                 quote! { &#ident },
@@ -328,7 +328,7 @@ pub(crate) fn emit_operation(
         .iter()
         .filter(|parameter| !parameter.required && parameter.location == ParamLoc::QueryString)
         .map(|parameter| {
-            let ident = param_ident(parameter, crate::name::IdentRole::Field);
+            let ident = param_ident(names, operation, parameter);
             let params_binding = bindings
                 .params
                 .as_ref()
@@ -354,7 +354,7 @@ pub(crate) fn emit_operation(
         .filter(|param| param.required && param.location == ParamLoc::Header)
         .map(|param| {
             let name = param.name.clone();
-            let ident = param_ident(param, crate::name::IdentRole::Param);
+            let ident = param_ident(names, operation, param);
             let value = param_value_tokens(param, quote! { &#ident });
             quote! { #request_binding = #request_binding.header(#name, #value); }
         });
@@ -364,7 +364,7 @@ pub(crate) fn emit_operation(
         .filter(|param| !param.required && param.location == ParamLoc::Header)
         .map(|param| {
             let name = param.name.clone();
-            let ident = param_ident(param, crate::name::IdentRole::Field);
+            let ident = param_ident(names, operation, param);
             let value = param_value_tokens(param, quote! { value });
             let params_binding = bindings
                 .params
@@ -391,7 +391,7 @@ pub(crate) fn emit_operation(
         .filter(|param| param.required && param.location == ParamLoc::Cookie)
         .map(|param| {
             let name = param.name.clone();
-            let ident = param_ident(param, crate::name::IdentRole::Param);
+            let ident = param_ident(names, operation, param);
             cookie_param_tokens(param, &name, quote! { &#ident }, cookies_binding)
         });
     let optional_cookies = operation
@@ -400,7 +400,7 @@ pub(crate) fn emit_operation(
         .filter(|param| !param.required && param.location == ParamLoc::Cookie)
         .map(|param| {
             let name = param.name.clone();
-            let ident = param_ident(param, crate::name::IdentRole::Field);
+            let ident = param_ident(names, operation, param);
             let params_binding = bindings
                 .params
                 .as_ref()
@@ -947,7 +947,7 @@ fn operation_arg_normalizations(
     let mut statements = Vec::new();
     for param in operation.params.iter().filter(|param| param.required) {
         if takes_into_string(api, param.ty) {
-            let ident = param_ident(param, crate::name::IdentRole::Param);
+            let ident = param_ident(names, operation, param);
             let ty = ty_tokens(param.ty, names, options, true);
             statements.push(quote! { let #ident: #ty = #ident.into(); });
         }
@@ -980,7 +980,7 @@ fn operation_args(
     let mut args = Vec::new();
     let mut forwards = Vec::new();
     for param in operation.params.iter().filter(|param| param.required) {
-        let ident = param_ident(param, crate::name::IdentRole::Param);
+        let ident = param_ident(names, operation, param);
         // A plain `String` parameter accepts anything that converts, so a call site passes a
         // literal without `.to_owned()`. Narrowed to exactly `String`: every other generated type
         // keeps its concrete position, where `impl Into<T>` would buy nothing and cost inference.
@@ -1729,22 +1729,26 @@ fn operation_bindings<'a>(operation: &Operation, names: &'a Names) -> &'a Operat
         .expect("operation bindings allocated")
 }
 
-fn param_ident(param: &crate::ir::Parameter, role: crate::name::IdentRole) -> proc_macro2::Ident {
-    escaped_token(&param.name, role)
-}
-
-/// Build the `proc_macro2::Ident` for an escaped name, PRESERVING raw escaping: a keyword like
-/// `type` escapes to `r#type`, which must become a raw identifier token (`Ident::new_raw`) — NOT a
-/// bare `type` (an invalid keyword token that fails to parse). This is the token equivalent of the
-/// name subsystem's `Ident` `ToTokens`; use it wherever an escaped param/field name is turned into
-/// a `proc_macro2::Ident` directly instead of going through a `name::Ident`.
-fn escaped_token(name: &str, role: crate::name::IdentRole) -> proc_macro2::Ident {
-    let escaped = crate::name::escape(name, role);
-    let span = proc_macro2::Span::call_site();
-    match escaped.as_str().strip_prefix("r#") {
-        Some(raw) => proc_macro2::Ident::new_raw(raw, span),
-        None => proc_macro2::Ident::new(escaped.as_str(), span),
-    }
+/// The identifier `name` allocated for `param`: its method argument when it is required, its
+/// `…Params` field and setter when it is optional. Looked up rather than escaped here, so two
+/// parameters whose names escape alike still get distinct identifiers.
+///
+/// `param` must be borrowed from `operation.params`; the allocation is positional, and it is found
+/// by address so that two parameters sharing a wire name in different locations stay apart.
+fn param_ident<'a>(
+    names: &'a Names,
+    operation: &Operation,
+    param: &crate::ir::Parameter,
+) -> &'a crate::name::Ident {
+    let index = operation
+        .params
+        .iter()
+        .position(|candidate| std::ptr::eq(candidate, param))
+        .expect("a parameter is borrowed from its own operation");
+    &names
+        .parameters
+        .get(&operation.id)
+        .expect("parameter names allocated")[index]
 }
 
 /// The percent-encoding set for one parameter, derived from its location, style, and
@@ -2110,10 +2114,8 @@ pub(crate) fn emit_params_struct(
         .iter()
         .filter(|param| !param.required)
         .collect();
-    // The setter method reuses the field ident verbatim (same escaping/keyword handling), so
-    // build it once per param.
-    let field_ident =
-        |param: &crate::ir::Parameter| escaped_token(&param.name, crate::name::IdentRole::Field);
+    // The setter method reuses the field ident verbatim, so the two can never disagree.
+    let field_ident = |param: &crate::ir::Parameter| param_ident(names, operation, param);
     let fields = optional.iter().map(|param| {
         let ident = field_ident(param);
         let wire = &param.name;
