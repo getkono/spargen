@@ -36,6 +36,12 @@ pub(crate) struct Names {
     /// parameters reserve their natural Rust spellings first, so these identifiers can never
     /// shadow caller-provided values.
     pub(crate) operation_bindings: HashMap<OperationId, OperationBindings>,
+    /// Identifier per operation parameter, in `Operation::params` order: a method argument for a
+    /// required parameter, a `…Params` field (and setter) for an optional one. Each kind shares
+    /// one scope per operation, so two parameters whose names escape to the same spelling (a path
+    /// and a query `id`, a query `page-size` and a header `page_size`) are disambiguated instead
+    /// of emitting a duplicate argument or field.
+    pub(crate) parameters: HashMap<OperationId, Vec<Ident>>,
     /// Type name per type.
     pub(crate) types: HashMap<TypeId, Ident>,
     /// Field name per `(type, wire property name)`.
@@ -265,18 +271,17 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             ),
         );
 
-        // Required parameters are fixed by the generated public surface. Reserve their natural
-        // spellings, then allocate every generator-owned binding in the same lexical scope so the
-        // implementation yields on collision without renaming ordinary arguments.
-        let mut binding_scope = Scope::default();
-        for parameter in operation
-            .params
-            .iter()
-            .filter(|parameter| parameter.required)
-        {
-            binding_scope.reserve(&parameter.name, IdentRole::Param);
-        }
+        // Required parameters are fixed by the generated public surface. Allocate them first, then
+        // every generator-owned binding in the same lexical scope so the implementation yields on
+        // collision without renaming ordinary arguments. Optional parameters are fields of the
+        // `…Params` struct, a scope of their own.
         let pointer = &operation.provenance.pointer;
+        let mut binding_scope = Scope::default();
+        let mut field_scope = Scope::default();
+        names.parameters.insert(
+            operation.id.clone(),
+            allocate_parameters(operation, &mut binding_scope, &mut field_scope),
+        );
         let params = operation
             .params
             .iter()
@@ -374,6 +379,72 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     }
 
     names
+}
+
+/// Allocate one identifier per parameter of `operation`, in `Operation::params` order: required
+/// parameters as method arguments in `arguments`, optional ones as `…Params` fields in `fields`.
+///
+/// Each kind is allocated as one ranked batch, so which of two parameters escaping to the same
+/// spelling keeps it depends on the parameters themselves and not on the order the spec lists
+/// them in: the earlier location (path, query, querystring, header, cookie) wins, then the
+/// lexically smaller wire name. The loser takes a suffix seeded from the operation's pointer, its
+/// location and its wire name, so it is as stable as the parameter is.
+fn allocate_parameters(
+    operation: &crate::ir::Operation,
+    arguments: &mut Scope,
+    fields: &mut Scope,
+) -> Vec<Ident> {
+    use crate::ir::ParamLoc;
+    let location = |location: ParamLoc| match location {
+        ParamLoc::Path => (0u8, "path"),
+        ParamLoc::Query => (1, "query"),
+        ParamLoc::QueryString => (2, "querystring"),
+        ParamLoc::Header => (3, "header"),
+        ParamLoc::Cookie => (4, "cookie"),
+    };
+    let seeds: Vec<crate::diag::JsonPointer> = operation
+        .params
+        .iter()
+        .map(|parameter| {
+            operation
+                .provenance
+                .pointer
+                .push("parameters")
+                .push(location(parameter.location).1)
+                .push(&parameter.name)
+        })
+        .collect();
+    let mut allocated: Vec<Option<Ident>> = vec![None; operation.params.len()];
+    for (required, scope, role) in [
+        (true, arguments, IdentRole::Param),
+        (false, fields, IdentRole::Field),
+    ] {
+        let indices: Vec<usize> = (0..operation.params.len())
+            .filter(|&index| operation.params[index].required == required)
+            .collect();
+        let requests: Vec<_> = indices
+            .iter()
+            .map(|&index| {
+                let parameter = &operation.params[index];
+                RankedRequest {
+                    hint: parameter.name.as_str(),
+                    provenance: &seeds[index],
+                    rank: (
+                        location(parameter.location).0,
+                        parameter.name.as_str(),
+                        index,
+                    ),
+                }
+            })
+            .collect();
+        for (index, ident) in indices.iter().zip(scope.alloc_ranked(&requests, role)) {
+            allocated[*index] = Some(ident);
+        }
+    }
+    allocated
+        .into_iter()
+        .map(|ident| ident.expect("every parameter is either required or optional"))
+        .collect()
 }
 
 /// The stable label for one documented status, shared by naming and codegen so a header struct and
