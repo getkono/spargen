@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0](https://github.com/getkono/spargen/compare/spargen-macro-v0.5.0...spargen-macro-v0.6.0) - 2026-10-03
+
+### Added
+
+- open const-narrowed response strings, and read problem details across operations ([#396](https://github.com/getkono/spargen/pull/396))
+
+### Fixed
+
+- *(macro)* fail loudly instead of auditing ./Cargo.toml when Cargo names no crate ([#338](https://github.com/getkono/spargen/pull/338))
+
 ## [0.5.0](https://github.com/getkono/spargen/compare/spargen-macro-v0.4.0...spargen-macro-v0.5.0) - 2026-09-24
 
 ### Other
