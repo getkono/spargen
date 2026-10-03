@@ -21,7 +21,8 @@
 //!   concrete Rust type, not the surface identity;
 //! * a **nominal** type — a `struct`, a string `enum`, or a union (the models a consumer names,
 //!   constructs, and matches) → its generated type name;
-//! * an array → `Vec<inner>`, a tuple → `(a, b, …)`, bytes → `Bytes`, an untyped node → `Value`;
+//! * an array → `Vec<inner>`, a tuple → `(a, b, …)` (one position → `(a,)`, as Rust spells it),
+//!   bytes → `Bytes`, an untyped node → `Value`;
 //! * an integer/boolean scalar `enum`/`const` (which generates a `pub type X = i64`/`bool` alias,
 //!   carrying no consumer-facing structure beyond its scalar) → that scalar;
 //! * a nullable reference wraps the above in `Option<…>`.
@@ -828,7 +829,12 @@ fn canon_ty(ty: Ty, api: &Api, names: &Names) -> String {
                 .iter()
                 .map(|item| canon_ty(*item, api, names))
                 .collect();
-            format!("({})", rendered.join(", "))
+            // A one-position tuple keeps its trailing comma, as codegen declares it: `(T)` would
+            // name a parenthesized `T`, not the `(T,)` the generated client has.
+            match rendered.as_slice() {
+                [only] => format!("({only},)"),
+                _ => format!("({})", rendered.join(", ")),
+            }
         }
         Some(TypeKind::Bytes) => "Bytes".to_owned(),
         Some(TypeKind::Null) => "()".to_owned(),

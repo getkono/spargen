@@ -383,6 +383,55 @@ fn changing_the_success_type_is_major() {
     assert_eq!(report.bump, Impact::Major);
 }
 
+/// The success-type detail of a report whose only change is the `listPets` success type.
+fn success_type_detail(old: &str, new: &str) -> String {
+    let report = diff(old, new);
+    let details: Vec<&str> = report
+        .changes
+        .iter()
+        .filter(|change| change.kind == ChangeKind::SuccessTypeChanged)
+        .map(|change| change.detail.as_str())
+        .collect();
+    assert_eq!(details.len(), 1, "{:?}", report.changes);
+    assert_eq!(report.bump, Impact::Major);
+    details[0].to_owned()
+}
+
+#[test]
+fn a_one_position_tuple_is_labelled_with_its_trailing_comma() {
+    // Issue #449: `(i64)` is Rust for a parenthesized `i64`; the generated type is `(i64,)`.
+    let pair_ref = "{ $ref: '#/components/schemas/Pair' }";
+    let scalar = full(
+        &pets_get("listPets", "", pair_ref),
+        "    Pair: { type: integer }\n",
+    );
+    let single = full(
+        &pets_get("listPets", "", pair_ref),
+        "    Pair:
+      type: array
+      prefixItems: [ { type: integer } ]
+      items: false
+",
+    );
+    assert_eq!(
+        success_type_detail(&scalar, &single),
+        "success type `i64` -> `(i64,)`"
+    );
+    // Two or more positions keep the plain comma-joined label.
+    let double = full(
+        &pets_get("listPets", "", pair_ref),
+        "    Pair:
+      type: array
+      prefixItems: [ { type: integer }, { type: string } ]
+      items: false
+",
+    );
+    assert_eq!(
+        success_type_detail(&single, &double),
+        "success type `(i64,)` -> `(i64, String)`"
+    );
+}
+
 #[test]
 fn documenting_a_bodyless_success_beside_the_body_is_major() {
     // A bodyless `204` beside the `200` body turns the plain `Pet` into a response enum with a
