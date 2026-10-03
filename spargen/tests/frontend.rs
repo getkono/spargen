@@ -109,15 +109,12 @@ fn stated_claim(message: &str) -> Option<OutcomeClaim> {
     })
 }
 
+/// `generate` on an inline spec, holding the run to the two oracles every fixture gets for free:
+/// `check` over the same document reaches the same accept/reject verdict and reports the same
+/// sorted codes ([`assert_check_agrees`]), and a `Generated` run wrote parseable Rust that is not
+/// the `compile_error!` stub codegen falls back to ([`assert_parseable`]).
 fn generate(spec: &str) -> Report {
-    let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
-    std::fs::write(&spec_path, spec).unwrap();
-    let out = temp.path().join("client.rs");
-    run_generate(&build(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from_path_buf(out).unwrap(),
-    ))
+    generate_with_code(spec).0
 }
 
 /// As [`generate`], but through the `check` entry point (no codegen/emit).
@@ -128,17 +125,49 @@ fn check(spec: &str) -> Report {
     run_check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
 }
 
+/// As [`generate`], also returning the emitted module (empty when nothing was written).
 fn generate_with_code(spec: &str) -> (Report, String) {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
+    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
     std::fs::write(&spec_path, spec).unwrap();
-    let out = temp.path().join("client.rs");
-    let report = run_generate(&build(
-        Utf8PathBuf::from_path_buf(spec_path).unwrap(),
-        Utf8PathBuf::from_path_buf(out.clone()).unwrap(),
-    ));
+    let out = Utf8PathBuf::from_path_buf(temp.path().join("client.rs")).unwrap();
+    let report = run_generate(&build(spec_path.clone(), out.clone()));
     let code = std::fs::read_to_string(out).unwrap_or_default();
+    assert_check_agrees(&report, &run_check(&Spec::new(spec_path)));
+    if report.outcome() == Outcome::Generated {
+        assert_parseable(&code);
+    }
     (report, code)
+}
+
+/// `check` must stand in for `generate`: the same accept/reject decision and the same sorted
+/// diagnostic codes. The outcomes themselves differ by design (`Clean` against `Generated`), since
+/// only one of the two writes a module.
+fn assert_check_agrees(generated: &Report, checked: &Report) {
+    assert_eq!(
+        checked.outcome() == Outcome::Rejected,
+        generated.outcome() == Outcome::Rejected,
+        "check says {:?} but generate says {:?}: {checked:#?} {generated:#?}",
+        checked.outcome(),
+        generated.outcome()
+    );
+    assert_eq!(
+        codes(checked),
+        codes(generated),
+        "check and generate report different diagnostics"
+    );
+}
+
+/// A `Generated` run's module parses as a Rust file and is not the `compile_error!` stub codegen
+/// emits when its own tokens fail to format, which keeps the outcome `Generated`.
+fn assert_parseable(code: &str) {
+    if let Err(error) = syn::parse_file(code) {
+        panic!("a `Generated` run wrote unparseable Rust ({error}):\n{code}");
+    }
+    assert!(
+        !code.contains("compile_error!"),
+        "a `Generated` run wrote the codegen fallback stub:\n{code}"
+    );
 }
 
 fn has_code(report: &Report, code: Code) -> bool {
