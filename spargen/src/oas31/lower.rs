@@ -2771,10 +2771,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             })
             .collect();
 
-        // Object members beside non-object ones: an intersection only when every non-object member
-        // is a union (below); any other mix has no single representable type.
+        // Object-vs-scalar mix has no single representable type.
         if has_object && !scalars.is_empty() {
-            return self.lower_all_of_objects_with_unions(schema, hint, &contributions, &scalars);
+            return self.reject_all_of_object_scalar_mix(schema);
         }
 
         // All-scalar allOf: recursively intersect compatible members (for example integer with
@@ -2814,89 +2813,13 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return Some(self.with_all_of_nullability(schema, ty));
         }
 
-        let structure = self.merge_object_contributions(schema, hint, &contributions)?;
-        let ty = self.insert_schema_type(schema, hint, TypeKind::Struct(structure));
-        Some(self.with_all_of_nullability(schema, ty))
-    }
-
-    /// An `allOf` whose members are objects plus one or more `oneOf`/`anyOf` unions: the merged
-    /// object intersected with each union branch by branch, exactly as `{$ref: Object, oneOf: [...]}`
-    /// intersects its target with its union sibling, so the two spellings of one conjunction reach
-    /// one outcome. Branches the object excludes drop out; a union left with no branch is `E013`,
-    /// and a union whose branches all meet the object in one and the same type is that type with
-    /// `W001`, as in the `$ref` arm of [`Self::lower_schema_inner`]. A non-object member that is
-    /// not a union is the object/scalar mix no single type represents.
-    fn lower_all_of_objects_with_unions(
-        &mut self,
-        schema: &Schema,
-        hint: &str,
-        contributions: &[Contribution],
-        scalars: &[Ty],
-    ) -> Option<Ty> {
-        let all_unions = scalars.iter().all(|ty| {
-            matches!(
-                self.graph.get(ty.id).map(|def| &def.kind),
-                Some(TypeKind::Union(_))
-            )
-        });
-        if !all_unions {
-            return self.reject_all_of_object_scalar_mix(schema);
-        }
-        let structure = self.merge_object_contributions(schema, hint, contributions)?;
-        let mut intersection = self.insert_type(
-            &format!("{hint}Object"),
-            TypeKind::Struct(structure),
-            Docs::default(),
-            None,
-        );
-        for (index, union) in scalars.iter().copied().enumerate() {
-            match self.intersect_types(intersection, union, &format!("{hint}Intersection{index}")) {
-                Ok(merged) => intersection = merged,
-                // No branch of the union admits an object of the merged shape: the object/scalar
-                // mix the rejection names, reached through a union of scalars.
-                Err(NoMeet::Empty) => return self.reject_all_of_object_scalar_mix(schema),
-                Err(NoMeet::Unrepresentable) => {
-                    return self.reject_unrepresentable_meet(
-                        schema,
-                        "an `allOf`'s object members and its `oneOf`/`anyOf` member share values \
-                         no single Rust type represents",
-                    );
-                }
-            }
-        }
-        // The merged object is never nullable, so neither is any branch it meets: there is no
-        // `null` for the collapse to account for, only the enclosing schema's own (applied below).
-        if let Some(common) = self.indistinguishable_union_variant(intersection) {
-            Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
-                .message(
-                    "this `allOf`'s object members and its `oneOf`/`anyOf` member intersect to a \
-                     union whose branches differ only in keywords the generated type does not \
-                     carry, so which branch a value matches is not enforced",
-                )
-                .remedy("keep producer-side validation for the union's branch constraints")
-                .emit(self.diags);
-            intersection = common;
-        }
-        let kind = self.graph.get(intersection.id)?.kind.clone();
-        let mut ty = self.insert_schema_type(schema, hint, kind);
-        ty.nullable = intersection.nullable;
-        Some(self.with_all_of_nullability(schema, ty))
-    }
-
-    /// Flatten the object contributions of an `allOf` into one struct. Property union preserves
-    /// first-seen order; a repeated property is intersected.
-    fn merge_object_contributions(
-        &mut self,
-        schema: &Schema,
-        hint: &str,
-        contributions: &[Contribution],
-    ) -> Option<Struct> {
+        // All object members: flatten into one struct. Property union preserves first-seen order.
         let mut fields: IndexMap<String, Field> = IndexMap::new();
         let mut required: Vec<String> = Vec::new();
         let mut additional = AdditionalProps::Allow;
         // Repeated properties whose types have no common value, in first-seen order.
         let mut uninhabited: IndexSet<String> = IndexSet::new();
-        for contribution in contributions {
+        for contribution in &contributions {
             let Contribution::Object {
                 fields: member_fields,
                 additional: member_additional,
@@ -3016,7 +2939,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // `additionalProperties` value schema constrains it, not only the requiring member's own:
         // `allOf: [{$ref: Labels}, {required: [a]}]` with string-valued `Labels` makes `a` a
         // string, not an unconstrained value. The requiring member already applied its own.
-        for contribution in contributions {
+        for contribution in &contributions {
             let Contribution::Object {
                 fields: member_fields,
                 additional: member_additional,
@@ -3089,7 +3012,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }
         }
 
-        Some(Struct { fields, additional })
+        let ty = self.insert_schema_type(
+            schema,
+            hint,
+            TypeKind::Struct(Struct { fields, additional }),
+        );
+        Some(self.with_all_of_nullability(schema, ty))
     }
 
     /// Gather every member of `schema.all_of` (source order) plus the enclosing schema's own object
