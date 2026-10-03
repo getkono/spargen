@@ -204,6 +204,50 @@ fn types_module(code: &str) -> String {
         .unwrap_or_default()
 }
 
+/// Fail if anything from the generated `types` module onward uses `serde_json::Value` as a type:
+/// the silent degradation of a typed schema the standing invariants forbid. The embedded runtime
+/// is stripped first, since it legitimately uses the type. The emitted file is
+/// prettyplease-formatted, so the spelling searched for is the formatted one, never the token
+/// stream's `serde_json :: Value`.
+///
+/// Two uses are not a degradation and are skipped: a path through the type
+/// (`serde_json::Value::deserialize`, `serde_json::Value::Object`), which is how a union's own
+/// `Deserialize` buffers its input, and a `let` binding inside an emitted impl body, which is how a
+/// discriminated union's `Serialize` re-inserts its tag. What remains is a field, alias, variant
+/// payload or signature type, where `serde_json::Value` would be the schema's lowered type.
+fn assert_no_untyped_value(code: &str) {
+    let types = types_module(code);
+    assert!(!types.is_empty(), "no `types` module was emitted: {code}");
+    let degraded: Vec<&str> = types
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("let "))
+        .filter(|line| {
+            line.match_indices("serde_json::Value")
+                .any(|(at, needle)| !line[at + needle.len()..].starts_with("::"))
+        })
+        .collect();
+    assert!(
+        degraded.is_empty(),
+        "a typed schema degraded to `serde_json::Value`: {degraded:#?}\n{types}"
+    );
+}
+
+/// [`assert_no_untyped_value`] can fail: a property with the empty schema, which admits any JSON
+/// value, lowers to `serde_json::Value` by design, and the oracle must see it. Without this a
+/// spelling that never matches (the token stream's `serde_json :: Value`) passes every fixture.
+#[test]
+fn the_untyped_value_oracle_sees_an_unconstrained_field() {
+    let (report, code) = generate_with_code(
+        "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    S:\n      type: object\n      properties:\n        anything: {}\n",
+    );
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let failed = std::panic::catch_unwind(|| assert_no_untyped_value(&code)).is_err();
+    assert!(
+        failed,
+        "the oracle passed a `serde_json::Value` field:\n{code}"
+    );
+}
+
 /// The name of the `pub struct` that declares the first field line starting with `field`.
 ///
 /// A type count plus "both fields exist somewhere" is satisfied by either assignment of two names to
@@ -366,7 +410,7 @@ paths:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("enum ResponseBody"), "{code}");
-    assert!(!code.contains("serde_json :: Value"), "{code}");
+    assert_no_untyped_value(&code);
 }
 
 #[test]
@@ -6832,7 +6876,7 @@ Pet:
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     let code = std::fs::read_to_string(out).unwrap();
     assert!(code.contains("pub id"), "{code}");
-    assert!(!code.contains("serde_json :: Value"), "{code}");
+    assert_no_untyped_value(&code);
 }
 
 #[test]
@@ -8033,7 +8077,7 @@ components:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(code.contains("pub id"), "{code}");
-    assert!(!code.contains("serde_json :: Value"), "{code}");
+    assert_no_untyped_value(&code);
 }
 
 #[test]
@@ -14790,7 +14834,7 @@ components:
     let (report, code) = generate_with_code(spec);
     assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
     assert!(!has_code(&report, Code::AllOfIrreconcilable), "{report:#?}");
-    assert!(!code.contains("serde_json :: Value"), "{code}");
+    assert_no_untyped_value(&code);
 
     // The claim in the doc comment above — "lowers to the NARROWER type" — and the whole point of
     // treating `$ref` as an applicator. Outcome assertions cannot see it: they pin when the tool
@@ -22808,7 +22852,7 @@ fn a_property_conflict_on_an_optional_property_does_not_empty_the_object() {
             code.contains("no JSON value can inhabit schema"),
             "`{what}` must give the conflicting property an uninhabited type: {code}"
         );
-        assert!(!code.contains("serde_json :: Value"), "{code}");
+        assert_no_untyped_value(&code);
     }
 
     // The controls. Requiring the property on either side obliges every instance to carry a value
@@ -22929,7 +22973,7 @@ fn an_all_of_conflict_on_an_optional_property_agrees_with_every_other_spelling()
             code.contains("pub a: Option<"),
             "`{what}` must keep the conflicting property optional: {code}"
         );
-        assert!(!code.contains("serde_json :: Value"), "{code}");
+        assert_no_untyped_value(&code);
     }
 
     let empty: &[(&str, &str, &str)] = &[
@@ -23672,10 +23716,7 @@ fn a_cycle_closing_union_member_is_rejected_not_discarded() {
         // And the outcome is the parent's reservation invariant, not a silent degradation: the
         // `serde_json::Value` #160 records is gone in both directions.
         let (_, code) = generate_with_code(&spec);
-        assert!(
-            !code.contains("serde_json :: Value"),
-            "`{what}` degraded to an untyped value: {code}"
-        );
+        assert_no_untyped_value(&code);
     }
 
     // A plain recursive `$ref` with no sibling at all still boxes and generates — the shape that
