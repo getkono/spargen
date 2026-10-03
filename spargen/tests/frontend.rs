@@ -820,6 +820,121 @@ components:
         2,
         "an `anyOf` keeps its variants: {code}"
     );
+
+    // Exactly one merged branch accepts `null`: `null` matches that branch alone, so it stays valid
+    // and the merged position stays `Option<String>`.
+    let one_nullable = "oneOf: [ { type: [string, 'null'] }, { type: string } ]";
+    let spec = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        x:
+          {one_nullable}
+      required: [x]
+"##
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+    let types = types_module(&code);
+    let x = field_type(&types, "pub x").unwrap_or_else(|| panic!("no `x` field: {types}"));
+    let inner = x
+        .strip_prefix("Option<")
+        .and_then(|inner| inner.strip_suffix('>'))
+        .unwrap_or_else(|| panic!("`x` is `{x}`, but `null` matches one branch only: {types}"));
+    assert!(
+        inner == "String" || types.contains(&format!("pub type {inner} = String;")),
+        "`x` must be the one `String` both branches lower to: {types}"
+    );
+}
+
+/// The `$ref` spelling of the merge above gives the same answer when its branches share a generated
+/// type only structurally (#402). `$ref: Int` beside `oneOf: [{enum: [1]}, {enum: [2]}]` meets to
+/// two distinct `i64`-alias enums, one generated type: emitted as two variants, every value would
+/// match both and fail exactly-one, so the position is that one type and `W001` reports it. Where
+/// only some branches share a type after the meet, they become one variant and the others stand.
+#[test]
+fn a_ref_sibling_one_of_whose_branches_share_a_type_only_structurally_collapses() {
+    for (shape, body, expect_variants) in [
+        (
+            "fully shared",
+            "{ $ref: '#/components/schemas/Int', oneOf: [ { enum: [1] }, { enum: [2] } ] }",
+            None,
+        ),
+        (
+            "partly shared",
+            "{ $ref: '#/components/schemas/Free', oneOf: [ { type: integer, enum: [1] }, { type: \
+             integer, enum: [2] }, { type: string } ] }",
+            Some(2),
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/U' }} }}
+components:
+  schemas:
+    Int: {{ type: integer }}
+    Free: {{ description: any value }}
+    U: {body}
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{shape} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/U"
+                }),
+                "{shape} via {entry}: the collapse must warn at `U`: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        match expect_variants {
+            Some(count) => assert_eq!(
+                enum_variants(&types, "U").len(),
+                count,
+                "{shape}: the two integer branches must be one variant: {types}"
+            ),
+            None => assert!(
+                !types.contains("pub enum U "),
+                "{shape}: `U` must not be a union of indistinguishable variants: {types}"
+            ),
+        }
+    }
 }
 
 /// The collapse above is reserved for a `$ref` whose own sibling is a `oneOf`/`anyOf`. A `$ref` to a
