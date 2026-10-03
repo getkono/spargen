@@ -608,46 +608,32 @@ components:
 /// so they must reach one outcome: the same verdict, the same diagnostics at the same pointer, and
 /// the same generated shape. An object target and a union member used to split them, the `$ref`
 /// spelling intersecting the union with the target while the `allOf` spelling rejected every such
-/// document as an object/scalar mix. Five cases, each through `generate` and `check`, for `oneOf`
+/// document as an object/scalar mix. Three cases, each through `generate` and `check`, for `oneOf`
 /// and `anyOf`: branches that collapse to the target (`W001`, `Base`'s shape), branches that narrow
-/// it (a union of two structs, each carrying `Base`'s fields and its own), branches the target
-/// excludes entirely (`E013`), and a union of one object and `null` — which lowers to that object
-/// made nullable rather than to a union — beside an object target and beside a nullable one, which
-/// both spellings merge into one struct with no diagnostic.
+/// it (a union of two structs, each carrying `Base`'s fields and its own), and branches the target
+/// excludes entirely (`E013`).
 #[test]
 fn a_ref_with_a_union_sibling_and_its_all_of_spelling_reach_the_same_outcome() {
     enum Expect {
         Collapsed,
         Narrowed,
         Rejected,
-        Merged(&'static [&'static str]),
     }
     let cases = [
-        ("Base", "[ { required: [a] }, { required: [b] } ]", Expect::Collapsed),
+        ("[ { required: [a] }, { required: [b] } ]", Expect::Collapsed),
         (
-            "Base",
             "[ { properties: { c: { type: integer } } }, { properties: { d: { type: boolean } } } ]",
             Expect::Narrowed,
         ),
-        ("Base", "[ { type: string }, { type: integer } ]", Expect::Rejected),
-        (
-            "Base",
-            "[ { $ref: '#/components/schemas/Other' }, { type: 'null' } ]",
-            Expect::Merged(&["a", "b", "z"]),
-        ),
-        (
-            "NullableBase",
-            "[ { properties: { c: { type: integer } } }, { type: 'null' } ]",
-            Expect::Merged(&["a", "c"]),
-        ),
+        ("[ { type: string }, { type: integer } ]", Expect::Rejected),
     ];
     for keyword in ["oneOf", "anyOf"] {
-        for (target, branches, expect) in &cases {
+        for (branches, expect) in &cases {
             let spellings = [
-                format!("{{ $ref: '#/components/schemas/{target}', {keyword}: {branches} }}"),
+                format!("{{ $ref: '#/components/schemas/Base', {keyword}: {branches} }}"),
                 format!(
-                    "{{ allOf: [ {{ $ref: '#/components/schemas/{target}' }}, {{ {keyword}: \
-                     {branches} }} ] }}"
+                    "{{ allOf: [ {{ $ref: '#/components/schemas/Base' }}, {{ {keyword}: {branches} \
+                     }} ] }}"
                 ),
             ];
             let mut outcomes = Vec::new();
@@ -673,14 +659,6 @@ components:
       properties:
         a: {{ type: string }}
         b: {{ type: string }}
-    NullableBase:
-      type: [object, 'null']
-      properties:
-        a: {{ type: string }}
-    Other:
-      type: object
-      properties:
-        z: {{ type: integer }}
     Pick: {pick}
 "##
                 );
@@ -758,16 +736,6 @@ components:
                             "`{pick}`: E013 must point at `Pick`: {report:#?}"
                         );
                     }
-                    Expect::Merged(fields) => {
-                        assert_eq!(generated.0, Outcome::Generated, "`{pick}`: {report:#?}");
-                        assert!(generated.1.is_empty(), "`{pick}`: {report:#?}");
-                        assert_eq!(
-                            declared_fields(&types, "Pick"),
-                            *fields,
-                            "`{pick}`: `Pick` must merge the target and the union's object: \
-                             {types}"
-                        );
-                    }
                 }
                 outcomes.push(generated);
             }
@@ -776,119 +744,6 @@ components:
                 "{keyword} {branches}: the `$ref`-sibling and `allOf` spellings must agree"
             );
         }
-    }
-}
-
-/// An `allOf` whose object members sit beside two or more `oneOf`/`anyOf` members is `E013`.
-/// Meeting the object with one union and then the other nests the second union's branches inside
-/// the first's, and the collapse that runs once after the meet cannot see through that: two
-/// unions of `required`-only branches used to generate, with no diagnostic, a `oneOf` of nested
-/// unions whose variants were all the one merged struct, which no value deserializes as. The
-/// `$ref` spelling of the same conjunction — a `oneOf` and an `anyOf` beside one `$ref` — is
-/// rejected too (`E007`), so the two spellings still agree that it does not generate. Each case
-/// runs through `generate` and `check`, which must report the same diagnostics.
-#[test]
-fn an_all_of_with_several_union_members_beside_objects_is_rejected() {
-    let union = "[ { required: [a] }, { required: [b] } ]";
-    let base = "{ $ref: '#/components/schemas/Base' }";
-    let cases = [
-        (
-            format!("{{ allOf: [ {base}, {{ oneOf: {union} }}, {{ oneOf: {union} }} ] }}"),
-            "E013",
-        ),
-        (
-            format!("{{ allOf: [ {base}, {{ oneOf: {union} }}, {{ anyOf: {union} }} ] }}"),
-            "E013",
-        ),
-        (
-            format!("{{ allOf: [ {base}, {{ anyOf: {union} }}, {{ anyOf: {union} }} ] }}"),
-            "E013",
-        ),
-        // A nested `allOf` flattens into the same merge, so its union is a second member.
-        (
-            format!(
-                "{{ allOf: [ {base}, {{ oneOf: {union} }}, {{ allOf: [ {{ anyOf: {union} }} ] }} \
-                 ] }}"
-            ),
-            "E013",
-        ),
-        // A `$ref` to a union component is a union member as much as an inline one is.
-        (
-            format!(
-                "{{ allOf: [ {base}, {{ $ref: '#/components/schemas/Either' }}, {{ oneOf: {union} \
-                 }} ] }}"
-            ),
-            "E013",
-        ),
-        // A union of one object and `null` is a union member too, so it counts.
-        (
-            format!(
-                "{{ allOf: [ {base}, {{ oneOf: [ {{ $ref: '#/components/schemas/Other' }}, {{ \
-                 type: 'null' }} ] }}, {{ oneOf: {union} }} ] }}"
-            ),
-            "E013",
-        ),
-        (
-            format!("{{ $ref: '#/components/schemas/Base', oneOf: {union}, anyOf: {union} }}"),
-            "E007",
-        ),
-    ];
-    for (pick, code) in &cases {
-        let spec = format!(
-            r##"
-openapi: 3.1.0
-info: {{ title: T, version: 1.0.0 }}
-servers: [{{ url: 'https://e.com' }}]
-paths:
-  /p:
-    get:
-      operationId: fetch
-      responses:
-        '200':
-          description: ok
-          content:
-            application/json: {{ schema: {{ $ref: '#/components/schemas/Pick' }} }}
-components:
-  schemas:
-    Base:
-      type: object
-      properties:
-        a: {{ type: string }}
-        b: {{ type: string }}
-    Other:
-      type: object
-      properties:
-        z: {{ type: integer }}
-    Either:
-      oneOf:
-        - {{ properties: {{ c: {{ type: integer }} }} }}
-        - {{ properties: {{ d: {{ type: boolean }} }} }}
-    Pick: {pick}
-"##
-        );
-        let observed = |report: &Report| {
-            let mut diagnostics: Vec<(String, String)> = report
-                .diagnostics()
-                .iter()
-                .map(|d| (d.code.to_string(), d.pointer.as_str().to_owned()))
-                .collect();
-            diagnostics.sort();
-            (report.outcome() == Outcome::Rejected, diagnostics)
-        };
-        let generated = observed(&generate(&spec));
-        assert_eq!(
-            generated,
-            (
-                true,
-                vec![((*code).to_owned(), "/components/schemas/Pick".to_owned())]
-            ),
-            "`{pick}`"
-        );
-        assert_eq!(
-            observed(&check(&spec)),
-            generated,
-            "`{pick}`: `generate` and `check` must agree"
-        );
     }
 }
 

@@ -2766,15 +2766,15 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let scalars: Vec<Ty> = contributions
             .iter()
             .filter_map(|c| match c {
-                Contribution::Scalar(ty) | Contribution::Union(ty) => Some(*ty),
+                Contribution::Scalar(ty) => Some(*ty),
                 Contribution::Object { .. } => None,
             })
             .collect();
 
-        // Object members beside non-object ones: an intersection only when the one non-object
-        // member is a union (below); any other mix has no single representable type.
+        // Object members beside non-object ones: an intersection only when every non-object member
+        // is a union (below); any other mix has no single representable type.
         if has_object && !scalars.is_empty() {
-            return self.lower_all_of_objects_with_unions(schema, hint, &contributions);
+            return self.lower_all_of_objects_with_unions(schema, hint, &contributions, &scalars);
         }
 
         // All-scalar allOf: recursively intersect compatible members (for example integer with
@@ -2819,56 +2819,39 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(self.with_all_of_nullability(schema, ty))
     }
 
-    /// An `allOf` whose members are objects plus one `oneOf`/`anyOf` union: the merged object
-    /// intersected with the union branch by branch, exactly as `{$ref: Object, oneOf: [...]}`
+    /// An `allOf` whose members are objects plus one or more `oneOf`/`anyOf` unions: the merged
+    /// object intersected with each union branch by branch, exactly as `{$ref: Object, oneOf: [...]}`
     /// intersects its target with its union sibling, so the two spellings of one conjunction reach
     /// one outcome. Branches the object excludes drop out; a union left with no branch is `E013`,
     /// and a union whose branches all meet the object in one and the same type is that type with
-    /// `W001`, as in the `$ref` arm of [`Self::lower_schema_inner`]. A union of one type and
-    /// `null`, which lowers to that type made nullable rather than to a union, is intersected the
-    /// same way, as the `$ref` arm intersects it.
-    ///
-    /// Two or more union members are `E013`: the `$ref` spelling of that conjunction, a `oneOf`
-    /// and an `anyOf` beside one `$ref`, is rejected (`E007`), and meeting the object with each
-    /// union in turn nests one union's branches inside the other's, which the single collapse
-    /// after the meet cannot see through. A non-object member that is not a union is the
-    /// object/scalar mix no single type represents.
+    /// `W001`, as in the `$ref` arm of [`Self::lower_schema_inner`]. A non-object member that is
+    /// not a union is the object/scalar mix no single type represents.
     fn lower_all_of_objects_with_unions(
         &mut self,
         schema: &Schema,
         hint: &str,
         contributions: &[Contribution],
+        scalars: &[Ty],
     ) -> Option<Ty> {
-        let mut unions = Vec::new();
-        for contribution in contributions {
-            match contribution {
-                Contribution::Object { .. } => {}
-                Contribution::Union(ty) => unions.push(*ty),
-                // A `$ref` member whose target is a union component.
-                Contribution::Scalar(ty)
-                    if matches!(
-                        self.graph.get(ty.id).map(|def| &def.kind),
-                        Some(TypeKind::Union(_))
-                    ) =>
-                {
-                    unions.push(*ty);
-                }
-                Contribution::Scalar(_) => return self.reject_all_of_object_scalar_mix(schema),
-            }
+        let all_unions = scalars.iter().all(|ty| {
+            matches!(
+                self.graph.get(ty.id).map(|def| &def.kind),
+                Some(TypeKind::Union(_))
+            )
+        });
+        if !all_unions {
+            return self.reject_all_of_object_scalar_mix(schema);
         }
-        let [union] = unions[..] else {
-            return self.reject_all_of_several_unions(schema);
-        };
         let structure = self.merge_object_contributions(schema, hint, contributions)?;
-        let object = self.insert_type(
+        let mut intersection = self.insert_type(
             &format!("{hint}Object"),
             TypeKind::Struct(structure),
             Docs::default(),
             None,
         );
-        let mut intersection =
-            match self.intersect_types(object, union, &format!("{hint}Intersection0")) {
-                Ok(merged) => merged,
+        for (index, union) in scalars.iter().copied().enumerate() {
+            match self.intersect_types(intersection, union, &format!("{hint}Intersection{index}")) {
+                Ok(merged) => intersection = merged,
                 // No branch of the union admits an object of the merged shape: the object/scalar
                 // mix the rejection names, reached through a union of scalars.
                 Err(NoMeet::Empty) => return self.reject_all_of_object_scalar_mix(schema),
@@ -2879,7 +2862,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                          no single Rust type represents",
                     );
                 }
-            };
+            }
+        }
         // The merged object is never nullable, so neither is any branch it meets: there is no
         // `null` for the collapse to account for, only the enclosing schema's own (applied below).
         if let Some(common) = self.indistinguishable_union_variant(intersection) {
@@ -3406,11 +3390,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             });
         } else if schema_imposes_scalar(schema) {
             let ty = self.lower_schema(schema, hint)?;
-            if schema.one_of.is_empty() && schema.any_of.is_empty() {
-                out.push(Contribution::Scalar(ty));
-            } else {
-                out.push(Contribution::Union(ty));
-            }
+            out.push(Contribution::Scalar(ty));
         }
         // Otherwise the member is a pure annotation (`{description: ...}`): no constraint.
         Some(())
@@ -3485,22 +3465,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
             .message("an `allOf` mixes object and scalar members, which cannot form one type")
             .remedy(ALL_OF_REMEDY)
-            .emit(self.diags);
-        None
-    }
-
-    /// An `allOf` whose object members sit beside two or more `oneOf`/`anyOf` members.
-    fn reject_all_of_several_unions<T>(&mut self, schema: &Schema) -> Option<T> {
-        // E013 case: several-unions
-        Diagnostic::error(Code::AllOfIrreconcilable, schema.provenance.clone())
-            .message(
-                "an `allOf` has object members beside two or more `oneOf`/`anyOf` members, whose \
-                 combined intersection is not representable as one generated union",
-            )
-            .remedy(
-                "keep one `oneOf`/`anyOf` member beside the object members, or distribute the \
-                 other union over its branches",
-            )
             .emit(self.diags);
         None
     }
@@ -8381,11 +8345,6 @@ enum Contribution {
         required: Vec<String>,
     },
     Scalar(Ty),
-    /// An inline member that is a `oneOf`/`anyOf`, whatever it lowered to: a union, or the one
-    /// nullable type a union of a single type and `null` collapses to. It is kept apart from
-    /// [`Contribution::Scalar`] so that beside object members it is intersected branch by branch
-    /// as a `$ref`'s union sibling is, rather than read as an object/scalar mix.
-    Union(Ty),
 }
 
 /// Whether a schema constrains object shape — declared/pattern properties, an `additionalProperties`
