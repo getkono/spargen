@@ -155,6 +155,7 @@ fn lower_pass(
         open_narrowing: options.open_narrowing,
         narrowing_opens: false,
         open_candidates: HashSet::new(),
+        meet_locations: HashMap::new(),
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -391,12 +392,12 @@ fn lower_pass(
 
     // An intersection narrows a field's type after its `default` was checked against the type the
     // declaring member gave it, so the applied defaults are checked again against the final graph.
-    retype_field_defaults(&mut ctx.graph, ctx.diags);
+    retype_field_defaults(&mut ctx.graph, &ctx.meet_locations, ctx.diags);
 
     // `xml.name`/`xml.attribute` become a format-agnostic serde `rename`, so they may only be applied
     // to a schema used *exclusively* as an XML body — otherwise the rename would corrupt the JSON
     // wire format. Suppress (and warn `W006` on) the rename for any shared/non-XML-reachable type.
-    gate_xml_field_renames(&mut ctx.graph, &operations, ctx.diags);
+    gate_xml_field_renames(&mut ctx.graph, &operations, &ctx.meet_locations, ctx.diags);
 
     let mut api_description = document.info.summary.clone();
     if let Some(description) = &document.info.description {
@@ -768,6 +769,11 @@ struct LowerCtx<'a, 'doc> {
     /// `$ref` target, memo, or union reaches it, so [`Self::narrowed_string`] opens it in place
     /// rather than leaving it beside an open copy as an unused public type.
     open_candidates: HashSet<TypeId>,
+    /// The authored schema each meet struct [`Self::intersect_structs`] built is located at (the
+    /// left side's definition, else the right side's). The struct itself keeps the document root's
+    /// provenance, which ranks it after every declared schema when type names collide; this is
+    /// where `W005` and `W006` raised against it point instead of that root (#454).
+    meet_locations: HashMap<TypeId, Provenance>,
 }
 
 /// The options that change what lowering produces.
@@ -4956,7 +4962,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 self.intersect_array_tuple(**item, positions, a, hint)
             }
             (TypeKind::Struct(left), TypeKind::Struct(right)) => {
-                self.intersect_structs(left, right, hint)
+                let location = self
+                    .authored_location(a)
+                    .or_else(|| self.authored_location(b));
+                self.intersect_structs(left, right, hint, location)
             }
             // A union's variants stay closed for the reason `lower_union_closed` gives; a union
             // that narrows to one branch is no union, and `intersect_union` meets that branch where
@@ -5205,6 +5214,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         left: &Struct,
         right: &Struct,
         hint: &str,
+        location: Option<Provenance>,
     ) -> Result<Ty, NoMeet> {
         let mut fields: IndexMap<String, Field> = left
             .fields
@@ -5313,7 +5323,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 &format!("{hint}Additional"),
             )
             .ok_or(NoMeet::Unrepresentable)?;
-        Ok(self.insert_type(
+        let meet = self.insert_type(
             hint,
             TypeKind::Struct(Struct {
                 fields: fields.into_values().collect(),
@@ -5321,7 +5331,22 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             }),
             Docs::default(),
             None,
-        ))
+        );
+        if let Some(location) = location {
+            self.meet_locations.insert(meet.id, location);
+        }
+        Ok(meet)
+    }
+
+    /// Where the schema `ty` lowers from was authored: the location [`Self::meet_locations`]
+    /// recorded for a meet struct, else the type's own provenance, unless that is the document root
+    /// every synthesized type falls back to.
+    fn authored_location(&self, ty: Ty) -> Option<Provenance> {
+        if let Some(location) = self.meet_locations.get(&ty.id) {
+            return Some(location.clone());
+        }
+        let def = self.graph.get(ty.id)?;
+        (!def.provenance.pointer.as_str().is_empty()).then(|| def.provenance.clone())
     }
 
     /// The one type every variant of `ty` shares, when `ty` is a union of two or more variants that
@@ -8687,7 +8712,11 @@ fn security_scheme_docs(name: &str, scheme: &super::SecuritySchemeObject) -> Vec
 /// it is documented as not applied and reported (`W005`) at the `default` that wrote it, naming
 /// the type whose field drops it. Running once over the finished graph reaches every meet, and
 /// only the types that are emitted: a meet's discarded intermediates are gone or elided by now.
-fn retype_field_defaults(graph: &mut TypeGraph, diags: &mut Diagnostics) {
+fn retype_field_defaults(
+    graph: &mut TypeGraph,
+    meet_locations: &HashMap<TypeId, Provenance>,
+    diags: &mut Diagnostics,
+) {
     let mut retyped: Vec<(TypeId, usize, Option<DefaultValue>)> = Vec::new();
     for (id, def) in graph.emitted() {
         let TypeKind::Struct(object) = &def.kind else {
@@ -8708,6 +8737,11 @@ fn retype_field_defaults(graph: &mut TypeGraph, diags: &mut Diagnostics) {
         let Some(def) = graph.get_mut(id) else {
             continue;
         };
+        let located = meet_locations
+            .get(&id)
+            .unwrap_or(&def.provenance)
+            .pointer
+            .clone();
         let TypeKind::Struct(object) = &mut def.kind else {
             continue;
         };
@@ -8726,7 +8760,7 @@ fn retype_field_defaults(graph: &mut TypeGraph, diags: &mut Diagnostics) {
                     "schema `default` `{written}` of property `{}` is not a value of the type an \
                      intersection narrows the property to in `{}`; it is documented in rustdoc \
                      there but not applied as a deserialization default",
-                    field.name.wire, def.provenance.pointer
+                    field.name.wire, located
                 ))
                 .remedy(
                     "use a default every intersected schema of the property admits, or set the \
@@ -8778,6 +8812,7 @@ fn written_default_display(value: &DefaultValue) -> String {
 fn gate_xml_field_renames(
     graph: &mut TypeGraph,
     operations: &[Operation],
+    meet_locations: &HashMap<TypeId, Provenance>,
     diags: &mut Diagnostics,
 ) {
     // Cheap guard: nothing to gate (and nothing to warn) unless some field carries an XML hint.
@@ -8846,7 +8881,7 @@ fn gate_xml_field_renames(
             }
             unsupported_reports.push((
                 xml_reachable.contains(&id),
-                def.provenance.clone(),
+                meet_locations.get(&id).unwrap_or(&def.provenance).clone(),
                 format!(
                     "`{}` on property `{}`",
                     field.xml.unsupported.join("`, `"),
@@ -8904,7 +8939,7 @@ fn gate_xml_field_renames(
         let Some(def) = graph.get_mut(id) else {
             continue;
         };
-        let provenance = def.provenance.clone();
+        let provenance = meet_locations.get(&id).unwrap_or(&def.provenance).clone();
         if let TypeKind::Struct(object) = &mut def.kind {
             for field in &mut object.fields {
                 field.xml = XmlField::default();
