@@ -88,7 +88,8 @@ emitted only by `codegen`, `compat`, `name` or the facade are out of scope).
 
 Measured on `master@38c1154`, and not re-measured since: no test holds this table, so a site added,
 moved, or regated after that commit may be reached differently or missing from it. Only the
-*Fired by the corpus* column is held, by the snapshot histograms. An emission site is one `Code::`
+*Fired by the corpus* column is held: its manifest cases by the snapshot histograms, and its
+recipe cells (`poem-openapi`'s `E001`, `aide`'s `W001`) by `recipes.rs`. An emission site is one `Code::`
 construction outside a `#[cfg(test)]` module. The mutation for a site makes it
 fire whenever the statement that selects it is evaluated: the innermost `if` or `let … else`
 condition, or the `match` whose arm it is, with any early exit ahead of it in the same block
