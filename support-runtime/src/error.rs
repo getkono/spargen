@@ -87,7 +87,8 @@ pub enum Error<E> {
         /// The headers of the response whose body failed to decode — for `EventStream`'s
         /// per-frame decode, of the response the frame was read from, as for `status`.
         headers: HeaderMap,
-        /// The serde deserialization error path.
+        /// The serde deserialization error path, held as serde wrote it; `Display` escapes its
+        /// control characters, since the message may quote server-supplied input.
         path: String,
         /// The retained raw body, capped at `max_error_body` by the dispatch and decode helpers.
         ///
@@ -415,7 +416,18 @@ impl<E: std::fmt::Display> std::fmt::Display for Error<E> {
                 write!(f, "unexpected response status {status}")
             }
             Error::Decode { status, path, .. } => {
-                write!(f, "response decode failed ({status}) at {path}")
+                // `path` is serde's message, which quotes the server-supplied input (an unknown
+                // enum variant, say) verbatim; its control characters are escaped so a value
+                // holding a LF, CR or tab cannot break or forge the message's line.
+                write!(f, "response decode failed ({status}) at ")?;
+                for c in path.chars() {
+                    if c.is_control() {
+                        write!(f, "{}", c.escape_debug())?;
+                    } else {
+                        write!(f, "{c}")?;
+                    }
+                }
+                Ok(())
             }
             Error::InterruptedBody(_) => f.write_str("response body was interrupted"),
         }
@@ -1636,6 +1648,28 @@ mod tests {
             error.to_string(),
             "response decode failed (502 Bad Gateway) at items[0].id"
         );
+    }
+
+    /// #457: the path quotes server-supplied text; its LF, CR, tab and other control characters
+    /// are escaped so the message stays on one line, while the field keeps serde's text.
+    #[test]
+    fn a_decode_error_escapes_its_paths_control_characters() {
+        let path = "unknown variant `x\ny\r\tz\u{1b}`, expected `ready`";
+        let error = Error::<ApiBody>::Decode {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            path: path.to_owned(),
+            body: Bytes::new(),
+            truncated: false,
+        };
+        assert_eq!(
+            error.to_string(),
+            r"response decode failed (200 OK) at unknown variant `x\ny\r\tz\u{1b}`, expected `ready`"
+        );
+        let Error::Decode { path: kept, .. } = error else {
+            unreachable!()
+        };
+        assert_eq!(kept, path);
     }
 
     /// The variants that wrap a cause expose it; the three that carry only data do not. A caller

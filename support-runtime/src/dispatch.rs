@@ -1996,6 +1996,40 @@ mod tests {
     }
 
     #[test]
+    fn a_decode_message_escapes_the_servers_lf_cr_and_tab() {
+        // #457: serde quotes an unknown variant verbatim, so a server-sent `"x\ny\r\tz"` reaches
+        // the message; it must show those characters escaped and stay on one line, on both the
+        // success and the documented-error decode paths.
+        #[derive(serde::Deserialize, Debug)]
+        enum Problem {
+            #[serde(rename = "gone")]
+            Gone,
+        }
+        impl std::fmt::Display for Problem {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{self:?}")
+            }
+        }
+        let body = r#""x\ny\r\tz""#;
+        let success = poll_ready(super::decode_success::<TextChoice>(
+            &core(),
+            json_response(200, body),
+        ))
+        .unwrap_err();
+        let error = poll_ready(super::classify_error::<Problem>(
+            &core(),
+            json_response(422, body),
+            &[StatusSpec::Exact(422)],
+        ));
+        assert!(matches!(success, Error::Decode { .. }), "{success:?}");
+        assert!(matches!(error, Error::Decode { .. }), "{error:?}");
+        for message in [success.to_string(), error.to_string()] {
+            assert!(message.contains(r"x\ny\r\tz"), "{message:?}");
+            assert!(!message.contains(['\n', '\r', '\t']), "{message:?}");
+        }
+    }
+
+    #[test]
     fn read_error_body_truncates_at_cap() {
         let mut core = core();
         core.config_mut().max_error_body = 4;
