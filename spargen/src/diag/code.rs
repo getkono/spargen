@@ -720,12 +720,29 @@ mod tests {
                 .next()
                 .is_none_or(|next| !next.is_alphanumeric() && next != '_');
             let before = &code[..at];
-            let negated_call = before.rfind("has_code(").is_some_and(|call| {
-                !before[call..].contains([')', ';']) && before[..call].trim_end().ends_with('!')
-            });
+            let negated_call = enclosing_has_code(before)
+                .is_some_and(|call| before[..call].trim_end().ends_with('!'));
             let not_equal = before.trim_end().ends_with("!=");
             whole_segment && !negated_call && !not_equal
         })
+    }
+
+    /// The byte offset of the innermost `has_code(` call still open at the end of `before`, or
+    /// `None` when no such call encloses that point. Parentheses are matched by depth, so a nested
+    /// call that has already closed (`check(spec)` in `has_code(&check(spec), Code::X)`) does not
+    /// end the enclosing `has_code` call; a `;` outside every open parenthesis ends the search.
+    fn enclosing_has_code(before: &str) -> Option<usize> {
+        let mut depth = 0usize;
+        for (at, byte) in before.bytes().enumerate().rev() {
+            match byte {
+                b')' => depth += 1,
+                b'(' if depth > 0 => depth -= 1,
+                b'(' if before[..at].ends_with("has_code") => return Some(at - "has_code".len()),
+                b';' if depth == 0 => return None,
+                _ => {}
+            }
+        }
+        None
     }
 
     /// [`asserts_variant`] refuses exactly the two forms that let a code with no fixture pass: a
@@ -737,6 +754,7 @@ mod tests {
             "let x = 1; // has_code(&report, Code::UnresolvedRef)",
             "assert!(!has_code(&report, Code::UnresolvedRef));",
             "assert!(\n    !has_code(\n        &report,\n        Code::UnresolvedRef\n    ),\n);",
+            "assert!(!has_code(&check(spec), Code::UnresolvedRef));",
             "assert!(d.code != Code::UnresolvedRef);",
             "assert!(has_code(&report, Code::UnresolvedRefTypo));",
         ] {
@@ -748,6 +766,7 @@ mod tests {
         for positive in [
             "assert!(has_code(&report, Code::UnresolvedRef));",
             "assert!(\n    has_code(\n        &report,\n        Code::UnresolvedRef\n    ),\n);",
+            "assert!(has_code(&check(spec), Code::UnresolvedRef));",
             ".find(|d| d.code == Code::UnresolvedRef)",
             "let messages = messages_for(&report, Code::UnresolvedRef);",
             "assert!(!has_code(&report, Code::InvalidInput));\nassert!(has_code(&report, Code::UnresolvedRef));",
