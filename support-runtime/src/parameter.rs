@@ -1255,4 +1255,81 @@ mod tests {
             assert!(std::error::Error::source(&error).is_none(), "{error}");
         }
     }
+
+    /// A parameter value whose strings are biased to control characters, in every shape a
+    /// serializer branches on: a scalar, an array of scalars, an array holding an array, an object
+    /// with scalar members (control characters in its keys too), and an object holding an object.
+    fn control_value() -> impl proptest::strategy::Strategy<Value = Value> {
+        use proptest::prelude::*;
+        let text = || {
+            proptest::string::string_regex(
+                "([\\x00-\\x1f]|\\x7f|[\\u{80}-\\u{9f}]|a|,|=|\\PC){0,6}",
+            )
+            .expect("a valid regex")
+        };
+        let scalar = prop_oneof![
+            text().prop_map(Value::String),
+            Just(Value::Null),
+            any::<i64>().prop_map(Value::from),
+        ];
+        let object = |member: BoxedStrategy<Value>| {
+            proptest::collection::btree_map(text(), member, 0..3)
+                .prop_map(|members| Value::Object(members.into_iter().collect()))
+        };
+        prop_oneof![
+            scalar.clone(),
+            proptest::collection::vec(scalar.clone(), 0..3).prop_map(Value::Array),
+            proptest::collection::vec(scalar.clone(), 0..3)
+                .prop_map(|items| Value::Array(vec![Value::Array(items)])),
+            object(scalar.clone().boxed()),
+            object(object(scalar.boxed()).boxed()),
+        ]
+    }
+
+    proptest::proptest! {
+        /// No `ParameterError` echoes the value it refused: through every serializer, style,
+        /// explode setting and encoding, an error's whole `source()` chain stays on one line
+        /// whatever control characters the value's strings and keys hold (#452's request-side
+        /// sibling).
+        #[test]
+        fn a_parameter_error_message_is_a_single_line(
+            value in control_value(),
+            explode in proptest::bool::ANY,
+            encoding in proptest::sample::select(vec![
+                PercentEncoding::Unreserved,
+                PercentEncoding::Form,
+                PercentEncoding::Reserved,
+                PercentEncoding::ReservedPath,
+                PercentEncoding::Passthrough,
+            ]),
+        ) {
+            let mut errors: Vec<ParameterError> = Vec::new();
+            errors.extend(serialize_simple(&value, explode, encoding).err());
+            errors.extend(serialize_matrix("p", &value, explode, encoding).err());
+            errors.extend(serialize_label(&value, explode, encoding).err());
+            errors.extend(serialize_form("p", &value, explode, encoding).err());
+            errors.extend(serialize_deep_object("p", &value, encoding).err());
+            for delimiter in [Delimiter::Space, Delimiter::Pipe] {
+                errors.extend(serialize_delimited("p", &value, delimiter, encoding).err());
+            }
+            for style in [
+                FormStyle::Form,
+                FormStyle::Delimited(Delimiter::Space),
+                FormStyle::DeepObject,
+            ] {
+                errors.extend(serialize_multipart_values(&value, style, explode).err());
+            }
+            for error in &errors {
+                let messages: Vec<String> = std::iter::successors(
+                    Some(error as &(dyn std::error::Error + 'static)),
+                    |error| error.source(),
+                )
+                .map(ToString::to_string)
+                .collect();
+                for message in messages {
+                    proptest::prop_assert!(!message.contains(char::is_control), "{message:?}");
+                }
+            }
+        }
+    }
 }

@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|type-removed|ResponseBodykindMember1|public type removed
+minor|type-added|ResponseBodykindMember0|new public type
+bump=major

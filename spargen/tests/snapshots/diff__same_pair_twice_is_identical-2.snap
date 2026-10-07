@@ -1,0 +1,8 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|field-removed|Pet.name|field removed (was `String`)
+minor|operation-added|GET /owners|new operation
+minor|optional-param-added|GET /pets param `limit` (query)|optional parameter added: `i64`
+bump=major

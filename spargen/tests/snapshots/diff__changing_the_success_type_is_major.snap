@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|success-type-changed|GET /pets|success type `Pet` -> `String`
+bump=major

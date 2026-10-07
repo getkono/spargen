@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|param-requiredness-changed|GET /pets param `limit` (query)|parameter now required
+bump=major

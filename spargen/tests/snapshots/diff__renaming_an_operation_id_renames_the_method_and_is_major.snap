@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|method-renamed|GET /pets|method renamed `list_pets` -> `fetch_pets`
+bump=major

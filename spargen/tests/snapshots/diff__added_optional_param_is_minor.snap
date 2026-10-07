@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+minor|optional-param-added|GET /pets param `limit` (query)|optional parameter added: `i64`
+bump=minor
