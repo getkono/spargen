@@ -780,6 +780,469 @@ components:
     }
 }
 
+/// An inline `oneOf` whose branches lower to one and the same generated type is the `$ref`-sibling
+/// collapse above spelled without the `$ref` (#402). Branches of nothing but `required` beside
+/// `type: object` and `properties` each meet the sibling to the same object, and bare ones each
+/// lower to `serde_json::Value`; emitted as two variants, every value matches both, so the
+/// exactly-one check fails every decode. The position is that one type instead, and the branch
+/// distinctions are reported (`W001`) rather than generating a union nothing can decode. Where only
+/// some branches share a type, they become one variant and the others stand. `null` follows the
+/// collapse's `oneOf` rule: two branches that both accept it fail exactly-one, so it is invalid.
+#[test]
+fn an_inline_one_of_whose_branches_lower_to_one_type_collapses_and_warns() {
+    let props = "properties: { a: { type: string }, b: { type: string } }";
+    let required_branches = "oneOf: [ { required: [a] }, { required: [b] } ]";
+    for (shape, body, expect_fields, expect_variants) in [
+        (
+            "beside type: object",
+            format!("      type: object\n      {props}\n      {required_branches}\n"),
+            Some(["a", "b"]),
+            None,
+        ),
+        ("bare", format!("      {required_branches}\n"), None, None),
+        (
+            "partly shared",
+            "      oneOf: [ { type: string, minLength: 1 }, { type: string, maxLength: 3 }, { \
+             type: integer } ]\n"
+                .to_owned(),
+            None,
+            Some(2),
+        ),
+    ] {
+        let spec = single_component_document(&body);
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{shape} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/U"
+                        && d.message.contains("same generated type")
+                }),
+                "{shape} via {entry}: the collapse must warn at `U`: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        match (expect_fields, expect_variants) {
+            (Some(fields), _) => assert_eq!(
+                declared_fields(&types, "U"),
+                fields,
+                "{shape}: `U` must be the one object both branches lower to: {types}"
+            ),
+            (None, Some(count)) => assert_eq!(
+                enum_variants(&types, "U").len(),
+                count,
+                "{shape}: the two string branches must be one variant: {types}"
+            ),
+            (None, None) => assert!(
+                types.contains("pub type U = serde_json::Value;"),
+                "{shape}: `U` must be the one untyped value both branches lower to: {types}"
+            ),
+        }
+        assert!(
+            !types.contains("pub enum U ") || expect_variants.is_some(),
+            "{shape}: `U` must not be a union of indistinguishable variants: {types}"
+        );
+    }
+
+    // Beside a nullable object, each `required`-only branch admits `null` (`required` binds objects
+    // only), so `null` matches both and the `oneOf` rejects it: the collapsed position is required
+    // and non-nullable, as the `$ref` spelling of the same document is.
+    let spec = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        x:
+          type: [object, 'null']
+          {props}
+          {required_branches}
+      required: [x]
+"##
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+    let types = types_module(&code);
+    let x = field_type(&types, "pub x").unwrap_or_else(|| panic!("no `x` field: {types}"));
+    assert!(
+        !x.starts_with("Option<"),
+        "`x` is `{x}`, but `null` matches both branches and is invalid: {types}"
+    );
+    assert_eq!(declared_fields(&types, &x), ["a", "b"], "{types}");
+
+    // An `anyOf` of the same branches decodes: one match is enough, so it is not collapsed.
+    let spec = single_component_document(&format!(
+        "      type: object\n      {props}\n      anyOf: [ \
+                                            {{ required: [a] }}, {{ required: [b] }} ]\n"
+    ));
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert_eq!(
+        enum_variants(&types_module(&code), "U").len(),
+        2,
+        "an `anyOf` keeps its variants: {code}"
+    );
+
+    // Exactly one merged branch accepts `null`: `null` matches that branch alone, so it stays valid
+    // and the merged position stays `Option<String>`.
+    let one_nullable = "oneOf: [ { type: [string, 'null'] }, { type: string } ]";
+    let spec = format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    Holder:
+      type: object
+      properties:
+        x:
+          {one_nullable}
+      required: [x]
+"##
+    );
+    let (report, code) = generate_with_code(&spec);
+    assert_ne!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        has_code(&report, Code::ValidationKeywordIgnored),
+        "{report:#?}"
+    );
+    let types = types_module(&code);
+    let x = field_type(&types, "pub x").unwrap_or_else(|| panic!("no `x` field: {types}"));
+    let inner = x
+        .strip_prefix("Option<")
+        .and_then(|inner| inner.strip_suffix('>'))
+        .unwrap_or_else(|| panic!("`x` is `{x}`, but `null` matches one branch only: {types}"));
+    assert!(
+        inner == "String" || types.contains(&format!("pub type {inner} = String;")),
+        "`x` must be the one `String` both branches lower to: {types}"
+    );
+}
+
+/// The `$ref` spelling of the merge above gives the same answer when its branches share a generated
+/// type only structurally (#402). `$ref: Int` beside `oneOf: [{enum: [1]}, {enum: [2]}]` meets to
+/// two distinct `i64`-alias enums, one generated type: emitted as two variants, every value would
+/// match both and fail exactly-one, so the position is that one type and `W001` reports it. Where
+/// only some branches share a type after the meet, they become one variant and the others stand.
+#[test]
+fn a_ref_sibling_one_of_whose_branches_share_a_type_only_structurally_collapses() {
+    for (shape, body, expect_variants) in [
+        (
+            "fully shared",
+            "{ $ref: '#/components/schemas/Int', oneOf: [ { enum: [1] }, { enum: [2] } ] }",
+            None,
+        ),
+        (
+            "partly shared",
+            "{ $ref: '#/components/schemas/Free', oneOf: [ { type: integer, enum: [1] }, { type: \
+             integer, enum: [2] }, { type: string } ] }",
+            Some(2),
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/U' }} }}
+components:
+  schemas:
+    Int: {{ type: integer }}
+    Free: {{ description: any value }}
+    U: {body}
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{shape} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/U"
+                }),
+                "{shape} via {entry}: the collapse must warn at `U`: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        match expect_variants {
+            Some(count) => assert_eq!(
+                enum_variants(&types, "U").len(),
+                count,
+                "{shape}: the two integer branches must be one variant: {types}"
+            ),
+            None => assert!(
+                !types.contains("pub enum U "),
+                "{shape}: `U` must not be a union of indistinguishable variants: {types}"
+            ),
+        }
+    }
+}
+
+/// The partly shared `$ref`-sibling merge keeps the `oneOf` null rule (#402). Beside a nullable
+/// object `NB`, `required: [a]` and `required: [b]` each meet `NB` to one nullable struct, and the
+/// third branch's extra property `c` makes a second, so the union keeps two variants. `null` then
+/// matches both merged branches and fails exactly-one, so it is invalid: the merged variant does
+/// not carry `Option<_>`, and neither does the position. The third branch is written once
+/// non-nullable and once nullable, so the union itself would otherwise accept `null` in the second
+/// case and the position's own nullability is pinned too.
+#[test]
+fn a_partly_shared_ref_sibling_one_of_beside_a_nullable_target_is_not_nullable() {
+    for third in ["object", "[object, 'null']"] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    NB:
+      type: [object, 'null']
+      properties:
+        a: {{ type: string }}
+        b: {{ type: string }}
+    Holder:
+      type: object
+      properties:
+        x:
+          $ref: '#/components/schemas/NB'
+          oneOf:
+            - {{ required: [a] }}
+            - {{ required: [b] }}
+            - {{ type: {third}, properties: {{ c: {{ type: integer }} }} }}
+      required: [x]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "third `type: {third}` via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+                }),
+                "third `type: {third}` via {entry}: the partial merge must warn at `x`: \
+                 {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        let x = field_type(&types, "pub x")
+            .unwrap_or_else(|| panic!("third `type: {third}`: no `x` field: {types}"));
+        assert!(
+            !x.starts_with("Option<"),
+            "third `type: {third}`: `x` is `{x}`, but `null` matches both merged branches, so it \
+             is invalid: {types}"
+        );
+        let variants = enum_variants(&types, &x);
+        assert_eq!(
+            variants.len(),
+            2,
+            "third `type: {third}`: the two required-only branches must be one variant beside \
+             the `c` branch: {types}"
+        );
+        assert!(
+            !variants.iter().any(|variant| variant.contains("(Option<")),
+            "third `type: {third}`: no variant may accept `null`, which matches both merged \
+             branches: {variants:?}"
+        );
+    }
+}
+
+/// After the meet with a `$ref` target, each `oneOf` branch keeps its own nullability, so branches
+/// that emit one Rust type need not agree on `null` (#402). Beside `NI: {type: [integer, 'null']}`,
+/// `{minimum: 0}` says nothing about `null` and meets `NI` to a nullable integer, while
+/// `{type: integer}` meets it to a plain one: every integer matches both, so they are one type
+/// however `null` falls, and `W001` reports it. `null` is valid exactly when one branch accepts it:
+/// with one untyped branch it matches that branch alone, and with two it matches both and fails
+/// exactly-one.
+#[test]
+fn a_ref_sibling_one_of_whose_branches_differ_only_in_nullability_collapses() {
+    for (branches, nullable) in [
+        ("[ { minimum: 0 }, { type: integer } ]", true),
+        (
+            "[ { minimum: 0 }, { maximum: 10 }, { type: integer } ]",
+            false,
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    NI: {{ type: [integer, 'null'] }}
+    Holder:
+      type: object
+      properties:
+        x:
+          $ref: '#/components/schemas/NI'
+          oneOf: {branches}
+      required: [x]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{branches} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+                }),
+                "{branches} via {entry}: the collapse must warn at `x`: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        let x = field_type(&types, "pub x")
+            .unwrap_or_else(|| panic!("{branches}: no `x` field: {types}"));
+        assert_eq!(
+            x.starts_with("Option<"),
+            nullable,
+            "{branches}: `x` is `{x}`, but `null` is {} here: {types}",
+            if nullable { "valid" } else { "invalid" }
+        );
+        let inner = x
+            .strip_prefix("Option<")
+            .and_then(|inner| inner.strip_suffix('>'))
+            .unwrap_or(&x);
+        assert!(
+            inner == "i64" || types.contains(&format!("pub type {inner} = i64;")),
+            "{branches}: `x` must be the one integer every branch lowers to, not a union: {types}"
+        );
+    }
+
+    // Partly shared: beside `NS: {type: [string, 'null']}`, `{maxLength: 0}` meets it to a nullable
+    // string and `{type: string, maxLength: 0}` to a plain one, while `{enum: [abc]}` is a string
+    // enum of its own, which neither of the others admits. The first two are one variant, and
+    // `null` matches the untyped one alone, so that variant accepts it.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Holder' } }
+components:
+  schemas:
+    NS: { type: [string, 'null'] }
+    Holder:
+      type: object
+      properties:
+        x:
+          $ref: '#/components/schemas/NS'
+          oneOf:
+            - { maxLength: 0 }
+            - { type: string, maxLength: 0 }
+            - { enum: [abc] }
+      required: [x]
+"##;
+    let (report, code) = generate_with_code(spec);
+    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "via {entry}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+            }),
+            "partly shared via {entry}: the merge must warn at `x`: {report:#?}"
+        );
+    }
+    let types = types_module(&code);
+    let x = field_type(&types, "pub x").unwrap_or_else(|| panic!("no `x` field: {types}"));
+    let variants = enum_variants(&types, &x);
+    assert_eq!(
+        variants.len(),
+        2,
+        "the two `maxLength: 0` branches must be one variant beside the enum branch: {types}"
+    );
+    assert_eq!(
+        variants
+            .iter()
+            .filter(|variant| variant.contains("(Option<"))
+            .count(),
+        1,
+        "the merged variant accepts `null`, which only its untyped branch matches: {variants:?}"
+    );
+}
+
 /// Issue #425: an object `allOf` admits `null` exactly when every member does, as its `$ref`-sibling
 /// spelling and the all-scalar `allOf` already do. A nullable `$ref` member decides `null` for
 /// itself; an untyped inline member's object keywords bind objects only, so it admits `null`

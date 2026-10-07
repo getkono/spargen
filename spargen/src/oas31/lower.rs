@@ -155,6 +155,7 @@ fn lower_pass(
         open_narrowing: options.open_narrowing,
         narrowing_opens: false,
         open_candidates: HashSet::new(),
+        unmerged_union: None,
     };
 
     // These names come from `components.schemas` itself, so the lookup inside cannot miss and the
@@ -768,6 +769,11 @@ struct LowerCtx<'a, 'doc> {
     /// `$ref` target, memo, or union reaches it, so [`Self::narrowed_string`] opens it in place
     /// rather than leaving it beside an open copy as an unused public type.
     open_candidates: HashSet<TypeId>,
+    /// The `oneOf` a `$ref`'s own sibling carries, while that sibling is lowered to be met with the
+    /// `$ref`'s target. [`Self::lower_union_closed`] leaves its indistinguishable variants unmerged
+    /// (#402): the `$ref` arm collapses them after the meet, where the branches' `null` is still
+    /// visible, and merging untyped branches first would hide it behind `serde_json::Value`.
+    unmerged_union: Option<Provenance>,
 }
 
 /// The options that change what lowering produces.
@@ -1721,7 +1727,14 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 }
                 None => {}
             }
-            let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"))?;
+            let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
+            let enclosing_unmerged = std::mem::replace(
+                &mut self.unmerged_union,
+                has_union_sibling.then(|| schema.provenance.clone()),
+            );
+            let sibling = self.lower_schema(&sibling, &format!("{hint}Constraint"));
+            self.unmerged_union = enclosing_unmerged;
+            let sibling = sibling?;
             let mark = self.graph_mark();
             let Ok(intersection) =
                 self.intersect_types(referenced, sibling, &format!("{hint}ReferenceIntersection"))
@@ -1737,9 +1750,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // Only a `$ref` whose own sibling is a `oneOf`/`anyOf` is collapsed. A `$ref` to a union
             // beside a non-union sibling is an intersection this check was never meant for, and it
             // keeps the shape it has always generated.
-            let has_union_sibling = !schema.one_of.is_empty() || !schema.any_of.is_empty();
+            // A `oneOf` sibling's branches are compared by generated type, as the inline merge
+            // compares them (#402): two distinct `i64`-alias enums are one Rust type, so no value
+            // tells them apart. An `anyOf` keeps the identity comparison it has always had.
+            let one_of = !schema.one_of.is_empty();
             let collapsed = has_union_sibling
-                .then(|| self.indistinguishable_union_variant(intersection))
+                .then(|| self.indistinguishable_union_variant(intersection, one_of))
                 .flatten();
             let intersection = match collapsed {
                 // Every branch of the intersected union is one and the same type: the branches
@@ -1747,18 +1763,18 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                 // nothing but `required` (#140). Emitting them as a union gives a `oneOf` whose
                 // exactly-one check fails on every value, so the position takes that one type and
                 // the ignored branch distinctions are reported, not dropped in silence.
-                Some(mut common) => {
-                    // Every branch is `common`, so either all of them accept `null` or none does,
-                    // and `intersection.nullable` says whether the union's own `null` member
-                    // survived the meet with the target. An `anyOf` needs one match, so `null` is
-                    // valid when either admits it. A `oneOf` needs exactly one: a nullable
-                    // `common` puts `null` in two or more branches, which fails it whatever the
-                    // `null` member does, so `null` is valid only through that member and only
-                    // when `common` rejects it.
+                Some((mut common, branches_accepting_null)) => {
+                    // `branches_accepting_null` counts the branches that accept `null`, and
+                    // `intersection.nullable` says whether the union's own `null` member survived
+                    // the meet with the target. An `anyOf` needs one match, so `null` is valid
+                    // when any of them admits it. A `oneOf` needs exactly one: its branches are
+                    // grouped apart from their own `null`, so they need not agree on it, and
+                    // `null` is valid only when exactly one of the branches and that member
+                    // accepts it — two put it in two branches, which fails exactly-one.
                     common.nullable = if schema.one_of.is_empty() {
-                        intersection.nullable || common.nullable
+                        intersection.nullable || branches_accepting_null > 0
                     } else {
-                        intersection.nullable && !common.nullable
+                        usize::from(intersection.nullable) + branches_accepting_null == 1
                     };
                     Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
                         .message(
@@ -1770,6 +1786,11 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
                         .emit(self.diags);
                     common
                 }
+                // Only some branches share a generated type: they become one variant, as the
+                // inline merge makes them, and the others stand.
+                None if one_of && has_union_sibling => self
+                    .merge_intersected_one_of(schema, intersection, hint)
+                    .unwrap_or(intersection),
                 None => intersection,
             };
             let kind = self.graph.get(intersection.id)?.kind.clone();
@@ -2246,6 +2267,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // The real member each variant came from: sibling keywords can exclude a member, so a
         // variant's position is not its member's.
         let mut variant_members: Vec<usize> = Vec::new();
+        // Whether each variant accepted `null` before its nullability was hoisted to the union.
+        let mut variant_nullable: Vec<bool> = Vec::new();
         let mut used_hints: HashSet<String> = HashSet::new();
         let mut reach = ScopeReach::default();
         for (index, member) in real_members.iter().enumerate() {
@@ -2336,6 +2359,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             // ever inspects non-null content — otherwise a variant like `{type: [string, null]}`
             // would be categorized `String` yet have no `null` arm in the custom `Deserialize`.
             nullable = nullable || ty.nullable;
+            variant_nullable.push(ty.nullable);
             ty.nullable = false;
             let base_hint = ref_name
                 .clone()
@@ -2374,6 +2398,29 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.reject_branchless_union(
                 schema,
                 "union sibling constraints make every variant impossible",
+            );
+        }
+        // A `oneOf` needs exactly one branch to match, and its typed trial matching decides that
+        // by which variants decode. Variants that lower to the same generated type decode the same
+        // values, so every value one of them accepts fails exactly-one: branches of nothing but
+        // `required` beside `type: object` (#402), or bare ones that each lower to
+        // `serde_json::Value`. They become one variant — the whole union is that type when every
+        // variant shares it, as the `$ref`-sibling collapse answers for the same branches — and
+        // the distinctions the generated type does not carry are reported, not dropped in silence.
+        // A discriminator tells such variants apart by tag, so it keeps them all; an `anyOf`
+        // decodes with any one match, so it does too. A `$ref`'s own `oneOf` sibling is collapsed
+        // by the `$ref` arm after the meet instead ([`Self::unmerged_union`]).
+        if mode == UnionMode::OneOf
+            && schema.discriminator.is_none()
+            && self.unmerged_union.as_ref() != Some(&schema.provenance)
+        {
+            self.merge_indistinguishable_variants(
+                schema,
+                &mut variants,
+                &mut ref_names,
+                &mut variant_members,
+                &variant_nullable,
+                &mut nullable,
             );
         }
         if variants.len() == 1 {
@@ -2490,6 +2537,79 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             self.insert_schema_type(schema, hint, TypeKind::Union(Union { variants, strategy }));
         ty.nullable = nullable;
         Some(ty)
+    }
+
+    /// Merge the `oneOf` variants that lower to the same generated type into the first of them,
+    /// keeping `ref_names` and `variant_members` aligned with `variants`, and report the merge as
+    /// `W001` at the union. `variant_nullable` is whether each variant accepted `null` before it
+    /// was hoisted to the union: two merged variants that both did put `null` in two branches,
+    /// which fails exactly-one whatever else the union admits, so `null` is then invalid.
+    fn merge_indistinguishable_variants(
+        &mut self,
+        schema: &Schema,
+        variants: &mut Vec<UnionVariant>,
+        ref_names: &mut Vec<Option<String>>,
+        variant_members: &mut Vec<usize>,
+        variant_nullable: &[bool],
+        nullable: &mut bool,
+    ) {
+        // Each kept variant, with the members merged into it and whether one of them accepted
+        // `null`.
+        let mut groups: Vec<(usize, Vec<usize>, bool)> = Vec::new();
+        let mut null_twice = false;
+        for (index, variant) in variants.iter().enumerate() {
+            let shared = groups.iter_mut().find(|(kept, _, _)| {
+                self.graph
+                    .same_generated_type(variants[*kept].ty, variant.ty)
+            });
+            match shared {
+                Some((_, members, accepts_null)) => {
+                    members.push(variant_members[index]);
+                    null_twice |= *accepts_null && variant_nullable[index];
+                    *accepts_null |= variant_nullable[index];
+                }
+                None => groups.push((index, vec![variant_members[index]], variant_nullable[index])),
+            }
+        }
+        if groups.len() == variants.len() {
+            return;
+        }
+        let merged: Vec<String> = groups
+            .iter()
+            .filter(|(_, members, _)| members.len() > 1)
+            .map(|(_, members, _)| {
+                let members: Vec<String> = members.iter().map(usize::to_string).collect();
+                format!("members {}", members.join(", "))
+            })
+            .collect();
+        let consequence = if groups.len() == 1 {
+            "the union is that one type"
+        } else {
+            "each such set is one variant of the generated enum"
+        };
+        Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+            .message(format!(
+                "this `oneOf`'s {} lower to the same generated type, differing only in keywords it \
+                 does not carry, so a value matching one matches all of them and would fail the \
+                 exactly-one rule: {consequence}, and which of them a value matches is not enforced",
+                merged.join(" and ")
+            ))
+            .remedy("keep producer-side validation for the union's branch constraints")
+            .emit(self.diags);
+        fn keep<T>(items: &mut Vec<T>, kept: &HashSet<usize>) {
+            *items = std::mem::take(items)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(index, item)| kept.contains(&index).then_some(item))
+                .collect();
+        }
+        let kept: HashSet<usize> = groups.iter().map(|(kept, _, _)| *kept).collect();
+        keep(variants, &kept);
+        keep(ref_names, &kept);
+        keep(variant_members, &kept);
+        if null_twice {
+            *nullable = false;
+        }
     }
 
     /// Lower shape-bearing keywords adjacent to `oneOf`/`anyOf` so every branch is intersected with
@@ -5327,13 +5447,106 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// The one type every variant of `ty` shares, when `ty` is a union of two or more variants that
     /// are all the same type. No value can tell such variants apart, so the union adds nothing to
     /// its common type — and a `oneOf` of them rejects every value its common type accepts.
-    fn indistinguishable_union_variant(&self, ty: Ty) -> Option<Ty> {
+    /// `structural` also counts variants that are distinct definitions emitting one Rust type
+    /// ([`Self::same_type_apart_from_null`]) as the same, unless a discriminator tells them apart by
+    /// tag. Returned with the number of variants that accept `null`: after the meet with a `$ref`
+    /// target each variant keeps its own nullability, so structurally shared variants need not
+    /// agree on it.
+    fn indistinguishable_union_variant(&self, ty: Ty, structural: bool) -> Option<(Ty, usize)> {
         let Some(TypeKind::Union(union)) = self.graph.get(ty.id).map(|def| &def.kind) else {
             return None;
         };
+        let structural =
+            structural && !matches!(union.strategy, UnionStrategy::Discriminated { .. });
         let (first, rest) = union.variants.split_first()?;
-        (!rest.is_empty() && rest.iter().all(|variant| same_ty(variant.ty, first.ty)))
-            .then_some(first.ty)
+        let nullable = union
+            .variants
+            .iter()
+            .filter(|variant| variant.ty.nullable)
+            .count();
+        (!rest.is_empty()
+            && rest.iter().all(|variant| {
+                same_ty(variant.ty, first.ty)
+                    || (structural && self.same_type_apart_from_null(variant.ty, first.ty))
+            }))
+        .then_some((first.ty, nullable))
+    }
+
+    /// Whether two `oneOf` variants emit one Rust type once each one's own `null` is set aside.
+    /// No non-null value tells them apart, so they are one variant whatever their nullability; the
+    /// callers decide `null` separately, by how many of the merged branches accept it.
+    fn same_type_apart_from_null(&self, a: Ty, b: Ty) -> bool {
+        self.graph
+            .same_generated_type(non_nullable(a), non_nullable(b))
+    }
+
+    /// The `oneOf` union `ty` a `$ref` met its own sibling to, with the variants that lower to one
+    /// generated type merged into the first of them, or `None` when no two do — the post-meet
+    /// counterpart of [`Self::merge_indistinguishable_variants`] (#402). Called once
+    /// [`Self::indistinguishable_union_variant`] has found that not every variant shares one type,
+    /// so two or more variants remain. Variants are grouped apart from their own `null`
+    /// ([`Self::same_type_apart_from_null`]); a merged set in which exactly one branch accepts
+    /// `null` keeps it, and one in which two or more do puts `null` in two branches, which fails
+    /// exactly-one, so `null` is then invalid everywhere in the union.
+    fn merge_intersected_one_of(&mut self, schema: &Schema, ty: Ty, hint: &str) -> Option<Ty> {
+        let TypeKind::Union(union) = &self.graph.get(ty.id)?.kind else {
+            return None;
+        };
+        if matches!(union.strategy, UnionStrategy::Discriminated { .. }) {
+            return None;
+        }
+        let union = union.clone();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (index, variant) in union.variants.iter().enumerate() {
+            let shared = groups.iter_mut().find(|group| {
+                self.same_type_apart_from_null(union.variants[group[0]].ty, variant.ty)
+            });
+            match shared {
+                Some(group) => group.push(index),
+                None => groups.push(vec![index]),
+            }
+        }
+        if groups.len() == union.variants.len() {
+            return None;
+        }
+        // The members of a set need not agree on `null`. A set accepts it when exactly one member
+        // does; two or more put `null` in two branches, which fails exactly-one everywhere.
+        let accepting_null = |group: &Vec<usize>| {
+            group
+                .iter()
+                .filter(|index| union.variants[**index].ty.nullable)
+                .count()
+        };
+        let null_twice = groups.iter().any(|group| accepting_null(group) > 1);
+        let retained: Vec<usize> = groups.iter().map(|group| group[0]).collect();
+        let variants = groups
+            .iter()
+            .map(|group| {
+                let mut variant = union.variants[group[0]].clone();
+                variant.ty.nullable = accepting_null(group) == 1 && !null_twice;
+                variant
+            })
+            .collect();
+        Diagnostic::warning(Code::ValidationKeywordIgnored, schema.provenance.clone())
+            .message(
+                "this `$ref` and its `oneOf` sibling intersect to a union some of whose branches \
+                 lower to the same generated type, differing only in keywords it does not carry, \
+                 so a value matching one matches all of them and would fail the exactly-one rule: \
+                 each such set is one variant of the generated enum, and which of them a value \
+                 matches is not enforced",
+            )
+            .remedy("keep producer-side validation for the union's branch constraints")
+            .emit(self.diags);
+        let strategy = retain_strategy(&union.strategy, &retained);
+        let mut merged = self.insert_type(
+            &format!("{hint}ReferenceIntersection"),
+            TypeKind::Union(Union { variants, strategy }),
+            Docs::default(),
+            None,
+        );
+        merged.nullable = ty.nullable && !null_twice;
+        merged.boxed = ty.boxed;
+        Some(merged)
     }
 
     /// The meet of the union `union` (whose type is `union_ty`) with `other`, branch by branch.
@@ -5391,36 +5604,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         {
             return Ok(non_nullable(union_ty));
         }
-        let strategy = match &union.strategy {
-            UnionStrategy::Discriminated {
-                tag_field,
-                tags,
-                categories,
-                default_variant,
-                untagged,
-                mode,
-            } => UnionStrategy::Discriminated {
-                tag_field: tag_field.clone(),
-                tags: retained.iter().map(|index| tags[*index].clone()).collect(),
-                categories: retained.iter().map(|index| categories[*index]).collect(),
-                untagged: retained.iter().map(|index| untagged[*index]).collect(),
-                mode: *mode,
-                // The fallback variant's index moves with the retained set; if the fallback itself
-                // was dropped, the union simply has no fallback any more.
-                default_variant: default_variant
-                    .and_then(|target| retained.iter().position(|index| *index == target)),
-            },
-            UnionStrategy::Disjoint { features } => UnionStrategy::Disjoint {
-                features: retained
-                    .iter()
-                    .map(|index| features[*index].clone())
-                    .collect(),
-            },
-            UnionStrategy::Trial { mode, priorities } => UnionStrategy::Trial {
-                mode: *mode,
-                priorities: retained.iter().map(|index| priorities[*index]).collect(),
-            },
-        };
+        let strategy = retain_strategy(&union.strategy, &retained);
         Ok(self.insert_type(
             hint,
             TypeKind::Union(Union { variants, strategy }),
@@ -8147,6 +8331,41 @@ fn no_meet(left: &TypeKind, right: &TypeKind) -> NoMeet {
 fn non_nullable(mut ty: Ty) -> Ty {
     ty.nullable = false;
     ty
+}
+
+/// `strategy` restricted to the variants at `retained` (ascending positions into the union it
+/// described), in that order.
+fn retain_strategy(strategy: &UnionStrategy, retained: &[usize]) -> UnionStrategy {
+    match strategy {
+        UnionStrategy::Discriminated {
+            tag_field,
+            tags,
+            categories,
+            default_variant,
+            untagged,
+            mode,
+        } => UnionStrategy::Discriminated {
+            tag_field: tag_field.clone(),
+            tags: retained.iter().map(|index| tags[*index].clone()).collect(),
+            categories: retained.iter().map(|index| categories[*index]).collect(),
+            untagged: retained.iter().map(|index| untagged[*index]).collect(),
+            mode: *mode,
+            // The fallback variant's index moves with the retained set; if the fallback itself
+            // was dropped, the union simply has no fallback any more.
+            default_variant: default_variant
+                .and_then(|target| retained.iter().position(|index| *index == target)),
+        },
+        UnionStrategy::Disjoint { features } => UnionStrategy::Disjoint {
+            features: retained
+                .iter()
+                .map(|index| features[*index].clone())
+                .collect(),
+        },
+        UnionStrategy::Trial { mode, priorities } => UnionStrategy::Trial {
+            mode: *mode,
+            priorities: retained.iter().map(|index| priorities[*index]).collect(),
+        },
+    }
 }
 
 fn same_ty(left: Ty, right: Ty) -> bool {
