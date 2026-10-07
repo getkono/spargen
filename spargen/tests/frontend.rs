@@ -16051,6 +16051,87 @@ fn a_default_an_intersection_narrows_away_is_reported_not_applied() {
     );
 }
 
+/// Issue #453: a repeated property whose types share no value, and that no side requires, takes an
+/// uninhabited type, so no value of it is a value of the `default` one side wrote. That default is
+/// dropped like one an intersection narrows the property away from: reported at the `default`
+/// that wrote it (`W005`), naming the type whose field drops it, and documented as not applied.
+/// Both spellings of the meet are held — `allOf` members, and a `$ref` with sibling `properties`.
+const UNINHABITED_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Pet:
+      allOf:
+        - type: object
+          properties:
+            a: { type: string, default: z }
+        - type: object
+          properties:
+            a: { type: integer }
+    Base:
+      type: object
+      properties:
+        a: { type: string, default: z }
+    Sibling:
+      $ref: '#/components/schemas/Base'
+      properties:
+        a: { type: integer }
+"##;
+
+#[test]
+fn a_default_an_uninhabited_meet_drops_is_reported_not_applied() {
+    for (entry, report) in [
+        ("generate", generate(UNINHABITED_DEFAULT_SPEC)),
+        ("check", check(UNINHABITED_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let mut pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        pointers.sort_unstable();
+        pointers.dedup();
+        assert_eq!(
+            pointers,
+            [
+                "/components/schemas/Base/properties/a/default",
+                "/components/schemas/Pet/allOf/0/properties/a/default",
+            ],
+            "{entry}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+        for dropping in ["/components/schemas/Pet", "/components/schemas/Sibling"] {
+            assert!(
+                messages.iter().any(|message| message.contains(dropping)),
+                "{entry}: `{dropping}` drops `a`'s default and must say so: {messages:#?}"
+            );
+        }
+    }
+
+    let (report, code) = generate_with_code(UNINHABITED_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    for name in ["Pet", "Sibling"] {
+        let start = code
+            .find(&format!("pub struct {name} {{"))
+            .unwrap_or_else(|| panic!("`{name}` is emitted: {code}"));
+        let body = &code[start..start + code[start..].find('}').unwrap()];
+        assert!(
+            body.contains("Default (not applied): `\"z\"`.") && !body.contains("default = \""),
+            "`{name}.a` documents `z` as not applied and wires no default: {body}"
+        );
+    }
+    // `Base` itself is no intersection: its `a` is still a string, and applies `z`.
+    assert_eq!(
+        code.matches("Some(\"z\".to_owned())").count(),
+        1,
+        "only `Base` applies `z`: {code}"
+    );
+}
+
 /// Issue #432: an intersection whose sides repeat a property merges the `default` either side
 /// declares, whichever side comes first. `allOf: [Narrow, Base]` wires `Base`'s default exactly as
 /// `allOf: [Base, Narrow]` does, and so does a `$ref` whose sibling `properties` declare it. Two
@@ -16325,10 +16406,9 @@ fn an_integer_and_a_number_default_of_equal_value_are_one_default() {
 /// warned `W005` against the dead `string`∩`enum` struct while the two-member spelling, whose
 /// result is the same uninhabited field, was clean.
 ///
-/// This pins the two spellings agreeing, not what they say: how a default on a field an
-/// intersection empties should be reported is the two-member spelling's question. The second case
-/// keeps the fixture from passing vacuously, since there the emitted struct itself drops the
-/// default and both spellings must report it once.
+/// This pins the two spellings agreeing. In the first two cases the emitted struct itself drops
+/// the default — the field the first one empties included (#453) — and both spellings must report
+/// it once.
 #[test]
 fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
     fn spec(media: &str, members: &[&str]) -> String {
@@ -16369,7 +16449,8 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
                 "{ type: integer }",
             ],
             ["{ type: string, default: z }", "{ type: integer }"],
-            0,
+            // The emptied field drops `z`, reported once at its `default` (#453).
+            1,
         ),
         (
             json,

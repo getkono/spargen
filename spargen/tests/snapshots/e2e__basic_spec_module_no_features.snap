@@ -4394,7 +4394,7 @@ pub mod types {
     pub type ConflictDefaultTargetx = String;
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ConflictDefault {
-        ///Default: `a`.
+        ///Default (not applied): `"a"`.
         #[serde(
             rename = "x",
             default,
@@ -4433,7 +4433,7 @@ pub mod types {
     }
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ConflictDefaultSibling {
-        ///Default: `a`.
+        ///Default (not applied): `"a"`.
         #[serde(
             rename = "x",
             default,
