@@ -114,6 +114,16 @@ pub(crate) const TYPES_MODULE_NAMES: &[&str] = &[
     "Vec",
 ];
 
+/// The type-namespace names codegen's `servers` module writes bare beside the server builders and
+/// server-variable enums it declares: `String` for a free-form variable's field, setter argument and
+/// `url()`, `Into` for that setter's `impl Into<String>`, and `Default` for the derive's
+/// `<Enum as Default>` and the hand-written `impl Default`. Server and enum names are allocated
+/// after these are reserved, so a server named `string` or `default` is disambiguated instead of
+/// declaring a struct that shadows the prelude item the module refers to. `Into` is written only
+/// for a free-form variable; like the others it is reserved unconditionally, so a server's name
+/// does not change when such a variable is added.
+pub(crate) const SERVERS_MODULE_NAMES: &[&str] = &["Default", "Into", "String"];
+
 /// Generator-owned bindings emitted inside one operation method.
 #[derive(Debug)]
 pub(crate) struct OperationBindings {
@@ -147,8 +157,13 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     // generated model or operation name. The builders and the variable enums are declared side by
     // side in that module and share Rust's type namespace, so they are drawn from one scope: two
     // scopes could hand a builder and an enum the same spelling. A spelling moves only where the
-    // two would have collided, so no description that compiled before is renamed.
+    // two would have collided, so no description that compiled before is renamed. The prelude
+    // names the module itself writes are taken first, unconditionally, so a server's name does not
+    // change when it gains or loses a free-form variable.
     let mut server_scope = Scope::default();
+    for name in SERVERS_MODULE_NAMES {
+        server_scope.reserve(name, IdentRole::Type);
+    }
     for (index, server) in api.servers.iter().enumerate() {
         let hint = server
             .name
@@ -764,8 +779,9 @@ mod tests {
             3 => "[a-cA-C][-_ ]?[a-cA-C]",
             1 => proptest::sample::select(vec![
                 "", "type", "self", "Self", "super", "crate", "String", "Box", "Option", "Vec",
-                "new", "core", "inner", "with_credential", "params", "body", "path", "query",
-                "url", "request", "cookies", "additional", "other", "Other", "1a", "-",
+                "Default", "default", "Into", "new", "core", "inner", "with_credential", "params",
+                "body", "path", "query", "url", "request", "cookies", "additional", "other",
+                "Other", "1a", "-",
             ])
             .prop_map(str::to_owned),
         ]
@@ -1162,7 +1178,7 @@ mod tests {
             assert_scope(
                 "servers module",
                 names.servers.iter().chain(names.server_variable_enums.values()),
-                &[],
+                super::SERVERS_MODULE_NAMES,
             )?;
             for (index, server) in api.servers.iter().enumerate() {
                 let fields = server
