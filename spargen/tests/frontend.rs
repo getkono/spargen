@@ -16936,7 +16936,10 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
                 "{ type: string, xml: { name: kay } }",
                 "{ type: string, minLength: 1 }",
             ],
-            2,
+            // The first member's own `inner` struct and the merged one both ignore the rename.
+            // The merged struct is located at the first member's `inner` (#454), so the two
+            // `W006` are one diagnostic, at the hint the author wrote.
+            1,
         ),
         // Under an XML body the merged struct is XML-dedicated and keeps its rename. Both spellings
         // report one `W006`, for the first member's own `inner` struct, which no body reaches. The
@@ -16975,6 +16978,153 @@ fn a_superseded_all_of_meet_reports_no_default_or_xml_diagnostic_of_its_own() {
                  not:\n{three}"
             );
             assert_eq!(reported(&without).len(), count, "{entry}: {without:#?}");
+        }
+    }
+}
+
+/// Issue #454: two `allOf` members that both declare an object-typed property `p` meet it in a
+/// struct of its own (`PetpIntersection`). That struct carried the document root's provenance, so
+/// a `W005` against it named the type as `` in `` `` and a `W006` against it had an empty pointer
+/// and a span covering the whole document. Both must name the property whose types were met.
+fn nested_meet_spec(first: &str, second: &str) -> String {
+    format!(
+        r##"
+openapi: 3.1.0
+info: {{ title: t, version: "1" }}
+paths:
+  /p:
+    get:
+      operationId: getP
+      responses:
+        "200":
+          description: ok
+          content:
+            application/json:
+              schema: {{ $ref: "#/components/schemas/Pet" }}
+components:
+  schemas:
+    Pet:
+      allOf:
+        - type: object
+          properties:
+            p:
+              type: object
+              properties:
+                {first}
+        - type: object
+          properties:
+            p:
+              type: object
+              properties:
+                {second}
+"##
+    )
+}
+
+#[test]
+fn a_nested_all_of_meet_locates_its_diagnostics_at_the_met_property() {
+    const MET: &str = "/components/schemas/Pet/allOf/0/properties/p";
+
+    let w005 = nested_meet_spec(
+        "a: { type: string, default: zzz }",
+        "a: { type: string, enum: [a, b] }",
+    );
+    let w006 = nested_meet_spec(
+        "a: { type: string, xml: { namespace: \"http://example.com/ns\" } }",
+        "b: { type: string }",
+    );
+    for (entry, run) in [
+        ("generate", generate as fn(&str) -> Report),
+        ("check", check),
+    ] {
+        let report = run(&w005);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+        assert!(
+            !messages.is_empty(),
+            "{entry}: `zzz` is dropped: {report:#?}"
+        );
+        for message in &messages {
+            assert!(
+                message.contains(&format!("in `{MET}`")) && !message.contains("in ``"),
+                "{entry}: the `W005` names the met property, not the root: {message}"
+            );
+        }
+
+        let report = run(&w006);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let ignored: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::XmlHintIgnored)
+            .collect();
+        assert!(
+            !ignored.is_empty(),
+            "{entry}: the namespace is ignored: {report:#?}"
+        );
+        for diagnostic in ignored {
+            assert_eq!(
+                diagnostic.pointer.as_str(),
+                MET,
+                "{entry}: every `W006` points at the met property: {report:#?}"
+            );
+            let span = diagnostic.span.expect("a located `W006`");
+            assert!(
+                span.start.line > 2,
+                "{entry}: the `W006` span is the property's, not the document's: {span:?}"
+            );
+        }
+    }
+}
+
+/// A meet's recorded location belongs to the id the meet struct was inserted at, and lifting a
+/// component root out of that id frees it for the next insert. `A`'s `$ref`-sibling meet is
+/// located at `B` and lifted into `A`'s reserved id; the struct `C` then reuses the freed id, and
+/// its `W006` must point at `C`, not inherit the lifted meet's `B` location.
+#[test]
+fn a_freed_meet_id_does_not_lend_its_location_to_the_next_type() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    B:
+      type: object
+    A:
+      $ref: '#/components/schemas/B'
+      properties:
+        m: { type: integer }
+    C:
+      type: object
+      properties:
+        x:
+          type: string
+          xml: { namespace: "http://example.com/ns" }
+"##;
+    for (entry, run) in [
+        ("generate", generate as fn(&str) -> Report),
+        ("check", check),
+    ] {
+        let report = run(spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let ignored: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::XmlHintIgnored)
+            .collect();
+        assert!(
+            !ignored.is_empty(),
+            "{entry}: the namespace is ignored: {report:#?}"
+        );
+        for diagnostic in ignored {
+            assert!(
+                diagnostic
+                    .pointer
+                    .as_str()
+                    .starts_with("/components/schemas/C"),
+                "{entry}: the `W006` for `C.x` points at `C`: {report:#?}"
+            );
         }
     }
 }
