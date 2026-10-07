@@ -1,5 +1,5 @@
 //! # Subsystem: emit
-//! layer-deps: codegen, diag
+//! layer-deps: codegen
 //!
 //! Module assembly and provenance stamping. Emit turns
 //! [`crate::codegen::GeneratedCode`] into one deterministic module plan.
