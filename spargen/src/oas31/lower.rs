@@ -7825,10 +7825,20 @@ enum Uninhabited {
 /// ([`TypeKind::Never`]) member, together with which of the two it is. [`parameter_shape_supported`]
 /// refuses both, because no value of the uninhabited schema has a token. The path is `""` for the
 /// parameter itself, `.name` for an object property, `.*` for its `additionalProperties`, `[]` for
-/// an array's items, and `[i]` for a tuple's. Only those positions are searched, so an uninhabited
-/// schema below a nested array or object stays reported as the nesting. `None` when there is no
-/// such schema.
+/// an array's items, and `[i]` for a tuple's. A `oneOf`/`anyOf` parameter schema serializes as
+/// whichever member the value is, so the parts of each member are searched too, with the same
+/// paths (a member adds nothing to it): `f.a` is the property `a` of an object member of `f`
+/// (#435). Only those positions are searched, so an uninhabited schema below a nested array or
+/// object stays reported as the nesting. `None` when there is no such schema.
 fn uninhabited_parameter_part(graph: &TypeGraph, ty: Ty) -> Option<(String, Uninhabited)> {
+    uninhabited_parameter_part_inner(graph, ty, &mut HashSet::new())
+}
+
+fn uninhabited_parameter_part_inner(
+    graph: &TypeGraph,
+    ty: Ty,
+    members: &mut HashSet<TypeId>,
+) -> Option<(String, Uninhabited)> {
     fn classify(graph: &TypeGraph, ty: Ty, visiting: &mut HashSet<TypeId>) -> Option<Uninhabited> {
         if !visiting.insert(ty.id) {
             return None;
@@ -7880,6 +7890,17 @@ fn uninhabited_parameter_part(graph: &TypeGraph, ty: Ty) -> Option<(String, Unin
                 AdditionalProps::Typed(value) => at(".*".to_owned(), **value),
                 AdditionalProps::Deny | AdditionalProps::Allow => None,
             }),
+        // `parameter_shape_supported` gives each member the position the union holds, so a
+        // member's parts are parts of the parameter. `members` stops a union that reaches itself
+        // through a member from being walked again.
+        TypeKind::Union(union) if members.insert(ty.id) => {
+            let found = union
+                .variants
+                .iter()
+                .find_map(|variant| uninhabited_parameter_part_inner(graph, variant.ty, members));
+            members.remove(&ty.id);
+            found
+        }
         // The parameter itself was classified above; a reservation has no parts to search.
         TypeKind::Reserved => None,
         _ => None,
