@@ -3730,7 +3730,8 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// leaves the rest, as the same keywords do as siblings of a `$ref` to a union
     /// ([`Self::refine_union_target`]). The other members are combined as an `allOf` and met
     /// with the union through [`Self::intersect_types`], the meet that `$ref` arm applies to a typed
-    /// sibling; the composition admits `null` exactly when every one of them does. Members that
+    /// sibling, under the nullability [`Self::combine_all_of`] gives their merge, as the
+    /// `allOf`-member spelling ([`Self::lower_all_of_with_union_member`]) takes it. Members that
     /// constrain nothing (`true`, `{}`, an annotation) take part in neither: with none of either
     /// kind left the union alone is the schema's type, under the schema's own hint, as it is with
     /// no `allOf` at all.
@@ -3763,10 +3764,9 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         let composed = if contributions.is_empty() {
             None
         } else {
-            let mut composed =
-                self.combine_all_of(&composition, &composition_hint, &contributions)?;
-            composed.nullable = contributions.iter().all(Contribution::admits_null);
-            Some(composed)
+            // Under the nullability `combine_all_of` gives it, as the `allOf`-member spelling
+            // takes it: an untyped object member admits `null` and decides nothing.
+            Some(self.combine_all_of(&composition, &composition_hint, &contributions)?)
         };
         let refiners = self.lower_all_of_refiners(&scoped, hint)?;
         self.meet_union_with_all_of(
@@ -3875,10 +3875,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         Some(refiners)
     }
 
-    /// Lower `union`, with its own merge held back, and meet it with an `allOf`'s `composed`
-    /// members and then with each of its `refiners`, collapsing what the meet leaves sharing one
-    /// generated type; the result is inserted as `schema`'s type under `hint`. The meet shared by
-    /// [`Self::lower_all_of_beside_union`] and [`Self::lower_all_of_with_union_member`].
+    /// Lower `union`, with its own merge held back, meet it with an `allOf`'s `composed` members,
+    /// collapse what that meet leaves sharing one generated type, and then meet the result with
+    /// each of its `refiners`; the result is inserted as `schema`'s type under `hint`. The meet
+    /// shared by [`Self::lower_all_of_beside_union`] and [`Self::lower_all_of_with_union_member`].
     #[allow(clippy::too_many_arguments)]
     fn meet_union_with_all_of(
         &mut self,
@@ -3910,6 +3910,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
             meet = met;
         }
+        // Collapsed before the refiners, which meet each branch apart and so would give branches
+        // the composition left as one type distinct definitions of the same shape: the refiners
+        // constrain every branch of their category alike, so refining the collapsed type admits
+        // the same values.
+        meet = self.collapse_met_union(
+            schema,
+            meet,
+            !union.one_of.is_empty(),
+            &format!("{hint}Intersection"),
+            spelling,
+        );
         for (index, (member, refiner)) in refiners.into_iter().enumerate() {
             let mut reach = ScopeReach::default();
             let met = self.meet_scoped_refiner(
@@ -3940,13 +3951,6 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             };
             meet = met;
         }
-        let meet = self.collapse_met_union(
-            schema,
-            meet,
-            !union.one_of.is_empty(),
-            &format!("{hint}Intersection"),
-            spelling,
-        );
         let kind = self.graph.get(meet.id)?.kind.clone();
         self.discard_meet_intermediates(mark, &kind);
         let mut ty = self.insert_schema_type(schema, hint, kind);
@@ -10224,18 +10228,6 @@ enum Contribution {
         nullable: Option<bool>,
     },
     Scalar(Ty),
-}
-
-impl Contribution {
-    /// Whether the member this contribution came from is known to admit `null`. An untyped
-    /// object member counts as not admitting it here, which is what the union-side meet
-    /// ([`LowerCtx::lower_all_of_beside_union`]) reads.
-    fn admits_null(&self) -> bool {
-        match self {
-            Contribution::Object { nullable, .. } => *nullable == Some(true),
-            Contribution::Scalar(ty) => ty.nullable,
-        }
-    }
 }
 
 /// Whether an object `allOf` merge admits `null` (issue #425): every member that decides its

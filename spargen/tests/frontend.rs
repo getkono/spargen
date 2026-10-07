@@ -1539,8 +1539,47 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
             Shape::Fields(&["a", "b", "c"], false),
         ),
     ];
-    for (case, target, keyword, branches, codes, shape) in cases {
+    // A further conjunct `required: [a]`, which every instance satisfies as well, written as an
+    // `allOf` member that is either those untyped object keywords alone (a member that refines the
+    // union's object branches) or the same keywords nested in an `allOf` of their own (a member
+    // combined with the target). `null` satisfies the target, the conjunct and both branches, so
+    // the `anyOf` admits it and the `oneOf`, which it matches twice, does not. The `$ref` spelling
+    // of the conjunct, `{$ref: NB, required: [a], oneOf|anyOf: […]}`, does not collapse its met
+    // branches yet (#538), so these rows drive the two `allOf` spellings alone.
+    let mut conjunct_cases = Vec::new();
+    for (form, conjunct) in [
+        ("refiner member", "{ required: [a] }"),
+        ("nested allOf member", "{ allOf: [ { required: [a] } ] }"),
+    ] {
+        for (keyword, nullable) in [("oneOf", false), ("anyOf", true)] {
+            conjunct_cases.push((
+                format!("nullable target, {form}, {keyword}"),
+                "NB",
+                keyword,
+                required,
+                vec![Code::ValidationKeywordIgnored],
+                Shape::Fields(&["a", "b"], nullable),
+                Some(conjunct),
+            ));
+        }
+    }
+    let cases = cases
+        .into_iter()
+        .map(|(case, target, keyword, branches, codes, shape)| {
+            (
+                case.to_owned(),
+                target,
+                keyword,
+                branches,
+                codes,
+                shape,
+                None,
+            )
+        })
+        .chain(conjunct_cases);
+    for (case, target, keyword, branches, codes, shape, conjunct) in cases {
         let target_ref = format!("'#/components/schemas/{target}'");
+        let member = conjunct.map_or_else(String::new, |member| format!(", {member}"));
         for (spelling, site) in [
             (
                 "$ref sibling",
@@ -1548,13 +1587,19 @@ fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_i
             ),
             (
                 "allOf member",
-                format!("{{ allOf: [ {{ $ref: {target_ref} }}, {{ {keyword}: {branches} }} ] }}"),
+                format!(
+                    "{{ allOf: [ {{ $ref: {target_ref} }}{member}, {{ {keyword}: {branches} }} \
+                     ] }}"
+                ),
             ),
             (
                 "beside allOf",
-                format!("{{ allOf: [ {{ $ref: {target_ref} }} ], {keyword}: {branches} }}"),
+                format!("{{ allOf: [ {{ $ref: {target_ref} }}{member} ], {keyword}: {branches} }}"),
             ),
-        ] {
+        ]
+        .into_iter()
+        .filter(|(spelling, _)| conjunct.is_none() || *spelling != "$ref sibling")
+        {
             let spec = format!(
                 r##"
 openapi: 3.1.0
@@ -1765,8 +1810,11 @@ fn a_union_member_ref_with_a_union_sibling_is_intersected_with_its_target() {
 /// An `allOf` member written `{ $ref: X, <union> }` gathers its union sibling as a further
 /// conjunct, as `gather_member` does for every shape-bearing sibling of a member's `$ref`. That
 /// conjunct is a union, which the object merge does not intersect with object members: it is the
-/// object/scalar-mix `E013` the separate-member spelling `allOf: [{$ref: Base}, {oneOf: [...]}]`
-/// already gives on `master` (making both agree with the `$ref` spelling is #491). Before the shape
+/// object/scalar-mix `E013`. The separate-member spelling `allOf: [{$ref: Base}, {oneOf: [...]}]`
+/// no longer is: it is met as the `$ref` spelling is (#463, pinned by
+/// `an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_is`). A union
+/// written beside a member's own `$ref` is not a union member of the `allOf`, so this spelling
+/// still takes the rejection rather than that meet. Before the shape
 /// gate counted the union keywords both documents below generated as the bare target with the
 /// union dropped in silence: the object one as `Base` merged with `c`, the scalar one as `String`
 /// for a union that admits no string at all.
