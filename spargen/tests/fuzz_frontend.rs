@@ -4,11 +4,13 @@
 //! parse/validate/audit → `ir` lower → `name` allocate — must ALWAYS return a [`Report`] for ANY
 //! input, however malformed, random, or adversarial. It must never `panic!`, `unwrap` on bad input,
 //! overflow the stack, or hang. This harness feeds a wide variety of inputs to `check` and asserts
-//! that every case returns, so no case panicked or aborted. Beyond no-panic it holds three oracles:
+//! that every case returns, so no case panicked or aborted. Beyond no-panic it holds five oracles:
 //! no report carries an `IR invariant failed` diagnostic (lowering must produce a valid IR for any
-//! input), a document that is valid JSON reports the same sorted codes through the JSON and the
-//! YAML parser, and `generate` over the valid-skeleton documents writes a module that parses as
-//! Rust whenever it reports `Generated`.
+//! input), every diagnostic names a real location (`oracles::location_violations`, #454), a
+//! document that is valid JSON reports the same sorted codes through the JSON and the YAML parser,
+//! and `generate` over the valid-skeleton documents writes a module that parses as Rust whenever
+//! it reports `Generated`, whose unions' variants a value can tell apart
+//! (`oracles::indistinguishable_variants`, #402).
 //!
 //! Coverage (see the per-category tests below):
 //!   * arbitrary raw bytes (invalid UTF-8, control bytes, truncated multibyte, …);
@@ -36,6 +38,8 @@ use proptest::test_runner::{Config as PtConfig, RngAlgorithm, TestCaseError, Tes
 use serde_json::{Map, Value};
 use spargen::{check, CargoIntegration, Code, Outcome, Report, Spec};
 use tempfile::TempDir;
+
+mod oracles;
 
 /// Keys the frontend interprets — biasing generated objects toward these drives the fuzzer past the
 /// parser and into document assembly, resolution, and lowering.
@@ -136,7 +140,8 @@ fn deterministic_runner(cases: u32) -> TestRunner {
 const INVARIANT_FAILURE: &str = "IR invariant failed";
 
 /// Write `bytes` to `spec.<ext>` in `dir` and run `check`. Returning at all proves `check` did not
-/// panic/abort; the report must also carry no [`INVARIANT_FAILURE`].
+/// panic/abort; the report must also carry no [`INVARIANT_FAILURE`], and every diagnostic it
+/// carries must name a real location ([`oracles::location_violations`]).
 fn exercise(dir: &TempDir, bytes: &[u8], ext: &str) -> Result<Report, TestCaseError> {
     let spec = Utf8PathBuf::from_path_buf(dir.path().join(format!("spec.{ext}"))).unwrap();
     std::fs::write(&spec, bytes).unwrap();
@@ -150,6 +155,11 @@ fn exercise(dir: &TempDir, bytes: &[u8], ext: &str) -> Result<Report, TestCaseEr
     prop_assert!(
         failed.is_empty(),
         "lowering produced an IR that fails its invariants (`.{ext}`): {failed:#?}"
+    );
+    let unlocated = oracles::unknown(oracles::location_violations(report.diagnostics(), bytes));
+    prop_assert!(
+        unlocated.is_empty(),
+        "diagnostics with no real location (`.{ext}`): {unlocated:#?}"
     );
     Ok(report)
 }
@@ -436,7 +446,21 @@ fn generate_writes_parseable_rust_for_skeleton_documents() {
                     !code.contains("compile_error!"),
                     "a `Generated` run wrote the codegen fallback stub"
                 );
+                let unexplained = oracles::unexplained_variants(&report, &code);
+                prop_assert!(
+                    unexplained.is_empty(),
+                    "a union's variants cannot be told apart and no warning says why: \
+                     {unexplained:#?}"
+                );
             }
+            let unlocated = oracles::unknown(oracles::location_violations(
+                report.diagnostics(),
+                text.as_bytes(),
+            ));
+            prop_assert!(
+                unlocated.is_empty(),
+                "diagnostics with no real location: {unlocated:#?}"
+            );
             Ok(())
         })
         .unwrap();
