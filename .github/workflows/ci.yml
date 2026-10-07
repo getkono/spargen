@@ -260,6 +260,12 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --no-deps --workspace --all-features --document-private-items
+      # The `spargen` binary shares its library's name, so `--workspace` skips it; this documents
+      # it on its own, or the CLI's doc links would go unchecked.
+      - name: Rustdoc link check (spargen binary)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps -p spargen --bin spargen --all-features --document-private-items
 
   release-preview:
     name: Release preview (release-plz)
