@@ -2791,7 +2791,10 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
     /// [`Self::meet_scoped_refiner`] for a `target` whose kind is `union`. The meet admits `null`
     /// exactly when `target` and `refiner` both do: [`Self::intersect_union`] builds its result
     /// from the non-null branches alone, and a union's `null` branch is its outer nullability,
-    /// so it is carried across here rather than lost with the rebuilt union.
+    /// so it is carried across here rather than lost with the rebuilt union. For the same reason,
+    /// a meet that excludes every non-null branch is not empty while both still admit `null`:
+    /// `null` is then the only value left, and the meet is the exact JSON null type, as the inline
+    /// sibling spelling of the same union answers (#450).
     fn meet_scoped_refiner_with_union(
         &mut self,
         target: Ty,
@@ -2801,11 +2804,19 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         reach: &mut ScopeReach,
     ) -> Result<Ty, NoMeet> {
         let enclosing = self.narrowing_opens;
-        let mut ty = self.closed_narrowing(|ctx| {
+        let accepts_null = target.nullable && self.refiner_accepts_null(refiner);
+        match self.closed_narrowing(|ctx| {
             ctx.intersect_union(target, union, refiner, hint, enclosing, reach)
-        })?;
-        ty.nullable = target.nullable && self.refiner_accepts_null(refiner);
-        Ok(ty)
+        }) {
+            Ok(mut ty) => {
+                ty.nullable = accepts_null;
+                Ok(ty)
+            }
+            Err(NoMeet::Empty) if accepts_null => {
+                Ok(self.insert_type(hint, TypeKind::Null, Docs::default(), None))
+            }
+            Err(no_meet) => Err(no_meet),
+        }
     }
 
     /// Whether a union branch met with `refiner` may still be `null`, for a union whose every

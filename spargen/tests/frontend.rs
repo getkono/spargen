@@ -25579,3 +25579,77 @@ fn a_discriminator_under_a_validation_only_keyword_resolves_its_mapping() {
         }
     }
 }
+
+/// #450: a nullable union of two or more non-null branches, refined by untyped object keywords
+/// that every non-null branch contradicts, still admits `null`, which those keywords are
+/// vacuously satisfied by. The scoped meet an untyped `allOf` member beside the union and an
+/// untyped `$ref` sibling of the union both take rejected it with `E013`, where the inline sibling
+/// spelling of the same keywords types it as the exact JSON null type. Every spelling now agrees.
+/// A refiner that itself denies `null` (`type: object`) leaves no value at all, and still rejects.
+#[test]
+fn a_nullable_union_whose_every_branch_a_scoped_refiner_excludes_is_null() {
+    const HEAD: &str = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\nservers: [{ url: \
+                        'https://e.com' }]\npaths: {}\ncomponents:\n  schemas:\n    Cat:\n      \
+                        type: object\n      required: [kind]\n      properties: { kind: { type: \
+                        string } }\n    Dog:\n      type: object\n      required: [kind, bark]\n      \
+                        properties: { kind: { type: string }, bark: { type: boolean } }\n";
+    const UNION: &str = "[{ $ref: '#/components/schemas/Cat' }, { $ref: \
+                         '#/components/schemas/Dog' }, { type: 'null' }]";
+    let head = HEAD;
+    let holder =
+        "    Holder:\n      type: object\n      required: [p]\n      properties:\n        \
+                  p: { $ref: '#/components/schemas/Pet' }\n";
+    let refined = "properties: { kind: { type: integer } }";
+
+    let spellings = [
+        (
+            "an untyped `allOf` member",
+            format!("    Pet:\n      allOf: [{{ {refined} }}]\n      oneOf: {UNION}\n"),
+        ),
+        (
+            "untyped `$ref` siblings",
+            format!(
+                "    U:\n      oneOf: {UNION}\n    Pet:\n      $ref: '#/components/schemas/U'\n      \
+                 {refined}\n"
+            ),
+        ),
+        (
+            "inline siblings (the control)",
+            format!("    Pet:\n      {refined}\n      oneOf: {UNION}\n"),
+        ),
+    ];
+    for (spelling, pet) in &spellings {
+        let spec = format!("{head}{pet}{holder}");
+        for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{spelling}, {entry}: a nullable union refined to only `null` rejected: \
+                 {report:#?}"
+            );
+            assert!(
+                !has_code(&report, Code::AllOfIrreconcilable),
+                "{spelling}, {entry}: {report:#?}"
+            );
+        }
+        let (_, code) = generate_with_code(&spec);
+        let types = types_module(&code);
+        assert!(
+            types.contains("pub type Pet = ();"),
+            "{spelling}: a nullable union refined to only `null` is not the null type:\n{types}"
+        );
+    }
+
+    // The rescue is `null`'s, so it needs a refiner that admits `null`. A typed `allOf` member
+    // denies it, and then no value satisfies the schema.
+    let spec = format!(
+        "{head}    Pet:\n      allOf: [{{ type: object, {refined} }}]\n      oneOf: {UNION}\n{holder}"
+    );
+    for (entry, report) in [("generate", generate(&spec)), ("check", check(&spec))] {
+        assert_eq!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        assert!(
+            has_code(&report, Code::AllOfIrreconcilable),
+            "{entry}: {report:#?}"
+        );
+    }
+}
