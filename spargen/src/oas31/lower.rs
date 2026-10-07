@@ -7795,17 +7795,38 @@ fn member_component_name(member: &SchemaOr, root: crate::diag::FileId) -> Option
 
 /// The wire name of the first field of an object parameter whose value is unconstrained
 /// ([`TypeKind::Any`]), which [`parameter_shape_supported`] refuses because an arbitrary JSON value
-/// has no single serialized token. `None` for a parameter that is not an object, or has no such
-/// field.
+/// has no single serialized token. A `oneOf`/`anyOf` parameter schema serializes as whichever
+/// member the value is, so the fields of each object member are searched too, through nested
+/// unions, as [`uninhabited_parameter_part`] searches them (#435). `None` for a parameter that is
+/// neither an object nor a union, or has no such field.
 fn unconstrained_parameter_property(graph: &TypeGraph, ty: Ty) -> Option<String> {
-    let TypeKind::Struct(object) = &graph.get(ty.id)?.kind else {
-        return None;
-    };
-    object
-        .fields
-        .iter()
-        .find(|field| matches!(graph.get(field.ty.id).map(|d| &d.kind), Some(TypeKind::Any)))
-        .map(|field| field.name.wire.clone())
+    unconstrained_parameter_property_inner(graph, ty, &mut HashSet::new())
+}
+
+fn unconstrained_parameter_property_inner(
+    graph: &TypeGraph,
+    ty: Ty,
+    members: &mut HashSet<TypeId>,
+) -> Option<String> {
+    match &graph.get(ty.id)?.kind {
+        TypeKind::Struct(object) => object
+            .fields
+            .iter()
+            .find(|field| matches!(graph.get(field.ty.id).map(|d| &d.kind), Some(TypeKind::Any)))
+            .map(|field| field.name.wire.clone()),
+        // `members` stops a union that reaches itself through a member from being walked again.
+        TypeKind::Union(union) if members.insert(ty.id) => {
+            let found = union.variants.iter().find_map(|variant| {
+                unconstrained_parameter_property_inner(graph, variant.ty, members)
+            });
+            members.remove(&ty.id);
+            found
+        }
+        // A reservation's shape is unknown, so it has no field to name; it is left to
+        // `parameter_shape_supported`, which refuses it.
+        TypeKind::Reserved => None,
+        _ => None,
+    }
 }
 
 /// How a parameter position fails to be inhabited, as [`uninhabited_parameter_part`] finds it.
