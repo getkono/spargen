@@ -25617,6 +25617,17 @@ fn a_nullable_union_whose_every_branch_a_scoped_refiner_excludes_is_null() {
             "inline siblings (the control)",
             format!("    Pet:\n      {refined}\n      oneOf: {UNION}\n"),
         ),
+        // The scoped meet also reaches a nullable union nested as a branch of the target union
+        // (`meet_refiner`'s union arm). Its every non-null branch is excluded, so it is `null`,
+        // and the object branch beside it is excluded too: `null` is the only value left.
+        (
+            "an untyped `allOf` member beside a nested nullable union",
+            format!(
+                "    Pet:\n      allOf: [{{ {refined} }}]\n      anyOf:\n        - oneOf: \
+                 {UNION}\n        - {{ type: object, required: [kind], properties: {{ kind: {{ \
+                 type: string }} }} }}\n"
+            ),
+        ),
     ];
     for (spelling, pet) in &spellings {
         let spec = format!("{head}{pet}{holder}");
@@ -25637,6 +25648,12 @@ fn a_nullable_union_whose_every_branch_a_scoped_refiner_excludes_is_null() {
         assert!(
             types.contains("pub type Pet = ();"),
             "{spelling}: a nullable union refined to only `null` is not the null type:\n{types}"
+        );
+        // The use site agrees too: the exact null type is the whole value set, so the holder's
+        // field is `Pet` itself, never an `Option` over it.
+        assert!(
+            types.contains("pub p: Pet,"),
+            "{spelling}: the holder's field is not the bare null type:\n{types}"
         );
     }
 

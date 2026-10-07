@@ -2760,8 +2760,12 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return self.reject_ref_sibling_intersection(schema);
         };
         let kind = self.graph.get(met.id)?.kind.clone();
+        // The meet carries the target's nullability, but for a meet that left only `null`: that
+        // is the exact null type, whose one value is `null` already, so it is not wrapped in an
+        // `Option` as the `allOf` and inline spellings of the same union are not (#450).
+        let nullable = referenced.nullable && !matches!(kind, TypeKind::Null);
         let mut ty = self.insert_schema_type(schema, hint, kind);
-        ty.nullable = referenced.nullable;
+        ty.nullable = nullable;
         ty.boxed = met.boxed;
         Some(ty)
     }
