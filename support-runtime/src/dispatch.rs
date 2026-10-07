@@ -52,9 +52,11 @@ pub fn build_url_on(
     // them (`%2E`, `.%2E`, ...), so percent-encoding a dot does not protect it. A rendered path
     // value forming such a segment would silently re-target the request (`/users/../keys` is
     // sent to `/keys`), so it is refused instead. A special-scheme URL also splits on `\`.
+    // The segment is `Debug`-formatted: `is_dot_segment` ignores tab, LF and CR, so a refused
+    // segment may hold them, and written raw they would hide in or break the message's line.
     if let Some(segment) = request_path.split(['/', '\\']).find(|s| is_dot_segment(s)) {
         return Err(Error::request_message(format!(
-            "request path contains the dot segment `{segment}`, which URL normalization would \
+            "request path contains the dot segment {segment:?}, which URL normalization would \
              remove and so send the request to a different resource"
         )));
     }
@@ -1639,6 +1641,32 @@ mod tests {
                 "{segment:?}: {error:?}"
             );
             build_url(&core, &format!("/users/{segment}"), &[]).expect_err(segment);
+        }
+    }
+
+    #[test]
+    fn the_dot_segment_refusal_escapes_the_segments_tab_lf_and_cr() {
+        // #452: the refused segment may hold the tab, LF or CR `is_dot_segment` ignores; the
+        // message must show them escaped and stay on one line.
+        let core = core_at("https://api.example.com/v1/");
+        for (segment, escaped) in [
+            (".\t.", r#"".\t.""#),
+            ("..\n", r#""..\n""#),
+            ("\r..", r#""\r..""#),
+        ] {
+            let error =
+                build_url(&core, &format!("/users/{segment}/keys"), &[]).expect_err(segment);
+            let cause = std::error::Error::source(&error)
+                .map(ToString::to_string)
+                .expect("a refusal carries its message");
+            assert!(
+                cause.contains(&format!("the dot segment {escaped},")),
+                "{segment:?}: {cause:?}"
+            );
+            assert!(
+                !cause.contains(['\t', '\n', '\r']),
+                "{segment:?}: {cause:?}"
+            );
         }
     }
 
