@@ -143,10 +143,12 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
     let _ = diags;
     let mut names = Names::default();
 
-    // Servers live in their own module, so they get their own scopes and can never collide with a
-    // generated model or operation name.
+    // Servers live in their own module, so they get their own scope and can never collide with a
+    // generated model or operation name. The builders and the variable enums are declared side by
+    // side in that module and share Rust's type namespace, so they are drawn from one scope: two
+    // scopes could hand a builder and an enum the same spelling. A spelling moves only where the
+    // two would have collided, so no description that compiled before is renamed.
     let mut server_scope = Scope::default();
-    let mut server_enum_scope = Scope::default();
     for (index, server) in api.servers.iter().enumerate() {
         let hint = server
             .name
@@ -167,7 +169,7 @@ pub(crate) fn allocate(api: &Api, diags: &mut Diagnostics) -> Names {
             }
             names.server_variable_enums.insert(
                 (index, variable_name.clone()),
-                server_enum_scope.alloc(
+                server_scope.alloc(
                     &format!("{hint} {variable_name}"),
                     IdentRole::Type,
                     &pointer,
@@ -1033,12 +1035,10 @@ mod tests {
         /// that module imports), the `…Params` structs, the client methods (beside the fixed
         /// ones), each struct's fields with its overflow map, each enum's and union's variants
         /// with an open enum's catch-all, each operation's method arguments with its generator
-        /// bindings and its `…Params` fields, each header struct's fields, and each server's
-        /// setters and each server variable's values. The server builders and the variable enums
-        /// are each checked only within the scope `allocate` draws them from: `emit_servers`
-        /// declares both in one `servers` module, and checking them as that one scope fails on
-        /// the current allocator (#523). Every member is allocated, so the property cannot pass
-        /// by allocating nothing.
+        /// bindings and its `…Params` fields, each header struct's fields, the `servers` module
+        /// (the server builders and the server-variable enums `emit_servers` declares side by
+        /// side), and each server's setters and each server variable's values. Every member is
+        /// allocated, so the property cannot pass by allocating nothing.
         #[test]
         fn every_allocation_is_legal_and_distinct_within_its_scope(
             definitions in proptest::collection::vec(definition(), 0..10),
@@ -1159,8 +1159,11 @@ mod tests {
             }
 
             prop_assert_eq!(names.servers.len(), servers.len());
-            assert_scope("servers", &names.servers, &[])?;
-            assert_scope("server variable enums", names.server_variable_enums.values(), &[])?;
+            assert_scope(
+                "servers module",
+                names.servers.iter().chain(names.server_variable_enums.values()),
+                &[],
+            )?;
             for (index, server) in api.servers.iter().enumerate() {
                 let fields = server
                     .variables
