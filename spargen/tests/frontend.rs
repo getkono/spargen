@@ -17077,6 +17077,58 @@ fn a_nested_all_of_meet_locates_its_diagnostics_at_the_met_property() {
     }
 }
 
+/// A meet's recorded location belongs to the id the meet struct was inserted at, and lifting a
+/// component root out of that id frees it for the next insert. `A`'s `$ref`-sibling meet is
+/// located at `B` and lifted into `A`'s reserved id; the struct `C` then reuses the freed id, and
+/// its `W006` must point at `C`, not inherit the lifted meet's `B` location.
+#[test]
+fn a_freed_meet_id_does_not_lend_its_location_to_the_next_type() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    B:
+      type: object
+    A:
+      $ref: '#/components/schemas/B'
+      properties:
+        m: { type: integer }
+    C:
+      type: object
+      properties:
+        x:
+          type: string
+          xml: { namespace: "http://example.com/ns" }
+"##;
+    for (entry, run) in [
+        ("generate", generate as fn(&str) -> Report),
+        ("check", check),
+    ] {
+        let report = run(spec);
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let ignored: Vec<_> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::XmlHintIgnored)
+            .collect();
+        assert!(
+            !ignored.is_empty(),
+            "{entry}: the namespace is ignored: {report:#?}"
+        );
+        for diagnostic in ignored {
+            assert!(
+                diagnostic
+                    .pointer
+                    .as_str()
+                    .starts_with("/components/schemas/C"),
+                "{entry}: the `W006` for `C.x` points at `C`: {report:#?}"
+            );
+        }
+    }
+}
+
 /// A parameter `default` is documented in rustdoc (never serde-wired) — generation is clean and
 /// must NOT raise W005 (parameters always have a documentation home).
 #[test]

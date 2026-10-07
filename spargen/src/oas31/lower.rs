@@ -983,7 +983,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             lowered.map(|ty| ty.nullable),
         );
         let mut ty = lowered?;
-        let (popped_id, mut def) = self.graph.pop_last().expect("component root def");
+        let (popped_id, mut def) = self.pop_last_type().expect("component root def");
         // Hard invariant (release too): a component root's def is always the last graph insert
         // during its own body lowering (children insert first). If future lowering (allOf/union
         // wrappers) ever inserts a derived type *after* the root, this fails loudly here instead
@@ -1364,7 +1364,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             lowered.map(|ty| ty.nullable),
         );
         let mut ty = lowered?;
-        let (popped_id, mut def) = self.graph.pop_last().expect("remote root def");
+        let (popped_id, mut def) = self.pop_last_type().expect("remote root def");
         // Same last-insert invariant as `ensure_component`: the remote type's root is the final
         // graph insert during its own body lowering (children insert first).
         assert_eq!(
@@ -1530,7 +1530,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             lowered.map(|ty| ty.nullable),
         );
         let mut ty = lowered?;
-        let (popped_id, mut def) = self.graph.pop_last().expect("resolved root def");
+        let (popped_id, mut def) = self.pop_last_type().expect("resolved root def");
         // Same last-insert invariant as `ensure_component` and `ensure_remote`: the target's root is
         // the final graph insert during its own body lowering (children insert first).
         assert_eq!(
@@ -5230,6 +5230,17 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         self.graph.last_id().map_or(0, |id| id.0 + 1)
     }
 
+    /// [`TypeGraph::pop_last`], also forgetting the location [`Self::meet_locations`] recorded for
+    /// the popped id. The next insert reuses that id for a type of its own, which would otherwise
+    /// inherit the popped meet's location. Every pop in lowering goes through here.
+    fn pop_last_type(&mut self) -> Option<(TypeId, TypeDef)> {
+        let popped = self.graph.pop_last();
+        if let Some((id, _)) = &popped {
+            self.meet_locations.remove(id);
+        }
+        popped
+    }
+
     /// Discard every type inserted since `mark` that `kind` does not refer to, directly or
     /// transitively. The caller has just met two or more types inserted before `mark` and is about
     /// to re-emit the meet's result as a new definition of `kind`, so the meets' own inserts are
@@ -5247,7 +5258,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
             return;
         }
         while self.graph.last_id().is_some_and(|id| id.0 >= mark) {
-            self.graph.pop_last();
+            self.pop_last_type();
         }
     }
 
@@ -7920,8 +7931,7 @@ impl<'a, 'doc> LowerCtx<'a, 'doc> {
         // named root is therefore left exactly as declared and the use site gets its own type.
         if self.graph.last_id() == Some(ty.id) && !self.is_component_root(ty.id) {
             let (_, definition) = self
-                .graph
-                .pop_last()
+                .pop_last_type()
                 .expect("a definition was just observed");
             let id = self.graph.insert(TypeDef {
                 kind: TypeKind::Bytes,
