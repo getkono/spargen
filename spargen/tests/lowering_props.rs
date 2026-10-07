@@ -190,6 +190,22 @@ fn type_conflicts(members: &[Member]) -> BTreeSet<usize> {
     conflicts
 }
 
+/// The `(name, type)` of every field `pub struct Merged` declares, in source order — empty when no
+/// such struct was emitted. Serde attribute lines between the fields are skipped.
+fn merged_fields(source: &str) -> Vec<(String, String)> {
+    let mut lines = source
+        .lines()
+        .map(str::trim_start)
+        .skip_while(|line| *line != "pub struct Merged {");
+    lines.next();
+    lines
+        .take_while(|line| !line.starts_with('}'))
+        .filter_map(|line| line.strip_prefix("pub "))
+        .filter_map(|rest| rest.split_once(':'))
+        .map(|(name, ty)| (name.to_owned(), ty.trim().trim_end_matches(',').to_owned()))
+        .collect()
+}
+
 /// `true` when a conflicting property is required by some member — the irreconcilable case
 /// (`E013`): every instance must carry a value no type admits. A conflict on a property no member
 /// requires leaves the objects that omit it valid, so it is typed uninhabited instead.
@@ -250,14 +266,12 @@ proptest! {
         prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
         prop_assert!(!has_code(&report, Code::AllOfIrreconcilable), "{:#?}", report);
 
-        // An optional conflict is an uninhabited type, never a silently widened or dropped one; with
-        // no conflict nothing is uninhabited.
-        prop_assert_eq!(
-            source.contains("no JSON value can inhabit schema"),
-            !type_conflicts(&members).is_empty(),
-            "uninhabited types disagree with the conflicting properties:\n{}",
-            source
-        );
+        // Every oracle below reads `pub struct Merged` itself: a field line or an uninhabited type
+        // found anywhere else in the module (a member's own struct, the embedded runtime) says
+        // nothing about what the merge produced.
+        let merged = merged_fields(&source);
+        prop_assert!(!merged.is_empty(), "no `pub struct Merged` was emitted:\n{}", source);
+        let conflicts = type_conflicts(&members);
 
         // Expected field set = union of member properties; required = union of member required flags.
         let mut required_union: BTreeSet<usize> = BTreeSet::new();
@@ -271,20 +285,38 @@ proptest! {
             }
         }
 
+        let expected: Vec<&str> = field_union.iter().map(|&name| KEYS[name]).collect();
+        let mut declared: Vec<&str> = merged.iter().map(|(field, _)| field.as_str()).collect();
+        declared.sort_unstable();
+        prop_assert_eq!(
+            &declared,
+            &expected,
+            "merged struct fields disagree with the union of member properties:\n{}",
+            source
+        );
+
         for &name in &field_union {
             let ident = KEYS[name];
-            let needle = format!("pub {ident}:");
-            let line = source
-                .lines()
-                .find(|l| l.trim_start().starts_with(&needle));
-            prop_assert!(line.is_some(), "merged struct dropped field `{ident}`:\n{source}");
-            let is_optional = line.unwrap().contains("Option");
+            let ty = &merged.iter().find(|(field, _)| field == ident).unwrap().1;
             // A field required by ANY member must be plain; a field required by none is `Option`.
+            let inner = ty.strip_prefix("Option<").and_then(|rest| rest.strip_suffix('>'));
             prop_assert_eq!(
-                is_optional,
+                inner.is_some(),
                 !required_union.contains(&name),
-                "field `{}` optionality disagrees with the required union:\n{}",
+                "field `{}: {}` optionality disagrees with the required union:\n{}",
                 ident,
+                ty,
+                source
+            );
+            // An optional conflict is an uninhabited type, never a silently widened or dropped
+            // one; a property with no conflict is never uninhabited.
+            let uninhabited = source.contains(&format!("pub enum {} {{}}", inner.unwrap_or(ty)));
+            prop_assert_eq!(
+                uninhabited,
+                conflicts.contains(&name),
+                "field `{}: {}` is uninhabited exactly when its members' types conflict:\n{}",
+                ident,
+                ty,
                 source
             );
         }
