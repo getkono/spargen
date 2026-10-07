@@ -7109,7 +7109,7 @@ fn following_spargen_deps_satisfies_the_audit_directly_and_through_workspace_inh
     let opted_in = block
         .lines()
         .map(|line| match line.strip_prefix("# ") {
-            Some(rest) if !rest.starts_with("Only if") => rest,
+            Some(rest) if !rest.starts_with("To opt in") => rest,
             _ => line,
         })
         .collect::<Vec<_>>()

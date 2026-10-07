@@ -688,7 +688,9 @@ impl Requirements {
     ///
     /// Opt-in dependencies (currently the blocking client's `tokio`) are rendered commented out
     /// under the feature that would require them, together with that feature's `[features]` entry
-    /// enabling them (`blocking = ["dep:tokio"]`) — uncommenting is the whole opt-in.
+    /// enabling them (`blocking = ["dep:tokio"]`). Uncommenting is the whole opt-in, except that an
+    /// entry whose `[features]` table, `blocking` key, or dependency table the manifest already
+    /// declares merges into it rather than being added a second time, which TOML rejects.
     pub fn manifest_block(&self) -> String {
         let mut rendered = String::new();
         let mut table: Option<&str> = None;
@@ -723,8 +725,12 @@ impl Requirements {
                 .iter()
                 .filter(|dependency| dependency.required_by_feature == Some(feature))
                 .collect();
+            // Uncommented as printed, a `[features]` table or `{feature}` key the manifest already
+            // declares would be defined twice and the manifest would no longer parse, so the
+            // header says each entry merges into what is already there.
             rendered.push_str(&format!(
-                "\n# Only if your package declares a `{feature}` Cargo feature:\n"
+                "\n# To opt in to the `{feature}` Cargo feature, uncomment the lines below, merging \
+                 each entry into a table (or `{feature}` key) your manifest already declares:\n"
             ));
             // The feature must enable each optional dependency it gates; the audit rejects a
             // declared feature entry that does not.
@@ -4821,7 +4827,7 @@ serde_json.workspace = true
         let opted_in = block
             .lines()
             .map(|line| match line.strip_prefix("# ") {
-                Some(rest) if !rest.starts_with("Only if") => rest,
+                Some(rest) if !rest.starts_with("To opt in") => rest,
                 _ => line,
             })
             .collect::<Vec<_>>()
@@ -4829,6 +4835,16 @@ serde_json.workspace = true
         assert!(
             opted_in.contains("[features]\nblocking = [\"dep:tokio\"]\n"),
             "the printed opt-in carries the feature wiring the audit requires:\n{block}"
+        );
+        // A manifest that already has a `[features]` table (or a `blocking` key) cannot take a
+        // second one, so the header must say the entries merge rather than claim a bare
+        // uncomment always suffices.
+        assert!(
+            block.contains(
+                "# To opt in to the `blocking` Cargo feature, uncomment the lines below, merging \
+                 each entry into a table (or `blocking` key) your manifest already declares:\n"
+            ),
+            "the opt-in header tells a consumer with existing tables to merge into them:\n{block}"
         );
         let manifest = format!("[package]\nname = \"consumer\"\nversion = \"0.0.0\"\n\n{opted_in}");
 

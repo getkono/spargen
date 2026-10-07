@@ -70,7 +70,9 @@ spargen deps <SPEC> [OPTIONS]
 The block it prints is the block the audit accepts — both read one table, and a test pins that they
 agree. Opt-in dependencies (the blocking client's `tokio`) are printed commented out under the
 Cargo feature that would require them, together with that feature's `[features]` entry
-(`blocking = ["dep:tokio"]`), so uncommenting them is the whole opt-in. `--format json` emits the
+(`blocking = ["dep:tokio"]`), so uncommenting them is the whole opt-in — except that an entry whose
+`[features]` table, `blocking` key, or dependency table the manifest already declares is merged
+into it, since TOML rejects a table or key defined twice. `--format json` emits the
 same set structurally.
 
 The block is written for the package's own tables, but a workspace member may inherit it instead:
