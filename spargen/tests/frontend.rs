@@ -398,6 +398,32 @@ fn the_location_oracle_sees_each_lost_location() {
         root,
     );
     assert_eq!(known[0].known, Some(oracles::ISSUE_DUPLICATE_KEY_POINTER));
+    // Each rule is checked on its own: a known empty pointer does not hide a whole-root span,
+    // which no issue tracks for `E022`.
+    let both: Vec<Option<u32>> = oracles::location_violations(
+        &[located(Code::DuplicateObjectKey, "", 0, (1, 0, 29), "m")],
+        root,
+    )
+    .into_iter()
+    .map(|violation| violation.known)
+    .collect();
+    assert_eq!(
+        both,
+        [Some(oracles::ISSUE_DUPLICATE_KEY_POINTER), None],
+        "{both:?}"
+    );
+    let unlocated = reasons(located(
+        Code::SchemaDefaultNotApplied,
+        "",
+        0,
+        (1, 0, 29),
+        "m",
+    ));
+    assert_eq!(unlocated.len(), 2, "{unlocated:?}");
+    assert!(
+        unlocated[1].contains("whole root document"),
+        "{unlocated:?}"
+    );
 }
 
 /// `E022` still reports the document root as its pointer (#533), so
@@ -7902,8 +7928,9 @@ mod remote {
         assert!(!has_code(&report, Code::VendoredRefDrift), "{report:#?}");
     }
 
-    /// `E003` and `E021` still report the document root as their pointer (#534), so
-    /// [`oracles::KNOWN_ROOT_POINTERS`] still needs their entries. Once #534 is fixed this fails:
+    /// `E003` and `E021` still report the document root as their pointer, with a span over the
+    /// whole document (#534), so [`oracles::KNOWN_ROOT_POINTERS`] and
+    /// [`oracles::KNOWN_WHOLE_ROOT_SPANS`] still need their entries. Once #534 is fixed this fails:
     /// remove the entries and this fixture together, so the known gaps only shrink.
     #[test]
     fn e003_and_e021_still_report_the_root_pointer_tracked_by_534() {
@@ -7915,13 +7942,23 @@ mod remote {
             let root = std::fs::read(temp.path().join("openapi.yaml")).unwrap();
             let reported: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
             assert_eq!(reported, [code], "{report:#?}");
-            let known: Vec<Option<u32>> = oracles::location_violations(report.diagnostics(), &root)
-                .into_iter()
-                .map(|violation| violation.known)
-                .collect();
+            let known: Vec<(bool, Option<u32>)> =
+                oracles::location_violations(report.diagnostics(), &root)
+                    .into_iter()
+                    .map(|violation| {
+                        (
+                            violation.reason.contains("whole root document"),
+                            violation.known,
+                        )
+                    })
+                    .collect();
+            // Both the root pointer and the whole-document span are #534's, each reported.
             assert_eq!(
                 known,
-                [Some(oracles::ISSUE_REMOTE_REF_POINTER)],
+                [
+                    (false, Some(oracles::ISSUE_REMOTE_REF_POINTER)),
+                    (true, Some(oracles::ISSUE_REMOTE_REF_POINTER)),
+                ],
                 "{report:#?}"
             );
         }

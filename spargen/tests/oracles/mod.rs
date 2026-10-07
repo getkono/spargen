@@ -32,12 +32,28 @@ pub struct Violation {
 
 /// The diagnostics whose pointer is still the document root although the construct they report has
 /// a pointer of its own, each with the open issue that tracks it. [`location_violations`] reports
-/// their empty pointer as known; every other rule still applies to them.
+/// their empty pointer as known; every other rule still applies to them, each checked on its own.
 pub const KNOWN_ROOT_POINTERS: &[(Code, u32)] = &[
     (Code::DuplicateObjectKey, ISSUE_DUPLICATE_KEY_POINTER),
     (Code::AbsoluteRefUnsupported, ISSUE_REMOTE_REF_POINTER),
     (Code::VendoredRefDrift, ISSUE_REMOTE_REF_POINTER),
 ];
+
+/// The diagnostics whose span still covers the whole root document although the construct they
+/// report has a span of its own, each with the open issue that tracks it. [`location_violations`]
+/// reports that span as known; every other rule still applies to them, each checked on its own.
+pub const KNOWN_WHOLE_ROOT_SPANS: &[(Code, u32)] = &[
+    (Code::AbsoluteRefUnsupported, ISSUE_REMOTE_REF_POINTER),
+    (Code::VendoredRefDrift, ISSUE_REMOTE_REF_POINTER),
+];
+
+/// The issue `table` tracks `code` under, if any.
+fn known_in(table: &[(Code, u32)], code: Code) -> Option<u32> {
+    table
+        .iter()
+        .find(|(known, _)| *known == code)
+        .map(|(_, issue)| *issue)
+}
 
 /// The issue (#533) tracking `E022`'s root pointer: the YAML and JSON parsers raise it before any
 /// pointer is tracked, with only the duplicate key's span.
@@ -82,41 +98,40 @@ pub fn location_violations(diagnostics: &[Diagnostic], root: &[u8]) -> Vec<Viola
         .iter()
         .rposition(|byte| !byte.is_ascii_whitespace())
         .map_or(0, |at| at + 1);
-    diagnostics
+    let mut violations = Vec::new();
+    for diagnostic in diagnostics
         .iter()
         .filter(|diagnostic| !is_document_level(diagnostic))
-        .filter_map(|diagnostic| {
-            let in_root = diagnostic.span.is_none_or(|span| span.file.0 == 0);
-            let whole_root = diagnostic.span.is_some_and(|span| {
-                span.file.0 == 0
-                    && span.start.line == 1
-                    && content_end > 0
-                    && span.end.offset >= content_end
+    {
+        let in_root = diagnostic.span.is_none_or(|span| span.file.0 == 0);
+        let whole_root = diagnostic.span.is_some_and(|span| {
+            span.file.0 == 0
+                && span.start.line == 1
+                && content_end > 0
+                && span.end.offset >= content_end
+        });
+        // Each rule is checked on its own, so a diagnostic that breaks two reports both, and a
+        // known gap under one rule never hides a break of another.
+        if diagnostic.message.contains("``") {
+            violations.push(Violation {
+                reason: format!("the message names something empty (``): {diagnostic:?}"),
+                known: None,
             });
-            let known = KNOWN_ROOT_POINTERS
-                .iter()
-                .find(|(code, _)| *code == diagnostic.code)
-                .map(|(_, issue)| *issue);
-            if diagnostic.message.contains("``") {
-                Some(Violation {
-                    reason: format!("the message names something empty (``): {diagnostic:?}"),
-                    known: None,
-                })
-            } else if in_root && diagnostic.pointer.as_str().is_empty() {
-                Some(Violation {
-                    reason: format!("the pointer is empty: {diagnostic:?}"),
-                    known,
-                })
-            } else if whole_root {
-                Some(Violation {
-                    reason: format!("the span covers the whole root document: {diagnostic:?}"),
-                    known: None,
-                })
-            } else {
-                None
-            }
-        })
-        .collect()
+        }
+        if in_root && diagnostic.pointer.as_str().is_empty() {
+            violations.push(Violation {
+                reason: format!("the pointer is empty: {diagnostic:?}"),
+                known: known_in(KNOWN_ROOT_POINTERS, diagnostic.code),
+            });
+        }
+        if whole_root {
+            violations.push(Violation {
+                reason: format!("the span covers the whole root document: {diagnostic:?}"),
+                known: known_in(KNOWN_WHOLE_ROOT_SPANS, diagnostic.code),
+            });
+        }
+    }
+    violations
 }
 
 /// Everything from the generated `types` module to the end of the file, or nothing when no module
