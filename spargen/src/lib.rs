@@ -22,7 +22,7 @@
 //! | `name`    | `ir`, `diag`  |
 //! | `support` | — (compiles standalone against reqwest/serde) |
 //! | `codegen` | `ir`, `name`, `support`, `diag` |
-//! | `emit`    | `codegen`, `diag` |
+//! | `emit`    | `codegen`     |
 //! | `compat`  | `source`, `diag` |
 //! | `surface` | `ir`, `name`  |
 //! | `cli`     | facade        |

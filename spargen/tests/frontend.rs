@@ -12317,6 +12317,65 @@ ADDITIONAL      responses:
         );
         assert_ne!(check(&spec).outcome(), Outcome::Rejected, "{style}");
     }
+    // The same object as a `oneOf`/`anyOf` member, directly or through a nested union, holds the
+    // parameter's position (#435), so its unconstrained field is named the same way rather than as
+    // nesting; a scalar value schema makes the union generate.
+    const UNION_TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: filter
+          in: query
+          style: STYLE
+          explode: true
+          schema: SCHEMA
+      responses:
+        "204": { description: No Content }
+"##;
+    let member = "{ type: object, properties: { b: { type: string } }, required: [a]ADDITIONAL }";
+    let unions = [
+        "{ oneOf: [MEMBER, { type: string }] }",
+        "{ anyOf: [{ oneOf: [MEMBER, { type: integer }] }, { type: string }] }",
+    ];
+    let union_spec = |style: &str, union: &str, additional: &str| {
+        UNION_TEMPLATE.replace("STYLE", style).replace(
+            "SCHEMA",
+            &union.replace("MEMBER", &member.replace("ADDITIONAL", additional)),
+        )
+    };
+    for style in ["deepObject", "form"] {
+        for union in unions {
+            for additional in ["", ", additionalProperties: true"] {
+                let spec = union_spec(style, union, additional);
+                for report in [generate(&spec), check(&spec)] {
+                    assert_eq!(
+                        report.outcome(),
+                        Outcome::Rejected,
+                        "{style} {union}: {report:#?}"
+                    );
+                    let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+                    assert_eq!(messages.len(), 1, "{style} {union}: {report:#?}");
+                    assert!(
+                        messages[0].contains("`a`")
+                            && messages[0].contains("no schema constrains its value")
+                            && !messages[0].contains("nested arrays or objects"),
+                        "{style} {union}: {messages:?}"
+                    );
+                }
+            }
+            let spec = union_spec(style, union, ", additionalProperties: { type: integer }");
+            for report in [generate(&spec), check(&spec)] {
+                assert_ne!(
+                    report.outcome(),
+                    Outcome::Rejected,
+                    "{style} {union}: {report:#?}"
+                );
+            }
+        }
+    }
 }
 
 /// A `simple`/`form`/`deepObject` parameter whose schema, or a property or item schema at a
@@ -12426,6 +12485,108 @@ paths:
                 && !messages[0].contains("uninhabited"),
             "{messages:?}"
         );
+    }
+}
+
+/// A `oneOf`/`anyOf` parameter schema serializes as whichever member the value is, so an
+/// uninhabited property, item, or tuple position of a struct, array, or tuple member is a part of
+/// the parameter and is named as one (#435). Before, the part walk stopped at the union, and the
+/// only message was "nested arrays or objects", though nothing is nested: the same union with an
+/// inhabited part generates.
+#[test]
+fn a_parameter_union_member_with_an_uninhabited_part_is_reported_as_uninhabited() {
+    const TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: f
+          in: query
+          style: STYLE
+          schema: SCHEMA
+      responses:
+        "204": { description: No Content }
+"##;
+    // (style, schema, the same schema with the part inhabited, what the message names)
+    let cases = [
+        (
+            "deepObject",
+            "{ oneOf: [{ type: object, properties: { a: false } }, { type: string }] }",
+            "{ oneOf: [{ type: object, properties: { a: { type: integer } } }, { type: string }] }",
+            "`f.a` is uninhabited",
+        ),
+        (
+            "form",
+            "{ oneOf: [{ type: object, properties: { a: false } }, { type: string }] }",
+            "{ oneOf: [{ type: object, properties: { a: { type: integer } } }, { type: string }] }",
+            "`f.a` is uninhabited",
+        ),
+        (
+            "form",
+            "{ anyOf: [{ type: object, additionalProperties: false, properties: { a: false } }, \
+             { type: integer }] }",
+            "{ anyOf: [{ type: object, additionalProperties: false, \
+             properties: { a: { type: integer } } }, { type: integer }] }",
+            "`f.a` is uninhabited",
+        ),
+        (
+            "form",
+            "{ oneOf: [{ type: array, items: false }, { type: boolean }] }",
+            "{ oneOf: [{ type: array, items: { type: string } }, { type: boolean }] }",
+            "`f[]` is uninhabited",
+        ),
+        (
+            "form",
+            "{ oneOf: [{ type: array, prefixItems: [{ type: string }, false], items: false }, \
+             { type: boolean }] }",
+            "{ oneOf: [{ type: array, prefixItems: [{ type: string }, { type: integer }], \
+             items: false }, { type: boolean }] }",
+            "`f[1]` is uninhabited",
+        ),
+        (
+            "deepObject",
+            "{ anyOf: [{ type: object, properties: { a: { oneOf: [{ type: integer }, false] } } }, \
+             { type: string }] }",
+            "{ anyOf: [{ type: object, properties: { a: { type: integer } } }, { type: string }] }",
+            "`f.a` has a `oneOf`/`anyOf` member that is uninhabited",
+        ),
+        // A union nested directly inside a union member holds the same position, so its members'
+        // parts are searched with the same paths.
+        (
+            "deepObject",
+            "{ oneOf: [{ oneOf: [{ type: object, properties: { a: false } }, { type: integer }] }, \
+             { type: string }] }",
+            "{ oneOf: [{ oneOf: [{ type: object, properties: { a: { type: integer } } }, \
+             { type: integer }] }, { type: string }] }",
+            "`f.a` is uninhabited",
+        ),
+    ];
+    for (style, schema, control, named) in cases {
+        let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
+        for report in [generate(&spec), check(&spec)] {
+            assert_eq!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{style} {schema}: {report:#?}"
+            );
+            let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+            assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+            assert!(
+                messages[0].contains(named) && !messages[0].contains("nested arrays or objects"),
+                "{style} {schema}: {messages:?}"
+            );
+        }
+        // The control: the same union with the part inhabited is a supported shape.
+        let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", control);
+        for report in [generate(&spec), check(&spec)] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{style} {control}: {report:#?}"
+            );
+        }
     }
 }
 

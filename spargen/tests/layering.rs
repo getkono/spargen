@@ -306,7 +306,7 @@ fn every_subsystem_declares_the_dependencies_it_actually_takes() {
 /// Declared `//! layer-deps:` edges a subsystem does not take, as `(subsystem, edge, issue)`, each
 /// with the issue that removes it. An entry that stops being needed fails the test, so this only
 /// shrinks.
-const OVER_DECLARED_TRACKED: &[(&str, &str, &str)] = &[("emit", "diag", "#499")];
+const OVER_DECLARED_TRACKED: &[(&str, &str, &str)] = &[];
 
 /// The subsystem directories under `spargen/src/`: each is a library subsystem in `SUBSYSTEMS`,
 /// or `cli` (header checked by `the_cli_declares_its_dependency_on_the_facade`), or `bin`, which
