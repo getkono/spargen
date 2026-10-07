@@ -261,6 +261,9 @@ pub trait ApiErrorBody {
 
 impl ApiErrorBody for std::convert::Infallible {
     type Body = std::convert::Infallible;
+    // Mutation testing: replacing this body with `None` is an equivalent mutant, declared rather
+    // than killed. `Infallible` is uninhabited, so no `&self` exists to call it with and no
+    // test, or caller, can observe what it returns.
     fn body(&self) -> Option<&Self::Body> {
         match *self {}
     }
@@ -367,6 +370,9 @@ pub trait ApiErrorProblem {
 }
 
 impl ApiErrorProblem for std::convert::Infallible {
+    // Mutation testing: replacing this body with `None` or `Some(Default::default())` is an
+    // equivalent mutant, declared rather than killed. `Infallible` is uninhabited, so no `&self`
+    // exists to call it with and no test, or caller, can observe what it returns.
     fn problem(&self) -> Option<ProblemDetails> {
         match *self {}
     }
@@ -1449,6 +1455,35 @@ mod tests {
             transport.is_transient(),
             Error::<ApiBody>::from_reqwest(reqwest_error()).is_transient()
         );
+    }
+
+    /// The borrowed classification answers `true` too, not only `false`: the builder-kind error
+    /// above is the one permanent class, so a transient source is needed beside it. A connect
+    /// failure needs a socket and a reactor, which this suite does not run; reqwest's status-kind
+    /// error needs neither, and it reaches the same `Transport` class a failed connection does,
+    /// by the fall-through `ReqwestClass::of` ends in. A retry policy keying on the default
+    /// classifier therefore retries it.
+    #[test]
+    fn a_transport_class_failure_is_transient_on_the_borrow_and_to_a_retry_policy() {
+        let status_error = || {
+            reqwest::Response::from(
+                http::Response::builder()
+                    .status(503)
+                    .body(String::new())
+                    .expect("valid synthetic response"),
+            )
+            .error_for_status()
+            .expect_err("a 503 is an error status")
+        };
+        let source = status_error();
+        assert!(source.is_status() && !source.is_connect(), "{source}");
+        assert_eq!(ReqwestClass::of(&source), ReqwestClass::Transport);
+        let transport = TransportError::new(source);
+        assert!(transport.is_transient());
+        assert!(crate::RetryOutcome::Transport(&transport).is_transient());
+        let error = Error::<ApiBody>::from_reqwest(status_error());
+        assert!(matches!(error, Error::Transport(_)), "{error}");
+        assert!(error.is_transient());
     }
 
     #[test]

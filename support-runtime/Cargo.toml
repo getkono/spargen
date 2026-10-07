@@ -54,3 +54,6 @@ http = "1"
 # The runtime itself needs only serde's runtime traits; the test module derives `Deserialize` on
 # throwaway payload structs, so the `derive` feature is pulled in for the test build only.
 serde = { workspace = true, features = ["derive"] }
+# Test-only: the percent-encoding and dot-segment laws are checked as properties over their input
+# space. A dev-dependency never reaches the embedded runtime or a consumer's graph.
+proptest.workspace = true
