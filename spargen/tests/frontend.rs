@@ -13336,6 +13336,64 @@ paths:
     }
 }
 
+/// Wrapping a parameter's schema in a union does not change the cause its diagnostic names
+/// (#435): for `S = {type: object, properties: {a: false}}` under `form` and `deepObject`, `S`
+/// itself and `oneOf: [S, {type: string}]` both report the one `E010` message naming `f.a` in the
+/// uninhabited wording, and neither the nesting one. `S` is held both inline and as a component.
+#[test]
+fn wrapping_a_parameter_schema_in_a_union_names_the_same_uninhabited_part() {
+    const TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: f
+          in: query
+          style: STYLE
+          schema: SCHEMA
+      responses:
+        "204": { description: No Content }
+components:
+  schemas:
+    S: { type: object, properties: { a: false } }
+"##;
+    const S: &str = "{ type: object, properties: { a: false } }";
+    const S_REF: &str = "{ $ref: '#/components/schemas/S' }";
+    for style in ["form", "deepObject"] {
+        for s in [S, S_REF] {
+            let wrapped = format!("{{ oneOf: [{s}, {{ type: string }}] }}");
+            let mut named = Vec::new();
+            for schema in [s, wrapped.as_str()] {
+                let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
+                for report in [generate(&spec), check(&spec)] {
+                    assert_eq!(
+                        report.outcome(),
+                        Outcome::Rejected,
+                        "{style} {schema}: {report:#?}"
+                    );
+                    let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+                    assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+                    assert!(
+                        messages[0].contains("`f.a` is uninhabited")
+                            && !messages[0].contains("nested arrays or objects"),
+                        "{style} {schema}: {messages:?}"
+                    );
+                    named.push(messages[0].to_owned());
+                }
+            }
+            // The bare and the wrapped schema, each through both entry points, give one message:
+            // the union adds nothing to what is named.
+            assert_eq!(named.len(), 4, "{style} {s}: {named:?}");
+            assert!(
+                named.iter().all(|message| *message == named[0]),
+                "{style} {s}: {named:#?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn matrix_and_label_path_styles_generate() {
     let spec = r##"
@@ -25893,6 +25951,100 @@ fn every_parity_fixture_that_reports_is_labelled() {
         labelled >= 7,
         "only {labelled} parity fixtures are labelled; the convention has been disarmed"
     );
+}
+
+/// Hold `spec` to its relocation twin ([`oracles::relocate`]): the same document with its
+/// `components.schemas` moved into a referenced `lib.yaml`. Both entry points must reach the same
+/// verdict with the same code multiset (so a `W001` the audit raises in the root and not in a
+/// referenced file, #446, shows as a count), and a `Generated` run must give each schema the same
+/// [`oracles::shape`]. Returns whether `spec` had schemas to move.
+fn assert_relocation_changes_nothing(name: &str, spec: &str) -> bool {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let Some(root) = oracles::write_relocated(&dir, spec) else {
+        return false;
+    };
+    let (inline, inline_code) = generate_with_code(spec);
+    let inline_checked = check(spec);
+    let out = dir.join("client.rs");
+    let moved = run_generate(&build(root.clone(), out.clone()));
+    let moved_code = std::fs::read_to_string(&out).unwrap_or_default();
+    let moved_checked = run_check(&Spec::new(root));
+    assert_eq!(
+        moved.outcome(),
+        inline.outcome(),
+        "`{name}`: relocated, generate says {:?}: {moved:#?}",
+        moved.outcome()
+    );
+    assert_eq!(
+        codes(&moved),
+        codes(&inline),
+        "`{name}`: relocated, generate reports other codes"
+    );
+    assert_eq!(
+        moved_checked.outcome(),
+        inline_checked.outcome(),
+        "`{name}`: relocated, check says {:?}",
+        moved_checked.outcome()
+    );
+    assert_eq!(
+        codes(&moved_checked),
+        codes(&inline_checked),
+        "`{name}`: relocated, check reports other codes"
+    );
+    if inline.outcome() == Outcome::Generated {
+        for schema in oracles::schema_names(spec) {
+            assert_eq!(
+                oracles::shape(&moved_code, &schema),
+                oracles::shape(&inline_code, &schema),
+                "`{name}`: relocated, `{schema}` lowers to another shape"
+            );
+        }
+    }
+    true
+}
+
+/// Moving a document's schemas into a referenced file changes no verdict, code or shape (#446):
+/// every [`PARITY_FIXTURES`] spec that declares schemas is held to its relocation twin. The
+/// floor keeps the property from passing because nothing was moved.
+#[test]
+fn moving_the_parity_fixtures_schemas_into_a_referenced_file_changes_nothing() {
+    let moved = PARITY_FIXTURES
+        .iter()
+        .filter(|(name, spec)| assert_relocation_changes_nothing(name, spec))
+        .count();
+    assert!(
+        moved >= 4,
+        "only {moved} parity fixtures declare schemas to move"
+    );
+}
+
+/// [`oracles::relocate`] moves what it says: the root keeps one `$ref` per schema, into the
+/// sub-file, which declares the schemas with their references between them spelled against
+/// itself.
+#[test]
+fn relocation_moves_every_schema_behind_a_reference() {
+    let spec = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    A: { type: string }\n    'b/c': { $ref: '#/components/schemas/A' }\n";
+    let (root, lib) = oracles::relocate(spec).unwrap();
+    let root: serde_json::Value = serde_json::from_str(&root).unwrap();
+    let lib: serde_json::Value = serde_json::from_str(&lib).unwrap();
+    assert_eq!(
+        root["components"]["schemas"],
+        serde_json::json!({
+            "A": { "$ref": "./lib.yaml#/components/schemas/A" },
+            "b/c": { "$ref": "./lib.yaml#/components/schemas/b~1c" },
+        })
+    );
+    assert_eq!(
+        lib["components"]["schemas"],
+        serde_json::json!({
+            "A": { "type": "string" },
+            "b/c": { "$ref": "./lib.yaml#/components/schemas/A" },
+        })
+    );
+    assert_eq!(root["openapi"], "3.1.0");
+    let bare = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\n";
+    assert!(oracles::relocate(bare).is_none());
 }
 
 // --- placement independence: an inline document and its `$ref`-split twins -------------------

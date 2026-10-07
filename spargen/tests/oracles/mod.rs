@@ -3,16 +3,23 @@
 //! properties (`lowering_props.rs`), so each holds every run it makes to the same bar (#475):
 //!
 //! * [`location_violations`]: every diagnostic names a real location (#454);
-//! * [`indistinguishable_variants`]: every union's variants can be told apart (#402).
+//! * [`indistinguishable_variants`]: every union's variants can be told apart (#402);
+//! * [`relocate`] and [`shape`]: moving a document's schemas into a referenced file changes no
+//!   verdict, code or shape (#446).
 //!
 //! Each oracle reports the defects it finds that an open issue already tracks as known, carrying
 //! the issue number, so a caller can let them through while the issue is open. The fixtures in
 //! `frontend.rs` that pin each known entry fail once the issue's fix lands, and the entry goes with
 //! them, so the set of known gaps can only shrink.
 
+// Each test crate that declares this module uses the part of it its runs need.
+#![allow(dead_code)]
+
 use std::collections::BTreeMap;
 
+use camino::{Utf8Path, Utf8PathBuf};
 use spargen::{Code, Diagnostic, Report};
+use yaml_rust2::{Yaml, YamlLoader};
 
 /// One defect an oracle found.
 #[derive(Debug)]
@@ -302,4 +309,169 @@ pub fn unexplained_variants(report: &Report, code: &str) -> Vec<String> {
         return Vec::new();
     }
     unknown(indistinguishable_variants(code))
+}
+
+/// The shape of the type the module `code` declares as `name`: what it stands for with every name
+/// it reaches expanded, so two modules that lower one schema under different names agree. `name`
+/// itself when the module declares nothing by that name.
+pub fn shape(code: &str, name: &str) -> String {
+    Declarations::read(types_module(code)).shape_of(name, 8)
+}
+
+/// A YAML string scalar.
+fn text(value: &str) -> Yaml {
+    Yaml::String(value.to_owned())
+}
+
+/// Append `node` to `out` as JSON, keeping every mapping's key order: the order of a schema's
+/// `properties` is the order of the fields it lowers to, so a relocation that reordered them would
+/// change a shape the document never changed. A key that is not a string is written as its YAML
+/// scalar text, as the frontend reads it.
+fn write_json(node: &Yaml, out: &mut String) {
+    let quoted = |value: &str| serde_json::to_string(value).expect("a string serializes");
+    match node {
+        Yaml::Real(value) => match value
+            .parse::<f64>()
+            .ok()
+            .and_then(serde_json::Number::from_f64)
+        {
+            Some(number) => out.push_str(&number.to_string()),
+            None => out.push_str(&quoted(value)),
+        },
+        Yaml::Integer(value) => out.push_str(&value.to_string()),
+        Yaml::String(value) => out.push_str(&quoted(value)),
+        Yaml::Boolean(value) => out.push_str(&value.to_string()),
+        Yaml::Array(items) => {
+            out.push('[');
+            for (at, item) in items.iter().enumerate() {
+                if at > 0 {
+                    out.push(',');
+                }
+                write_json(item, out);
+            }
+            out.push(']');
+        }
+        Yaml::Hash(entries) => {
+            out.push('{');
+            for (at, (key, value)) in entries.iter().enumerate() {
+                if at > 0 {
+                    out.push(',');
+                }
+                let key = match key {
+                    Yaml::String(key) | Yaml::Real(key) => key.clone(),
+                    Yaml::Integer(key) => key.to_string(),
+                    Yaml::Boolean(key) => key.to_string(),
+                    _ => String::from("null"),
+                };
+                out.push_str(&quoted(&key));
+                out.push(':');
+                write_json(value, out);
+            }
+            out.push('}');
+        }
+        Yaml::Alias(_) | Yaml::Null | Yaml::BadValue => out.push_str("null"),
+    }
+}
+
+/// The value at `key` of a YAML mapping, mutably.
+fn entry<'a>(node: &'a mut Yaml, key: &str) -> Option<&'a mut Yaml> {
+    match node {
+        Yaml::Hash(entries) => entries.get_mut(&text(key)),
+        _ => None,
+    }
+}
+
+/// The file [`relocate`] moves a document's schemas into, beside the root.
+pub const RELOCATED_LIB: &str = "lib.yaml";
+
+/// `spec` with its `components.schemas` moved into [`RELOCATED_LIB`] (#446), as the root and
+/// sub-file texts, or `None` when `spec` declares no schema or is not a YAML mapping.
+///
+/// The sub-file declares the schemas under its own `components.schemas`. A
+/// `#/components/schemas/…` reference between them would read the root document's component of
+/// that name first (a sub-file's bare component reference does), which is now the `$ref` back into
+/// the sub-file, so each is spelled against the sub-file itself (`./lib.yaml#/components/…`). Each
+/// root entry becomes a `$ref` to its moved schema, so every schema stays reachable under its name
+/// and every reference the root makes still resolves to it. Both files are written as JSON, which
+/// YAML reads, with every key in its original order.
+pub fn relocate(spec: &str) -> Option<(String, String)> {
+    let mut root = YamlLoader::load_from_str(spec).ok()?.into_iter().next()?;
+    let schemas = entry(entry(&mut root, "components")?, "schemas")?;
+    if schemas.as_hash().is_none_or(|entries| entries.is_empty()) {
+        return None;
+    }
+    let mut moved = std::mem::replace(schemas, Yaml::Hash(Default::default()));
+    point_into_lib(&mut moved);
+    let Yaml::Hash(moved_entries) = &moved else {
+        unreachable!("the moved schemas are a mapping")
+    };
+    let Yaml::Hash(entries) = schemas else {
+        unreachable!("the emptied schemas are a mapping")
+    };
+    for name in moved_entries.keys() {
+        let Yaml::String(name) = name else { continue };
+        let target = format!(
+            "./{RELOCATED_LIB}#/components/schemas/{}",
+            name.replace('~', "~0").replace('/', "~1")
+        );
+        let mut reference = yaml_rust2::yaml::Hash::new();
+        reference.insert(text("$ref"), text(&target));
+        entries.insert(text(name), Yaml::Hash(reference));
+    }
+    let mut components = yaml_rust2::yaml::Hash::new();
+    components.insert(text("schemas"), moved);
+    let mut lib = yaml_rust2::yaml::Hash::new();
+    lib.insert(text("components"), Yaml::Hash(components));
+    let (mut root_text, mut lib_text) = (String::new(), String::new());
+    write_json(&root, &mut root_text);
+    write_json(&Yaml::Hash(lib), &mut lib_text);
+    Some((root_text, lib_text))
+}
+
+/// Respell every `$ref` under `node` that names a root schema (`#/components/schemas/…`) against
+/// [`RELOCATED_LIB`], which now holds the schemas.
+fn point_into_lib(node: &mut Yaml) {
+    match node {
+        Yaml::Hash(entries) => {
+            for (key, child) in entries.iter_mut() {
+                match child {
+                    Yaml::String(target)
+                        if *key == text("$ref") && target.starts_with("#/components/schemas/") =>
+                    {
+                        *target = format!("./{RELOCATED_LIB}{target}");
+                    }
+                    _ => point_into_lib(child),
+                }
+            }
+        }
+        Yaml::Array(items) => items.iter_mut().for_each(point_into_lib),
+        _ => {}
+    }
+}
+
+/// Write [`relocate`]'s two files into `dir`, returning the root's path, or `None` when there is
+/// nothing to move.
+pub fn write_relocated(dir: &Utf8Path, spec: &str) -> Option<Utf8PathBuf> {
+    let (root, lib) = relocate(spec)?;
+    let path = dir.join("openapi.yaml");
+    std::fs::write(&path, root).unwrap();
+    std::fs::write(dir.join(RELOCATED_LIB), lib).unwrap();
+    Some(path)
+}
+
+/// The names `spec` declares under `components.schemas`, in document order.
+pub fn schema_names(spec: &str) -> Vec<String> {
+    let Some(mut root) = YamlLoader::load_from_str(spec)
+        .ok()
+        .and_then(|documents| documents.into_iter().next())
+    else {
+        return Vec::new();
+    };
+    match entry(&mut root, "components").and_then(|components| entry(components, "schemas")) {
+        Some(Yaml::Hash(entries)) => entries
+            .keys()
+            .filter_map(|name| name.as_str().map(str::to_owned))
+            .collect(),
+        _ => Vec::new(),
+    }
 }
