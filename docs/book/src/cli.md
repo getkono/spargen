@@ -20,7 +20,7 @@ freestanding either way.
 
 ```toml
 [build-dependencies]
-spargen = { version = "0.4", features = ["remote-fetch"] }
+spargen = { version = "0.5", features = ["remote-fetch"] }
 ```
 
 With neither feature on (the default), the crate links no HTTP client at all, and `generate` and

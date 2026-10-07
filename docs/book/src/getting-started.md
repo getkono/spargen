@@ -42,8 +42,8 @@ Treat a truncated report as a partial view: fixing everything it lists may not b
 fn main() {
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let build = spargen::Spec::new("api/openapi.yaml").build(format!("{out_dir}/api.rs"));
-    let report = spargen::generate(&build);
-    assert_eq!(report.outcome(), spargen::Outcome::Generated, "{report:#?}");
+    // `Generated` on a cold build, `Cached` on a warm one — `expect_success` accepts both.
+    spargen::generate(&build).expect_success();
 }
 ```
 

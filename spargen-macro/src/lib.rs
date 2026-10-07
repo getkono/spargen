@@ -46,7 +46,7 @@
 //! Inline generation recompiles the whole generator (host-side) as part of your build, and the
 //! generated code is not materialized on disk (use `cargo expand` to inspect it). When you want
 //! the generated source checked in or reviewable, configure the `build.rs` API to write it there.
-//! The macro trades that visibility for a zero-config, single-dependency setup.
+//! The macro trades that visibility for a zero-config setup with no build.rs.
 //!
 //! ## Runtime graph
 //!

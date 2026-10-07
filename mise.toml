@@ -299,10 +299,15 @@ env = { RUSTDOCFLAGS = "-D warnings" }
 run = "cargo doc --no-deps --workspace --all-features --document-private-items"
 
 [tasks.docs]
-description = "Build the mdBook documentation site into docs/book/book (git-ignored)"
-# mdBook is pinned in `[tools]` above, so this uses the same version CI does. Fails on broken
-# includes/links.
-run = "mdbook build docs/book"
+description = "Build the mdBook documentation site into docs/book/book (git-ignored) and check its links"
+# mdBook is pinned in `[tools]` above, so this uses the same version CI does. `mdbook build` checks
+# no link and exits 0 on an unreadable `{{#include}}`, so the second command reads the built site
+# and fails on either: an include left unresolved, or a relative link or anchor that does not
+# resolve inside the site (`spargen/tests/docs.rs`).
+run = [
+  "mdbook build docs/book",
+  "cargo test -p spargen --test docs every_link_in_the_built_book_resolves -- --exact --ignored",
+]
 
 [tasks.commit-msg]
 description = "Validate a Conventional Commit message read from stdin (merge commits exempt)"

@@ -29,7 +29,7 @@ Two facts frame all of it:
   [`carve` escape hatch](#carving-unsupported-idioms) drops just that island and generates the
   rest.
 
-The specs used below are vendored under [`corpus/recipes/`](../corpus/recipes/README.md) and are
+The specs used below are vendored under [`corpus/recipes/`](https://github.com/getkono/spargen/blob/master/corpus/recipes/README.md) and are
 exercised by `spargen/tests/recipes.rs`, which asserts each framework's outcome so these recipes
 stay honest.
 
@@ -78,7 +78,7 @@ works too.)
 
 **Generate.** Compile the crate containing the shared `build.rs` above.
 
-**Idioms spargen handles.** The vendored [`corpus/recipes/utoipa.json`](../corpus/recipes/utoipa.json)
+**Idioms spargen handles.** The vendored [`corpus/recipes/utoipa.json`](https://github.com/getkono/spargen/blob/master/corpus/recipes/utoipa.json)
 mirrors a typical utoipa document and generates cleanly. It covers:
 
 | utoipa idiom | OpenAPI shape | spargen result |
@@ -127,7 +127,7 @@ titles/versions during assembly.)
 
 **Generate.** Compile the crate containing the shared `build.rs` above.
 
-**Idioms spargen handles.** The vendored [`corpus/recipes/aide.json`](../corpus/recipes/aide.json)
+**Idioms spargen handles.** The vendored [`corpus/recipes/aide.json`](https://github.com/getkono/spargen/blob/master/corpus/recipes/aide.json)
 mirrors a schemars-backed aide document. It generates with only validation-only warnings
 (`W001`, for the `minimum`/`format` hints schemars emits, which spargen faithfully ignores). It
 covers:
@@ -182,7 +182,7 @@ Then point the shared `build.rs` at `openapi-3.1.json` and compile.
 2020-12; 3.0 uses its own dialect with `nullable`). Spargen targets the 3.1 dialect and refuses to
 guess at a 3.0 document rather than mistranslate it — the rejection is the contract, per the
 [support matrix](support-matrix.md). The vendored
-[`corpus/recipes/poem-openapi.json`](../corpus/recipes/poem-openapi.json) is a 3.0.0 document; the
+[`corpus/recipes/poem-openapi.json`](https://github.com/getkono/spargen/blob/master/corpus/recipes/poem-openapi.json) is a 3.0.0 document; the
 recipe test asserts it rejects with `E001`.
 
 ---
@@ -201,14 +201,14 @@ referenced a carved schema) and stays deterministic.
 let build = spargen::Spec::new("openapi.json")
     .carve(true)
     .build("src/api.rs");
-let report = spargen::generate(&build);
-assert_eq!(report.outcome(), spargen::Outcome::Generated);
+// `Generated` on a cold build, `Cached` on a warm one — `expect_success` accepts both.
+spargen::generate(&build).expect_success();
 ```
 
 `spargen check --carve` audits the carved subset the same way. If you would rather remove specific
 paths/operations/components by name (an exact or glob rule) instead of letting carve decide, use the
 [compatibility omit mode](compatibility.md). The vendored
-[`corpus/recipes/utoipa-untagged-overlap.json`](../corpus/recipes/utoipa-untagged-overlap.json)
+[`corpus/recipes/utoipa-untagged-overlap.json`](https://github.com/getkono/spargen/blob/master/corpus/recipes/utoipa-untagged-overlap.json)
 demonstrates that overlapping `integer | number` unions no longer need this escape hatch: they
 generate as typed trial-matching enums. The carve integration suite separately pins the
 reject-then-carve flow for genuinely unsupported constructs.
@@ -220,5 +220,5 @@ reject-then-carve flow for genuinely unsupported constructs.
 - [Support matrix](support-matrix.md) — exactly what is supported, warned, or rejected.
 - [Diagnostic index](errors.md) — every stable `E###`/`W###` code (`spargen explain E001`).
 - [Compatibility omit mode](compatibility.md) — carve/omit unsupported segments by name.
-- [`corpus/recipes/README.md`](../corpus/recipes/README.md) — provenance of the vendored specs and
+- [`corpus/recipes/README.md`](https://github.com/getkono/spargen/blob/master/corpus/recipes/README.md) — provenance of the vendored specs and
   the verified per-framework version constants.
