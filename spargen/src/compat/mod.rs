@@ -13,7 +13,9 @@
 //!   whole pointer string). A glob rule removes **every** matching construct (bulk); a rule with no
 //!   metacharacter is an exact rule and behaves exactly as before. A metacharacter is escapable
 //!   with a backslash (`\*`, `\?`), because a URI path may legitimately contain one; rules that
-//!   auto-carve builds from literal document text are escaped for exactly that reason. See
+//!   auto-carve builds from literal document text are escaped for exactly that reason. A
+//!   backslash escapes whatever character follows it, in exact and glob rules alike (`\b` is `b`,
+//!   `\\` is one literal backslash). See
 //!   [`glob_match`] for the semantics.
 //! * **Auto-carve.** [`carve_rules`] maps error diagnostics to the smallest enclosing *omittable*
 //!   construct, so the facade can iteratively omit the unsupported islands of a spec and generate
@@ -375,23 +377,18 @@ fn has_glob_meta(pattern: &str) -> bool {
 }
 
 /// Resolve the escapes in a pattern with no unescaped metacharacter, so an exact rule compares
-/// against the literal text the author meant. `\*` → `*`, `\?` → `?`, `\\` → `\`; a backslash
-/// before anything else is kept, since it is an ordinary character in a URI path.
+/// against the literal text the author meant. A backslash escapes whatever follows it — `\*` →
+/// `*`, `\?` → `?`, `\\` → `\`, and `\b` → `b` — exactly as [`compile_glob`] reads it, so an exact
+/// rule and a glob rule never disagree on what a pattern names. A trailing lone backslash escapes
+/// nothing and is kept as itself.
 fn unescape_glob(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len());
     let mut chars = pattern.chars();
     while let Some(ch) = chars.next() {
-        if ch != '\\' {
+        if ch == '\\' {
+            out.push(chars.next().unwrap_or('\\'));
+        } else {
             out.push(ch);
-            continue;
-        }
-        match chars.next() {
-            Some(escaped @ ('*' | '?' | '\\')) => out.push(escaped),
-            Some(other) => {
-                out.push('\\');
-                out.push(other);
-            }
-            None => out.push('\\'),
         }
     }
     out
@@ -1256,11 +1253,13 @@ mod tests {
     use std::borrow::Cow;
 
     use super::{
-        carve_rules, glob_match, has_glob_meta, omittable_enclosing, ComponentKind, Diagnostic,
-        JsonPointer, Omit, OmitMethod, OmitRule, Provenance,
+        carve_rules, escape_glob_meta, glob_match, has_glob_meta, omittable_enclosing,
+        unescape_glob, ComponentKind, Diagnostic, JsonPointer, Omit, OmitMethod, OmitRule,
+        Provenance,
     };
     use crate::diag::{Code, Diagnostics};
     use crate::source::InputBundle;
+    use proptest::prelude::*;
 
     #[test]
     fn glob_matcher_semantics() {
@@ -1329,6 +1328,65 @@ mod tests {
         assert!(glob_match(r"\", r"\"));
         // A pattern opening with an escape must not index before its start.
         assert!(glob_match(r"\*x", "*x"));
+    }
+
+    /// Exact and glob rules share one escaping rule: a backslash escapes whatever follows it, so
+    /// `\b` is the literal `b` in both forms. The exact form used to keep the backslash, so the
+    /// exact rule `/a\b` named the path `/a\b` while the glob `/a\b*` named `/abc`.
+    #[test]
+    fn an_escaped_ordinary_character_means_itself_in_exact_and_glob_rules() {
+        assert_eq!(unescape_glob(r"/a\b"), "/ab");
+        assert!(glob_match(r"/a\b", "/ab"));
+        assert!(!glob_match(r"/a\b", r"/a\b"));
+        assert!(glob_match(r"/a\b*", "/abc"));
+        assert!(!glob_match(r"/a\b*", r"/a\bc"));
+        // The metacharacter escapes and a trailing lone backslash are unchanged.
+        assert_eq!(unescape_glob(r"/f/\*\?\\"), r"/f/*?\");
+        assert_eq!(unescape_glob(r"/f/\"), r"/f/\");
+
+        // An exact path rule applies the same reading: `/a\b` removes `/ab`, not `/a\b`.
+        let spec = r#"
+openapi: 3.1.0
+info: { title: t, version: 1.0.0 }
+paths:
+  /ab:
+    get: { responses: { "200": { description: ok } } }
+  '/a\b':
+    get: { responses: { "200": { description: ok } } }
+"#;
+        let mut bundle = bundle_of(spec);
+        let mut diags = Diagnostics::default();
+        let omit = Omit {
+            rules: vec![OmitRule::path(r"/a\b")],
+        };
+        omit.apply(&mut bundle, &mut diags).unwrap();
+        assert_eq!(keys_under(&bundle, "paths", None), vec![r"/a\b".to_owned()]);
+    }
+
+    proptest! {
+        /// Escaping literal text yields a rule that matches exactly that text.
+        #[test]
+        fn an_escaped_text_matches_itself(text in r"[a-c/*?\\]{0,12}") {
+            let pattern = escape_glob_meta(&text);
+            prop_assert!(!has_glob_meta(&pattern), "{pattern:?}");
+            prop_assert!(glob_match(&pattern, &text), "{pattern:?} vs {text:?}");
+            prop_assert_eq!(unescape_glob(&pattern), text);
+        }
+
+        /// A pattern with no unescaped metacharacter matches as a glob exactly the text its
+        /// exact-rule reading names, so the two forms can never disagree.
+        #[test]
+        fn a_meta_free_pattern_matches_exactly_its_unescaped_text(
+            // Ordinary characters and escapes of anything, then an optional trailing backslash:
+            // every pattern with no unescaped metacharacter, built rather than filtered.
+            pattern in r"([a-c/]|\\[a-c/*?\\]){0,8}\\?",
+            text in r"[a-c/*?\\]{0,12}",
+        ) {
+            prop_assert!(!has_glob_meta(&pattern), "{pattern:?}");
+            let literal = unescape_glob(&pattern);
+            prop_assert!(glob_match(&pattern, &literal), "{pattern:?} vs {literal:?}");
+            prop_assert_eq!(glob_match(&pattern, &text), literal == text);
+        }
     }
 
     /// Load an inline YAML spec into an [`InputBundle`] via a tempfile (the loader reads from disk).
