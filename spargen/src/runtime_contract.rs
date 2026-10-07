@@ -658,8 +658,10 @@ impl RequiredDependency {
 /// Every dependency generated output from one spec requires — what `spargen deps` prints and what
 /// the `E023` audit checks a consumer manifest against.
 ///
-/// Both read one private requirement table, so the block printed here is exactly the block that passes the
-/// audit.
+/// Both read one private requirement table, so the block [`Requirements::manifest_block`] prints
+/// passes the audit: as printed for a package that declares no opt-in feature, and with that
+/// feature's commented lines uncommented (merged into any table or key the manifest already
+/// declares) for one that does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Requirements {
     /// The dependencies, in manifest order.

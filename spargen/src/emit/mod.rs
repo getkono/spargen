@@ -36,7 +36,10 @@ pub(crate) struct EmitPlan {
 /// An emission failure.
 #[derive(Debug)]
 pub(crate) enum EmitError {
-    /// A filesystem error.
+    /// An I/O error. Nothing in emit constructs it: [`plan`] renders in memory and writes no file,
+    /// so it can fail only with [`EmitError::Layout`]. The variant and its
+    /// `From<std::io::Error>` impl are kept until their removal lands separately; only the
+    /// `From` impl's own test builds one.
     Io(std::io::Error),
     /// The requested layout is inconsistent with the generated code.
     Layout(String),

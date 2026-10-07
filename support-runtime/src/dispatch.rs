@@ -564,6 +564,10 @@ where
 }
 
 /// Classify a documented raw-byte error body without passing it through a structured decoder.
+///
+/// Retains at most `max_error_body` bytes either way, and drops the truncation flag: neither
+/// [`Error::Api`] nor [`Error::UnexpectedStatus`] has a field for it, so a body cut at the cap is
+/// indistinguishable from one that was exactly that long.
 pub async fn classify_error_bytes<E: From<Bytes>>(
     core: &ClientCore,
     response: Response,

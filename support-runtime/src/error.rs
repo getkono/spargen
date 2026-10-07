@@ -69,7 +69,11 @@ pub enum Error<E> {
         status: StatusCode,
         /// The response headers.
         headers: HeaderMap,
-        /// The raw response body.
+        /// The raw response body, capped at `max_error_body` by the dispatch helpers; unlike
+        /// `Decode`, this variant carries no flag saying whether bytes were dropped to meet the
+        /// cap. The generated shim for an operation with more than one documented success status
+        /// reads through `read_success_body`, which does not take the cap, so on that path the
+        /// body is retained whole (see `Decode`'s `body`).
         body: Bytes,
     },
     /// #8 — the response body failed to deserialize; retains the status and headers the response

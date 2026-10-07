@@ -6,7 +6,7 @@
 //! `diag` is the only vocabulary shared across pipeline stages, so it depends on nothing.
 //!
 //! Every diagnostic carries a severity, a stable [`Code`], the [`JsonPointer`] to the offending
-//! construct, a [`Span`] (`file:line:column`), a one-line message, and an optional remedy —
+//! construct, a [`Span`] (`file:line:column`), a one-line message, and an optional remedy.
 //! Generation collects all diagnostics into a capped [`Diagnostics`] batch rather than stopping
 //! at the first error; presentation belongs to the optional binary.
 
