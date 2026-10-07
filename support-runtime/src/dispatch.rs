@@ -2661,4 +2661,113 @@ mod tests {
             200,
         );
     }
+
+    /// Every message in `error`'s `source()` chain, outermost first.
+    fn messages(error: &(dyn std::error::Error + 'static)) -> Vec<String> {
+        std::iter::successors(Some(error), |error| error.source())
+            .map(ToString::to_string)
+            .collect()
+    }
+
+    /// Whether every message in `error`'s chain is free of control characters, so none can break
+    /// the line it is logged on or forge another.
+    fn single_line(error: &(dyn std::error::Error + 'static)) -> Result<(), String> {
+        match messages(error)
+            .into_iter()
+            .find(|message| message.contains(char::is_control))
+        {
+            Some(message) => Err(message),
+            None => Ok(()),
+        }
+    }
+
+    /// Text biased to control characters: the C0 set, DEL and the C1 set, beside dots, `%2E` and
+    /// ordinary characters.
+    fn control_biased() -> impl proptest::strategy::Strategy<Value = String> {
+        proptest::string::string_regex(
+            "([\\x00-\\x1f]|\\x7f|[\\u{80}-\\u{9f}]|\\.|%2[eE]|a|\"|\\PC){0,8}",
+        )
+        .expect("a valid regex")
+    }
+
+    /// A documented string enum: serde's message for a value it does not list quotes the value.
+    /// It is an error body too, so the classifiers' `Error<Listed>` has a `source()` chain.
+    #[derive(Debug, serde::Deserialize)]
+    enum Listed {
+        Listed,
+    }
+
+    impl std::fmt::Display for Listed {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Listed::Listed => formatter.write_str("listed"),
+            }
+        }
+    }
+
+    impl std::error::Error for Listed {}
+
+    proptest::proptest! {
+        /// `build_url` refuses a path value that forms a dot segment by quoting the segment, and
+        /// a server override that does not parse through `url`'s error: whatever the text holds,
+        /// every message in the refusal's chain stays on one line (#452).
+        #[test]
+        fn a_url_refusal_message_is_a_single_line(
+            segment in control_biased(),
+            server in control_biased(),
+        ) {
+            let core = core_at("https://api.example.com/v1/");
+            let path = format!("/users/{segment}/keys");
+            let refusals = [
+                build_url(&core, &path, &[]).err(),
+                build_url(&core, &segment, &[]).err(),
+                build_url_on(&core, Some(&server), &path, &[]).err(),
+                build_url_with_query_string(&core, &path, &[], Some(&segment)).err(),
+            ];
+            for error in refusals.iter().flatten() {
+                proptest::prop_assert_eq!(single_line(error), Ok(()));
+            }
+        }
+
+        /// `Error::Decode` carries serde's message, which quotes the server-supplied value it
+        /// failed on; through the per-status dispatch, the JSON and text success decoders and
+        /// both error classifiers, every message in its chain stays on one line (#457).
+        #[test]
+        fn a_decode_failure_message_is_a_single_line(text in control_biased()) {
+            let json = serde_json::Value::String(text.clone()).to_string();
+            let core = core();
+            let mut errors: Vec<Error<Listed>> = Vec::new();
+            for body in [format!(r#"{{"id":{json}}}"#), json.clone(), text.clone()] {
+                if let Err(error) = dispatch_success(json_response(200, &body)) {
+                    errors.push(error.widen());
+                }
+                if let Err(error) = dispatch_success(json_response(202, &format!(r#"{{"job":{body}}}"#))) {
+                    errors.push(error.widen());
+                }
+                if let Err(error) = poll_ready(super::decode_success::<Listed>(&core, json_response(200, &body))) {
+                    errors.push(error.widen());
+                }
+                if let Err(error) = poll_ready(decode_success_text::<Listed>(&core, json_response(200, &body))) {
+                    errors.push(error.widen());
+                }
+                errors.push(poll_ready(super::classify_error::<Listed>(
+                    &core,
+                    json_response(400, &body),
+                    &[StatusSpec::Any],
+                )));
+                errors.push(poll_ready(classify_error_text::<Listed>(
+                    &core,
+                    json_response(400, &body),
+                    &[StatusSpec::Any],
+                )));
+            }
+            proptest::prop_assert!(
+                errors.iter().any(|error| matches!(error, Error::Decode { .. })),
+                "no decode failure was produced"
+            );
+            for error in &errors {
+                proptest::prop_assert_eq!(single_line(error), Ok(()));
+            }
+        }
+    }
 }
