@@ -210,31 +210,11 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
 
     // The config file is discovered beside the spec, then macro arguments override it — the same
     // precedence the CLI and `build.rs` use.
-    let mut config = match spargen::Spec::new(spec_path.clone()).discover_config_file() {
+    let discovered = match spargen::Spec::new(spec_path.clone()).discover_config_file() {
         Ok(spec) => spec,
         Err(error) => return Err(syn::Error::new(args.spec.span(), error.to_string())),
     };
-    if args.no_uuid {
-        config = config.uuid(false);
-    }
-    if args.no_time {
-        config = config.time(false);
-    }
-    if args.carve {
-        config = config.carve(true);
-    }
-    if args.open_narrowing {
-        config = config.open_narrowing(true);
-    }
-    for rule in &args.omit.rules {
-        config = config.omit_rule(rule.clone());
-    }
-    if let Some(cap) = args.error_body_cap {
-        config = config.error_body_cap(cap);
-    }
-    if let Some(cap) = args.batch_cap {
-        config = config.batch_cap(cap);
-    }
+    let config = config(args, discovered);
 
     // Keep spargen's codegen (and the tokenization below) off the compiler bridge; restored on drop.
     let _fallback = FallbackGuard::force();
@@ -282,6 +262,35 @@ fn expand(args: &Args) -> syn::Result<proc_macro2::TokenStream> {
         #generated
         #(const _: &[u8] = include_bytes!(#tracks);)*
     })
+}
+
+/// Apply the macro arguments over `discovered`, the `Spec` the config file beside the spec yields.
+/// A flag only ever overrides: an argument the macro was not given leaves the config file's value
+/// in place, and omit rules are appended to the file's own.
+fn config(args: &Args, discovered: spargen::Spec) -> spargen::Spec {
+    let mut config = discovered;
+    if args.no_uuid {
+        config = config.uuid(false);
+    }
+    if args.no_time {
+        config = config.time(false);
+    }
+    if args.carve {
+        config = config.carve(true);
+    }
+    if args.open_narrowing {
+        config = config.open_narrowing(true);
+    }
+    for rule in &args.omit.rules {
+        config = config.omit_rule(rule.clone());
+    }
+    if let Some(cap) = args.error_body_cap {
+        config = config.error_body_cap(cap);
+    }
+    if let Some(cap) = args.batch_cap {
+        config = config.batch_cap(cap);
+    }
+    config
 }
 
 fn parse_usize(input: ParseStream) -> syn::Result<usize> {
@@ -493,8 +502,8 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
-    use super::{Args, Consumer};
-    use spargen::{ComponentKind, OmitMethod, OmitRule};
+    use super::{config, Args, Consumer};
+    use spargen::{ComponentKind, OmitMethod, OmitRule, Spec};
 
     fn os(value: &str) -> Option<std::ffi::OsString> {
         Some(value.into())
@@ -568,10 +577,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn parses_every_build_configuration_control() {
-        let args: Args = syn::parse_str(
-            r#"spec = "openapi.yaml", no_uuid, no_time, carve,
+    /// Every argument the keyed form accepts, each set away from its default.
+    const EVERY_CONTROL: &str = r#"spec = "openapi.yaml", no_uuid, no_time, carve, open_narrowing,
                error_body_cap = 4096, batch_cap = 7,
                omit {
                    operations { post "/legacy"; }
@@ -579,27 +586,88 @@ mod tests {
                    components { schemas { "Legacy"; } }
                    pointers { "/webhooks"; }
                    file("shared.yaml") { pointers { "/Legacy"; } }
-               }"#,
-        )
-        .unwrap();
+               }"#;
 
+    /// The rules [`EVERY_CONTROL`]'s `omit` block names, in the order it names them.
+    fn every_omit_rule() -> Vec<OmitRule> {
+        vec![
+            OmitRule::operation(OmitMethod::Post, "/legacy"),
+            OmitRule::path("/internal/**"),
+            OmitRule::component(ComponentKind::Schemas, "Legacy"),
+            OmitRule::pointer(None, "/webhooks"),
+            OmitRule::pointer(Some("shared.yaml".into()), "/Legacy"),
+        ]
+    }
+
+    #[test]
+    fn parses_every_build_configuration_control() {
+        let args: Args = syn::parse_str(EVERY_CONTROL).unwrap();
+
+        assert_eq!(args.spec.value(), "openapi.yaml");
         assert!(args.no_uuid);
         assert!(args.no_time);
         assert!(args.carve);
+        assert!(args.open_narrowing);
         assert_eq!(args.error_body_cap, Some(4096));
         assert_eq!(args.batch_cap, Some(7));
-        assert_eq!(args.omit.rules.len(), 5);
+        assert_eq!(args.omit.rules, every_omit_rule());
+    }
+
+    #[test]
+    fn a_bare_spec_path_sets_no_control() {
+        let args: Args = syn::parse_str(r#""openapi.yaml""#).unwrap();
+
+        assert_eq!(args.spec.value(), "openapi.yaml");
+        assert!(!args.no_uuid);
+        assert!(!args.no_time);
+        assert!(!args.carve);
+        assert!(!args.open_narrowing);
+        assert_eq!(args.error_body_cap, None);
+        assert_eq!(args.batch_cap, None);
+        assert_eq!(args.omit.rules, Vec::new());
+    }
+
+    /// Each argument reaches the `Spec` field it names, and nothing else changes.
+    #[test]
+    fn every_argument_maps_onto_its_spec_field() {
+        let args: Args = syn::parse_str(EVERY_CONTROL).unwrap();
+        let mut expected = Spec::new("openapi.yaml")
+            .uuid(false)
+            .time(false)
+            .carve(true)
+            .open_narrowing(true)
+            .error_body_cap(4096)
+            .batch_cap(7);
+        for rule in every_omit_rule() {
+            expected = expected.omit_rule(rule);
+        }
+        assert_eq!(config(&args, Spec::new("openapi.yaml")), expected);
+    }
+
+    /// The macro overrides the discovered config file only where it was given an argument: an
+    /// absent flag keeps the file's value rather than resetting it, and omit rules append.
+    #[test]
+    fn an_absent_argument_keeps_the_config_files_value() {
+        let discovered = Spec::new("openapi.yaml")
+            .uuid(false)
+            .time(false)
+            .carve(true)
+            .open_narrowing(true)
+            .error_body_cap(1024)
+            .batch_cap(3)
+            .omit_rule(OmitRule::path("/from-file"));
+
+        let bare: Args = syn::parse_str(r#""openapi.yaml""#).unwrap();
+        assert_eq!(config(&bare, discovered.clone()), discovered);
+
+        let capped: Args =
+            syn::parse_str(r#""openapi.yaml", batch_cap = 9, omit { paths { "/from-macro"; } }"#)
+                .unwrap();
         assert_eq!(
-            args.omit.rules[0],
-            OmitRule::operation(OmitMethod::Post, "/legacy")
-        );
-        assert_eq!(
-            args.omit.rules[2],
-            OmitRule::component(ComponentKind::Schemas, "Legacy")
-        );
-        assert_eq!(
-            args.omit.rules[4],
-            OmitRule::pointer(Some("shared.yaml".into()), "/Legacy")
+            config(&capped, discovered.clone()),
+            discovered
+                .batch_cap(9)
+                .omit_rule(OmitRule::path("/from-macro"))
         );
     }
 }

@@ -360,8 +360,9 @@ async fn main() {
         .expect("retry recovers from the transient 503");
     assert_eq!(recovered.status(), 200);
     assert_eq!(recovered.into_inner().name, "Comet");
-    // The route was hit more than once, proving the retry actually replayed the request.
-    assert!(FLAKY_HITS.load(Ordering::SeqCst) >= 2);
+    // The route was hit exactly twice: the 503, then the one replay that recovered. More would mean
+    // the policy retried a success, or something else reached the route.
+    assert_eq!(FLAKY_HITS.load(Ordering::SeqCst), 2);
     println!(
         "retry recovered a flaky route after {} attempt(s)",
         FLAKY_HITS.load(Ordering::SeqCst)

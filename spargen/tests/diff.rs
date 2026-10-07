@@ -231,7 +231,7 @@ fn added_required_field_is_major() {
     // A newly-required field breaks every existing constructor of the type.
     let with_tag = "        id: { type: integer }\n        name: { type: string }\n        tag: { type: string }\n";
     let report = diff(&base(), &spec("", "id, tag", with_tag, ""));
-    assert!(kinds(&report).contains(&ChangeKind::RequiredFieldAdded));
+    assert_eq!(kinds(&report), vec![ChangeKind::RequiredFieldAdded]);
     assert_eq!(report.bump, Impact::Major);
 }
 
@@ -259,10 +259,16 @@ fn overall_bump_is_max_impact_across_mixed_changes() {
     let old = base();
     let new = spec(PARAM_OPTIONAL_INT, "id", only_id, EXTRA_OP);
     let report = diff(&old, &new);
-    let kinds = kinds(&report);
-    assert!(kinds.contains(&ChangeKind::OptionalParamAdded), "{kinds:?}");
-    assert!(kinds.contains(&ChangeKind::FieldRemoved), "{kinds:?}");
-    assert!(kinds.contains(&ChangeKind::OperationAdded), "{kinds:?}");
+    assert_eq!(
+        kinds(&report),
+        vec![
+            ChangeKind::FieldRemoved,
+            ChangeKind::OperationAdded,
+            ChangeKind::OptionalParamAdded,
+        ],
+        "{:?}",
+        report.changes
+    );
     assert_eq!(report.bump, Impact::Major);
     // Deterministic order: most-severe first.
     assert_eq!(report.changes[0].impact, Impact::Major);
@@ -348,8 +354,9 @@ fn renaming_an_operation_id_renames_the_method_and_is_major() {
     let old = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
     let new = full(&pets_get("fetchPets", "", PET_REF), PET_SCHEMA);
     let report = diff(&old, &new);
-    assert!(
-        kinds(&report).contains(&ChangeKind::MethodRenamed),
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::MethodRenamed],
         "{:?}",
         report.changes
     );
@@ -376,8 +383,9 @@ fn adding_a_request_body_is_major() {
     let old = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
     let new = full(&pets_get("listPets", REQUEST_BODY_PET, PET_REF), PET_SCHEMA);
     let report = diff(&old, &new);
-    assert!(
-        kinds(&report).contains(&ChangeKind::RequestBodyAdded),
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::RequestBodyAdded],
         "{:?}",
         report.changes
     );
@@ -389,8 +397,9 @@ fn removing_a_request_body_is_major() {
     let old = full(&pets_get("listPets", REQUEST_BODY_PET, PET_REF), PET_SCHEMA);
     let new = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
     let report = diff(&old, &new);
-    assert!(
-        kinds(&report).contains(&ChangeKind::RequestBodyRemoved),
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::RequestBodyRemoved],
         "{:?}",
         report.changes
     );
@@ -405,8 +414,9 @@ fn changing_a_request_body_type_is_major() {
         PET_SCHEMA,
     );
     let report = diff(&old, &new);
-    assert!(
-        kinds(&report).contains(&ChangeKind::RequestBodyTypeChanged),
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::RequestBodyTypeChanged],
         "{:?}",
         report.changes
     );
@@ -418,8 +428,9 @@ fn changing_the_success_type_is_major() {
     let old = full(&pets_get("listPets", "", PET_REF), PET_SCHEMA);
     let new = full(&pets_get("listPets", "", "{ type: string }"), PET_SCHEMA);
     let report = diff(&old, &new);
-    assert!(
-        kinds(&report).contains(&ChangeKind::SuccessTypeChanged),
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::SuccessTypeChanged],
         "{:?}",
         report.changes
     );
@@ -488,8 +499,9 @@ fn documenting_a_bodyless_success_beside_the_body_is_major() {
         PET_SCHEMA,
     );
     let report = diff(&old, &new);
-    assert!(
-        kinds(&report).contains(&ChangeKind::SuccessTypeChanged),
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::SuccessTypeChanged],
         "{:?}",
         report.changes
     );
@@ -575,8 +587,9 @@ fn removing_the_last_declared_success_makes_default_the_success_type_and_is_majo
         PET_SCHEMA,
     );
     let report = diff(&old, &new);
-    assert!(
-        kinds(&report).contains(&ChangeKind::SuccessTypeChanged),
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::SuccessTypeChanged],
         "{:?}",
         report.changes
     );
@@ -648,8 +661,9 @@ fn changing_a_documented_error_type_is_major() {
     let old = full(&with_error("{ type: string }"), PET_SCHEMA);
     let new = full(&with_error("{ type: integer }"), PET_SCHEMA);
     let report = diff(&old, &new);
-    assert!(
-        kinds(&report).contains(&ChangeKind::ErrorTypeChanged),
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::ErrorTypeChanged],
         "{:?}",
         report.changes
     );
@@ -738,20 +752,26 @@ fn losing_api_error_body_is_major_and_gaining_it_is_minor() {
 
     // `body()`, `Error::api_body()`, and every `E: ApiErrorBody` bound stop compiling.
     let lost = diff(&uniform, &mixed);
-    let lost_kinds = kinds(&lost);
-    assert!(
-        lost_kinds.contains(&ChangeKind::ErrorTypeChanged),
-        "{lost_kinds:?}"
-    );
-    assert!(
-        lost_kinds.contains(&ChangeKind::ApiErrorBodyRemoved),
-        "{lost_kinds:?}"
+    assert_eq!(
+        kinds(&lost),
+        vec![
+            ChangeKind::ApiErrorBodyRemoved,
+            ChangeKind::ErrorTypeChanged
+        ],
+        "{:?}",
+        lost.changes
     );
     assert_eq!(lost.bump, Impact::Major);
 
     // The reverse gains the trait: additive on its own, though the signature change beside it
     // still makes the pair breaking.
     let gained = diff(&mixed, &uniform);
+    assert_eq!(
+        kinds(&gained),
+        vec![ChangeKind::ErrorTypeChanged, ChangeKind::ApiErrorBodyAdded],
+        "{:?}",
+        gained.changes
+    );
     let added = gained
         .changes
         .iter()
@@ -963,16 +983,19 @@ fn adding_a_public_type_is_minor_and_removing_one_is_major() {
     let without = full(&pets_get("listPets", "", PET_REF), PET_WITH_INLINE_OWNER);
     let with = full(&pets_get("listPets", "", PET_REF), PET_AND_OWNER);
 
+    // The field pointing at the type changes with it, so each direction also reports that field.
     let added = diff(&without, &with);
-    assert!(
-        kinds(&added).contains(&ChangeKind::TypeAdded),
+    assert_eq!(
+        kinds(&added),
+        vec![ChangeKind::FieldTypeChanged, ChangeKind::TypeAdded],
         "{:?}",
         added.changes
     );
 
     let removed = diff(&with, &without);
-    assert!(
-        kinds(&removed).contains(&ChangeKind::TypeRemoved),
+    assert_eq!(
+        kinds(&removed),
+        vec![ChangeKind::TypeRemoved, ChangeKind::FieldTypeChanged],
         "{:?}",
         removed.changes
     );
@@ -1036,8 +1059,9 @@ fn changing_a_types_generation_kind_is_major() {
         &full(TWO_OPS, &with_status(STATUS_STRUCT)),
         &full(TWO_OPS, &with_status(STATUS_ENUM_TWO)),
     );
-    assert!(
-        kinds(&report).contains(&ChangeKind::TypeKindChanged),
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::TypeKindChanged],
         "{:?}",
         report.changes
     );
@@ -1080,12 +1104,10 @@ fn changing_a_union_variant_payload_type_is_major() {
         &full(TWO_OPS, &with_status(UNION_STRING_OR_INT)),
         &full(TWO_OPS, &with_status(UNION_STRING_OR_BOOL)),
     );
-    let kinds = kinds(&report);
-    assert!(
-        kinds.contains(&ChangeKind::VariantTypeChanged)
-            || (kinds.contains(&ChangeKind::VariantAdded)
-                && kinds.contains(&ChangeKind::VariantRemoved)),
-        "a union payload change must be reported, not silently dropped: {:?}",
+    assert_eq!(
+        kinds(&report),
+        vec![ChangeKind::VariantTypeChanged],
+        "a union payload change is one changed variant, not a remove and an add: {:?}",
         report.changes
     );
     assert_eq!(report.bump, Impact::Major);
@@ -1102,8 +1124,9 @@ fn flipping_a_field_between_required_and_optional_is_major_both_ways() {
         (&required_name, &optional_name),
     ] {
         let report = diff(old, new);
-        assert!(
-            kinds(&report).contains(&ChangeKind::FieldRequirednessChanged),
+        assert_eq!(
+            kinds(&report),
+            vec![ChangeKind::FieldRequirednessChanged],
             "{:?}",
             report.changes
         );
@@ -1203,10 +1226,16 @@ fn renaming_a_keyword_named_operation_and_field_is_still_major() {
     let new = full(&pets_get("generate", "", PET_REF), renamed_field);
     let report = diff(&old, &new);
 
-    let kinds = kinds(&report);
-    assert!(kinds.contains(&ChangeKind::MethodRenamed), "{kinds:?}");
-    assert!(kinds.contains(&ChangeKind::FieldRemoved), "{kinds:?}");
-    assert!(kinds.contains(&ChangeKind::FieldAdded), "{kinds:?}");
+    assert_eq!(
+        kinds(&report),
+        vec![
+            ChangeKind::MethodRenamed,
+            ChangeKind::FieldRemoved,
+            ChangeKind::FieldAdded,
+        ],
+        "{:?}",
+        report.changes
+    );
     assert_eq!(report.bump, Impact::Major);
 
     // Not vacuous: the field changes are located by the escaped identifier, which is what makes
@@ -1604,9 +1633,12 @@ fn open_narrowing_adds_no_type_the_output_does_not_use() {
     let mut added = Vec::new();
     for (case, spec) in &specs {
         let report = diff_configured(spec, spec, |spec| spec, open);
+        // Opening is the option's only effect: one `VariantAdded` per opened set (`kind`, and each
+        // member a nested `anyOf` names), and nothing else.
+        let kinds = kinds(&report);
         assert!(
-            kinds(&report).contains(&ChangeKind::VariantAdded),
-            "{case}: the option opens `kind`: {report:?}"
+            !kinds.is_empty() && kinds.iter().all(|kind| *kind == ChangeKind::VariantAdded),
+            "{case}: the option only opens `kind`: {report:?}"
         );
         added.extend(
             report

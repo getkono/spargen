@@ -1191,6 +1191,10 @@ mod tests {
     /// CLAUDE.md asks `tests/diff.rs` for "semver classification per change kind". Nine of the 24
     /// had a fixture; the rest were classified by policy alone, with nothing proving the
     /// classifier ever produces them. This makes "per change kind" mean what it says.
+    ///
+    /// A bare mention is not a fixture: `kinds(&report).contains(&ChangeKind::X)` passes beside
+    /// spurious extra changes, and a filter on `X` asserts nothing about whether `X` was produced.
+    /// So each kind must be named inside an `assert_eq!` — the exact change list a fixture expects.
     #[test]
     fn every_kind_has_a_fixture_in_the_diff_suite() {
         // A packaged `.crate` is tested outside the workspace, so the check is skipped there —
@@ -1201,20 +1205,83 @@ mod tests {
             return;
         };
         let suite = read_repo_file(&root, "spargen/tests/diff.rs");
+        let asserted = assert_eq_spans(&suite);
         for kind in all_kinds() {
             let variant = variant_name(kind);
             let needle = format!("ChangeKind::{variant}");
-            let mentioned = suite.match_indices(&needle).any(|(at, _)| {
-                suite[at + needle.len()..]
+            let pinned = suite.match_indices(&needle).any(|(at, _)| {
+                let whole = suite[at + needle.len()..]
                     .chars()
                     .next()
-                    .is_none_or(|next| !next.is_alphanumeric() && next != '_')
+                    .is_none_or(|next| !next.is_alphanumeric() && next != '_');
+                whole && asserted.iter().any(|span| span.contains(&at))
             });
             assert!(
-                mentioned,
-                "{} has no fixture: `{needle}` appears nowhere in spargen/tests/diff.rs",
+                pinned,
+                "{} has no fixture: `{needle}` appears in no `assert_eq!` in spargen/tests/diff.rs",
                 kind.code()
             );
+        }
+    }
+
+    /// The byte span of every `assert_eq!(…)` argument list in `source`, found by bracket depth.
+    /// String literals (plain and raw) are skipped, so a bracket inside a message or an inline
+    /// spec does not end a span early.
+    fn assert_eq_spans(source: &str) -> Vec<std::ops::Range<usize>> {
+        const OPEN: &str = "assert_eq!(";
+        let bytes = source.as_bytes();
+        let mut spans = Vec::new();
+        for (start, _) in source.match_indices(OPEN) {
+            let mut at = start + OPEN.len();
+            let mut depth = 1_usize;
+            while depth > 0 {
+                let Some(&byte) = bytes.get(at) else {
+                    panic!("unbalanced `assert_eq!(` at byte {start} of spargen/tests/diff.rs")
+                };
+                match byte {
+                    b'(' | b'[' | b'{' => depth += 1,
+                    b')' | b']' | b'}' => depth -= 1,
+                    b'"' => at = skip_string(bytes, at, 0),
+                    // A character literal such as `'}'` or `'\''`; a lifetime has no closing `'`.
+                    b'\'' if bytes.get(at + 2) == Some(&b'\'') => at += 2,
+                    b'\''
+                        if bytes.get(at + 1) == Some(&b'\\')
+                            && bytes.get(at + 3) == Some(&b'\'') =>
+                    {
+                        at += 3;
+                    }
+                    b'r' if matches!(bytes.get(at + 1), Some(b'#' | b'"'))
+                        && !bytes[at - 1].is_ascii_alphanumeric()
+                        && bytes[at - 1] != b'_' =>
+                    {
+                        let hashes = bytes[at + 1..].iter().take_while(|b| **b == b'#').count();
+                        at = skip_string(bytes, at + 1 + hashes, hashes);
+                    }
+                    _ => {}
+                }
+                at += 1;
+            }
+            spans.push(start..at);
+        }
+        spans
+    }
+
+    /// The index of the closing `"` (and its `hashes` trailing `#`s) of the string literal whose
+    /// opening `"` is at `open`; a plain literal (`hashes == 0`) honours backslash escapes.
+    fn skip_string(bytes: &[u8], open: usize, hashes: usize) -> usize {
+        let mut at = open + 1;
+        loop {
+            match bytes.get(at) {
+                None => panic!("unterminated string literal at byte {open}"),
+                Some(b'\\') if hashes == 0 => at += 2,
+                Some(b'"')
+                    if bytes[at + 1..].iter().take(hashes).all(|b| *b == b'#')
+                        && bytes.len() > at + hashes =>
+                {
+                    return at + hashes;
+                }
+                Some(_) => at += 1,
+            }
         }
     }
 
