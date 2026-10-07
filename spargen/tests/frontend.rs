@@ -15890,6 +15890,116 @@ fn a_default_an_intersection_narrows_away_is_reported_not_applied() {
     );
 }
 
+/// Issue #432: an intersection whose sides repeat a property merges the `default` either side
+/// declares, whichever side comes first. `allOf: [Narrow, Base]` wires `Base`'s default exactly as
+/// `allOf: [Base, Narrow]` does, and so does a `$ref` whose sibling `properties` declare it. Two
+/// sides that declare different defaults keep the same one in either order, and the one the merged
+/// field cannot carry is reported (`W005`) at the `default` that wrote it.
+const MERGED_DEFAULT_SPEC: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths: {}
+components:
+  schemas:
+    Narrow:
+      type: object
+      properties:
+        p: { type: string }
+    Base:
+      type: object
+      properties:
+        p: { type: string, default: hello }
+    Other:
+      type: object
+      properties:
+        p: { type: string, default: world }
+    Combined:
+      allOf:
+        - $ref: '#/components/schemas/Narrow'
+        - $ref: '#/components/schemas/Base'
+    Reversed:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - $ref: '#/components/schemas/Narrow'
+    Sib:
+      $ref: '#/components/schemas/Narrow'
+      properties:
+        p: { type: string, default: hello }
+    Clash:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - $ref: '#/components/schemas/Other'
+    ClashReversed:
+      allOf:
+        - $ref: '#/components/schemas/Other'
+        - $ref: '#/components/schemas/Base'
+    ClashSibling:
+      $ref: '#/components/schemas/Other'
+      properties:
+        p: { type: string, default: hello }
+"##;
+
+#[test]
+fn an_intersection_merges_a_default_either_side_declares() {
+    for (entry, report) in [
+        ("generate", generate(MERGED_DEFAULT_SPEC)),
+        ("check", check(MERGED_DEFAULT_SPEC)),
+    ] {
+        assert_ne!(report.outcome(), Outcome::Rejected, "{entry}: {report:#?}");
+        let mut pointers: Vec<&str> = report
+            .diagnostics()
+            .iter()
+            .filter(|d| d.code == Code::SchemaDefaultNotApplied)
+            .map(|d| d.pointer.as_str())
+            .collect();
+        pointers.sort_unstable();
+        pointers.dedup();
+        // Only the conflicts report, and in every order at the default they do not keep: `hello`
+        // is kept over `world`, so `Other`'s is the one reported.
+        assert_eq!(
+            pointers,
+            ["/components/schemas/Other/properties/p/default"],
+            "{entry}: {report:#?}"
+        );
+        let messages = messages_for(&report, Code::SchemaDefaultNotApplied);
+        for kept in [
+            "/components/schemas/Base/properties/p/default",
+            "/components/schemas/ClashSibling/properties/p/default",
+        ] {
+            assert!(
+                messages.iter().any(|message| message.contains(kept)),
+                "{entry}: the report names the default `{kept}` kept instead: {messages:#?}"
+            );
+        }
+    }
+
+    let (report, code) = generate_with_code(MERGED_DEFAULT_SPEC);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    for name in [
+        "Base",
+        "Combined",
+        "Reversed",
+        "Sib",
+        "Clash",
+        "ClashReversed",
+        "ClashSibling",
+    ] {
+        let start = code
+            .find(&format!("pub struct {name} {{"))
+            .unwrap_or_else(|| panic!("`{name}` is emitted: {code}"));
+        let body = &code[start..start + code[start..].find('}').unwrap()];
+        assert!(
+            body.contains("Default: `hello`.") && body.contains("default = \"default_"),
+            "`{name}.p` documents and applies `hello`: {body}"
+        );
+    }
+    assert_eq!(
+        code.matches("Some(\"world\".to_owned())").count(),
+        1,
+        "only `Other` itself applies `world`: {code}"
+    );
+}
+
 /// An object `allOf` whose members repeat an object property meets that property pair by pair, and
 /// the struct an earlier pair met it in is superseded by the next meet and not emitted (#428). The
 /// post-lowering passes that report `W005` (#404) and `W006` read only emitted types, so a

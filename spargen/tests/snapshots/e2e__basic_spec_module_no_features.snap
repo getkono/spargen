@@ -4730,6 +4730,104 @@ pub mod types {
         pub fraction: Option<NarrowDefaultSiblingConstraintfraction>,
     }
     #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MergedDefaultNarrow {
+        #[serde(
+            rename = "p",
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub p: Option<MergedDefaultNarrowp>,
+    }
+    pub type MergedDefaultNarrowp = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MergedDefaultBase {
+        ///Default: `hello`.
+        #[serde(
+            rename = "p",
+            default = "default_65_p",
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub p: Option<MergedDefaultBasep>,
+    }
+    fn default_65_p() -> Option<MergedDefaultBasep> {
+        Some("hello".to_owned())
+    }
+    pub type MergedDefaultBasep = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MergedDefaultOther {
+        ///Default: `world`.
+        #[serde(
+            rename = "p",
+            default = "default_67_p",
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub p: Option<MergedDefaultOtherp>,
+    }
+    fn default_67_p() -> Option<MergedDefaultOtherp> {
+        Some("world".to_owned())
+    }
+    pub type MergedDefaultOtherp = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MergedDefault {
+        ///Default: `hello`.
+        #[serde(
+            rename = "p",
+            default = "default_69_p",
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub p: Option<MergedDefaultNarrowp>,
+    }
+    fn default_69_p() -> Option<MergedDefaultNarrowp> {
+        Some("hello".to_owned())
+    }
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MergedDefaultSibling {
+        ///Default: `hello`.
+        #[serde(
+            rename = "p",
+            default = "default_70_p",
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub p: Option<MergedDefaultNarrowp>,
+    }
+    fn default_70_p() -> Option<MergedDefaultNarrowp> {
+        Some("hello".to_owned())
+    }
+    pub type MergedDefaultSiblingConstraintp = String;
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MergedDefaultSiblingConstraint {
+        ///Default: `hello`.
+        #[serde(
+            rename = "p",
+            default = "default_72_p",
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub p: Option<MergedDefaultSiblingConstraintp>,
+    }
+    fn default_72_p() -> Option<MergedDefaultSiblingConstraintp> {
+        Some("hello".to_owned())
+    }
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MergedDefaultClash {
+        ///Default: `hello`.
+        #[serde(
+            rename = "p",
+            default = "default_73_p",
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "decode_present",
+        )]
+        pub p: Option<MergedDefaultOtherp>,
+    }
+    fn default_73_p() -> Option<MergedDefaultOtherp> {
+        Some("hello".to_owned())
+    }
+    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct ForbiddenProperty {
         #[serde(
             rename = "x",
@@ -4876,7 +4974,7 @@ pub mod types {
         ///Default: `red`.
         #[serde(
             rename = "colour",
-            default = "default_68_colour",
+            default = "default_79_colour",
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -4891,7 +4989,7 @@ pub mod types {
         #[serde(rename = "maybe", default, skip_serializing_if = "Option::is_none")]
         pub maybe: Option<OptionalFieldsmaybe>,
     }
-    fn default_68_colour() -> Option<OptionalFieldscolour> {
+    fn default_79_colour() -> Option<OptionalFieldscolour> {
         Some("red".to_owned())
     }
     pub type OptionalFieldsname = String;
@@ -5992,7 +6090,7 @@ pub mod types {
         ///Default: `red`.
         #[serde(
             rename = "color",
-            default = "default_139_color",
+            default = "default_150_color",
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -6000,7 +6098,7 @@ pub mod types {
         ///Default: `true`.
         #[serde(
             rename = "enabled",
-            default = "default_139_enabled",
+            default = "default_150_enabled",
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -6008,7 +6106,7 @@ pub mod types {
         ///Default: `1.5`.
         #[serde(
             rename = "ratio",
-            default = "default_139_ratio",
+            default = "default_150_ratio",
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
@@ -6027,22 +6125,22 @@ pub mod types {
         ///Default: `auto`.
         #[serde(
             rename = "mode",
-            default = "default_139_mode",
+            default = "default_150_mode",
             skip_serializing_if = "Option::is_none",
             deserialize_with = "decode_present",
         )]
         pub mode: Option<Mode>,
     }
-    fn default_139_color() -> Option<Settingscolor> {
+    fn default_150_color() -> Option<Settingscolor> {
         Some("red".to_owned())
     }
-    fn default_139_enabled() -> Option<Settingsenabled> {
+    fn default_150_enabled() -> Option<Settingsenabled> {
         Some(true)
     }
-    fn default_139_ratio() -> Option<Settingsratio> {
+    fn default_150_ratio() -> Option<Settingsratio> {
         Some(1.5)
     }
-    fn default_139_mode() -> Option<Mode> {
+    fn default_150_mode() -> Option<Mode> {
         Some(Mode::Auto)
     }
     pub type Settingscolor = String;
