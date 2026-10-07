@@ -56,7 +56,7 @@ struct OpSurface {
     method_name: String,
     /// Parameters keyed by `(wire name, location)`: OpenAPI identifies a parameter by the pair, so a
     /// path `id` and a query `id` are two distinct entries rather than one overwriting the other.
-    params: BTreeMap<(String, &'static str), ParamSurface>,
+    params: BTreeMap<ParamKey, ParamSurface>,
     /// The canonical request-body type, or `None` for a bodyless operation. A present body is a
     /// required `&T` argument in the generated signature (the IR does not model an optional body).
     request_body: Option<String>,
@@ -68,6 +68,9 @@ struct OpSurface {
     /// implement `ApiErrorBody`.
     error_body: Option<String>,
 }
+
+/// A parameter's identity: its wire name and its location as the OpenAPI `in` value spells it.
+type ParamKey = (String, &'static str);
 
 /// A single parameter's surface: its canonical type and whether it is required (required params are
 /// positional method arguments; optional ones ride in the `…Params` struct).
@@ -571,6 +574,24 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
         let (name, loc) = param_key;
         let location = format!("{key} param `{name}` ({loc})");
         match (old.params.get(param_key), new.params.get(param_key)) {
+            // The arrival side of a move; its departure side compares the pair.
+            (None, Some(_)) if moved_param(param_key, &new.params, &old.params).is_some() => {}
+            (Some(old_param), None) => match moved_param(param_key, &old.params, &new.params) {
+                Some(to) => diff_param(
+                    format!("{key} param `{name}` ({loc} -> {})", to.1),
+                    old_param,
+                    &new.params[to],
+                    changes,
+                ),
+                None => changes.push(Change::new(
+                    ChangeKind::ParamRemoved,
+                    location,
+                    format!("parameter removed (was `{}`)", old_param.ty),
+                )),
+            },
+            (Some(old_param), Some(new_param)) => {
+                diff_param(location, old_param, new_param, changes);
+            }
             (None, Some(param)) => {
                 let kind = if param.required {
                     ChangeKind::RequiredParamAdded
@@ -591,36 +612,60 @@ fn diff_operation(key: &str, old: &OpSurface, new: &OpSurface, changes: &mut Vec
                     ),
                 ));
             }
-            (Some(param), None) => changes.push(Change::new(
-                ChangeKind::ParamRemoved,
-                location,
-                format!("parameter removed (was `{}`)", param.ty),
-            )),
-            (Some(old_param), Some(new_param)) => {
-                if old_param.ty != new_param.ty {
-                    changes.push(Change::new(
-                        ChangeKind::ParamTypeChanged,
-                        location.clone(),
-                        format!("parameter type `{}` -> `{}`", old_param.ty, new_param.ty),
-                    ));
-                }
-                if old_param.required != new_param.required {
-                    changes.push(Change::new(
-                        ChangeKind::ParamRequirednessChanged,
-                        location,
-                        format!(
-                            "parameter now {}",
-                            if new_param.required {
-                                "required"
-                            } else {
-                                "optional"
-                            }
-                        ),
-                    ));
-                }
-            }
             (None, None) => unreachable!("key drawn from the union of both maps"),
         }
+    }
+}
+
+/// The key a parameter moved to: `key`'s wire name is declared exactly once in `here` and exactly
+/// once in `there`, at a different location. The generated identifier is allocated from the wire
+/// name (the location only ranks two names that escape to the same spelling), so such a move keeps
+/// the argument or `…Params` field the consumer writes, and the pair is compared as one parameter. A name declared in more than one location on either side is ambiguous, and
+/// its keys stay unpaired.
+fn moved_param<'a, V>(
+    key: &ParamKey,
+    here: &BTreeMap<ParamKey, V>,
+    there: &'a BTreeMap<ParamKey, V>,
+) -> Option<&'a ParamKey> {
+    let named = |(name, _): &&ParamKey| *name == key.0;
+    let mut there_named = there.keys().filter(named);
+    match (
+        here.keys().filter(named).count(),
+        there_named.next(),
+        there_named.next(),
+    ) {
+        (1, Some(to), None) if to != key => Some(to),
+        _ => None,
+    }
+}
+
+/// The changes between two declarations of one parameter, reported at `location`.
+fn diff_param(
+    location: String,
+    old_param: &ParamSurface,
+    new_param: &ParamSurface,
+    changes: &mut Vec<Change>,
+) {
+    if old_param.ty != new_param.ty {
+        changes.push(Change::new(
+            ChangeKind::ParamTypeChanged,
+            location.clone(),
+            format!("parameter type `{}` -> `{}`", old_param.ty, new_param.ty),
+        ));
+    }
+    if old_param.required != new_param.required {
+        changes.push(Change::new(
+            ChangeKind::ParamRequirednessChanged,
+            location,
+            format!(
+                "parameter now {}",
+                if new_param.required {
+                    "required"
+                } else {
+                    "optional"
+                }
+            ),
+        ));
     }
 }
 
