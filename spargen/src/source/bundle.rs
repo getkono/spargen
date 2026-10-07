@@ -67,9 +67,7 @@ impl InputBundle {
     /// target is walked like a document of its own (see [`collect_refs`]).
     pub(crate) fn load(root: &Utf8Path, diags: &mut Diagnostics) -> Result<InputBundle, Aborted> {
         let mut bundle = InputBundle {
-            working_dir: std::env::current_dir()
-                .ok()
-                .and_then(|dir| Utf8PathBuf::from_path_buf(dir).ok()),
+            working_dir: working_dir(),
             ..InputBundle::default()
         };
 
@@ -418,17 +416,10 @@ impl InputBundle {
             })
     }
 
-    /// The document identity of a local `path`: absolute against the load-time working directory,
-    /// with `.` and `..` segments removed lexically — what RFC 3986 §5.2.4 does to a relative
-    /// reference resolved against its base URI, which is how a `$ref` names a document. Lexical
-    /// rather than `canonicalize`: it reads nothing from the filesystem, so it is deterministic and
-    /// usable where the bundle promises no I/O, and it identifies documents the way references do,
-    /// by URI, so a symlink is not followed.
+    /// The document identity of a local `path`, against the load-time working directory: see
+    /// [`local_identity`].
     fn local_identity(&self, path: &Utf8Path) -> Utf8PathBuf {
-        match &self.working_dir {
-            Some(dir) if path.is_relative() => normalize_lexically(&dir.join(path)),
-            _ => normalize_lexically(path),
-        }
+        local_identity(self.working_dir.as_deref(), path)
     }
 
     fn resolve_path(&self, base: FileId, path: &str) -> Utf8PathBuf {
@@ -486,6 +477,29 @@ fn parse_by_name(
         Some("json") => parse_json(id, text, diags),
         Some("yaml" | "yml") => parse_yaml(id, text, diags),
         _ => parse_yaml(id, text, diags).or_else(|_| parse_json(id, text, diags)),
+    }
+}
+
+/// The working directory a relative local path is made absolute against by [`local_identity`], or
+/// `None` when it is unreadable or not UTF-8 (relative paths are then compared relative). The build
+/// and `spargen lock` each capture it once, so identity is a pure function of the path for a run.
+pub(super) fn working_dir() -> Option<Utf8PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .and_then(|dir| Utf8PathBuf::from_path_buf(dir).ok())
+}
+
+/// The document identity of a local `path`: absolute against `working_dir` (see [`working_dir`]),
+/// with `.` and `..` segments removed lexically — what RFC 3986 §5.2.4 does to a relative
+/// reference resolved against its base URI, which is how a `$ref` names a document. Lexical
+/// rather than `canonicalize`: it reads nothing from the filesystem, so it is deterministic and
+/// usable where the bundle promises no I/O, and it identifies documents the way references do,
+/// by URI, so a symlink is not followed. The build and `spargen lock` both key local documents by
+/// it, so the lock reads exactly the local documents the build reads (#451).
+pub(super) fn local_identity(working_dir: Option<&Utf8Path>, path: &Utf8Path) -> Utf8PathBuf {
+    match working_dir {
+        Some(dir) if path.is_relative() => normalize_lexically(&dir.join(path)),
+        _ => normalize_lexically(path),
     }
 }
 
