@@ -1103,6 +1103,146 @@ components:
     }
 }
 
+/// After the meet with a `$ref` target, each `oneOf` branch keeps its own nullability, so branches
+/// that emit one Rust type need not agree on `null` (#402). Beside `NI: {type: [integer, 'null']}`,
+/// `{minimum: 0}` says nothing about `null` and meets `NI` to a nullable integer, while
+/// `{type: integer}` meets it to a plain one: every integer matches both, so they are one type
+/// however `null` falls, and `W001` reports it. `null` is valid exactly when one branch accepts it:
+/// with one untyped branch it matches that branch alone, and with two it matches both and fails
+/// exactly-one.
+#[test]
+fn a_ref_sibling_one_of_whose_branches_differ_only_in_nullability_collapses() {
+    for (branches, nullable) in [
+        ("[ { minimum: 0 }, { type: integer } ]", true),
+        (
+            "[ { minimum: 0 }, { maximum: 10 }, { type: integer } ]",
+            false,
+        ),
+    ] {
+        let spec = format!(
+            r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+    NI: {{ type: [integer, 'null'] }}
+    Holder:
+      type: object
+      properties:
+        x:
+          $ref: '#/components/schemas/NI'
+          oneOf: {branches}
+      required: [x]
+"##
+        );
+        let (report, code) = generate_with_code(&spec);
+        for (entry, report) in [("generate", &report), ("check", &check(&spec))] {
+            assert_ne!(
+                report.outcome(),
+                Outcome::Rejected,
+                "{branches} via {entry}: {report:#?}"
+            );
+            assert!(
+                report.diagnostics().iter().any(|d| {
+                    d.code == Code::ValidationKeywordIgnored
+                        && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+                }),
+                "{branches} via {entry}: the collapse must warn at `x`: {report:#?}"
+            );
+        }
+        let types = types_module(&code);
+        let x = field_type(&types, "pub x")
+            .unwrap_or_else(|| panic!("{branches}: no `x` field: {types}"));
+        assert_eq!(
+            x.starts_with("Option<"),
+            nullable,
+            "{branches}: `x` is `{x}`, but `null` is {} here: {types}",
+            if nullable { "valid" } else { "invalid" }
+        );
+        let inner = x
+            .strip_prefix("Option<")
+            .and_then(|inner| inner.strip_suffix('>'))
+            .unwrap_or(&x);
+        assert!(
+            inner == "i64" || types.contains(&format!("pub type {inner} = i64;")),
+            "{branches}: `x` must be the one integer every branch lowers to, not a union: {types}"
+        );
+    }
+
+    // Partly shared: beside `NS: {type: [string, 'null']}`, `{maxLength: 0}` meets it to a nullable
+    // string and `{type: string, maxLength: 0}` to a plain one, while `{enum: [abc]}` is a string
+    // enum of its own, which neither of the others admits. The first two are one variant, and
+    // `null` matches the untyped one alone, so that variant accepts it.
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Holder' } }
+components:
+  schemas:
+    NS: { type: [string, 'null'] }
+    Holder:
+      type: object
+      properties:
+        x:
+          $ref: '#/components/schemas/NS'
+          oneOf:
+            - { maxLength: 0 }
+            - { type: string, maxLength: 0 }
+            - { enum: [abc] }
+      required: [x]
+"##;
+    let (report, code) = generate_with_code(spec);
+    for (entry, report) in [("generate", &report), ("check", &check(spec))] {
+        assert_ne!(
+            report.outcome(),
+            Outcome::Rejected,
+            "via {entry}: {report:#?}"
+        );
+        assert!(
+            report.diagnostics().iter().any(|d| {
+                d.code == Code::ValidationKeywordIgnored
+                    && d.pointer.as_str() == "/components/schemas/Holder/properties/x"
+            }),
+            "partly shared via {entry}: the merge must warn at `x`: {report:#?}"
+        );
+    }
+    let types = types_module(&code);
+    let x = field_type(&types, "pub x").unwrap_or_else(|| panic!("no `x` field: {types}"));
+    let variants = enum_variants(&types, &x);
+    assert_eq!(
+        variants.len(),
+        2,
+        "the two `maxLength: 0` branches must be one variant beside the enum branch: {types}"
+    );
+    assert_eq!(
+        variants
+            .iter()
+            .filter(|variant| variant.contains("(Option<"))
+            .count(),
+        1,
+        "the merged variant accepts `null`, which only its untyped branch matches: {variants:?}"
+    );
+}
+
 /// Issue #425: an object `allOf` admits `null` exactly when every member does, as its `$ref`-sibling
 /// spelling and the all-scalar `allOf` already do. A nullable `$ref` member decides `null` for
 /// itself; an untyped inline member's object keywords bind objects only, so it admits `null`
