@@ -13,7 +13,7 @@ use semver::{Op, Version, VersionReq};
 use serde::{Deserialize, Serialize};
 
 use crate::diag::{Diagnostic, OutcomeClaim};
-use crate::ir::{Api, MediaType, Prim, TypeGraph, TypeId, TypeKind};
+use crate::ir::{Api, MediaType, Prim, TypeKind};
 use crate::{Code, JsonPointer, Spec};
 
 const BYTES: Dependency = Dependency::stable("bytes", "1.12.1", 2);
@@ -95,7 +95,7 @@ impl RuntimeRequirements {
                     .as_ref()
                     .is_some_and(|body| body.media == MediaType::Multipart)
             }),
-            bytes_serde: bytes_need_serde(api),
+            bytes_serde: api.uses_bytes_serde(),
             streams: api.uses_streams(),
             xml: api.uses_xml(),
             uuid: spec.uuid
@@ -105,119 +105,6 @@ impl RuntimeRequirements {
             time: spec.time && api.uses_time(),
         }
     }
-}
-
-fn bytes_need_serde(api: &Api) -> bool {
-    let model_needs_serde =
-        api.types
-            .iter()
-            .any(|(_, definition)| match &definition.kind {
-                TypeKind::Struct(object) => {
-                    object
-                        .fields
-                        .iter()
-                        .any(|field| contains_bytes(&api.types, field.ty.id, &mut BTreeSet::new()))
-                        || match &object.additional {
-                            crate::ir::AdditionalProps::Typed(ty) => {
-                                contains_bytes(&api.types, ty.id, &mut BTreeSet::new())
-                            }
-                            crate::ir::AdditionalProps::Allow
-                            | crate::ir::AdditionalProps::Deny => false,
-                        }
-                }
-                TypeKind::Union(union) => union
-                    .variants
-                    .iter()
-                    .any(|variant| contains_bytes(&api.types, variant.ty.id, &mut BTreeSet::new())),
-                // Requirements are derived only from an `Api` that passed `check_invariants`, which
-                // rejects a surviving reservation. Answering `false` would under-declare a runtime
-                // dependency for a shape nobody computed.
-                TypeKind::Reserved => unreachable!(
-                    "a reservation reached the runtime contract; `check_invariants` should have \
-                     rejected it"
-                ),
-                _ => false,
-            });
-    model_needs_serde
-        || api.operations.iter().any(|operation| {
-            operation.params.iter().any(|parameter| {
-                matches!(
-                    &parameter.style,
-                    crate::ir::ParamStyle::Content(MediaType::Json)
-                ) && contains_bytes(&api.types, parameter.ty.id, &mut BTreeSet::new())
-            }) || operation.request_body.as_ref().is_some_and(|body| {
-                body.ty
-                    .is_some_and(|ty| typed_body_needs_bytes_serde(api, body.media, ty.id))
-            }) || operation
-                .responses
-                .by_status
-                .iter()
-                .map(|(_, response)| response)
-                .chain(operation.responses.default.iter())
-                .any(|response| {
-                    response.body.is_some_and(|ty| {
-                        response
-                            .media
-                            .is_some_and(|media| typed_body_needs_bytes_serde(api, media, ty.id))
-                    })
-                })
-        })
-}
-
-fn typed_body_needs_bytes_serde(api: &Api, media: MediaType, id: TypeId) -> bool {
-    serde_body_media(media)
-        && (media.stream_framing().is_some()
-            || !matches!(
-                api.types.get(id).map(|definition| &definition.kind),
-                Some(TypeKind::Bytes)
-            ))
-        && contains_bytes(&api.types, id, &mut BTreeSet::new())
-}
-
-fn serde_body_media(media: MediaType) -> bool {
-    matches!(
-        media,
-        MediaType::Json
-            | MediaType::FormUrlEncoded
-            | MediaType::Xml
-            | MediaType::EventStream
-            | MediaType::Ndjson
-            | MediaType::JsonSequence
-    )
-}
-
-fn contains_bytes(types: &TypeGraph, id: TypeId, visiting: &mut BTreeSet<TypeId>) -> bool {
-    if !visiting.insert(id) {
-        return false;
-    }
-    let contains = match types.get(id).map(|definition| &definition.kind) {
-        Some(TypeKind::Bytes) => true,
-        Some(TypeKind::Struct(object)) => {
-            object
-                .fields
-                .iter()
-                .any(|field| contains_bytes(types, field.ty.id, visiting))
-                || match &object.additional {
-                    crate::ir::AdditionalProps::Typed(ty) => contains_bytes(types, ty.id, visiting),
-                    crate::ir::AdditionalProps::Allow | crate::ir::AdditionalProps::Deny => false,
-                }
-        }
-        Some(TypeKind::Array(item)) => contains_bytes(types, item.id, visiting),
-        Some(TypeKind::Tuple(items)) => items
-            .iter()
-            .any(|item| contains_bytes(types, item.id, visiting)),
-        Some(TypeKind::Union(union)) => union
-            .variants
-            .iter()
-            .any(|variant| contains_bytes(types, variant.ty.id, visiting)),
-        // Unreachable for the reason `bytes_need_serde` states: only a checked `Api` gets here.
-        Some(TypeKind::Reserved) => unreachable!(
-            "a reservation reached the runtime contract; `check_invariants` should have rejected it"
-        ),
-        _ => false,
-    };
-    visiting.remove(&id);
-    contains
 }
 
 /// Whether this process is an actual Cargo build script. Only there do `cargo:` directives reach
