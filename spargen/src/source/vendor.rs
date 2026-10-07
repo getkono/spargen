@@ -897,6 +897,8 @@ mod tests {
     /// or `..` segments, and the root reaches it under another. The build resolves the reference
     /// to `lib.yaml` and never reads the file at `virtual.yaml`, so neither does the lock: its
     /// remote reference, which the stub would fail with `E025`, is neither fetched nor pinned.
+    /// The `..` reference spelling passes through a directory that exists, so it reads
+    /// `virtual.yaml` on disk if the lock ever follows it.
     #[test]
     fn a_local_self_and_a_reference_spelled_differently_are_one_document() {
         for (self_spelling, ref_spelling) in [
@@ -933,6 +935,9 @@ mod tests {
                          \x20 schemas:\n\
                          \x20   V: { $ref: \"https://api.example.com/missing.yaml#/Z\" }\n",
                     ),
+                    // `nowhere/` exists, so `nowhere/../virtual.yaml` reads `virtual.yaml` on
+                    // disk: a lock keyed by raw spelling would read and fetch through it.
+                    ("nowhere/unreferenced.yaml", "type: string\n"),
                 ],
                 &[],
             );
