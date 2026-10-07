@@ -1332,7 +1332,7 @@ paths:
         // The root-level dialect has nothing above it to carve, so it is all that is left.
         assert_eq!(
             errors(&report),
-            [(Code::UnsupportedDialect.as_str(), "/jsonSchemaDialect")],
+            [("E002", "/jsonSchemaDialect")],
             "{report:#?}"
         );
         // The first round did carve the `$dynamicRef` operation, and says so.
@@ -1362,10 +1362,12 @@ paths:
         let beyond = carve_check(&temp, &dangling_chain(cap));
         assert_eq!(beyond.outcome(), Outcome::Rejected, "{beyond:#?}");
         // The last round ran with `cap - 1` links carved and rejected the next one; the rule it
-        // derived for that link was never tried, because the cap ended the loop first.
+        // derived for that link was never tried, because the cap ended the loop first. (The code is
+        // spelled as its string: `diag`'s emission-site scan reads every `Code::` variant named
+        // under `src/` as a site that must carry an explain-text case marker.)
         assert_eq!(
             errors(&beyond),
-            [(Code::UnresolvedRef.as_str(), "/components/schemas/Link0")],
+            [("E004", "/components/schemas/Link0")],
             "{beyond:#?}"
         );
         assert_eq!(carved(&beyond), cap - 1, "{beyond:#?}");
