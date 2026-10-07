@@ -1244,4 +1244,269 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         read_repo_file(root, "tests/no-such-suite.rs");
     }
+
+    /// One node of a synthetic type tree: every [`crate::ir::TypeKind`] `canon_ty` renders, with
+    /// the nullability and boxing a reference to it may carry.
+    #[derive(Debug, Clone)]
+    struct Node {
+        shape: Shape,
+        nullable: bool,
+        boxed: bool,
+    }
+
+    #[derive(Debug, Clone)]
+    enum Shape {
+        Primitive(crate::ir::Prim),
+        /// A struct, string enum, union or uninhabited type: rendered by its allocated name.
+        Nominal(NominalKind),
+        IntEnum,
+        BoolEnum,
+        Bytes,
+        Null,
+        Any,
+        Array(Box<Node>),
+        Tuple(Vec<Node>),
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum NominalKind {
+        Struct,
+        StringEnum,
+        Union,
+        Never,
+    }
+
+    fn node() -> impl proptest::strategy::Strategy<Value = Node> {
+        use crate::ir::Prim;
+        use proptest::prelude::*;
+        let leaf = prop_oneof![
+            proptest::sample::select(vec![
+                Prim::Bool,
+                Prim::String,
+                Prim::I32,
+                Prim::I64,
+                Prim::F64,
+                Prim::Uuid,
+                Prim::DateTime,
+                Prim::Date,
+            ])
+            .prop_map(Shape::Primitive),
+            proptest::sample::select(vec![
+                NominalKind::Struct,
+                NominalKind::StringEnum,
+                NominalKind::Union,
+                NominalKind::Never,
+            ])
+            .prop_map(Shape::Nominal),
+            Just(Shape::IntEnum),
+            Just(Shape::BoolEnum),
+            Just(Shape::Bytes),
+            Just(Shape::Null),
+            Just(Shape::Any),
+        ];
+        let wrap = |shape| {
+            (shape, any::<bool>(), any::<bool>()).prop_map(|(shape, nullable, boxed)| Node {
+                shape,
+                nullable,
+                boxed,
+            })
+        };
+        wrap(leaf.boxed()).prop_recursive(4, 24, 4, move |inner| {
+            wrap(
+                prop_oneof![
+                    inner.clone().prop_map(|item| Shape::Array(Box::new(item))),
+                    proptest::collection::vec(inner, 0..4).prop_map(Shape::Tuple),
+                ]
+                .boxed(),
+            )
+        })
+    }
+
+    /// Insert `node` into `api`'s type graph bottom-up, naming each nominal definition, and return
+    /// the reference to it. Definitions are made through `reserve` and filled in place, which is
+    /// how a graph is built without naming `crate::diag` (a layer this subsystem does not take).
+    fn insert(
+        node: &Node,
+        api: &mut crate::ir::Api,
+        names: &mut crate::name::Names,
+    ) -> crate::ir::Ty {
+        use crate::ir::{
+            AdditionalProps, Openness, ScalarEnum, ScalarRepr, Struct, TypeKind, Union, UnionMode,
+            UnionStrategy,
+        };
+        let scalar_enum = |repr| {
+            TypeKind::Enum(ScalarEnum {
+                repr,
+                variants: Vec::new(),
+                openness: Openness::Closed,
+            })
+        };
+        let kind = match &node.shape {
+            Shape::Primitive(prim) => TypeKind::Primitive(*prim),
+            Shape::Nominal(NominalKind::Struct) => TypeKind::Struct(Struct {
+                fields: Vec::new(),
+                additional: AdditionalProps::Allow,
+            }),
+            Shape::Nominal(NominalKind::StringEnum) => scalar_enum(ScalarRepr::String),
+            Shape::Nominal(NominalKind::Union) => TypeKind::Union(Union {
+                variants: Vec::new(),
+                strategy: UnionStrategy::Trial {
+                    mode: UnionMode::OneOf,
+                    priorities: Vec::new(),
+                },
+            }),
+            Shape::Nominal(NominalKind::Never) => TypeKind::Never,
+            Shape::IntEnum => scalar_enum(ScalarRepr::Int),
+            Shape::BoolEnum => scalar_enum(ScalarRepr::Bool),
+            Shape::Bytes => TypeKind::Bytes,
+            Shape::Null => TypeKind::Null,
+            Shape::Any => TypeKind::Any,
+            Shape::Array(item) => TypeKind::Array(Box::new(insert(item, api, names))),
+            Shape::Tuple(items) => {
+                TypeKind::Tuple(items.iter().map(|item| insert(item, api, names)).collect())
+            }
+        };
+        let id = api.types.reserve();
+        api.types.get_mut(id).expect("just reserved").kind = kind;
+        if let Shape::Nominal(_) = node.shape {
+            names.types.insert(
+                id,
+                crate::name::Ident::new(format!("Nominal{}", names.types.len())),
+            );
+        }
+        crate::ir::Ty {
+            id,
+            nullable: node.nullable,
+            boxed: node.boxed,
+        }
+    }
+
+    /// The single generic argument of `ty` when it is the bare path `wrapper<…>`.
+    fn generic_argument<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<&'a syn::Type> {
+        let syn::Type::Path(path) = ty else {
+            return None;
+        };
+        let [segment] = path.path.segments.iter().collect::<Vec<_>>()[..] else {
+            return None;
+        };
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return None;
+        };
+        if segment.ident != wrapper {
+            return None;
+        }
+        match arguments.args.iter().collect::<Vec<_>>()[..] {
+            [syn::GenericArgument::Type(inner)] => Some(inner),
+            _ => None,
+        }
+    }
+
+    /// The bare single-identifier path `ty` names, if it is one.
+    fn bare_name(ty: &syn::Type) -> Option<String> {
+        let syn::Type::Path(path) = ty else {
+            return None;
+        };
+        match path.path.segments.iter().collect::<Vec<_>>()[..] {
+            [segment] if segment.arguments.is_empty() => Some(segment.ident.to_string()),
+            _ => None,
+        }
+    }
+
+    /// Hold the parsed rendering of `node` to its structure: `Option<…>` exactly when nullable,
+    /// never a `Box` (boxing is not a surface distinction), a tuple of exactly N elements exactly
+    /// when the kind is `Tuple(N)` (`Null` is the one other `()`, the unit type codegen also emits
+    /// for it), `Vec<…>` around an array's item, and otherwise the scalar label or allocated name.
+    fn check(
+        node: &Node,
+        ty: crate::ir::Ty,
+        parsed: &syn::Type,
+        api: &crate::ir::Api,
+        names: &crate::name::Names,
+    ) -> Result<(), proptest::test_runner::TestCaseError> {
+        use crate::ir::TypeKind;
+        use proptest::{prop_assert, prop_assert_eq};
+        let parsed = if node.nullable {
+            let inner = generic_argument(parsed, "Option");
+            prop_assert!(inner.is_some(), "a nullable reference renders `Option<…>`");
+            inner.expect("checked")
+        } else {
+            prop_assert!(generic_argument(parsed, "Option").is_none());
+            parsed
+        };
+        prop_assert!(
+            generic_argument(parsed, "Box").is_none(),
+            "boxing is rendered"
+        );
+        let kind = &api.types.get(ty.id).expect("inserted").kind;
+        let tuple = match parsed {
+            syn::Type::Tuple(tuple) => Some(tuple.elems.len()),
+            _ => None,
+        };
+        let expected_tuple = match kind {
+            TypeKind::Tuple(items) => Some(items.len()),
+            TypeKind::Null => Some(0),
+            TypeKind::Reserved => unreachable!("`insert` fills every reservation it makes"),
+            _ => None,
+        };
+        prop_assert_eq!(tuple, expected_tuple, "tuple arity of {:?}", kind);
+        prop_assert!(
+            !matches!(parsed, syn::Type::Paren(_)),
+            "a parenthesized type"
+        );
+        let expected = match &node.shape {
+            Shape::Tuple(nodes) => {
+                let (syn::Type::Tuple(tuple), TypeKind::Tuple(items)) = (parsed, kind) else {
+                    unreachable!("arity checked above")
+                };
+                for ((node, item), element) in nodes.iter().zip(items).zip(&tuple.elems) {
+                    check(node, *item, element, api, names)?;
+                }
+                return Ok(());
+            }
+            Shape::Array(node) => {
+                let TypeKind::Array(item) = kind else {
+                    unreachable!("`insert` builds an array for an array node")
+                };
+                let inner = generic_argument(parsed, "Vec");
+                prop_assert!(inner.is_some(), "an array renders `Vec<…>`");
+                return check(node, **item, inner.expect("checked"), api, names);
+            }
+            // The arity check above is all there is to `()`.
+            Shape::Null => return Ok(()),
+            Shape::Primitive(prim) => super::prim_label(*prim).to_owned(),
+            Shape::Nominal(_) => names.types[&ty.id].as_str().to_owned(),
+            Shape::IntEnum => "i64".to_owned(),
+            Shape::BoolEnum => "bool".to_owned(),
+            Shape::Bytes => "Bytes".to_owned(),
+            Shape::Any => "Value".to_owned(),
+        };
+        prop_assert_eq!(bare_name(parsed), Some(expected));
+        Ok(())
+    }
+
+    proptest::proptest! {
+        /// `canon_ty` renders every type tree as a Rust type that parses, and whose structure is
+        /// the tree's: in particular a one-position tuple keeps the trailing comma that makes it
+        /// `(T,)` rather than a parenthesized `T` (#449), at any depth.
+        #[test]
+        fn canon_ty_parses_as_the_type_its_tree_describes(node in node()) {
+            let mut api = crate::ir::Api {
+                info: crate::ir::Info {
+                    title: "T".to_owned(),
+                    version: "1".to_owned(),
+                    description: None,
+                },
+                servers: Vec::new(),
+                operations: Vec::new(),
+                types: Default::default(),
+                security_schemes: Default::default(),
+            };
+            let mut names = crate::name::Names::default();
+            let ty = insert(&node, &mut api, &mut names);
+            let rendered = super::canon_ty(ty, &api, &names);
+            let parsed = syn::parse_str::<syn::Type>(&rendered);
+            proptest::prop_assert!(parsed.is_ok(), "{rendered:?} does not parse as a type");
+            check(&node, ty, &parsed.expect("checked"), &api, &names)?;
+        }
+    }
 }
