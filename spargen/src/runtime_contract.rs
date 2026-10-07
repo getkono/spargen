@@ -343,6 +343,18 @@ fn target_table_name(key: &str) -> String {
     }
 }
 
+/// The consuming package's manifest, as a build script's environment names it:
+/// `CARGO_MANIFEST_PATH` when set, otherwise `Cargo.toml` inside `CARGO_MANIFEST_DIR`, otherwise
+/// `None`.
+///
+/// Its edge cases differ from `generate_api!`'s locator in `spargen-macro`; aligning the two would
+/// change what a build script audits, so they are stated here rather than unified:
+///
+/// - A variable whose value is not UTF-8 counts as unset, so a non-UTF-8 `CARGO_MANIFEST_PATH`
+///   falls back to `CARGO_MANIFEST_DIR` silently. The macro's locator reports it instead.
+/// - An empty value is taken as given: an empty `CARGO_MANIFEST_PATH` names the empty path, which
+///   the audit then fails to read, and an empty `CARGO_MANIFEST_DIR` names `Cargo.toml` relative
+///   to the working directory. The macro's locator treats an empty value as unset.
 pub(crate) fn manifest_from_env() -> Option<Utf8PathBuf> {
     std::env::var("CARGO_MANIFEST_PATH")
         .ok()
@@ -361,21 +373,22 @@ pub(crate) struct Audit {
 }
 
 pub(crate) fn cargo_directives(manifests: &[Utf8PathBuf]) {
-    for directive in rerun_directives(manifests) {
+    for directive in rerun_if_changed_lines(manifests) {
         println!("{directive}");
     }
 }
 
-/// One `cargo:rerun-if-changed` line per audited manifest.
+/// One `cargo:rerun-if-changed` line per path, in the order given — the audited manifests here,
+/// and the build's inputs and output in `cache`.
 ///
 /// Cargo reads build-script output line by line and has no escape for a line break, so a path
 /// carrying one cannot be named: written out, everything after the break would reach Cargo as a
 /// directive of its own. Such a path is left out rather than split.
-fn rerun_directives(manifests: &[Utf8PathBuf]) -> Vec<String> {
-    manifests
+pub(crate) fn rerun_if_changed_lines(paths: &[Utf8PathBuf]) -> Vec<String> {
+    paths
         .iter()
-        .filter(|manifest| !manifest.as_str().contains(['\n', '\r']))
-        .map(|manifest| format!("cargo:rerun-if-changed={manifest}"))
+        .filter(|path| !path.as_str().contains(['\n', '\r']))
+        .map(|path| format!("cargo:rerun-if-changed={path}"))
         .collect()
 }
 
@@ -4193,7 +4206,7 @@ serde_json.workspace = true
             Utf8PathBuf::from("/work/Cargo.toml"),
         ];
         assert_eq!(
-            rerun_directives(&manifests),
+            rerun_if_changed_lines(&manifests),
             [
                 "cargo:rerun-if-changed=/work/client/Cargo.toml",
                 "cargo:rerun-if-changed=/work/Cargo.toml",

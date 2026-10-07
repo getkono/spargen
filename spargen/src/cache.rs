@@ -6,7 +6,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::diag::{Diagnostic, Diagnostics, InterpId, JsonPointer, Loc, OutcomeClaim, Span};
-use crate::runtime_contract::RuntimeRequirements;
+use crate::runtime_contract::{rerun_if_changed_lines, RuntimeRequirements};
 use crate::source::{sha256_hex, InputBundle};
 use crate::{Build, Code, Spec};
 
@@ -87,11 +87,8 @@ pub(crate) fn cargo_directives(build: &Build, snapshot: Option<&InputSnapshot>) 
 }
 
 /// One `cargo:rerun-if-changed` line per input the snapshot read (only the root spec when there is
-/// no snapshot) and for the output module, sorted and deduplicated.
-///
-/// Cargo reads build-script output line by line and has no escape for a line break, so a path
-/// carrying one cannot be named: written out, everything after the break would reach Cargo as a
-/// directive of its own. Such a path is left out rather than split.
+/// no snapshot) and for the output module, sorted and deduplicated. A path carrying a line break is
+/// left out, as [`rerun_if_changed_lines`] describes.
 fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<String> {
     let mut paths = snapshot
         .map(|snapshot| snapshot.paths.clone())
@@ -99,11 +96,7 @@ fn rerun_directives(build: &Build, snapshot: Option<&InputSnapshot>) -> Vec<Stri
     paths.push(build.output.clone());
     paths.sort();
     paths.dedup();
-    paths
-        .iter()
-        .filter(|path| !path.as_str().contains(['\n', '\r']))
-        .map(|path| format!("cargo:rerun-if-changed={path}"))
-        .collect()
+    rerun_if_changed_lines(&paths)
 }
 
 pub(crate) fn cache_dir() -> Option<Utf8PathBuf> {
