@@ -1752,7 +1752,8 @@ mod support {
             Parse {
                 /// The header name.
                 name: &'static str,
-                /// The underlying serde message.
+                /// The underlying serde message, held as serde wrote it; `Display` escapes its control
+                /// characters, since the message may quote the server-supplied value.
                 message: String,
             },
         }
@@ -1768,8 +1769,16 @@ mod support {
                     Self::Parse { name, message } => {
                         write!(
                             formatter,
-                            "response header `{name}` did not match its documented type: {message}"
-                        )
+                            "response header `{name}` did not match its documented type: "
+                        )?;
+                        for c in message.chars() {
+                            if c.is_control() {
+                                write!(formatter, "{}", c.escape_debug())?;
+                            } else {
+                                write!(formatter, "{c}")?;
+                            }
+                        }
+                        Ok(())
                     }
                 }
             }

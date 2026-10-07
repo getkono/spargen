@@ -51,7 +51,8 @@ pub enum HeaderError {
     Parse {
         /// The header name.
         name: &'static str,
-        /// The underlying serde message.
+        /// The underlying serde message, held as serde wrote it; `Display` escapes its control
+        /// characters, since the message may quote the server-supplied value.
         message: String,
     },
 }
@@ -65,10 +66,23 @@ impl fmt::Display for HeaderError {
             Self::NotUtf8 { name } => {
                 write!(formatter, "response header `{name}` is not valid UTF-8")
             }
-            Self::Parse { name, message } => write!(
-                formatter,
-                "response header `{name}` did not match its documented type: {message}"
-            ),
+            Self::Parse { name, message } => {
+                // `message` is serde's, which quotes the server-supplied value (an unknown enum
+                // variant, say) verbatim, and a field value may legally hold a tab; control
+                // characters are escaped so the value cannot break or forge the message's line.
+                write!(
+                    formatter,
+                    "response header `{name}` did not match its documented type: "
+                )?;
+                for c in message.chars() {
+                    if c.is_control() {
+                        write!(formatter, "{}", c.escape_debug())?;
+                    } else {
+                        write!(formatter, "{c}")?;
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -372,6 +386,103 @@ mod tests {
             ),
         ] {
             assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    /// A documented string enum, the target whose serde message quotes the offending input.
+    #[derive(Debug, serde::Deserialize)]
+    enum Documented {
+        Listed,
+    }
+
+    const SHAPES: [HeaderShape; 5] = [
+        HeaderShape::Scalar,
+        HeaderShape::Array,
+        HeaderShape::Object,
+        HeaderShape::Json,
+        HeaderShape::SetCookie,
+    ];
+
+    /// Every message along `error`'s `source()` chain.
+    fn chain(error: &HeaderError) -> Vec<String> {
+        let mut messages = Vec::new();
+        let mut next: Option<&dyn std::error::Error> = Some(error);
+        while let Some(current) = next {
+            messages.push(current.to_string());
+            next = current.source();
+        }
+        messages
+    }
+
+    /// Parse `raw` as each target, under `shape` and `explode`, and return the messages of every
+    /// error any of them reports.
+    fn messages(raw: &[u8], shape: HeaderShape, explode: bool) -> Vec<String> {
+        let mut map = HeaderMap::new();
+        map.append(
+            "x-value",
+            reqwest::header::HeaderValue::from_bytes(raw).unwrap(),
+        );
+        let mut out = Vec::new();
+        if let Err(error) = parse_header::<Documented>(&map, "x-value", shape, explode) {
+            out.extend(chain(&error));
+        }
+        if let Err(error) = parse_header::<Vec<Documented>>(&map, "x-value", shape, explode) {
+            out.extend(chain(&error));
+        }
+        if let Err(error) = parse_header::<u32>(&map, "x-value", shape, explode) {
+            out.extend(chain(&error));
+        }
+        out
+    }
+
+    /// #521: a field value may legally carry a horizontal tab, and serde's message quotes it; the
+    /// `Parse` message shows it escaped and stays on one line, while the field keeps serde's text.
+    #[test]
+    fn a_parse_error_escapes_the_values_tab() {
+        let map = headers(&[("x-value", "\t")]);
+        let error = parse_header::<Documented>(&map, "x-value", HeaderShape::Scalar, false)
+            .expect_err("a tab is no documented variant");
+        assert_eq!(
+            error.to_string(),
+            r"response header `x-value` did not match its documented type: unknown variant `\t`, expected `Listed`"
+        );
+        let HeaderError::Parse { message, .. } = error else {
+            unreachable!()
+        };
+        assert_eq!(message, "unknown variant `\t`, expected `Listed`");
+    }
+
+    fn field_value() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+        proptest::collection::vec(
+            proptest::prop_oneof![
+                0x21u8..=0x7e,
+                proptest::strategy::Just(b'\t'),
+                0x80u8..=0xff
+            ],
+            0..8,
+        )
+    }
+
+    proptest::proptest! {
+        /// Over field values drawn from visible ASCII, tab, and obs-text, every shape, and both
+        /// `explode` settings, a header either parses or fails with no control character in any
+        /// message of its `source()` chain.
+        #[test]
+        fn no_header_error_message_carries_a_control_character(
+            raw in field_value(),
+            shape in proptest::sample::select(SHAPES.to_vec()),
+            explode in proptest::bool::ANY,
+        ) {
+            for message in messages(&raw, shape, explode) {
+                proptest::prop_assert!(
+                    !message.chars().any(char::is_control),
+                    "{:?} {:?} {}: {:?}",
+                    raw,
+                    shape,
+                    explode,
+                    message
+                );
+            }
         }
     }
 }
