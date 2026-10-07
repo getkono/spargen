@@ -418,10 +418,7 @@ pub(super) fn param_default_docs_tokens(operation: &Operation) -> Vec<TokenStrea
 }
 
 /// The local and argument identifiers `name` allocated for one operation method's body.
-pub(super) fn operation_bindings<'a>(
-    operation: &Operation,
-    names: &'a Names,
-) -> &'a OperationBindings {
+fn operation_bindings<'a>(operation: &Operation, names: &'a Names) -> &'a OperationBindings {
     names
         .operation_bindings
         .get(&operation.id)
