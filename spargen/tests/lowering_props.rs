@@ -11,34 +11,117 @@
 //! * `allOf` merge reconciles exactly — a property declared with two different types is `E013`, and
 //!   an otherwise-consistent merge keeps the union of every member's fields (no field loss) with the
 //!   union of every member's `required`.
+//!
+//! Every run is also held to the shared `oracles`: each diagnostic names a real location (#454),
+//! each generated union's variants are distinguishable by shape unless a warning says why or an
+//! open issue tracks the gap (#402), and each case moved into a referenced file
+//! (`oracles::relocate`) reaches the same verdict, codes and shapes (#446).
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use proptest::prelude::*;
 use spargen::{CargoIntegration, Code, Outcome, Report, Spec};
+
+mod oracles;
 
 /// Run `check` (frontend + lowering, no emit) on an inline spec written into a throwaway tempdir.
 fn check(spec: &str) -> Report {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
+    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
     std::fs::write(&spec_path, spec).unwrap();
-    spargen::check(&Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap()))
+    check_at(&spec_path)
+}
+
+/// `check` on the root document at `root`, held to [`oracles::location_violations`].
+fn check_at(root: &Utf8Path) -> Report {
+    let report = spargen::check(&Spec::new(root));
+    assert_located(&report, root);
+    report
 }
 
 /// Run `generate` to a module and return the report plus the emitted source (when written).
 fn generate_module(spec: &str) -> (Report, String) {
     let temp = tempfile::tempdir().unwrap();
-    let spec_path = temp.path().join("openapi.yaml");
+    let spec_path = Utf8PathBuf::from_path_buf(temp.path().join("openapi.yaml")).unwrap();
     std::fs::write(&spec_path, spec).unwrap();
-    let out = temp.path().join("client.rs");
+    generate_at(&spec_path)
+}
+
+/// `generate` on the root document at `root`, writing the module beside it, held to
+/// [`oracles::location_violations`] and, when it generates, to
+/// [`oracles::indistinguishable_variants`]: a union's variants are told apart by shape, or a
+/// warning says why, or an open issue tracks the gap (#492 for the equal nominal variants a
+/// repeated closed-object key set lowers to).
+fn generate_at(root: &Utf8Path) -> (Report, String) {
+    let out = root.with_file_name("client.rs");
     let report = spargen::generate(
-        &Spec::new(Utf8PathBuf::from_path_buf(spec_path).unwrap())
-            .build(Utf8PathBuf::from_path_buf(out.clone()).unwrap())
+        &Spec::new(root)
+            .build(out.clone())
             .cargo(CargoIntegration::Off),
     );
+    assert_located(&report, root);
     let source = std::fs::read_to_string(&out).unwrap_or_default();
+    if report.outcome() == Outcome::Generated {
+        let unexplained = oracles::unexplained_variants(&report, &source);
+        assert!(
+            unexplained.is_empty(),
+            "a union's variants cannot be told apart and no warning says why: {unexplained:#?}"
+        );
+    }
     (report, source)
+}
+
+/// Fail unless every diagnostic in `report` names a real location (#454).
+fn assert_located(report: &Report, root: &Utf8Path) {
+    let text = std::fs::read(root).unwrap_or_default();
+    let unlocated = oracles::unknown(oracles::location_violations(report.diagnostics(), &text));
+    assert!(
+        unlocated.is_empty(),
+        "diagnostics with no real location: {unlocated:#?}"
+    );
+}
+
+/// The sorted diagnostic codes of a report, duplicates kept, so a `W001` count is compared too.
+fn codes(report: &Report) -> Vec<&'static str> {
+    let mut codes: Vec<&'static str> = report
+        .diagnostics()
+        .iter()
+        .map(|diagnostic| diagnostic.code.as_str())
+        .collect();
+    codes.sort_unstable();
+    codes
+}
+
+/// Moving `spec`'s schemas into a referenced file ([`oracles::relocate`]) changes nothing (#446):
+/// `check` reaches the same verdict with the same code multiset, and when `inline` (the module
+/// `spec` generated, `None` when the case only checks) was generated, `generate` gives every
+/// schema the same [`oracles::shape`].
+fn assert_relocation_changes_nothing(
+    spec: &str,
+    inline: Option<&(Report, String)>,
+) -> Result<(), TestCaseError> {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let root = oracles::write_relocated(&dir, spec).expect("every case declares schemas");
+    let inline_checked = check(spec);
+    let moved_checked = check_at(&root);
+    prop_assert_eq!(moved_checked.outcome(), inline_checked.outcome());
+    prop_assert_eq!(codes(&moved_checked), codes(&inline_checked));
+    if let Some((report, source)) = inline {
+        let (moved, moved_source) = generate_at(&root);
+        prop_assert_eq!(moved.outcome(), report.outcome());
+        prop_assert_eq!(codes(&moved), codes(report));
+        for schema in oracles::schema_names(spec) {
+            prop_assert_eq!(
+                oracles::shape(&moved_source, &schema),
+                oracles::shape(source, &schema),
+                "relocated, `{}` lowers to another shape",
+                schema
+            );
+        }
+    }
+    Ok(())
 }
 
 fn has_code(report: &Report, code: Code) -> bool {
@@ -231,12 +314,14 @@ proptest! {
     fn json_category_unions_generate_typed(
         variants in proptest::collection::vec(category_strategy(), 2..=5)
     ) {
-        let (report, source) = generate_module(&category_union_spec(&variants));
+        let spec = category_union_spec(&variants);
+        let generated = generate_module(&spec);
+        let (report, source) = &generated;
         prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
-        prop_assert!(!has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
+        prop_assert!(!has_code(report, Code::NonDisjointUnion), "{:#?}", report);
         let distinct: BTreeSet<Category> = variants.iter().copied().collect();
         prop_assert_eq!(
-            has_code(&report, Code::ValidationKeywordIgnored),
+            has_code(report, Code::ValidationKeywordIgnored),
             distinct.len() < variants.len(),
             "{:#?}",
             report
@@ -248,6 +333,7 @@ proptest! {
             variants,
             source
         );
+        assert_relocation_changes_nothing(&spec, Some(&generated))?;
     }
 
     /// Every closed-object combination lowers to a typed enum. Unique required keys select a direct
@@ -256,10 +342,13 @@ proptest! {
     fn closed_object_unions_generate_typed(
         variants in proptest::collection::vec(key_set_strategy(), 2..=4)
     ) {
-        let (report, source) = generate_module(&closed_object_union_spec(&variants));
+        let spec = closed_object_union_spec(&variants);
+        let generated = generate_module(&spec);
+        let (report, source) = &generated;
         prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
-        prop_assert!(!has_code(&report, Code::NonDisjointUnion), "{:#?}", report);
+        prop_assert!(!has_code(report, Code::NonDisjointUnion), "{:#?}", report);
         prop_assert!(source.contains("pub enum U"), "union was not emitted as a typed enum:\n{source}");
+        assert_relocation_changes_nothing(&spec, Some(&generated))?;
     }
 
     /// A conflicting property type across members that some member requires is `E013`; otherwise the
@@ -275,11 +364,13 @@ proptest! {
             let report = check(&spec);
             prop_assert_eq!(report.outcome(), Outcome::Rejected, "{:#?}", report);
             prop_assert!(has_code(&report, Code::AllOfIrreconcilable), "{:#?}", report);
-            return Ok(());
+            return assert_relocation_changes_nothing(&spec, None);
         }
 
         // No conflict: the merge must succeed and preserve every member's fields.
-        let (report, source) = generate_module(&spec);
+        let generated = generate_module(&spec);
+        assert_relocation_changes_nothing(&spec, Some(&generated))?;
+        let (report, source) = generated;
         prop_assert_ne!(report.outcome(), Outcome::Rejected, "{:#?}", report);
         prop_assert!(!has_code(&report, Code::AllOfIrreconcilable), "{:#?}", report);
 

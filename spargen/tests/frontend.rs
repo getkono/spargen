@@ -7,12 +7,17 @@
 //! a named set a companion test keeps spanning rejections, warnings and clean runs.
 //!
 //! Every run any fixture makes goes through `run_generate` or `run_check`, which hold each
-//! diagnostic's declared `OutcomeClaim` to the run's own outcome (#413).
+//! diagnostic's declared `OutcomeClaim` to the run's own outcome (#413) and to a real location
+//! (#454), and hold every union a `Generated` run emits to variants a value can tell apart (#402).
+//! The last two oracles live in `oracles/`, shared with `fuzz_frontend.rs` and
+//! `lowering_props.rs`.
 
 use camino::Utf8PathBuf;
 use spargen::{
     Build, CargoIntegration, Code, Diagnostic, Outcome, OutcomeClaim, Report, Severity, Spec,
 };
+
+mod oracles;
 
 /// Run `generate` on an inline spec written into a throwaway tempdir, returning the report. The
 /// tempdir (and any written output) is discarded once the report — which owns its data — is built.
@@ -23,19 +28,53 @@ fn build(spec: Utf8PathBuf, out: Utf8PathBuf) -> Build {
     Spec::new(spec).build(out).cargo(CargoIntegration::Off)
 }
 
-/// `spargen::generate`, then [`assert_claims_hold`] on the report. Every fixture here reaches
-/// `generate` through this function, so every diagnostic any fixture provokes is held to its run.
+/// `spargen::generate`, then [`assert_claims_hold`] and [`assert_located`] on the report, and
+/// [`assert_distinguishable_variants`] on the module a `Generated` run wrote. Every fixture here
+/// reaches `generate` through this function, so every diagnostic any fixture provokes is held to
+/// its run, and every union any fixture emits is held to variants a value can tell apart.
 fn run_generate(build: &Build) -> Report {
     let report = spargen::generate(build);
     assert_claims_hold(&report);
+    assert_located(&report, build.spec());
+    if report.outcome() == Outcome::Generated {
+        let code = std::fs::read_to_string(build.output()).unwrap_or_default();
+        assert_distinguishable_variants(&report, &code);
+    }
     report
 }
 
-/// `spargen::check`, then [`assert_claims_hold`] on the report, as [`run_generate`].
+/// `spargen::check`, then [`assert_claims_hold`] and [`assert_located`] on the report, as
+/// [`run_generate`].
 fn run_check(spec: &Spec) -> Report {
     let report = spargen::check(spec);
     assert_claims_hold(&report);
+    assert_located(&report, spec);
     report
+}
+
+/// Fail unless every diagnostic in `report` is held to a real location (#454), except where an open
+/// issue tracks the gap: see [`oracles::location_violations`]. The root document is read back from
+/// `spec`'s path, so a span can be compared with the file it lies in.
+fn assert_located(report: &Report, spec: &Spec) {
+    let root = std::fs::read(spec.path()).unwrap_or_default();
+    let violations = oracles::unknown(oracles::location_violations(report.diagnostics(), &root));
+    assert!(
+        violations.is_empty(),
+        "a `{}` run reported diagnostics with no real location: {violations:#?}",
+        report.outcome()
+    );
+}
+
+/// Fail if a `Generated` run emitted a union whose variants cannot be told apart and no warning
+/// says why, except where an open issue tracks the gap: see
+/// [`oracles::indistinguishable_variants`].
+fn assert_distinguishable_variants(report: &Report, code: &str) {
+    let violations = oracles::unexplained_variants(report, code);
+    assert!(
+        violations.is_empty(),
+        "a union's variants cannot be told apart and no warning says why: {violations:#?}\n\
+         {report:#?}"
+    );
 }
 
 /// Fail unless every diagnostic in `report` makes a claim its run's outcome admits (#413).
@@ -247,6 +286,251 @@ fn the_untyped_value_oracle_sees_an_unconstrained_field() {
         failed,
         "the oracle passed a `serde_json::Value` field:\n{code}"
     );
+}
+
+/// A diagnostic for the location oracle's own fixtures, at `pointer` with `span` in file `file`.
+fn located(
+    code: Code,
+    pointer: &str,
+    file: u32,
+    span: (u32, usize, usize),
+    message: &str,
+) -> Diagnostic {
+    let (line, start, end) = span;
+    Diagnostic {
+        code,
+        severity: Severity::Warning,
+        pointer: spargen::JsonPointer::from(pointer),
+        span: Some(spargen::Span {
+            file: spargen::FileId(file),
+            start: spargen::Loc {
+                line,
+                col: 1,
+                offset: start,
+            },
+            end: spargen::Loc {
+                line,
+                col: 1,
+                offset: end,
+            },
+        }),
+        message: message.to_owned(),
+        remedy: None,
+        interpretation: None,
+        claim: OutcomeClaim::Independent,
+    }
+}
+
+/// [`oracles::location_violations`] can fail, on each of the three ways #454's diagnostics lost
+/// their location, and passes what a real location looks like. Without this an oracle that read the
+/// wrong field would pass every fixture.
+#[test]
+fn the_location_oracle_sees_each_lost_location() {
+    let root = b"openapi: 3.1.0\ncomponents: {}\n";
+    let reasons = |diagnostic: Diagnostic| -> Vec<String> {
+        oracles::location_violations(&[diagnostic], root)
+            .into_iter()
+            .map(|violation| violation.reason)
+            .collect()
+    };
+    let at = "/components/schemas/Pet";
+    // The three #454 shapes: an empty pointer, an empty name, a span over the whole root.
+    let empty_pointer = reasons(located(
+        Code::SchemaDefaultNotApplied,
+        "",
+        0,
+        (2, 15, 28),
+        "m",
+    ));
+    assert!(
+        empty_pointer[0].contains("the pointer is empty"),
+        "{empty_pointer:?}"
+    );
+    let empty_name = reasons(located(
+        Code::SchemaDefaultNotApplied,
+        at,
+        0,
+        (2, 15, 28),
+        "in ``",
+    ));
+    assert!(
+        empty_name[0].contains("names something empty"),
+        "{empty_name:?}"
+    );
+    let whole = reasons(located(
+        Code::SchemaDefaultNotApplied,
+        at,
+        0,
+        (1, 0, 29),
+        "m",
+    ));
+    assert!(whole[0].contains("whole root document"), "{whole:?}");
+    // A real location, and the root of a referenced file, which is a construct of its own.
+    assert!(reasons(located(
+        Code::SchemaDefaultNotApplied,
+        at,
+        0,
+        (2, 15, 28),
+        "`Pet`"
+    ))
+    .is_empty());
+    assert!(reasons(located(
+        Code::SchemaDefaultNotApplied,
+        "",
+        1,
+        (1, 0, 29),
+        "m"
+    ))
+    .is_empty());
+    // A document-level diagnostic's location is the root.
+    assert!(reasons(located(
+        Code::UnsupportedOpenApiVersion,
+        "",
+        0,
+        (1, 0, 29),
+        "m"
+    ))
+    .is_empty());
+    assert!(reasons(located(Code::InvalidInput, "", 0, (1, 0, 29), "m")).is_empty());
+    // A known gap is still reported, with the issue that tracks it.
+    let known = oracles::location_violations(
+        &[located(Code::DuplicateObjectKey, "", 0, (2, 15, 28), "m")],
+        root,
+    );
+    assert_eq!(known[0].known, Some(oracles::ISSUE_DUPLICATE_KEY_POINTER));
+    // Each rule is checked on its own: a known empty pointer does not hide a whole-root span,
+    // which no issue tracks for `E022`.
+    let both: Vec<Option<u32>> = oracles::location_violations(
+        &[located(Code::DuplicateObjectKey, "", 0, (1, 0, 29), "m")],
+        root,
+    )
+    .into_iter()
+    .map(|violation| violation.known)
+    .collect();
+    assert_eq!(
+        both,
+        [Some(oracles::ISSUE_DUPLICATE_KEY_POINTER), None],
+        "{both:?}"
+    );
+    let unlocated = reasons(located(
+        Code::SchemaDefaultNotApplied,
+        "",
+        0,
+        (1, 0, 29),
+        "m",
+    ));
+    assert_eq!(unlocated.len(), 2, "{unlocated:?}");
+    assert!(
+        unlocated[1].contains("whole root document"),
+        "{unlocated:?}"
+    );
+}
+
+/// `E022` still reports the document root as its pointer (#533), so
+/// [`oracles::KNOWN_ROOT_POINTERS`] still needs its entry. Once #533 is fixed this fails: remove the
+/// entry and this fixture together, so the known gaps only shrink.
+#[test]
+fn e022_still_reports_the_root_pointer_tracked_by_533() {
+    let spec = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    Foo:\n      type: object\n      type: string\n";
+    let report = check(spec);
+    let known: Vec<Option<u32>> =
+        oracles::location_violations(report.diagnostics(), spec.as_bytes())
+            .into_iter()
+            .map(|violation| violation.known)
+            .collect();
+    assert_eq!(
+        known,
+        [Some(oracles::ISSUE_DUPLICATE_KEY_POINTER)],
+        "{report:#?}"
+    );
+}
+
+/// [`oracles::indistinguishable_variants`] can fail: two variants whose payloads are differently
+/// named structs with one shape, and a variant that is `serde_json::Value`. A field of another type
+/// is another shape. Without this an oracle that matched nothing would pass every fixture.
+#[test]
+fn the_distinguishable_variant_oracle_sees_equal_and_untyped_variants() {
+    let code = "pub mod types {\n\
+                pub enum U {\n    A(Box<A>),\n    B(Box<B>),\n    C(Box<C>),\n}\n\
+                impl<'de> serde::Deserialize<'de> for U {\n\
+                \"data must match exactly one typed variant of union U\"\n}\n\
+                pub type Aa = String;\n\
+                pub type Ba = String;\n\
+                #[serde(deny_unknown_fields)]\n\
+                pub struct A {\n    pub a: Aa,\n}\n\
+                #[serde(deny_unknown_fields)]\n\
+                pub struct B {\n    pub a: Ba,\n}\n\
+                pub type C = serde_json::Value;\n\
+                }\n";
+    let reasons = |code: &str| -> Vec<String> {
+        oracles::indistinguishable_variants(code)
+            .into_iter()
+            .map(|violation| violation.reason)
+            .collect()
+    };
+    let found = reasons(code);
+    assert_eq!(found.len(), 2, "{found:#?}");
+    assert!(
+        found[0].contains("`C` is `serde_json::Value`")
+            && found[1].contains("variants `A` and `B` have one shape"),
+        "{found:#?}"
+    );
+    let distinct = code.replace("pub type Ba = String;", "pub type Ba = i64;");
+    assert_eq!(reasons(&distinct).len(), 1, "{:#?}", reasons(&distinct));
+    // An enum with no `Deserialize` impl of its own is not a union.
+    let not_a_union = code.replace("serde::Deserialize<'de> for U", "Other");
+    assert!(
+        reasons(&not_a_union).is_empty(),
+        "{:#?}",
+        reasons(&not_a_union)
+    );
+}
+
+/// Structurally equal inline `oneOf` branches are still two variants with no diagnostic (#492),
+/// and union members that accept every value are still `serde_json::Value` variants with none
+/// (#535), so [`oracles::indistinguishable_variants`] still needs to let both through as known.
+/// Once either issue is fixed this fails: remove its known gap and its case here together.
+#[test]
+fn equal_nominal_and_untyped_variants_are_still_tracked_by_492_and_535() {
+    let cases = [
+        (
+            "oneOf: [{ type: object, additionalProperties: false, required: [a], properties: \
+             { a: { type: string } } }, { type: object, additionalProperties: false, required: [a], \
+             properties: { a: { type: string } } }]",
+            oracles::ISSUE_EQUAL_NOMINAL_VARIANTS,
+        ),
+        (
+            "oneOf: [{ type: string, enum: [x] }, { type: string, enum: [x] }]",
+            oracles::ISSUE_EQUAL_NOMINAL_VARIANTS,
+        ),
+        (
+            "anyOf: [{ required: [a] }, { required: [b] }]",
+            oracles::ISSUE_UNTYPED_UNION_MEMBER,
+        ),
+        ("oneOf: [{ type: string }, {}]", oracles::ISSUE_UNTYPED_UNION_MEMBER),
+    ];
+    for (schema, issue) in cases {
+        let (report, code) = generate_with_code(&format!(
+            "openapi: 3.1.0\ninfo: {{ title: T, version: 1.0.0 }}\npaths: {{}}\ncomponents:\n  \
+             schemas:\n    U:\n      {schema}\n"
+        ));
+        assert_eq!(
+            report.outcome(),
+            Outcome::Generated,
+            "{schema}: {report:#?}"
+        );
+        assert!(report.diagnostics().is_empty(), "{schema}: {report:#?}");
+        let known: std::collections::BTreeSet<Option<u32>> =
+            oracles::indistinguishable_variants(&code)
+                .into_iter()
+                .map(|violation| violation.known)
+                .collect();
+        assert_eq!(
+            known,
+            std::collections::BTreeSet::from([Some(issue)]),
+            "{schema}"
+        );
+    }
 }
 
 /// The name of the `pub struct` that declares the first field line starting with `field`.
@@ -7905,6 +8189,42 @@ mod remote {
         assert!(!has_code(&report, Code::VendoredRefDrift), "{report:#?}");
     }
 
+    /// `E003` and `E021` still report the document root as their pointer, with a span over the
+    /// whole document (#534), so [`oracles::KNOWN_ROOT_POINTERS`] and
+    /// [`oracles::KNOWN_WHOLE_ROOT_SPANS`] still need their entries. Once #534 is fixed this fails:
+    /// remove the entries and this fixture together, so the known gaps only shrink.
+    #[test]
+    fn e003_and_e021_still_report_the_root_pointer_tracked_by_534() {
+        for (code, lock) in [
+            (Code::AbsoluteRefUnsupported, None),
+            (Code::VendoredRefDrift, Some(lock(GIZMO_SHA256))),
+        ] {
+            let (report, temp, _) = run(lock, None, true);
+            let root = std::fs::read(temp.path().join("openapi.yaml")).unwrap();
+            let reported: Vec<Code> = report.diagnostics().iter().map(|d| d.code).collect();
+            assert_eq!(reported, [code], "{report:#?}");
+            let known: Vec<(bool, Option<u32>)> =
+                oracles::location_violations(report.diagnostics(), &root)
+                    .into_iter()
+                    .map(|violation| {
+                        (
+                            violation.reason.contains("whole root document"),
+                            violation.known,
+                        )
+                    })
+                    .collect();
+            // Both the root pointer and the whole-document span are #534's, each reported.
+            assert_eq!(
+                known,
+                [
+                    (false, Some(oracles::ISSUE_REMOTE_REF_POINTER)),
+                    (true, Some(oracles::ISSUE_REMOTE_REF_POINTER)),
+                ],
+                "{report:#?}"
+            );
+        }
+    }
+
     #[test]
     fn pinned_remote_ref_resolves_hermetically_to_typed_schema() {
         // Lock pins the correct sha256 and the vendored bytes match ⇒ the remote ref resolves with
@@ -13309,6 +13629,64 @@ paths:
                 report.outcome(),
                 Outcome::Rejected,
                 "{style} {control}: {report:#?}"
+            );
+        }
+    }
+}
+
+/// Wrapping a parameter's schema in a union does not change the cause its diagnostic names
+/// (#435): for `S = {type: object, properties: {a: false}}` under `form` and `deepObject`, `S`
+/// itself and `oneOf: [S, {type: string}]` both report the one `E010` message naming `f.a` in the
+/// uninhabited wording, and neither the nesting one. `S` is held both inline and as a component.
+#[test]
+fn wrapping_a_parameter_schema_in_a_union_names_the_same_uninhabited_part() {
+    const TEMPLATE: &str = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+paths:
+  /x:
+    get:
+      parameters:
+        - name: f
+          in: query
+          style: STYLE
+          schema: SCHEMA
+      responses:
+        "204": { description: No Content }
+components:
+  schemas:
+    S: { type: object, properties: { a: false } }
+"##;
+    const S: &str = "{ type: object, properties: { a: false } }";
+    const S_REF: &str = "{ $ref: '#/components/schemas/S' }";
+    for style in ["form", "deepObject"] {
+        for s in [S, S_REF] {
+            let wrapped = format!("{{ oneOf: [{s}, {{ type: string }}] }}");
+            let mut named = Vec::new();
+            for schema in [s, wrapped.as_str()] {
+                let spec = TEMPLATE.replace("STYLE", style).replace("SCHEMA", schema);
+                for report in [generate(&spec), check(&spec)] {
+                    assert_eq!(
+                        report.outcome(),
+                        Outcome::Rejected,
+                        "{style} {schema}: {report:#?}"
+                    );
+                    let messages = messages_for(&report, Code::UnsupportedParameterStyle);
+                    assert_eq!(messages.len(), 1, "{style} {schema}: {report:#?}");
+                    assert!(
+                        messages[0].contains("`f.a` is uninhabited")
+                            && !messages[0].contains("nested arrays or objects"),
+                        "{style} {schema}: {messages:?}"
+                    );
+                    named.push(messages[0].to_owned());
+                }
+            }
+            // The bare and the wrapped schema, each through both entry points, give one message:
+            // the union adds nothing to what is named.
+            assert_eq!(named.len(), 4, "{style} {s}: {named:?}");
+            assert!(
+                named.iter().all(|message| *message == named[0]),
+                "{style} {s}: {named:#?}"
             );
         }
     }
@@ -25871,6 +26249,100 @@ fn every_parity_fixture_that_reports_is_labelled() {
         labelled >= 7,
         "only {labelled} parity fixtures are labelled; the convention has been disarmed"
     );
+}
+
+/// Hold `spec` to its relocation twin ([`oracles::relocate`]): the same document with its
+/// `components.schemas` moved into a referenced `lib.yaml`. Both entry points must reach the same
+/// verdict with the same code multiset (so a `W001` the audit raises in the root and not in a
+/// referenced file, #446, shows as a count), and a `Generated` run must give each schema the same
+/// [`oracles::shape`]. Returns whether `spec` had schemas to move.
+fn assert_relocation_changes_nothing(name: &str, spec: &str) -> bool {
+    let temp = tempfile::tempdir().unwrap();
+    let dir = Utf8PathBuf::from_path_buf(temp.path().to_path_buf()).unwrap();
+    let Some(root) = oracles::write_relocated(&dir, spec) else {
+        return false;
+    };
+    let (inline, inline_code) = generate_with_code(spec);
+    let inline_checked = check(spec);
+    let out = dir.join("client.rs");
+    let moved = run_generate(&build(root.clone(), out.clone()));
+    let moved_code = std::fs::read_to_string(&out).unwrap_or_default();
+    let moved_checked = run_check(&Spec::new(root));
+    assert_eq!(
+        moved.outcome(),
+        inline.outcome(),
+        "`{name}`: relocated, generate says {:?}: {moved:#?}",
+        moved.outcome()
+    );
+    assert_eq!(
+        codes(&moved),
+        codes(&inline),
+        "`{name}`: relocated, generate reports other codes"
+    );
+    assert_eq!(
+        moved_checked.outcome(),
+        inline_checked.outcome(),
+        "`{name}`: relocated, check says {:?}",
+        moved_checked.outcome()
+    );
+    assert_eq!(
+        codes(&moved_checked),
+        codes(&inline_checked),
+        "`{name}`: relocated, check reports other codes"
+    );
+    if inline.outcome() == Outcome::Generated {
+        for schema in oracles::schema_names(spec) {
+            assert_eq!(
+                oracles::shape(&moved_code, &schema),
+                oracles::shape(&inline_code, &schema),
+                "`{name}`: relocated, `{schema}` lowers to another shape"
+            );
+        }
+    }
+    true
+}
+
+/// Moving a document's schemas into a referenced file changes no verdict, code or shape (#446):
+/// every [`PARITY_FIXTURES`] spec that declares schemas is held to its relocation twin. The
+/// floor keeps the property from passing because nothing was moved.
+#[test]
+fn moving_the_parity_fixtures_schemas_into_a_referenced_file_changes_nothing() {
+    let moved = PARITY_FIXTURES
+        .iter()
+        .filter(|(name, spec)| assert_relocation_changes_nothing(name, spec))
+        .count();
+    assert!(
+        moved >= 4,
+        "only {moved} parity fixtures declare schemas to move"
+    );
+}
+
+/// [`oracles::relocate`] moves what it says: the root keeps one `$ref` per schema, into the
+/// sub-file, which declares the schemas with their references between them spelled against
+/// itself.
+#[test]
+fn relocation_moves_every_schema_behind_a_reference() {
+    let spec = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\ncomponents:\n  schemas:\n    A: { type: string }\n    'b/c': { $ref: '#/components/schemas/A' }\n";
+    let (root, lib) = oracles::relocate(spec).unwrap();
+    let root: serde_json::Value = serde_json::from_str(&root).unwrap();
+    let lib: serde_json::Value = serde_json::from_str(&lib).unwrap();
+    assert_eq!(
+        root["components"]["schemas"],
+        serde_json::json!({
+            "A": { "$ref": "./lib.yaml#/components/schemas/A" },
+            "b/c": { "$ref": "./lib.yaml#/components/schemas/b~1c" },
+        })
+    );
+    assert_eq!(
+        lib["components"]["schemas"],
+        serde_json::json!({
+            "A": { "type": "string" },
+            "b/c": { "$ref": "./lib.yaml#/components/schemas/A" },
+        })
+    );
+    assert_eq!(root["openapi"], "3.1.0");
+    let bare = "openapi: 3.1.0\ninfo: { title: T, version: 1.0.0 }\npaths: {}\n";
+    assert!(oracles::relocate(bare).is_none());
 }
 
 // --- placement independence: an inline document and its `$ref`-split twins -------------------
