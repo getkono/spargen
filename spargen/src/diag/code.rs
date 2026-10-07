@@ -700,6 +700,65 @@ mod tests {
         })
     }
 
+    /// Does `suite` assert `Code::<variant>` in a positive form — evidence that the code fires,
+    /// not only a mention? [`mentions_variant`] alone is satisfied by a comment naming the code or
+    /// by a fixture asserting its *absence*, neither of which is a fixture for it. So a comment
+    /// (everything from `//` to the end of a line) is discarded first, and an occurrence does not
+    /// count when it is the code argument of a negated `!has_code(...)` call or the right side of
+    /// a `!=`. Every other whole-segment occurrence (`has_code(r, Code::X)`, `d.code == Code::X`
+    /// in a `find`/`any`/`filter`, `messages_for(r, Code::X)`) is accepted.
+    fn asserts_variant(suite: &str, variant: &str) -> bool {
+        let code: String = suite
+            .lines()
+            .map(|line| line.find("//").map_or(line, |at| &line[..at]))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let needle = format!("Code::{variant}");
+        code.match_indices(&needle).any(|(at, _)| {
+            let whole_segment = code[at + needle.len()..]
+                .chars()
+                .next()
+                .is_none_or(|next| !next.is_alphanumeric() && next != '_');
+            let before = &code[..at];
+            let negated_call = before.rfind("has_code(").is_some_and(|call| {
+                !before[call..].contains([')', ';']) && before[..call].trim_end().ends_with('!')
+            });
+            let not_equal = before.trim_end().ends_with("!=");
+            whole_segment && !negated_call && !not_equal
+        })
+    }
+
+    /// [`asserts_variant`] refuses exactly the two forms that let a code with no fixture pass: a
+    /// comment naming it and an assertion that it is absent.
+    #[test]
+    fn a_comment_or_an_absence_is_not_a_fixture() {
+        for vacuous in [
+            "// Code::UnresolvedRef is covered elsewhere",
+            "let x = 1; // has_code(&report, Code::UnresolvedRef)",
+            "assert!(!has_code(&report, Code::UnresolvedRef));",
+            "assert!(\n    !has_code(\n        &report,\n        Code::UnresolvedRef\n    ),\n);",
+            "assert!(d.code != Code::UnresolvedRef);",
+            "assert!(has_code(&report, Code::UnresolvedRefTypo));",
+        ] {
+            assert!(
+                !asserts_variant(vacuous, "UnresolvedRef"),
+                "accepted as a fixture: {vacuous}"
+            );
+        }
+        for positive in [
+            "assert!(has_code(&report, Code::UnresolvedRef));",
+            "assert!(\n    has_code(\n        &report,\n        Code::UnresolvedRef\n    ),\n);",
+            ".find(|d| d.code == Code::UnresolvedRef)",
+            "let messages = messages_for(&report, Code::UnresolvedRef);",
+            "assert!(!has_code(&report, Code::InvalidInput));\nassert!(has_code(&report, Code::UnresolvedRef));",
+        ] {
+            assert!(
+                asserts_variant(positive, "UnresolvedRef"),
+                "refused as a fixture: {positive}"
+            );
+        }
+    }
+
     /// The workspace root, or `None` when this crate is tested from a packaged `.crate`, which
     /// carries neither the workspace manifest nor the test suites. Gating on the *workspace
     /// marker* rather than on the file under inspection is deliberate: inside the repository a
@@ -1191,7 +1250,9 @@ mod tests {
     /// rather than convention. Frontend codes are asserted there; the eight the frontend cannot
     /// produce — the `compat` omit rules, the facade's own Cargo-integration and runtime-audit
     /// diagnostics, and `spargen lock`'s fetch failure — are asserted in the suite that *can* produce them, and each
-    /// must say so here. A new code that lands in neither place fails, which is the point.
+    /// must say so here. A new code that lands in neither place fails, which is the point. The
+    /// owning suite must assert the code in a positive form ([`asserts_variant`]); frontend.rs
+    /// must not name an elsewhere-owned code at all, not even negatively.
     #[test]
     fn every_code_is_asserted_by_the_suite_that_owns_it() {
         const OWNED_ELSEWHERE: &[(&str, &str)] = &[
@@ -1226,9 +1287,9 @@ mod tests {
             match OWNED_ELSEWHERE.iter().find(|(owned, _)| *owned == variant) {
                 Some((_, suite)) => {
                     assert!(
-                        mentions_variant(&read(suite), variant),
+                        asserts_variant(&read(suite), variant),
                         "{} is declared to be asserted in {suite}, but `Code::{variant}` appears \
-                         nowhere in it",
+                         nowhere in it outside a comment or an assertion of its absence",
                         code.as_str()
                     );
                     assert!(
@@ -1239,10 +1300,11 @@ mod tests {
                     );
                 }
                 None => assert!(
-                    mentions_variant(&frontend, variant),
+                    asserts_variant(&frontend, variant),
                     "{} has no fixture: `Code::{variant}` appears nowhere in \
-                     spargen/tests/frontend.rs. Add one, or add the code to OWNED_ELSEWHERE \
-                     naming the suite that asserts it.",
+                     spargen/tests/frontend.rs outside a comment or an assertion of its \
+                     absence. Add one, or add the code to OWNED_ELSEWHERE naming the suite that \
+                     asserts it.",
                     code.as_str()
                 ),
             }
