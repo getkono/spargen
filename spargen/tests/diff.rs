@@ -92,7 +92,40 @@ fn diff_configured(
     std::fs::write(&new_path, new_spec).unwrap();
     let old = configure_old(Spec::new(Utf8PathBuf::from_path_buf(old_path).unwrap()));
     let new = configure_new(Spec::new(Utf8PathBuf::from_path_buf(new_path).unwrap()));
-    spargen::diff(&old, &new).expect("both specs should lower")
+    let report = spargen::diff(&old, &new).expect("both specs should lower");
+    snapshot(&report);
+    report
+}
+
+std::thread_local! {
+    /// How many reports the running test has snapshotted so far. libtest runs every test on a
+    /// thread of its own, so this counts per test.
+    static SNAPSHOTS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Snapshot the whole [`fingerprint`] of a report — every change's impact, code, location and
+/// `detail` label, and the bump — so a fixture pins the labels a consumer reads, not only the
+/// kinds its assertions name. Every report a fixture diffs is snapshotted, in order: the first as
+/// `diff__<test>.snap`, the next as `diff__<test>-2.snap`, and so on.
+fn snapshot(report: &DiffReport) {
+    let thread = std::thread::current();
+    let test = thread
+        .name()
+        .expect("libtest names each test's thread after the test")
+        .rsplit("::")
+        .next()
+        .expect("a thread name has a last segment")
+        .to_owned();
+    let index = SNAPSHOTS.with(|count| {
+        count.set(count.get() + 1);
+        count.get()
+    });
+    let name = if index == 1 {
+        test
+    } else {
+        format!("{test}-{index}")
+    };
+    insta::assert_snapshot!(name, fingerprint(report).join("\n"));
 }
 
 /// The kinds present in a report, for order-independent membership assertions.

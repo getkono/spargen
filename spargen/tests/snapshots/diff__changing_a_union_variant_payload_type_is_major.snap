@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|variant-type-changed|Status|variant `StatusVariant1` type `i64` -> `bool`
+bump=major

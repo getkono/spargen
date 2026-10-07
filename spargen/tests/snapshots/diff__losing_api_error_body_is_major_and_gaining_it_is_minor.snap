@@ -1,0 +1,7 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|api-error-body-removed|GET /pets|error type no longer implements `ApiErrorBody` (was `Body = String`)
+major|error-type-changed|GET /pets|error type `Error{404:String, 409:String}` -> `Error{404:String, 409:i64}`
+bump=major

@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|error-type-changed|GET /pets|error type `Error{404:(), 409:String}` -> `Error{404:(), 410:String}`
+bump=major

@@ -1,0 +1,6 @@
+---
+source: spargen/tests/diff.rs
+expression: "fingerprint(report).join(\"\\n\")"
+---
+major|param-type-changed|GET /pets/{id} param `id` (path)|parameter type `String` -> `i64`
+bump=major
