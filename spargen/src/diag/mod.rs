@@ -31,8 +31,8 @@ pub use span::{FileId, Loc, Span};
 ///
 /// Test-only: the one predicate behind every check that a fixture cited for an explain clause is
 /// a `#[test]` in the module named — `EXPLAIN_CLAUSES_OWNED_ELSEWHERE` in `code.rs` and the `E023`
-/// byte-for-byte test in `runtime_contract.rs` — so a fix to it reaches both. It lives in `diag`
-/// because that is the lowest layer both can reach.
+/// byte-for-byte test in `runtime_contract/tests/explain.rs` — so a fix to it reaches both. It
+/// lives in `diag` because that is the lowest layer both can reach.
 #[cfg(test)]
 pub(crate) fn is_test_fn(source: &str, name: &str) -> bool {
     source.match_indices(&format!("fn {name}(")).any(|(at, _)| {

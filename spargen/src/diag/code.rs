@@ -205,7 +205,7 @@ impl Code {
     ///   A case may also reserve a message wording, which its sites must use and no other site of
     ///   the code may. Adding an enumerating body means adding it to that table.
     /// - `E023`'s body is pinned byte-for-byte, clause by clause, by
-    ///   `runtime_contract::tests::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`.
+    ///   `runtime_contract::tests::explain::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`.
     ///   Its consumer-obligation clauses, which that test does not cite fixtures for, are tied to
     ///   the fixtures that enforce them by this module's `EXPLAIN_CLAUSES_OWNED_ELSEWHERE` table.
     /// - Every other body is prose held only to being non-empty. A body that grows a list of the
@@ -1354,9 +1354,20 @@ mod tests {
         fixtures: &'static [&'static str],
     }
 
+    /// Every file of `runtime_contract`'s test module, joined: its fixtures are split across them
+    /// by concern. A listed file that goes missing fails to compile, and a cited fixture moved
+    /// into a file not listed here fails `explain_clauses_owned_elsewhere_resolve_to_fixtures_that_exist`
+    /// as unfound, so neither passes by reading less.
     const RUNTIME_CONTRACT: (&str, &str) = (
-        "runtime_contract.rs",
-        include_str!("../runtime_contract.rs"),
+        "runtime_contract/tests/",
+        concat!(
+            include_str!("../runtime_contract/tests/deps_block.rs"),
+            include_str!("../runtime_contract/tests/explain.rs"),
+            include_str!("../runtime_contract/tests/mod.rs"),
+            include_str!("../runtime_contract/tests/targets.rs"),
+            include_str!("../runtime_contract/tests/versions.rs"),
+            include_str!("../runtime_contract/tests/workspace.rs"),
+        ),
     );
 
     /// The sibling of `OWNED_ELSEWHERE` for explain **prose**. `OWNED_ELSEWHERE` records which
@@ -1364,7 +1375,7 @@ mod tests {
     /// *says*, for clauses no test asserts as text.
     ///
     /// `E023`'s body is pinned byte for byte by
-    /// `runtime_contract::tests::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`,
+    /// `runtime_contract::tests::explain::the_e023_explain_text_states_the_inheritance_rules_this_module_enforces`,
     /// which additionally cites a fixture for each sentence stating what the resolver does, and by
     /// its own rule does not cite fixtures for sentences that give advice. The consumer-obligations
     /// clauses below fall outside that rule — most read as advice — yet each is enforced by an
