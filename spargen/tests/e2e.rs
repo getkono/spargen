@@ -1298,9 +1298,14 @@ fn runtime_dependency_floors_compile_with_direct_minimal_versions() {
 /// provenance header's spargen version and spec path (a temporary directory). Every byte below
 /// the header is kept, the embedded `support` runtime included.
 fn basic_spec_module(configure: impl FnOnce(Spec) -> Spec) -> String {
+    spec_module("openapi.yaml", BASIC_SPEC, configure)
+}
+
+/// [`basic_spec_module`] over any root document, written as `file_name`.
+fn spec_module(file_name: &str, contents: &str, configure: impl FnOnce(Spec) -> Spec) -> String {
     let temp = tempfile::tempdir().unwrap();
-    let spec = temp.path().join("openapi.yaml");
-    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let spec = temp.path().join(file_name);
+    std::fs::write(&spec, contents).unwrap();
     let out = temp.path().join("lib.rs");
     let spec_path = Utf8PathBuf::from_path_buf(spec).unwrap();
     let report = spargen::generate(
@@ -1363,6 +1368,210 @@ fn basic_spec_module_without_type_mapping_features_is_pinned() {
     insta::assert_snapshot!("basic_spec_module_no_features", module);
 }
 
+/// `value` as JSON text, keeping YAML's key order — `serde_json::Map` would sort the keys, and
+/// document order is what orders the emitted items.
+fn yaml_as_json(value: &yaml_rust2::Yaml, out: &mut String) {
+    use yaml_rust2::Yaml;
+    match value {
+        Yaml::Null => out.push_str("null"),
+        Yaml::Boolean(boolean) => out.push_str(&boolean.to_string()),
+        Yaml::Integer(integer) => out.push_str(&integer.to_string()),
+        Yaml::Real(real) => {
+            let number: f64 = real.parse().unwrap();
+            assert!(number.is_finite(), "no JSON spelling for {real}");
+            out.push_str(real);
+        }
+        Yaml::String(string) => out.push_str(&serde_json::to_string(string).unwrap()),
+        Yaml::Array(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                yaml_as_json(item, out);
+            }
+            out.push(']');
+        }
+        Yaml::Hash(entries) => {
+            out.push('{');
+            for (index, (key, item)) in entries.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                let key = match key {
+                    Yaml::String(key) => key.clone(),
+                    Yaml::Integer(key) => key.to_string(),
+                    Yaml::Boolean(key) => key.to_string(),
+                    other => panic!("no JSON key for {other:?}"),
+                };
+                out.push_str(&serde_json::to_string(&key).unwrap());
+                out.push(':');
+                yaml_as_json(item, out);
+            }
+            out.push('}');
+        }
+        other => panic!("no JSON spelling for {other:?}"),
+    }
+}
+
+/// A JSON root document is the same description as its YAML spelling, so it emits the same module
+/// byte for byte — which also makes it compile wherever the pinned YAML module does.
+#[test]
+fn a_json_spelling_of_the_basic_spec_emits_the_same_module() {
+    let documents = yaml_rust2::YamlLoader::load_from_str(BASIC_SPEC).unwrap();
+    assert_eq!(documents.len(), 1);
+    let mut json = String::new();
+    yaml_as_json(&documents[0], &mut json);
+    serde_json::from_str::<serde_json::Value>(&json).expect("the conversion is valid JSON");
+
+    let from_json = spec_module("openapi.json", &json, |spec| spec);
+    assert_eq!(
+        from_json,
+        basic_spec_module(|spec| spec),
+        "the JSON spelling of BASIC_SPEC must emit the YAML spelling's module"
+    );
+}
+
+/// A JSON root whose types live in a YAML sub-file, both reached through relative `$ref`s, one of
+/// them from inside the sub-file to a sibling definition there: the multi-file, mixed-format input
+/// a split description takes, compiled and linted in a consumer crate.
+const MULTI_FILE_ROOT: &str = r##"{
+  "openapi": "3.1.0",
+  "info": { "title": "Split", "version": "1.0.0" },
+  "servers": [ { "url": "https://example.com" } ],
+  "paths": {
+    "/pets/{id}": {
+      "get": {
+        "operationId": "getPet",
+        "parameters": [
+          { "name": "id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": { "schema": { "$ref": "lib.yaml#/components/schemas/Pet" } }
+            }
+          },
+          "404": {
+            "description": "missing",
+            "content": {
+              "application/json": { "schema": { "$ref": "lib.yaml#/components/schemas/Problem" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"##;
+
+const MULTI_FILE_LIB: &str = r##"
+components:
+  schemas:
+    Pet:
+      type: object
+      required: [id, owner]
+      properties:
+        id: { type: string }
+        owner: { $ref: "#/components/schemas/Owner" }
+    Owner:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+    Problem:
+      type: object
+      required: [title]
+      properties:
+        title: { type: string }
+"##;
+
+#[test]
+fn a_multi_file_json_root_compiles_in_a_consumer_crate() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.json");
+    std::fs::write(&spec, MULTI_FILE_ROOT).unwrap();
+    std::fs::write(temp.path().join("lib.yaml"), MULTI_FILE_LIB).unwrap();
+    let out = temp.path().join("client");
+
+    let report = generate_fixture_crate(&spec, &out, "split_client");
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    assert_eq!(report.errors().count(), 0, "{report:#?}");
+
+    // Every sub-file type is emitted under its own name, the one the sub-file's internal `$ref`
+    // reaches included, and the operation's success and error both name them.
+    let generated = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+    for item in [
+        "pub struct Pet ",
+        "pub struct Owner ",
+        "pub struct Problem ",
+    ] {
+        assert!(generated.contains(item), "{item} is emitted");
+    }
+    assert!(
+        generated.contains("pub owner: Owner,"),
+        "Pet's owner is typed"
+    );
+    assert!(
+        generated.contains("ResponseValue<types::Pet>"),
+        "getPet's success is the sub-file Pet"
+    );
+
+    let status = fixture_cargo(&out).arg("check").status().unwrap();
+    assert!(status.success(), "the split client must compile");
+    let status = fixture_cargo(&out)
+        .args(["clippy", "--", "-D", "warnings"])
+        .status()
+        .unwrap();
+    assert!(
+        status.success(),
+        "the split client must pass clippy -D warnings"
+    );
+}
+
+/// `generate_api!` renders through `preview_for_macro` and `build.rs` through `generate`. For one
+/// configuration away from every default, the two emit the same module, and the macro's manifest
+/// audit accepts the manifest the `build.rs` fixture crate declares.
+#[test]
+fn the_macro_preview_emits_the_module_generate_writes() {
+    let temp = tempfile::tempdir().unwrap();
+    let spec = temp.path().join("openapi.yaml");
+    std::fs::write(&spec, BASIC_SPEC).unwrap();
+    let out = temp.path().join("client");
+    let configure = |spec: Spec| {
+        spec.uuid(false)
+            .time(false)
+            .open_narrowing(true)
+            .error_body_cap(4096)
+            .batch_cap(7)
+    };
+
+    let report = generate_configured_fixture_crate(&spec, &out, "parity_client", "2021", configure);
+    assert_eq!(report.outcome(), Outcome::Generated, "{report:#?}");
+    let written = std::fs::read_to_string(out.join("src/lib.rs")).unwrap();
+
+    let preview = spargen::__private::preview_for_macro(
+        &configure(Spec::new(Utf8PathBuf::from_path_buf(spec).unwrap())),
+        out.join("Cargo.toml").to_str().unwrap(),
+    );
+    assert_eq!(
+        preview.report.outcome(),
+        Outcome::Generated,
+        "{:#?}",
+        preview.report
+    );
+    let contents = preview.contents.expect("a generated module");
+    // `generate` adds only the build cache's two digest lines above the rendered module.
+    let mut lines = written.splitn(3, '\n');
+    assert!(lines.next().unwrap().starts_with("// input-sha256: "));
+    assert!(lines.next().unwrap().starts_with("// content-sha256: "));
+    assert!(
+        lines.next().unwrap() == contents,
+        "the macro preview and `generate` emitted different modules for the same config"
+    );
+}
+
 #[test]
 fn generated_module_compiles_in_basic_oas31_crate() {
     let temp = tempfile::tempdir().unwrap();
@@ -1395,22 +1604,45 @@ fn generated_module_compiles_in_basic_oas31_crate() {
         .unwrap();
     assert!(status.success());
 
-    // The fixture manifest models the documented dependencies application developers provide.
-    let manifest = std::fs::read_to_string(out.join("Cargo.toml")).unwrap();
-    assert!(
-        manifest.contains(r#"blocking = ["dep:tokio"]"#),
-        "fixture manifest must declare the blocking feature: {manifest}"
+    // What the generator itself requires of a consumer, not what this harness wrote into the
+    // fixture manifest: `tokio` is the one opt-in dependency — optional, native-only, needed only
+    // by the `blocking` feature — and every other dependency is unconditional. `uuid`/`time` are
+    // not consumer features at all: generated code names them unconditionally.
+    let requirements = spargen::requirements(&Spec::new(
+        Utf8PathBuf::from_path_buf(spec.clone()).unwrap(),
+    ))
+    .expect("the basic spec lowers");
+    let opt_in: Vec<_> = requirements
+        .dependencies
+        .iter()
+        .filter(|dependency| dependency.optional || dependency.required_by_feature.is_some())
+        .collect();
+    assert_eq!(opt_in.len(), 1, "{requirements:#?}");
+    let tokio = opt_in[0];
+    assert_eq!(
+        (
+            tokio.name,
+            tokio.optional,
+            tokio.required_by_feature,
+            tokio.features.as_slice(),
+            tokio.table,
+        ),
+        (
+            "tokio",
+            true,
+            Some("blocking"),
+            &["rt"][..],
+            "target.'cfg(not(target_arch = \"wasm32\"))'.dependencies",
+        ),
+        "{requirements:#?}"
     );
+    // The block `spargen deps` prints keeps it opt-in: commented out under the feature that
+    // enables it, so a consumer that pastes the block as printed never builds tokio.
+    let block = requirements.manifest_block();
     assert!(
-        manifest.contains(r#"tokio = { version = "1.53.1", features = ["rt"], optional = true }"#),
-        "tokio must be an optional dependency: {manifest}"
-    );
-    // `blocking` is opt-in and must never be a default feature. `uuid`/`time` are not consumer
-    // features at all any more: generated code names them unconditionally, so the dependency audit
-    // now requires them non-optional — which leaves this manifest with no `default` list.
-    assert!(
-        !manifest.contains("default = "),
-        "the fixture manifest must declare no default features: {manifest}"
+        block.contains("# blocking = [\"dep:tokio\"]\n")
+            && !block.lines().any(|line| line.starts_with("tokio")),
+        "{block}"
     );
     // The `BlockingClient` and every blocking method are emitted behind `#[cfg(feature = "blocking")]`
     // so a default build compiles them out entirely — there is no `BlockingClient` without the opt-in.
@@ -2526,6 +2758,33 @@ fn error_dispatch_takes_the_exact_arm_before_an_overlapping_range() {
     std::fs::write(
         out.join("tests/defaults.rs"),
         r##"
+/// `converted` — a conversion between a typed value and a `serde_json::Value` — failed as a `Data`
+/// error: the type refused the value, which is the only way such a conversion can fail.
+#[track_caller]
+fn assert_refused<T: std::fmt::Debug>(converted: serde_json::Result<T>, what: &str) {
+    match converted {
+        Ok(value) => panic!("{what}: the type admits no such value, yet produced {value:?}"),
+        Err(error) => assert_eq!(
+            error.classify(),
+            serde_json::error::Category::Data,
+            "{what}: refused for the wrong reason: {error}"
+        ),
+    }
+}
+
+/// `document` is well-formed JSON that `T` refuses, read both as text and as a parsed value. A
+/// malformed document would fail to decode too, and prove nothing about `T`; the parsed value
+/// cannot fail on syntax, so its refusal is the type's own.
+#[track_caller]
+fn assert_refuses<T: serde::de::DeserializeOwned + std::fmt::Debug>(document: &str, what: &str) {
+    let value: serde_json::Value = serde_json::from_str(document)
+        .unwrap_or_else(|error| panic!("{what}: {document} is not JSON: {error}"));
+    if let Ok(decoded) = serde_json::from_str::<T>(document) {
+        panic!("{what}: the type admits no such value, yet decoded {document} as {decoded:?}");
+    }
+    assert_refused(serde_json::from_value::<T>(value), what);
+}
+
 #[test]
 fn absent_optional_fields_use_schema_defaults() {
     let settings: basic_client::types::Settings =
@@ -2545,11 +2804,11 @@ fn an_uninhabited_optional_field_drops_its_members_default() {
     let sibling: basic_client::types::ConflictDefaultSibling = serde_json::from_str("{}").unwrap();
     assert!(sibling.x.is_none());
     // Present, no value decodes: neither member's type is the field's.
-    assert!(serde_json::from_str::<basic_client::types::ConflictDefault>(r#"{"x": "a"}"#).is_err());
-    assert!(serde_json::from_str::<basic_client::types::ConflictDefault>(r#"{"x": 1}"#).is_err());
-    assert!(
-        serde_json::from_str::<basic_client::types::ConflictDefaultSibling>(r#"{"x": "a"}"#)
-            .is_err()
+    assert_refuses::<basic_client::types::ConflictDefault>(r#"{"x": "a"}"#, "ConflictDefault");
+    assert_refuses::<basic_client::types::ConflictDefault>(r#"{"x": 1}"#, "ConflictDefault");
+    assert_refuses::<basic_client::types::ConflictDefaultSibling>(
+        r#"{"x": "a"}"#,
+        "ConflictDefaultSibling",
     );
 }
 
@@ -2617,11 +2876,7 @@ where
         assert_eq!(serde_json::to_string(&value).unwrap(), "{}", "{type_name}: {valid}");
     }
     for invalid in [r#"{"x": 1}"#, r#"{"x": "s"}"#, r#"{"x": null}"#] {
-        let decoded = serde_json::from_str::<T>(invalid);
-        assert!(
-            decoded.is_err(),
-            "{type_name}: {invalid} names a value no type admits, yet decoded as {decoded:?}"
-        );
+        assert_refuses::<T>(invalid, &format!("{type_name}: a value no type admits"));
     }
 }
 
@@ -2640,7 +2895,7 @@ fn a_nullable_uninhabited_field_still_admits_null() {
     let present: basic_client::types::NullOnlyProperty =
         serde_json::from_str(r#"{"x": null}"#).unwrap();
     assert!(present.x.is_none());
-    assert!(serde_json::from_str::<basic_client::types::NullOnlyProperty>(r#"{"x": 1}"#).is_err());
+    assert_refuses::<basic_client::types::NullOnlyProperty>(r#"{"x": 1}"#, "NullOnlyProperty");
 }
 
 // serde's `Option<T>` maps a JSON `null` to `None` without calling `T::deserialize`, so an
@@ -2652,11 +2907,7 @@ fn an_optional_non_nullable_field_rejects_a_present_null() {
     use basic_client::types::OptionalFields;
     for field in ["name", "count", "flag", "tags", "mode", "nested", "choice", "colour"] {
         let document = format!(r#"{{"{field}": null}}"#);
-        let decoded = serde_json::from_str::<OptionalFields>(&document);
-        assert!(
-            decoded.is_err(),
-            "{document}: `{field}` is not nullable, yet decoded as {decoded:?}"
-        );
+        assert_refuses::<OptionalFields>(&document, &format!("`{field}` is not nullable"));
     }
     // Absence is still `None` (or the schema default), and serialises back to absence.
     let absent: OptionalFields = serde_json::from_str("{}").unwrap();
@@ -2736,7 +2987,10 @@ fn all_of_compatible_constraints_keep_the_narrow_typed_intersection() {
         "steps": [{"name": "build"}],
         "empty_only": [null],
     });
-    assert!(serde_json::from_value::<basic_client::types::Refined>(invalid).is_err());
+    assert_refused(
+        serde_json::from_value::<basic_client::types::Refined>(invalid),
+        "Refined with a null in `empty_only`",
+    );
 }
 
 #[test]
@@ -2763,11 +3017,17 @@ fn overlapping_unions_enforce_one_of_and_canonicalize_any_of() {
 
     // Both branches accept `special`, so oneOf rejects it. A manually constructed broad branch is
     // revalidated during serialization and rejected for the same reason.
-    assert!(serde_json::from_str::<basic_client::types::OneOverlap>(r#""special""#).is_err());
+    assert_refuses::<basic_client::types::OneOverlap>(
+        r#""special""#,
+        "OneOverlap decoding a value both branches accept",
+    );
     let ambiguous = basic_client::types::OneOverlap::OneOverlapVariant0(Box::new(
         "special".to_owned(),
     ));
-    assert!(serde_json::to_value(ambiguous).is_err());
+    assert_refused(
+        serde_json::to_value(ambiguous),
+        "OneOverlap serializing a value both branches accept",
+    );
     assert!(serde_json::from_str::<basic_client::types::OneOverlap>(r#""other""#).is_ok());
 }
 
@@ -2868,9 +3128,9 @@ fn discriminated_union_round_trips_with_tag() {
         serde_json::from_str(r#"{"petType": "Dog", "bark": false}"#).unwrap();
     assert!(matches!(dog, basic_client::types::Pet::Dog(_)));
     assert_eq!(serde_json::to_value(&dog).unwrap()["petType"], "dog");
-    assert!(
-        serde_json::from_str::<basic_client::types::Pet>(r#"{"petType": "cow", "bark": true}"#)
-            .is_err()
+    assert_refuses::<basic_client::types::Pet>(
+        r#"{"petType": "cow", "bark": true}"#,
+        "Pet with an unmapped tag",
     );
 }
 
@@ -2888,8 +3148,9 @@ fn an_untagged_discriminated_member_leaves_the_tagged_dispatch_in_place() {
         serde_json::from_str(r#"{"petType": "Cat", "name": "Tom"}"#).unwrap();
     assert!(matches!(cat, LooseAnimal::Cat(_)), "{cat:?}");
     // A tag naming a tagged member never falls through to the untagged one.
-    assert!(
-        serde_json::from_str::<LooseAnimal>(r#"{"petType": "Dog", "fins": 3}"#).is_err()
+    assert_refuses::<LooseAnimal>(
+        r#"{"petType": "Dog", "fins": 3}"#,
+        "LooseAnimal tagged Dog without Dog's fields",
     );
     // An unrecognized or absent tag tries the untagged member by its schema, and it writes no tag
     // of its own beyond the field it holds.
@@ -2900,7 +3161,7 @@ fn an_untagged_discriminated_member_leaves_the_tagged_dispatch_in_place() {
         serde_json::to_value(&fish).unwrap(),
         serde_json::json!({"petType": "Shark", "fins": 3})
     );
-    assert!(serde_json::from_str::<LooseAnimal>(r#"{"bark": true}"#).is_err());
+    assert_refuses::<LooseAnimal>(r#"{"bark": true}"#, "LooseAnimal untagged, matching no member");
 }
 
 #[test]
@@ -8314,6 +8575,20 @@ fn decode<T: serde::de::DeserializeOwned, E>(
     serde_json::from_str(json)
 }
 
+/// `decoded` failed because the type refused a well-formed value: a `Data` error, never a syntax
+/// or end-of-input one, which would mean the test's own document was malformed and proved nothing.
+#[track_caller]
+fn assert_refused<T: std::fmt::Debug>(decoded: serde_json::Result<T>, what: &str) {
+    match decoded {
+        Ok(value) => panic!("{what}: the type admits no such value, yet produced {value:?}"),
+        Err(error) => assert_eq!(
+            error.classify(),
+            serde_json::error::Category::Data,
+            "{what}: refused for the wrong reason: {error}"
+        ),
+    }
+}
+
 #[test]
 fn a_listed_value_is_its_own_variant_and_an_unlisted_one_is_kept() {
     let listed = decode(
@@ -8339,7 +8614,10 @@ fn a_listed_value_is_its_own_variant_and_an_unlisted_one_is_kept() {
     let wire = serde_json::to_value(&unlisted).unwrap();
     assert_eq!(wire["type"], "https://example.com/probs/moved");
     // A non-string is refused: the open set's domain is the `string` it narrowed.
-    assert!(decode(PostProblemsError::Status404, r#"{"type":7,"title":"t"}"#).is_err());
+    assert_refused(
+        decode(PostProblemsError::Status404, r#"{"type":7,"title":"t"}"#),
+        "a non-string type",
+    );
 }
 
 #[test]
@@ -8364,16 +8642,20 @@ fn a_union_and_a_component_stay_closed() {
     )
     .is_ok());
     // ...and a type neither lists matches neither.
-    assert!(decode(
-        PostProblemsError::Status400,
-        r#"{"type":"https://example.com/probs/c","title":"t"}"#,
-    )
-    .is_err());
-    assert!(decode(
-        PostProblemsError::Status410,
-        r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
-    )
-    .is_err());
+    assert_refused(
+        decode(
+            PostProblemsError::Status400,
+            r#"{"type":"https://example.com/probs/c","title":"t"}"#,
+        ),
+        "400: a type no variant lists",
+    );
+    assert_refused(
+        decode(
+            PostProblemsError::Status410,
+            r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
+        ),
+        "410: a type the closed set does not list",
+    );
     // A narrowing through a `$ref`'d value opens a copy in the response and leaves the component
     // closed for its other uses.
     let copy = decode(
@@ -8382,15 +8664,19 @@ fn a_union_and_a_component_stay_closed() {
     )
     .expect("the response's own copy is open");
     assert_eq!(copy.r#type.as_str(), "https://example.com/probs/moved");
-    assert!(serde_json::from_str::<open_problems::types::ForbiddenType>(
-        r#""https://example.com/probs/moved""#
-    )
-    .is_err());
+    assert_refused(
+        serde_json::from_str::<open_problems::types::ForbiddenType>(
+            r#""https://example.com/probs/moved""#,
+        ),
+        "the component itself stays closed",
+    );
     // A request body is never opened.
-    assert!(serde_json::from_str::<open_problems::types::RequestBody>(
-        r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
-    )
-    .is_err());
+    assert_refused(
+        serde_json::from_str::<open_problems::types::RequestBody>(
+            r#"{"type":"https://example.com/probs/moved","title":"t"}"#,
+        ),
+        "a request body stays closed",
+    );
 }
 
 #[test]
@@ -8408,8 +8694,14 @@ fn a_union_meeting_an_open_set_decodes_in_either_member_order() {
     // A value the set lists but no variant does, and one nothing lists, match no variant.
     for kind in ["c", "z"] {
         let json = format!(r#"{{"kind":"{kind}"}}"#);
-        assert!(decode(PostProblemsError::Status422, &json).is_err(), "union last: {kind}");
-        assert!(decode(PostProblemsError::Status423, &json).is_err(), "union first: {kind}");
+        assert_refused(
+            decode(PostProblemsError::Status422, &json),
+            &format!("union last: {kind}"),
+        );
+        assert_refused(
+            decode(PostProblemsError::Status423, &json),
+            &format!("union first: {kind}"),
+        );
     }
     // A union that narrows to one branch is no union: in either order the result is the response's
     // own open set, so an unlisted value is kept.
@@ -8425,8 +8717,8 @@ fn a_union_meeting_an_open_set_decodes_in_either_member_order() {
     macro_rules! closed_beside_another {
         ($status:expr, $order:literal) => {
             decode($status, r#"{"kind":"b"}"#).unwrap_or_else(|error| panic!("{}: {error}", $order));
-            assert!(decode($status, r#"{"kind":"a"}"#).is_err(), "{}: a", $order);
-            assert!(decode($status, r#"{"kind":"z"}"#).is_err(), "{}: z", $order);
+            assert_refused(decode($status, r#"{"kind":"a"}"#), &format!("{}: a", $order));
+            assert_refused(decode($status, r#"{"kind":"z"}"#), &format!("{}: z", $order));
         };
     }
     closed_beside_another!(PostProblemsError::Status426, "union last");
@@ -8441,12 +8733,14 @@ fn a_set_narrowed_against_a_uuid_stays_closed_in_either_member_order() {
         ($status:expr, $order:literal) => {
             decode($status, r#"{"kind":"00000000-0000-0000-0000-000000000001"}"#)
                 .unwrap_or_else(|error| panic!("{}: listed: {error}", $order));
-            assert!(
-                decode($status, r#"{"kind":"00000000-0000-0000-0000-000000000002"}"#).is_err(),
-                "{}: unlisted uuid",
-                $order
+            assert_refused(
+                decode($status, r#"{"kind":"00000000-0000-0000-0000-000000000002"}"#),
+                &format!("{}: unlisted uuid", $order),
             );
-            assert!(decode($status, r#"{"kind":"z"}"#).is_err(), "{}: unlisted string", $order);
+            assert_refused(
+                decode($status, r#"{"kind":"z"}"#),
+                &format!("{}: unlisted string", $order),
+            );
         };
     }
     closed_against_uuid!(PostProblemsError::Status428, "uuid last");
