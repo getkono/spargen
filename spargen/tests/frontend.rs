@@ -1443,6 +1443,264 @@ components:
     }
 }
 
+/// `allOf: [{$ref: T}, {oneOf/anyOf: […]}]` describes exactly the instances `{$ref: T,
+/// oneOf/anyOf: […]}` does, and so does the union written beside the `allOf`: all three are one
+/// conjunction, and must agree (#463). The `allOf`-member spelling used to read the union as a
+/// scalar member, so beside `T`'s object it was `E013` "mixes object and scalar members" where the
+/// `$ref` spelling generated. Each case is lowered in all three spellings as the component `Pick`,
+/// and each must reach the same outcome, report the same codes at `Pick`, and give `Pick` the same
+/// shape: branches the meet leaves as one type collapse with `W001` and keep the keyword's `null`
+/// rule, a branch the target excludes drops out, a union none of whose branches meets the target
+/// is `E013`, and a union of one real branch beside `null` is met as that branch.
+#[test]
+fn an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_is() {
+    let base =
+        "    Base:\n      type: object\n      properties:\n        a: { type: string }\n        \
+                b: { type: string }\n";
+    let nullable_base =
+        "    NB:\n      type: [object, 'null']\n      properties:\n        a: { type: \
+                         string }\n        b: { type: string }\n";
+    let name = "    Name: { type: string }\n";
+    let required = "[ { required: [a] }, { required: [b] } ]";
+    let enumerated = "[ { type: string, enum: [red, green] }, { type: integer } ]";
+    let single =
+        "[ { type: object, required: [a], properties: { c: { type: integer } } }, { type: \
+                  'null' } ]";
+    // (case, target, keyword, branches, the codes reported at `Pick`, `Pick`'s shape). `Fields`
+    // carries whether the required `pick` property is `Option`, that is, whether `null` is valid.
+    enum Shape {
+        Fields(&'static [&'static str], bool),
+        Variants(&'static [&'static str]),
+        Rejected,
+    }
+    let cases = [
+        (
+            "required-only oneOf",
+            "Base",
+            "oneOf",
+            required,
+            vec![Code::ValidationKeywordIgnored],
+            Shape::Fields(&["a", "b"], false),
+        ),
+        (
+            "required-only anyOf",
+            "Base",
+            "anyOf",
+            required,
+            vec![Code::ValidationKeywordIgnored],
+            Shape::Fields(&["a", "b"], false),
+        ),
+        (
+            "nullable target, oneOf",
+            "NB",
+            "oneOf",
+            required,
+            vec![Code::ValidationKeywordIgnored],
+            Shape::Fields(&["a", "b"], false),
+        ),
+        (
+            "nullable target, anyOf",
+            "NB",
+            "anyOf",
+            required,
+            vec![Code::ValidationKeywordIgnored],
+            Shape::Fields(&["a", "b"], true),
+        ),
+        (
+            "excluded branch, oneOf",
+            "Name",
+            "oneOf",
+            enumerated,
+            vec![],
+            Shape::Variants(&["Red", "Green"]),
+        ),
+        (
+            "excluded branch, anyOf",
+            "Name",
+            "anyOf",
+            enumerated,
+            vec![],
+            Shape::Variants(&["Red", "Green"]),
+        ),
+        (
+            "empty meet",
+            "Name",
+            "oneOf",
+            "[ { type: integer } ]",
+            vec![Code::AllOfIrreconcilable],
+            Shape::Rejected,
+        ),
+        (
+            "single nullable branch",
+            "Base",
+            "oneOf",
+            single,
+            vec![],
+            Shape::Fields(&["a", "b", "c"], false),
+        ),
+    ];
+    // A further conjunct `required: [a]`, which every instance satisfies as well, written as an
+    // `allOf` member that is either those untyped object keywords alone (a member that refines the
+    // union's object branches) or the same keywords nested in an `allOf` of their own (a member
+    // combined with the target). `null` satisfies the target, the conjunct and both branches, so
+    // the `anyOf` admits it and the `oneOf`, which it matches twice, does not. The `$ref` spelling
+    // of the conjunct, `{$ref: NB, required: [a], oneOf|anyOf: […]}`, does not collapse its met
+    // branches yet (#538), so these rows drive the two `allOf` spellings alone.
+    let mut conjunct_cases = Vec::new();
+    for (form, conjunct) in [
+        ("refiner member", "{ required: [a] }"),
+        ("nested allOf member", "{ allOf: [ { required: [a] } ] }"),
+    ] {
+        for (keyword, nullable) in [("oneOf", false), ("anyOf", true)] {
+            conjunct_cases.push((
+                format!("nullable target, {form}, {keyword}"),
+                "NB",
+                keyword,
+                required,
+                vec![Code::ValidationKeywordIgnored],
+                Shape::Fields(&["a", "b"], nullable),
+                Some(conjunct),
+            ));
+        }
+    }
+    let cases = cases
+        .into_iter()
+        .map(|(case, target, keyword, branches, codes, shape)| {
+            (
+                case.to_owned(),
+                target,
+                keyword,
+                branches,
+                codes,
+                shape,
+                None,
+            )
+        })
+        .chain(conjunct_cases);
+    for (case, target, keyword, branches, codes, shape, conjunct) in cases {
+        let target_ref = format!("'#/components/schemas/{target}'");
+        let member = conjunct.map_or_else(String::new, |member| format!(", {member}"));
+        for (spelling, site) in [
+            (
+                "$ref sibling",
+                format!("{{ $ref: {target_ref}, {keyword}: {branches} }}"),
+            ),
+            (
+                "allOf member",
+                format!(
+                    "{{ allOf: [ {{ $ref: {target_ref} }}{member}, {{ {keyword}: {branches} }} \
+                     ] }}"
+                ),
+            ),
+            (
+                "beside allOf",
+                format!("{{ allOf: [ {{ $ref: {target_ref} }}{member} ], {keyword}: {branches} }}"),
+            ),
+        ]
+        .into_iter()
+        .filter(|(spelling, _)| conjunct.is_none() || *spelling != "$ref sibling")
+        {
+            let spec = format!(
+                r##"
+openapi: 3.1.0
+info: {{ title: T, version: 1.0.0 }}
+servers: [{{ url: 'https://e.com' }}]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: {{ schema: {{ $ref: '#/components/schemas/Holder' }} }}
+components:
+  schemas:
+{base}{nullable_base}{name}    Pick: {site}
+    Holder:
+      type: object
+      properties:
+        pick: {{ $ref: '#/components/schemas/Pick' }}
+      required: [pick]
+"##
+            );
+            let label = format!("{case}, {spelling}");
+            let (report, code) = generate_with_code(&spec);
+            let at_pick: Vec<Code> = report
+                .diagnostics()
+                .iter()
+                .filter(|d| d.pointer.as_str() == "/components/schemas/Pick")
+                .map(|d| d.code)
+                .collect();
+            assert_eq!(at_pick, codes, "{label}: {report:#?}\n{spec}");
+            let types = types_module(&code);
+            match shape {
+                Shape::Rejected => {
+                    assert_eq!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+                }
+                Shape::Fields(fields, nullable) => {
+                    assert_ne!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+                    assert_eq!(declared_fields(&types, "Pick"), fields, "{label}: {types}");
+                    let pick = field_type(&types, "pub pick")
+                        .unwrap_or_else(|| panic!("{label}: no `pick` field: {types}"));
+                    assert_eq!(
+                        pick.starts_with("Option<"),
+                        nullable,
+                        "{label}: `pick` is `{pick}`: {types}"
+                    );
+                }
+                Shape::Variants(variants) => {
+                    assert_ne!(report.outcome(), Outcome::Rejected, "{label}: {report:#?}");
+                    assert_eq!(enum_variants(&types, "Pick"), variants, "{label}: {types}");
+                }
+            }
+        }
+    }
+}
+
+/// Several `oneOf`/`anyOf` members beside an object member are not met with it: their meet would
+/// nest one union in another's branches, so the composition is rejected with the stable `E013` it
+/// has always drawn rather than emitting a union of identical variants (#463).
+#[test]
+fn an_all_of_with_several_union_members_beside_an_object_is_rejected() {
+    let spec = r##"
+openapi: 3.1.0
+info: { title: T, version: 1.0.0 }
+servers: [{ url: 'https://e.com' }]
+paths:
+  /p:
+    get:
+      operationId: fetch
+      responses:
+        '200':
+          description: ok
+          content:
+            application/json: { schema: { $ref: '#/components/schemas/Pick' } }
+components:
+  schemas:
+    Base:
+      type: object
+      properties:
+        a: { type: string }
+        b: { type: string }
+    Pick:
+      allOf:
+        - $ref: '#/components/schemas/Base'
+        - oneOf: [ { required: [a] }, { required: [b] } ]
+        - anyOf: [ { required: [a] }, { required: [b] } ]
+"##;
+    let report = generate(spec);
+    assert_eq!(report.outcome(), Outcome::Rejected, "{report:#?}");
+    assert!(
+        report
+            .diagnostics()
+            .iter()
+            .any(|d| d.code == Code::AllOfIrreconcilable
+                && d.pointer.as_str() == "/components/schemas/Pick"),
+        "{report:#?}"
+    );
+}
+
 /// A document whose only component `U` is `body`, reached from one response body.
 fn single_component_document(body: &str) -> String {
     format!(
@@ -1552,8 +1810,11 @@ fn a_union_member_ref_with_a_union_sibling_is_intersected_with_its_target() {
 /// An `allOf` member written `{ $ref: X, <union> }` gathers its union sibling as a further
 /// conjunct, as `gather_member` does for every shape-bearing sibling of a member's `$ref`. That
 /// conjunct is a union, which the object merge does not intersect with object members: it is the
-/// object/scalar-mix `E013` the separate-member spelling `allOf: [{$ref: Base}, {oneOf: [...]}]`
-/// already gives on `master` (making both agree with the `$ref` spelling is #491). Before the shape
+/// object/scalar-mix `E013`. The separate-member spelling `allOf: [{$ref: Base}, {oneOf: [...]}]`
+/// no longer is: it is met as the `$ref` spelling is (#463, pinned by
+/// `an_all_of_union_member_is_met_with_the_other_members_as_a_ref_sibling_union_is`). A union
+/// written beside a member's own `$ref` is not a union member of the `allOf`, so this spelling
+/// still takes the rejection rather than that meet. Before the shape
 /// gate counted the union keywords both documents below generated as the bare target with the
 /// union dropped in silence: the object one as `Base` merged with `c`, the scalar one as `String`
 /// for a union that admits no string at all.
